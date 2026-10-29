@@ -40,9 +40,10 @@
 //! stopped; a plugin whose hooks overrun [`OVERRUNS_TO_TURN_OFF`] times in a
 //! session is turned off, with a [`PluginDisabled`] notice.
 //!
-//! **Queue.** The worker takes at most [`HookLimits::queue`] events at a
-//! time. When it's full, a new event is dropped, never waited for, and
-//! counted against its plugin in [`LuauHooks::dropped`].
+//! **Queue.** At most [`HookLimits::queue`] events wait for the worker. When
+//! that many do, a new event is dropped, never waited for, and counted
+//! against its plugin in [`LuauHooks::dropped`]. Nothing the line thread
+//! calls waits for hooks, except [`LuauHooks::wait_until_idle`].
 //!
 //! **Approval.** A plugin asking for `send_commands` runs no hooks until the
 //! caller approves it.
@@ -58,11 +59,11 @@ use cpu_time::ThreadTime;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::fmt;
-use std::io;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -369,8 +370,13 @@ impl Vm {
         let lua = sandbox(&id, &plugin.manifest.permissions, limits, &meter, &outbox, state)
             .map_err(|error| invalid("plugin.toml", error))?;
         for script in &plugin.scripts {
-            meter.start(limits);
-            lua.load(&*script.source).set_name(format!("={}", script.file)).exec().map_err(|error| invalid(&script.file, error))?;
+            // Compiling isn't the plugin's code running, so only running counts.
+            let chunk = lua.load(&*script.source).set_name(format!("={}", script.file)).into_function();
+            let ran = chunk.and_then(|chunk| {
+                meter.start(limits);
+                chunk.call::<()>(())
+            });
+            ran.map_err(|error| invalid(&script.file, error))?;
         }
         Ok(Vm {
             plugin: id,
@@ -586,70 +592,69 @@ impl RateLimit {
 /// event naming a hook to a worker thread, which runs it and sends the
 /// outputs to the [`HookSink`] given at start.
 pub struct LuauHooks {
-    jobs: Option<SyncSender<Job>>,
+    /// Unbounded, so control jobs never wait; `queued` bounds the events.
+    jobs: Option<Sender<Job>>,
+    /// Events sent that the worker hasn't taken yet.
+    queued: Arc<AtomicUsize>,
+    queue: usize,
     turned_off: Receiver<PluginId>,
     worker: Option<JoinHandle<()>>,
     dropped: HashMap<PluginId, u64>,
+    failed_to_load: Vec<(PluginId, PluginError)>,
 }
 
 enum Job {
     Event(PluginEvent),
     Approve(PluginId, bool),
-    Flush(SyncSender<()>),
+    Idle(SyncSender<()>),
 }
-
-/// Why [`LuauHooks`] couldn't start.
-#[derive(Debug)]
-pub enum StartError {
-    /// A plugin's hooks didn't load.
-    Load(PluginError),
-    /// The worker thread couldn't be spawned.
-    Spawn(io::Error),
-}
-
-impl fmt::Display for StartError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StartError::Load(error) => error.fmt(f),
-            StartError::Spawn(error) => write!(f, "couldn't start the Luau hook thread: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for StartError {}
 
 impl LuauHooks {
-    /// Starts the worker with each of `plugins` that has hooks. Fails, with
-    /// the worker stopped, if any plugin's hooks don't load.
+    /// Starts the worker with each of `plugins` that has hooks. A plugin
+    /// whose hooks don't load is left out, and listed in
+    /// [`LuauHooks::failed_to_load`]; the others run. Fails only if the
+    /// worker thread can't be spawned.
     pub fn start<'a>(
         plugins: impl IntoIterator<Item = &'a Plugin>,
         limits: HookLimits,
         state: Arc<dyn StateView>,
         sink: impl HookSink + Send + 'static,
-    ) -> Result<LuauHooks, StartError> {
+    ) -> io::Result<LuauHooks> {
         let plugins: Vec<Plugin> = plugins.into_iter().cloned().collect();
-        let (jobs, inbox) = mpsc::sync_channel(limits.queue);
+        let (jobs, inbox) = mpsc::channel();
         let (turned_off_tx, turned_off) = mpsc::channel();
         let (loaded_tx, loaded) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("mudling-luau".into())
-            .spawn(move || {
-                let mut runner = HookRunner::new(limits, state);
-                let added = plugins.iter().try_for_each(|plugin| runner.add(plugin));
-                let failed = added.is_err();
-                let _ = loaded_tx.send(added);
-                if !failed {
-                    work(runner, inbox, TurnOff { sink, turned_off: turned_off_tx });
-                }
-            })
-            .map_err(StartError::Spawn)?;
-        // Dropped on an error, which joins the stopped worker.
-        let hooks = LuauHooks { jobs: Some(jobs), turned_off, worker: Some(worker), dropped: HashMap::new() };
-        loaded.recv().expect("the hook worker reports whether the plugins loaded").map_err(StartError::Load)?;
-        Ok(hooks)
+        let queued = Arc::new(AtomicUsize::new(0));
+        let taken = queued.clone();
+        let worker = thread::Builder::new().name("mudling-luau".into()).spawn(move || {
+            let mut runner = HookRunner::new(limits, state);
+            let failed: Vec<(PluginId, PluginError)> = plugins
+                .iter()
+                .filter_map(|plugin| runner.add(plugin).err().map(|error| (plugin.id().clone(), error)))
+                .collect();
+            let _ = loaded_tx.send(failed);
+            work(runner, inbox, &taken, TurnOff { sink, turned_off: turned_off_tx });
+        })?;
+        let failed_to_load = loaded.recv().expect("the hook worker reports which plugins loaded");
+        Ok(LuauHooks {
+            jobs: Some(jobs),
+            queued,
+            queue: limits.queue,
+            turned_off,
+            worker: Some(worker),
+            dropped: HashMap::new(),
+            failed_to_load,
+        })
     }
 
-    /// See [`HookRunner::set_approved`]. Waits for room if the queue is full.
+    /// The plugins whose hooks didn't load at start, and why. Their hooks
+    /// don't run.
+    pub fn failed_to_load(&self) -> &[(PluginId, PluginError)] {
+        &self.failed_to_load
+    }
+
+    /// See [`HookRunner::set_approved`]. Takes effect before any event sent
+    /// after it, and never waits.
     pub fn set_approved(&mut self, plugin: &PluginId, approved: bool) {
         self.send(Job::Approve(plugin.clone(), approved));
     }
@@ -661,20 +666,25 @@ impl LuauHooks {
     }
 
     /// Turns off, in `host`, each plugin the worker turned off for
-    /// overrunning since the last call, and returns them. Call it after
+    /// overrunning since the last call. Returns each one, with whether the
+    /// host could; one failing doesn't stop the rest. Call it after
     /// [`PluginHost::read_line`].
-    pub fn turn_off_overrunning(&mut self, host: &mut PluginHost) -> Result<Vec<PluginId>, PluginError> {
-        let turned_off: Vec<PluginId> = self.turned_off.try_iter().collect();
-        for plugin in &turned_off {
-            host.set_enabled(plugin, false)?;
-        }
-        Ok(turned_off)
+    pub fn turn_off_overrunning(&mut self, host: &mut PluginHost) -> Vec<(PluginId, Result<(), PluginError>)> {
+        self.turned_off
+            .try_iter()
+            .map(|plugin| {
+                let turned_off = host.set_enabled(&plugin, false).map(drop);
+                (plugin, turned_off)
+            })
+            .collect()
     }
 
-    /// Waits until the worker has run every hook queued so far.
-    pub fn flush(&mut self) {
+    /// Blocks until the worker has run every job sent so far, slow hooks
+    /// included. For tests, benches and shutdown; the line thread shouldn't
+    /// call it.
+    pub fn wait_until_idle(&mut self) {
         let (done, finished) = mpsc::sync_channel(1);
-        self.send(Job::Flush(done));
+        self.send(Job::Idle(done));
         let _ = finished.recv();
     }
 
@@ -697,13 +707,15 @@ impl PluginSink for LuauHooks {
     /// Queues an event naming a hook, or drops it if the queue is full: the
     /// line thread never waits for hooks.
     fn event(&mut self, event: PluginEvent) {
-        let Some(jobs) = &self.jobs else { return };
         if event.hook.is_none() {
             return;
         }
-        if let Err(TrySendError::Full(Job::Event(event))) = jobs.try_send(Job::Event(event)) {
+        if self.queued.load(Ordering::Acquire) >= self.queue {
             *self.dropped.entry(event.plugin).or_default() += 1;
+            return;
         }
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        self.send(Job::Event(event));
     }
 }
 
@@ -713,12 +725,15 @@ impl Drop for LuauHooks {
     }
 }
 
-fn work(mut runner: HookRunner, inbox: Receiver<Job>, mut sink: TurnOff<impl HookSink>) {
+fn work(mut runner: HookRunner, inbox: Receiver<Job>, queued: &AtomicUsize, mut sink: TurnOff<impl HookSink>) {
     for job in inbox {
         match job {
-            Job::Event(event) => runner.run(&event, &mut sink),
+            Job::Event(event) => {
+                queued.fetch_sub(1, Ordering::AcqRel);
+                runner.run(&event, &mut sink);
+            }
             Job::Approve(plugin, approved) => runner.set_approved(&plugin, approved),
-            Job::Flush(done) => {
+            Job::Idle(done) => {
                 let _ = done.send(());
             }
         }

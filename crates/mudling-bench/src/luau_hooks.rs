@@ -107,19 +107,24 @@ pub fn print(report: &Report) {
 }
 
 /// What the line thread pays per hooked event: queueing it for the worker.
+/// The events go in batches smaller than the queue, waiting (untimed) for
+/// the worker between batches, so every one is queued, none dropped.
 fn time_hand_off(plugin: &Plugin, rows: &[Line]) -> Summary {
-    let events = events(plugin, rows);
+    let limits = HookLimits::default();
     let state: Arc<dyn StateView> = Arc::new(HashMap::<String, Value>::new());
-    let mut hooks = LuauHooks::start([plugin], HookLimits::default(), state, Discard).expect("the hooks load");
-    let samples: Vec<Duration> = events
-        .into_iter()
-        .map(|event| {
+    let mut hooks = LuauHooks::start([plugin], limits, state, Discard).expect("the worker starts");
+    assert!(hooks.failed_to_load().is_empty(), "{:?}", hooks.failed_to_load());
+    let mut samples = Vec::with_capacity(rows.len());
+    let mut events = events(plugin, rows).into_iter().peekable();
+    while events.peek().is_some() {
+        for event in events.by_ref().take(limits.queue / 2) {
             let started = Instant::now();
             hooks.event(event);
-            started.elapsed()
-        })
-        .collect();
-    hooks.flush();
+            samples.push(started.elapsed());
+        }
+        hooks.wait_until_idle();
+    }
+    assert!(hooks.dropped().is_empty(), "the queue filled: {:?}", hooks.dropped());
     Summary::of(&samples).expect("hand-offs were timed")
 }
 

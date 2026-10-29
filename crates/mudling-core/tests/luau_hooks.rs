@@ -4,7 +4,7 @@
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
     DisabledReason, HookFailed, HookLimits, HookOutput, HookRunner, LuauHooks, PluginDisabled, SendCommand,
-    StartError, StateView, StoreWrite, Value,
+    StateView, StoreWrite, Value,
 };
 use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginId};
 use std::collections::HashMap;
@@ -314,8 +314,8 @@ fn the_worker_turns_an_overrunning_plugin_off_in_the_host() {
     for line in lines(&["go", "go", "go"]) {
         host.read_line(&line, &mut hooks);
     }
-    hooks.flush();
-    assert_eq!(hooks.turn_off_overrunning(&mut host).unwrap(), [id("hooked")]);
+    hooks.wait_until_idle();
+    assert_eq!(hooks.turn_off_overrunning(&mut host), [(id("hooked"), Ok(()))]);
     assert_eq!(host.is_enabled(&id("hooked")), Some(false));
 
     let received: Vec<HookOutput> = received.try_iter().collect();
@@ -418,7 +418,7 @@ fn hooks_run_off_the_calling_thread() {
     for line in lines(&["\x1b[1mgo\x1b[0m", "stay"]) {
         host.read_line(&line, &mut hooks);
     }
-    hooks.flush();
+    hooks.wait_until_idle();
     let received: Vec<HookOutput> = received.try_iter().collect();
     assert_eq!(
         writes(&received),
@@ -430,26 +430,55 @@ fn hooks_run_off_the_calling_thread() {
 }
 
 #[test]
-fn a_plugin_whose_hooks_dont_load_fails_to_start() {
-    let plugin = hooked(&[], "while true do end");
-    let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
-        panic!("the plugin loaded");
-    };
-    assert_eq!(error.source,"hooks.luau");
+fn a_plugin_whose_hooks_dont_load_is_left_out_and_the_rest_run() {
+    let broken = named("broken", &[], "while true do end").unwrap();
+    let working = named("working", &["write_store:s"], "function on_go(event) mud.store('s', 'ran', true) end").unwrap();
+    let mut host = PluginHost::new([broken.clone(), working.clone()]).unwrap();
+    let (outputs, received) = mpsc::channel();
+    let mut hooks = LuauHooks::start([&broken, &working], HookLimits::default(), no_state(), outputs).unwrap();
+
+    let [(plugin, error)] = hooks.failed_to_load() else { panic!("{:?}", hooks.failed_to_load()) };
+    assert_eq!(plugin, &id("broken"));
+    assert_eq!(error.source, "hooks.luau");
     assert!(error.to_string().contains("time box"), "{error}");
+
+    host.read_line(&lines(&["go"])[0], &mut hooks);
+    hooks.wait_until_idle();
+    let received: Vec<HookOutput> = received.try_iter().collect();
+    assert_eq!(writes(&received), [("s".to_owned(), "ran".to_owned(), Value::Bool(true))], "{received:?}");
 }
 
 #[test]
 fn every_hook_a_pattern_names_must_be_defined() {
     let plugin = hooked(&[], "function on_other(event) end");
     let error = HookRunner::new(HookLimits::default(), no_state()).add(&plugin).unwrap_err();
-    assert_eq!(error.source,"plugin.toml");
+    assert_eq!(error.source, "plugin.toml");
     assert!(error.to_string().contains("`hook = \"on_go\"` names a function the hook files (hooks.luau) don't define"), "{error}");
 
-    let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
-        panic!("the plugin loaded");
-    };
-    assert!(error.to_string().contains("on_go"), "{error}");
+    let hooks = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()).unwrap();
+    assert!(hooks.failed_to_load()[0].1.to_string().contains("on_go"), "{:?}", hooks.failed_to_load());
+}
+
+#[test]
+fn compiling_a_large_hook_file_isnt_charged_to_the_time_box() {
+    let mut source = String::from("function on_go(event) end\n");
+    for function in 0..400 {
+        source.push_str(&format!(
+            "function helper_{function}(row)\n\
+             local cells = {{}}\n\
+             for start = 1, #row, 22 do\n\
+             local name, percent = string.match(string.sub(row, start, start + 21), '^%s*(.-)%s+(%d+)%%%s*$')\n\
+             if percent then cells[name] = tonumber(percent) end\n\
+             end\n\
+             return cells\n\
+             end\n"
+        ));
+    }
+    let plugin = hooked(&[], &source);
+    let started = Instant::now();
+    runner(&plugin);
+    // In a debug build compiling this takes well over the 2 ms time box.
+    assert!(started.elapsed() > HookLimits::default().time, "compiled in {:?}", started.elapsed());
 }
 
 #[test]
@@ -493,13 +522,14 @@ fn a_full_queue_drops_new_events_without_waiting_and_counts_them() {
     for _ in 0..9 {
         host.read_line(&go, &mut hooks);
     }
+    hooks.set_approved(plugin.id(), true);
     assert!(started.elapsed() < Duration::from_millis(100), "the line thread waited");
     assert_eq!(hooks.dropped().get(plugin.id()), Some(&7));
 
     for _ in 0..3 {
         release.send(()).unwrap();
     }
-    hooks.flush();
+    hooks.wait_until_idle();
     assert_eq!(writes(&received.try_iter().collect::<Vec<_>>()).len(), 3);
 }
 
