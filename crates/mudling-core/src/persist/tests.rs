@@ -1,9 +1,12 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::sync::Barrier;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const T1: Timestamp = Timestamp(1_790_000_000_000);
 const T2: Timestamp = Timestamp(1_790_000_060_000);
+const MEADOW: &str = "{ 1 10} Builder  The Meadow";
 
 fn open() -> (TempDir, Database) {
     let folder = TempDir::new().unwrap();
@@ -21,7 +24,7 @@ fn room(id: i64, name: &str) -> Room {
     Room {
         id,
         name: name.to_owned(),
-        area: "{ 1 10} Builder  The Meadow".to_owned(),
+        area: MEADOW.to_owned(),
         environment: "field".to_owned(),
         description: "Tall grass sways here.".to_owned(),
         x: id,
@@ -34,13 +37,28 @@ fn room(id: i64, name: &str) -> Room {
     }
 }
 
-fn exit(room_id: i64, direction: &str, to_room: Option<i64>) -> Exit {
+fn exit(room_id: i64, direction: &str, state: &str) -> Exit {
     Exit {
         room_id,
         direction: direction.to_owned(),
-        door: Some("closed".to_owned()),
-        doorway: true,
+        state: state.to_owned(),
+        updated: T1,
+    }
+}
+
+fn link(room_id: i64, direction: &str, to_room: i64) -> Link {
+    Link {
+        room_id,
+        direction: direction.to_owned(),
         to_room,
+        updated: T1,
+    }
+}
+
+fn doorway(room_id: i64, direction: &str) -> Doorway {
+    Doorway {
+        room_id,
+        direction: direction.to_owned(),
         updated: T1,
     }
 }
@@ -52,29 +70,51 @@ fn stats(pairs: &[(&str, i64)]) -> StatMap {
         .collect()
 }
 
-/// Two rooms linked both ways, with a note, a feature and a sighting.
-fn small_map(batch: &mut Batch) {
-    batch
-        .upsert(room(1, "A quiet road"))
-        .upsert(room(2, "A crossroads"))
-        .upsert(exit(1, "north", Some(2)))
-        .upsert(exit(2, "south", Some(1)))
-        .upsert(exit(2, "east", None))
-        .upsert(RoomNote {
+/// Two rooms linked both ways, with a note, a feature and a sighting. Room
+/// 2 no longer lists west or up, but remembers a link west and a doorway up.
+/// Rows are in the order the reader returns them.
+fn small_map() -> MapRows {
+    MapRows {
+        rooms: vec![room(1, "A quiet road"), room(2, "A crossroads")],
+        exits: vec![
+            exit(1, "north", "open"),
+            exit(2, "east", "closed"),
+            exit(2, "south", "open"),
+        ],
+        links: vec![link(1, "north", 2), link(2, "south", 1), link(2, "west", 1)],
+        doorways: vec![doorway(2, "east"), doorway(2, "up")],
+        notes: vec![RoomNote {
             room_id: 1,
             text: "Ask the guard.".to_owned(),
             updated: T1,
-        })
-        .upsert(RoomFeature {
+        }],
+        features: vec![RoomFeature {
             room_id: 2,
             feature: "water".to_owned(),
             updated: T1,
-        })
-        .upsert(Sighting {
+        }],
+        sightings: vec![Sighting {
             room_id: 2,
             mob: "a grey wolf".to_owned(),
             updated: T1,
-        });
+        }],
+    }
+}
+
+fn small_map_batch() -> Batch {
+    let map = small_map();
+    let records = (map.rooms.into_iter().map(Record::from))
+        .chain(map.exits.into_iter().map(Record::from))
+        .chain(map.links.into_iter().map(Record::from))
+        .chain(map.doorways.into_iter().map(Record::from))
+        .chain(map.notes.into_iter().map(Record::from))
+        .chain(map.features.into_iter().map(Record::from))
+        .chain(map.sightings.into_iter().map(Record::from));
+    let mut batch = Batch::new();
+    for record in records {
+        batch.upsert(record);
+    }
+    batch
 }
 
 #[test]
@@ -92,14 +132,10 @@ fn opening_an_empty_folder_migrates_to_the_latest_schema() {
     assert_eq!(journal, "wal");
 
     // Opening again finds the schema current and changes nothing.
-    commit(&database, {
-        let mut batch = Batch::new();
-        small_map(&mut batch);
-        batch
-    });
+    commit(&database, small_map_batch());
     let again = Database::open(folder.path(), "mud.example.org").unwrap();
     assert_eq!(again.schema_version().unwrap(), LATEST_VERSION);
-    assert_eq!(again.reader().unwrap().map().unwrap().rooms.len(), 2);
+    assert_eq!(again.reader().unwrap().map().unwrap(), small_map());
 }
 
 #[test]
@@ -108,6 +144,25 @@ fn migrating_starts_from_the_version_found() {
     let mut connection = Connection::open(folder.path().join("db.sqlite")).unwrap();
     assert_eq!(schema::migrate(&mut connection).unwrap(), 0);
     assert_eq!(schema::migrate(&mut connection).unwrap(), LATEST_VERSION);
+}
+
+#[test]
+fn connections_opening_a_new_file_at_once_migrate_it_once() {
+    const OPENERS: usize = 8;
+    for _ in 0..10 {
+        let folder = TempDir::new().unwrap();
+        let start = Barrier::new(OPENERS);
+        std::thread::scope(|scope| {
+            for _ in 0..OPENERS {
+                scope.spawn(|| {
+                    start.wait();
+                    Database::open(folder.path(), "mud.example.org").unwrap()
+                });
+            }
+        });
+        let database = Database::open(folder.path(), "mud.example.org").unwrap();
+        assert_eq!(database.schema_version().unwrap(), LATEST_VERSION);
+    }
 }
 
 #[test]
@@ -122,7 +177,7 @@ fn server_names_must_be_file_names() {
             "{bad:?}"
         );
     }
-    assert!(Database::open(folder.path(), "avatar.outland.org").is_ok());
+    assert!(Database::open(folder.path(), "mud.example.org").is_ok());
 }
 
 #[test]
@@ -227,8 +282,7 @@ fn every_record_type_round_trips() {
         updated: T1,
     };
 
-    let mut batch = Batch::new();
-    small_map(&mut batch);
+    let mut batch = small_map_batch();
     batch
         .upsert(server.clone())
         .upsert(character.clone())
@@ -248,43 +302,7 @@ fn every_record_type_round_trips() {
     assert_eq!(reader.servers().unwrap(), vec![server]);
     assert_eq!(reader.meta().unwrap(), vec![meta]);
     assert_eq!(reader.mob_marks().unwrap(), vec![mark]);
-    let map = reader.map().unwrap();
-    assert_eq!(
-        map.rooms,
-        vec![room(1, "A quiet road"), room(2, "A crossroads")]
-    );
-    assert_eq!(
-        map.exits,
-        vec![
-            exit(1, "north", Some(2)),
-            exit(2, "east", None),
-            exit(2, "south", Some(1))
-        ]
-    );
-    assert_eq!(
-        map.notes,
-        vec![RoomNote {
-            room_id: 1,
-            text: "Ask the guard.".to_owned(),
-            updated: T1
-        }]
-    );
-    assert_eq!(
-        map.features,
-        vec![RoomFeature {
-            room_id: 2,
-            feature: "water".to_owned(),
-            updated: T1
-        }]
-    );
-    assert_eq!(
-        map.sightings,
-        vec![Sighting {
-            room_id: 2,
-            mob: "a grey wolf".to_owned(),
-            updated: T1
-        }]
-    );
+    assert_eq!(reader.map().unwrap(), small_map());
     assert_eq!(
         reader.characters().unwrap(),
         CharacterRows {
@@ -307,20 +325,14 @@ fn every_record_type_round_trips() {
 }
 
 #[test]
-fn upserts_update_in_place_and_deletes_remove() {
+fn links_and_doorways_outlive_the_exits_listed() {
     let (_folder, database) = open();
     let writer = database.writer().unwrap();
-    let mut batch = Batch::new();
-    small_map(&mut batch);
-    writer.submit(batch).unwrap();
+    writer.submit(small_map_batch()).unwrap();
 
-    let renamed = Room {
-        name: "A muddy road".to_owned(),
-        updated: T2,
-        ..room(1, "")
-    };
+    // Room 2 stops listing east: its door and its links stay known.
     let mut batch = Batch::new();
-    batch.upsert(renamed.clone()).delete(Key::Exit {
+    batch.delete(Key::Exit {
         room_id: 2,
         direction: "east".to_owned(),
     });
@@ -328,23 +340,47 @@ fn upserts_update_in_place_and_deletes_remove() {
     writer.flush().unwrap();
 
     let map = database.reader().unwrap().map().unwrap();
-    assert_eq!(map.rooms[0], renamed);
-    // Updating a room in place keeps its exits and note.
-    assert_eq!(map.exits.len(), 2);
-    assert_eq!(map.notes.len(), 1);
+    assert_eq!(
+        map.exits,
+        vec![exit(1, "north", "open"), exit(2, "south", "open")]
+    );
+    assert_eq!(map.links, small_map().links);
+    assert_eq!(map.doorways, small_map().doorways);
 }
 
 #[test]
-fn deleting_a_room_takes_its_details_and_unlinks_exits_to_it() {
+fn upserts_update_in_place() {
     let (_folder, database) = open();
+    let writer = database.writer().unwrap();
+    writer.submit(small_map_batch()).unwrap();
+
+    let renamed = Room {
+        name: "A muddy road".to_owned(),
+        updated: T2,
+        ..room(1, "")
+    };
     let mut batch = Batch::new();
-    small_map(&mut batch);
+    batch.upsert(renamed.clone());
+    writer.submit(batch).unwrap();
+    writer.flush().unwrap();
+
+    // Updating a room in place keeps its exits, links and note.
+    let mut expected = small_map();
+    expected.rooms[0] = renamed;
+    assert_eq!(database.reader().unwrap().map().unwrap(), expected);
+}
+
+#[test]
+fn deleting_a_room_takes_its_details_and_the_links_to_it() {
+    let (_folder, database) = open();
+    let mut batch = small_map_batch();
     batch.delete(Key::Room(2));
     commit(&database, batch);
 
     let map = database.reader().unwrap().map().unwrap();
     assert_eq!(map.rooms, vec![room(1, "A quiet road")]);
-    assert_eq!(map.exits, vec![exit(1, "north", None)]);
+    assert_eq!(map.exits, vec![exit(1, "north", "open")]);
+    assert!(map.links.is_empty() && map.doorways.is_empty());
     assert!(map.features.is_empty() && map.sightings.is_empty());
     assert_eq!(map.notes.len(), 1);
 }
@@ -358,7 +394,7 @@ fn a_failing_batch_writes_nothing_and_later_batches_still_commit() {
     let mut dangling = Batch::new();
     dangling
         .upsert(room(1, "A quiet road"))
-        .upsert(exit(9, "north", None));
+        .upsert(exit(9, "north", "open"));
     writer.submit(dangling).unwrap();
     // Restoring a version that doesn't exist fails mid-batch.
     let mut missing = Batch::new();
@@ -371,13 +407,41 @@ fn a_failing_batch_writes_nothing_and_later_batches_still_commit() {
     writer.submit(good).unwrap();
 
     match writer.flush() {
-        Err(Error::BatchesFailed(failures)) => assert_eq!(failures.len(), 2),
+        Err(Error::BatchesFailed(failures)) => assert_eq!(failures.count(), 2),
         other => panic!("expected two failed batches, got {other:?}"),
     }
     let map = database.reader().unwrap().map().unwrap();
     assert_eq!(map.rooms, vec![room(3, "A bridge")]);
     assert!(map.exits.is_empty());
     // Failures are reported once.
+    writer.flush().unwrap();
+}
+
+#[test]
+fn failures_are_collected_without_waiting_and_capped() {
+    let (_folder, database) = open();
+    let writer = database.writer().unwrap();
+    let failing = writer::KEPT_FAILURES + 3;
+    for _ in 0..failing {
+        let mut batch = Batch::new();
+        batch.upsert(exit(9, "north", "open"));
+        writer.submit(batch).unwrap();
+    }
+    let mut marker = Batch::new();
+    marker.upsert(room(1, "A quiet road"));
+    writer.submit(marker).unwrap();
+
+    // Once the last batch is visible, every failure before it is recorded.
+    let reader = database.reader().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reader.map().unwrap().rooms.is_empty() {
+        assert!(Instant::now() < deadline, "the writer never caught up");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let failures = writer.take_failures();
+    assert_eq!(failures.errors.len(), writer::KEPT_FAILURES);
+    assert_eq!(failures.dropped, 3);
+    assert!(writer.take_failures().is_empty());
     writer.flush().unwrap();
 }
 
@@ -400,9 +464,7 @@ fn the_reader_sees_commits_while_the_writer_is_open() {
     let writer = database.writer().unwrap();
     let reader = database.reader().unwrap();
     assert!(reader.map().unwrap().rooms.is_empty());
-    let mut batch = Batch::new();
-    small_map(&mut batch);
-    writer.submit(batch).unwrap();
+    writer.submit(small_map_batch()).unwrap();
     writer.flush().unwrap();
     assert_eq!(reader.map().unwrap().rooms.len(), 2);
 }
@@ -411,12 +473,10 @@ fn the_reader_sees_commits_while_the_writer_is_open() {
 fn map_versions_save_list_and_restore() {
     let (_folder, database) = open();
     let writer = database.writer().unwrap();
-    let mut batch = Batch::new();
-    small_map(&mut batch);
+    let mut batch = small_map_batch();
     batch.save_map_version("autosave", "Session start", T1);
     writer.submit(batch).unwrap();
     writer.flush().unwrap();
-    let original = database.reader().unwrap().map().unwrap();
 
     // Change the map, then save it again.
     let mut batch = Batch::new();
@@ -428,7 +488,10 @@ fn map_versions_save_list_and_restore() {
             ..room(2, "")
         })
         .upsert(room(3, "A bridge"))
-        .upsert(room(4, "A ford"))
+        .upsert(Room {
+            area: "The Ford".to_owned(),
+            ..room(4, "A ford")
+        })
         .save_map_version("named", "Before the flood", T2);
     writer.submit(batch).unwrap();
     writer.flush().unwrap();
@@ -446,8 +509,10 @@ fn map_versions_save_list_and_restore() {
             ("autosave", "Session start", 2, T1)
         ]
     );
+    assert_eq!(versions[0].areas, stats(&[(MEADOW, 2), ("The Ford", 1)]));
+    assert_eq!(versions[1].areas, stats(&[(MEADOW, 2)]));
     let first = versions[1].id;
-    assert_eq!(reader.map_version(first).unwrap(), original);
+    assert_eq!(reader.map_version(first).unwrap(), small_map());
 
     let restored_at = Timestamp(T2.0 + 1);
     let mut batch = Batch::new();
@@ -457,8 +522,7 @@ fn map_versions_save_list_and_restore() {
 
     // The live map is the first version again, stamped with the restore's
     // time; sightings keep when the mob was seen.
-    let restored = reader.map().unwrap();
-    let mut expected = original.clone();
+    let mut expected = small_map();
     expected
         .rooms
         .iter_mut()
@@ -468,6 +532,14 @@ fn map_versions_save_list_and_restore() {
         .iter_mut()
         .for_each(|e| e.updated = restored_at);
     expected
+        .links
+        .iter_mut()
+        .for_each(|l| l.updated = restored_at);
+    expected
+        .doorways
+        .iter_mut()
+        .for_each(|d| d.updated = restored_at);
+    expected
         .notes
         .iter_mut()
         .for_each(|n| n.updated = restored_at);
@@ -475,7 +547,7 @@ fn map_versions_save_list_and_restore() {
         .features
         .iter_mut()
         .for_each(|f| f.updated = restored_at);
-    assert_eq!(restored, expected);
+    assert_eq!(reader.map().unwrap(), expected);
 
     // Deleting a version deletes its rows; the other stays.
     let mut batch = Batch::new();
@@ -484,4 +556,15 @@ fn map_versions_save_list_and_restore() {
     writer.flush().unwrap();
     assert_eq!(reader.map_versions().unwrap().len(), 1);
     assert_eq!(reader.map_version(first).unwrap(), MapRows::default());
+}
+
+#[test]
+fn an_empty_map_saves_a_version_with_no_areas() {
+    let (_folder, database) = open();
+    let mut batch = Batch::new();
+    batch.save_map_version("safety", "Before reset", T1);
+    commit(&database, batch);
+    let versions = database.reader().unwrap().map_versions().unwrap();
+    assert_eq!(versions[0].room_count, 0);
+    assert!(versions[0].areas.is_empty());
 }

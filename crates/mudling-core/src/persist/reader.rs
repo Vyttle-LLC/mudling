@@ -15,6 +15,8 @@ pub struct Reader {
 pub struct MapRows {
     pub rooms: Vec<Room>,
     pub exits: Vec<Exit>,
+    pub links: Vec<Link>,
+    pub doorways: Vec<Doorway>,
     pub notes: Vec<RoomNote>,
     pub features: Vec<RoomFeature>,
     pub sightings: Vec<Sighting>,
@@ -62,6 +64,8 @@ impl Reader {
         Ok(MapRows {
             rooms: self.all()?,
             exits: self.all()?,
+            links: self.all()?,
+            doorways: self.all()?,
             notes: self.all()?,
             features: self.all()?,
             sightings: self.all()?,
@@ -97,41 +101,36 @@ impl Reader {
     /// The rows of one saved version, to preview it or compare it.
     pub fn map_version(&self, version_id: i64) -> Result<MapRows, Error> {
         let _snapshot = self.connection.unchecked_transaction()?;
-        let id = [version_id];
         Ok(MapRows {
-            rooms: self.query(
-                "SELECT id, name, area, environment, description, x, y, z, building, tangled, maze, updated
-                 FROM version_rooms WHERE version_id = ?1 ORDER BY id",
-                id,
-                Room::from_row,
-            )?,
-            exits: self.query(
-                "SELECT room_id, direction, door, doorway, to_room, updated
-                 FROM version_exits WHERE version_id = ?1 ORDER BY room_id, direction",
-                id,
-                Exit::from_row,
-            )?,
-            notes: self.query(
-                "SELECT room_id, text, updated FROM version_room_notes WHERE version_id = ?1 ORDER BY room_id",
-                id,
-                RoomNote::from_row,
-            )?,
-            features: self.query(
-                "SELECT room_id, feature, updated
-                 FROM version_room_features WHERE version_id = ?1 ORDER BY room_id, feature",
-                id,
-                RoomFeature::from_row,
-            )?,
-            sightings: self.query(
-                "SELECT room_id, mob, updated FROM version_sightings WHERE version_id = ?1 ORDER BY room_id, mob",
-                id,
-                Sighting::from_row,
-            )?,
+            rooms: self.version_rows(&ROOMS, version_id)?,
+            exits: self.version_rows(&EXITS, version_id)?,
+            links: self.version_rows(&LINKS, version_id)?,
+            doorways: self.version_rows(&DOORWAYS, version_id)?,
+            notes: self.version_rows(&NOTES, version_id)?,
+            features: self.version_rows(&FEATURES, version_id)?,
+            sightings: self.version_rows(&SIGHTINGS, version_id)?,
         })
     }
 
     fn all<T: Stored>(&self) -> rusqlite::Result<Vec<T>> {
         self.query(T::SELECT, [], T::from_row)
+    }
+
+    fn version_rows<T: Stored>(
+        &self,
+        table: &MapTable,
+        version_id: i64,
+    ) -> rusqlite::Result<Vec<T>> {
+        let MapTable {
+            version,
+            columns,
+            order_by,
+            ..
+        } = table;
+        let sql = format!(
+            "SELECT {columns}, updated FROM {version} WHERE version_id = ?1 ORDER BY {order_by}"
+        );
+        self.query(&sql, [version_id], T::from_row)
     }
 
     fn query<T>(

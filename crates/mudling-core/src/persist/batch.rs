@@ -44,10 +44,6 @@ impl Batch {
         self
     }
 
-    pub fn len(&self) -> usize {
-        self.changes.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
@@ -118,6 +114,8 @@ records!(
     Meta,
     Room,
     Exit,
+    Link,
+    Doorway,
     RoomNote,
     RoomFeature,
     Sighting,
@@ -138,8 +136,8 @@ fn upsert<T: Stored>(tx: &Transaction<'_>, record: &T) -> rusqlite::Result<()> {
 }
 
 /// A record's key, for [`Batch::delete`]. Deleting a room deletes its
-/// exits, note, features and sightings, and unlinks exits that led to it;
-/// deleting a character deletes its stats, skills, affects, worn items and
+/// exits, links, doorways, note, features and sightings, and the links
+/// that led to it; deleting a character deletes its stats, skills, affects, worn items and
 /// gear sets.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
@@ -148,6 +146,8 @@ pub enum Key {
     Meta(String),
     Room(i64),
     Exit { room_id: i64, direction: String },
+    Link { room_id: i64, direction: String },
+    Doorway { room_id: i64, direction: String },
     RoomNote(i64),
     RoomFeature { room_id: i64, feature: String },
     Sighting { room_id: i64, mob: String },
@@ -176,6 +176,14 @@ impl Key {
             Key::Room(id) => run("DELETE FROM rooms WHERE id = ?1", params![id]),
             Key::Exit { room_id, direction } => run(
                 "DELETE FROM exits WHERE room_id = ?1 AND direction = ?2",
+                params![room_id, direction],
+            ),
+            Key::Link { room_id, direction } => run(
+                "DELETE FROM links WHERE room_id = ?1 AND direction = ?2",
+                params![room_id, direction],
+            ),
+            Key::Doorway { room_id, direction } => run(
+                "DELETE FROM doorways WHERE room_id = ?1 AND direction = ?2",
                 params![room_id, direction],
             ),
             Key::RoomNote(room_id) => run(
@@ -233,20 +241,24 @@ fn save_map_version(
     created: Timestamp,
 ) -> rusqlite::Result<()> {
     tx.prepare_cached(
-        "INSERT INTO map_versions (created, kind, label, room_count, updated)
-         VALUES (?1, ?2, ?3, (SELECT count(*) FROM rooms), ?1)",
+        "INSERT INTO map_versions (created, kind, label, room_count, areas, updated)
+         VALUES (?1, ?2, ?3, (SELECT count(*) FROM rooms),
+             (SELECT json_group_object(area, total) FROM (SELECT area, count(*) AS total FROM rooms GROUP BY area)),
+             ?1)",
     )?
     .execute(params![created, kind, label])?;
     let version_id = tx.last_insert_rowid();
-    for sql in [
-        "INSERT INTO version_rooms SELECT ?1, id, name, area, environment, description, x, y, z,
-            building, tangled, maze, updated FROM rooms",
-        "INSERT INTO version_exits SELECT ?1, room_id, direction, door, doorway, to_room, updated FROM exits",
-        "INSERT INTO version_room_notes SELECT ?1, room_id, text, updated FROM room_notes",
-        "INSERT INTO version_room_features SELECT ?1, room_id, feature, updated FROM room_features",
-        "INSERT INTO version_sightings SELECT ?1, room_id, mob, updated FROM sightings",
-    ] {
-        tx.prepare_cached(sql)?.execute(params![version_id])?;
+    for table in MAP_TABLES {
+        let MapTable {
+            live,
+            version,
+            columns,
+            ..
+        } = table;
+        tx.prepare_cached(&format!(
+            "INSERT INTO {version} (version_id, {columns}, updated) SELECT ?1, {columns}, updated FROM {live}"
+        ))?
+        .execute(params![version_id])?;
     }
     Ok(())
 }
@@ -260,19 +272,29 @@ fn restore_map_version(
 ) -> rusqlite::Result<()> {
     tx.prepare_cached("SELECT 1 FROM map_versions WHERE id = ?1")?
         .query_row(params![version_id], |_| Ok(()))?;
-    // Deleting the rooms deletes their exits, notes, features and sightings.
+    // Deleting the rooms deletes every other map row with them.
     tx.prepare_cached("DELETE FROM rooms")?.execute([])?;
-    for sql in [
-        "INSERT INTO rooms SELECT id, name, area, environment, description, x, y, z,
-            building, tangled, maze, ?2 FROM version_rooms WHERE version_id = ?1",
-        "INSERT INTO exits SELECT room_id, direction, door, doorway, to_room, ?2 FROM version_exits WHERE version_id = ?1",
-        "INSERT INTO room_notes SELECT room_id, text, ?2 FROM version_room_notes WHERE version_id = ?1",
-        "INSERT INTO room_features SELECT room_id, feature, ?2 FROM version_room_features WHERE version_id = ?1",
-    ] {
-        tx.prepare_cached(sql)?.execute(params![version_id, at])?;
+    for table in MAP_TABLES {
+        let MapTable {
+            live,
+            version,
+            columns,
+            restore_stamps_updated,
+            ..
+        } = table;
+        let updated = if restore_stamps_updated {
+            "?2"
+        } else {
+            "updated"
+        };
+        let mut insert = tx.prepare_cached(&format!(
+            "INSERT INTO {live} ({columns}, updated) SELECT {columns}, {updated} FROM {version} WHERE version_id = ?1"
+        ))?;
+        if restore_stamps_updated {
+            insert.execute(params![version_id, at])?;
+        } else {
+            insert.execute(params![version_id])?;
+        }
     }
-    // A sighting's time is when the mob was seen, so it's kept as it was.
-    tx.prepare_cached("INSERT INTO sightings SELECT room_id, mob, updated FROM version_sightings WHERE version_id = ?1")?
-        .execute(params![version_id])?;
     Ok(())
 }

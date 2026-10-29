@@ -1,5 +1,5 @@
 //! The schema, as numbered migrations. `PRAGMA user_version` holds the last
-//! one applied; opening a database applies the rest, each in a transaction.
+//! one applied; opening a database applies the rest in one transaction.
 //!
 //! Every record carries `updated` (milliseconds since the Unix epoch), so a
 //! later sync can merge two copies record by record, newest first. Columns
@@ -9,7 +9,7 @@
 //! Foreign keys are deferred to commit, so a batch may write a child before
 //! its parent; a batch that leaves one dangling fails as a whole.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 /// Migration `i` takes the schema from version `i` to version `i + 1`.
 /// Append new ones; never edit one that has shipped.
@@ -18,14 +18,18 @@ const MIGRATIONS: &[&str] = &[V1];
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
 
 /// Brings the schema up to [`LATEST_VERSION`], returning the version found.
-pub fn migrate(conn: &mut Connection) -> rusqlite::Result<u32> {
-    let found: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    for (version, sql) in (1..).zip(MIGRATIONS).skip(found as usize) {
-        let tx = conn.transaction()?;
+/// The version is read under the write lock, so two connections opening one
+/// file can't both apply the same migration.
+pub fn migrate(connection: &mut Connection) -> rusqlite::Result<u32> {
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let found: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    for sql in MIGRATIONS.iter().skip(found as usize) {
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", version)?;
-        tx.commit()?;
     }
+    if found < LATEST_VERSION {
+        tx.pragma_update(None, "user_version", LATEST_VERSION)?;
+    }
+    tx.commit()?;
     Ok(found)
 }
 
@@ -67,16 +71,31 @@ CREATE TABLE rooms (
     updated     INTEGER NOT NULL
 );
 
+-- A room's exits as the game lists them now, links explored, and doorways
+-- seen are kept apart: a link or a doorway outlives the room's listing.
 CREATE TABLE exits (
     room_id   INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     direction TEXT NOT NULL,
-    door      TEXT,
-    doorway   INTEGER NOT NULL,
-    to_room   INTEGER REFERENCES rooms(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
+    state     TEXT NOT NULL,
     updated   INTEGER NOT NULL,
     PRIMARY KEY (room_id, direction)
 ) WITHOUT ROWID;
-CREATE INDEX exits_to_room ON exits(to_room);
+
+CREATE TABLE links (
+    room_id   INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    direction TEXT NOT NULL,
+    to_room   INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    updated   INTEGER NOT NULL,
+    PRIMARY KEY (room_id, direction)
+) WITHOUT ROWID;
+CREATE INDEX links_to_room ON links(to_room);
+
+CREATE TABLE doorways (
+    room_id   INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    direction TEXT NOT NULL,
+    updated   INTEGER NOT NULL,
+    PRIMARY KEY (room_id, direction)
+) WITHOUT ROWID;
 
 CREATE TABLE room_notes (
     room_id INTEGER PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
@@ -191,6 +210,8 @@ CREATE TABLE map_versions (
     kind       TEXT NOT NULL,
     label      TEXT NOT NULL,
     room_count INTEGER NOT NULL,
+    -- Rooms per area, as JSON: {"area": count}.
+    areas      TEXT NOT NULL,
     updated    INTEGER NOT NULL
 );
 CREATE INDEX map_versions_created ON map_versions(created);
@@ -216,9 +237,24 @@ CREATE TABLE version_exits (
     version_id INTEGER NOT NULL REFERENCES map_versions(id) ON DELETE CASCADE,
     room_id    INTEGER NOT NULL,
     direction  TEXT NOT NULL,
-    door       TEXT,
-    doorway    INTEGER NOT NULL,
-    to_room    INTEGER,
+    state      TEXT NOT NULL,
+    updated    INTEGER NOT NULL,
+    PRIMARY KEY (version_id, room_id, direction)
+) WITHOUT ROWID;
+
+CREATE TABLE version_links (
+    version_id INTEGER NOT NULL REFERENCES map_versions(id) ON DELETE CASCADE,
+    room_id    INTEGER NOT NULL,
+    direction  TEXT NOT NULL,
+    to_room    INTEGER NOT NULL,
+    updated    INTEGER NOT NULL,
+    PRIMARY KEY (version_id, room_id, direction)
+) WITHOUT ROWID;
+
+CREATE TABLE version_doorways (
+    version_id INTEGER NOT NULL REFERENCES map_versions(id) ON DELETE CASCADE,
+    room_id    INTEGER NOT NULL,
+    direction  TEXT NOT NULL,
     updated    INTEGER NOT NULL,
     PRIMARY KEY (version_id, room_id, direction)
 ) WITHOUT ROWID;

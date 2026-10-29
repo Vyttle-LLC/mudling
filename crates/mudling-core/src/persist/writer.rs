@@ -3,8 +3,14 @@
 use super::Error;
 use super::batch::Batch;
 use rusqlite::{Connection, TransactionBehavior};
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
+
+/// Failed batches kept until collected; past this, the oldest are dropped
+/// and only counted.
+pub(super) const KEPT_FAILURES: usize = 32;
 
 /// Takes batches from any thread without waiting on the disk; its thread
 /// commits each batch in one transaction, in the order they came. Dropping
@@ -13,23 +19,54 @@ use std::thread::{self, JoinHandle};
 pub struct Writer {
     sender: Option<Sender<Message>>,
     thread: Option<JoinHandle<()>>,
+    failures: Arc<Mutex<Failures>>,
+}
+
+/// Batches that failed and were rolled back whole.
+#[derive(Debug, Default)]
+pub struct Failures {
+    /// The most recent failures, oldest first.
+    pub errors: VecDeque<rusqlite::Error>,
+    /// Failures dropped to keep `errors` short.
+    pub dropped: usize,
+}
+
+impl Failures {
+    pub fn is_empty(&self) -> bool {
+        self.errors.is_empty() && self.dropped == 0
+    }
+
+    pub fn count(&self) -> usize {
+        self.errors.len() + self.dropped
+    }
+
+    fn push(&mut self, error: rusqlite::Error) {
+        if self.errors.len() == KEPT_FAILURES {
+            self.errors.pop_front();
+            self.dropped += 1;
+        }
+        self.errors.push_back(error);
+    }
 }
 
 enum Message {
     Batch(Batch),
-    Flush(SyncSender<Vec<rusqlite::Error>>),
+    Flush(SyncSender<()>),
 }
 
 impl Writer {
     pub(crate) fn spawn(connection: Connection) -> Result<Writer, Error> {
         let (sender, receiver) = mpsc::channel();
+        let failures = Arc::new(Mutex::new(Failures::default()));
+        let thread_failures = Arc::clone(&failures);
         let thread = thread::Builder::new()
             .name("mudling-persist".to_owned())
-            .spawn(move || run(connection, receiver))
+            .spawn(move || run(connection, receiver, &thread_failures))
             .map_err(Error::Io)?;
         Ok(Writer {
             sender: Some(sender),
             thread: Some(thread),
+            failures,
         })
     }
 
@@ -42,13 +79,21 @@ impl Writer {
         self.send(Message::Batch(batch))
     }
 
+    /// Collects the batches that failed since the last collection. It never
+    /// waits on the disk, so a session can call it on every tick.
+    pub fn take_failures(&self) -> Failures {
+        let mut failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *failures)
+    }
+
     /// Waits until every batch queued so far is committed or has failed,
-    /// and reports the batches that failed since the last flush. This
-    /// blocks on the disk: for tests, benchmarks and shutdown.
+    /// then reports the failures not yet collected. This blocks on the
+    /// disk: for tests, benchmarks and shutdown.
     pub fn flush(&self) -> Result<(), Error> {
-        let (reply, failures) = mpsc::sync_channel(1);
+        let (reply, done) = mpsc::sync_channel(1);
         self.send(Message::Flush(reply))?;
-        let failures = failures.recv().map_err(|_| Error::WriterStopped)?;
+        done.recv().map_err(|_| Error::WriterStopped)?;
+        let failures = self.take_failures();
         if failures.is_empty() {
             Ok(())
         } else {
@@ -72,17 +117,19 @@ impl Drop for Writer {
     }
 }
 
-fn run(mut connection: Connection, receiver: Receiver<Message>) {
-    let mut failures = Vec::new();
+fn run(mut connection: Connection, receiver: Receiver<Message>, failures: &Mutex<Failures>) {
     for message in receiver {
         match message {
             Message::Batch(batch) => {
                 if let Err(error) = commit(&mut connection, &batch) {
-                    failures.push(error);
+                    failures
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(error);
                 }
             }
             Message::Flush(reply) => {
-                let _ = reply.send(std::mem::take(&mut failures));
+                let _ = reply.send(());
             }
         }
     }

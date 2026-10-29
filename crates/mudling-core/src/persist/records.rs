@@ -218,33 +218,29 @@ impl Stored for Room {
     }
 }
 
+/// An exit the room lists now. When the room stops listing it, the row goes,
+/// but a [`Link`] or [`Doorway`] that way stays.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exit {
     pub room_id: i64,
     pub direction: String,
-    /// The door's state as the game reports it; `None` when there's no door.
-    pub door: Option<String>,
-    /// The exit has shown a door at some point, open or shut.
-    pub doorway: bool,
-    /// The room it leads to, once explored.
-    pub to_room: Option<i64>,
+    /// The exit's state as the game reports it (a door open or shut).
+    pub state: String,
     pub updated: Timestamp,
 }
 
 impl Stored for Exit {
-    const UPSERT: &'static str = "INSERT INTO exits (room_id, direction, door, doorway, to_room, updated)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-        ON CONFLICT (room_id, direction) DO UPDATE SET door = excluded.door, doorway = excluded.doorway,
-            to_room = excluded.to_room, updated = excluded.updated";
-    const SELECT: &'static str = "SELECT room_id, direction, door, doorway, to_room, updated FROM exits ORDER BY room_id, direction";
+    const UPSERT: &'static str = "INSERT INTO exits (room_id, direction, state, updated)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT (room_id, direction) DO UPDATE SET state = excluded.state, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT room_id, direction, state, updated FROM exits ORDER BY room_id, direction";
 
     fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
         statement.execute(params![
             self.room_id,
             self.direction,
-            self.door,
-            self.doorway,
-            self.to_room,
+            self.state,
             self.updated
         ])
     }
@@ -253,10 +249,72 @@ impl Stored for Exit {
         Ok(Exit {
             room_id: row.get(0)?,
             direction: row.get(1)?,
-            door: row.get(2)?,
-            doorway: row.get(3)?,
-            to_room: row.get(4)?,
-            updated: row.get(5)?,
+            state: row.get(2)?,
+            updated: row.get(3)?,
+        })
+    }
+}
+
+/// An explored connection: going `direction` from the room led to `to_room`.
+/// Deleting either room deletes the link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub room_id: i64,
+    pub direction: String,
+    pub to_room: i64,
+    pub updated: Timestamp,
+}
+
+impl Stored for Link {
+    const UPSERT: &'static str = "INSERT INTO links (room_id, direction, to_room, updated)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT (room_id, direction) DO UPDATE SET to_room = excluded.to_room, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT room_id, direction, to_room, updated FROM links ORDER BY room_id, direction";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![
+            self.room_id,
+            self.direction,
+            self.to_room,
+            self.updated
+        ])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Link {
+            room_id: row.get(0)?,
+            direction: row.get(1)?,
+            to_room: row.get(2)?,
+            updated: row.get(3)?,
+        })
+    }
+}
+
+/// A direction that has shown a door at some point, open or shut.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Doorway {
+    pub room_id: i64,
+    pub direction: String,
+    pub updated: Timestamp,
+}
+
+impl Stored for Doorway {
+    const UPSERT: &'static str =
+        "INSERT INTO doorways (room_id, direction, updated) VALUES (?1, ?2, ?3)
+        ON CONFLICT (room_id, direction) DO UPDATE SET updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT room_id, direction, updated FROM doorways ORDER BY room_id, direction";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![self.room_id, self.direction, self.updated])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Doorway {
+            room_id: row.get(0)?,
+            direction: row.get(1)?,
+            updated: row.get(2)?,
         })
     }
 }
@@ -731,12 +789,16 @@ pub struct MapVersion {
     pub kind: String,
     pub label: String,
     pub room_count: i64,
+    /// Rooms per area, so versions can be compared without their rooms.
+    pub areas: BTreeMap<String, i64>,
     pub updated: Timestamp,
 }
 
 impl MapVersion {
     /// Newest first.
-    pub(crate) const LIST: &'static str = "SELECT id, created, kind, label, room_count, updated FROM map_versions ORDER BY created DESC, id DESC";
+    pub(crate) const LIST: &'static str =
+        "SELECT id, created, kind, label, room_count, areas, updated
+        FROM map_versions ORDER BY created DESC, id DESC";
 
     pub(crate) fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(MapVersion {
@@ -745,10 +807,89 @@ impl MapVersion {
             kind: row.get(2)?,
             label: row.get(3)?,
             room_count: row.get(4)?,
-            updated: row.get(5)?,
+            areas: row.get::<_, Json<_>>(5)?.0,
+            updated: row.get(6)?,
         })
     }
 }
+
+/// A live map table and its copy in map history, with its columns listed
+/// once, in `from_row` order. Every table ends with `updated`, left out here
+/// because restoring a version may stamp it.
+pub(crate) struct MapTable {
+    pub live: &'static str,
+    pub version: &'static str,
+    pub columns: &'static str,
+    pub order_by: &'static str,
+    /// Restoring stamps rows with the restore's time. A sighting's time is
+    /// when the mob was seen, so it's kept.
+    pub restore_stamps_updated: bool,
+}
+
+const fn map_table(
+    live: &'static str,
+    version: &'static str,
+    columns: &'static str,
+    order_by: &'static str,
+) -> MapTable {
+    MapTable {
+        live,
+        version,
+        columns,
+        order_by,
+        restore_stamps_updated: true,
+    }
+}
+
+pub(crate) const ROOMS: MapTable = map_table(
+    "rooms",
+    "version_rooms",
+    "id, name, area, environment, description, x, y, z, building, tangled, maze",
+    "id",
+);
+pub(crate) const EXITS: MapTable = map_table(
+    "exits",
+    "version_exits",
+    "room_id, direction, state",
+    "room_id, direction",
+);
+pub(crate) const LINKS: MapTable = map_table(
+    "links",
+    "version_links",
+    "room_id, direction, to_room",
+    "room_id, direction",
+);
+pub(crate) const DOORWAYS: MapTable = map_table(
+    "doorways",
+    "version_doorways",
+    "room_id, direction",
+    "room_id, direction",
+);
+pub(crate) const NOTES: MapTable = map_table(
+    "room_notes",
+    "version_room_notes",
+    "room_id, text",
+    "room_id",
+);
+pub(crate) const FEATURES: MapTable = map_table(
+    "room_features",
+    "version_room_features",
+    "room_id, feature",
+    "room_id, feature",
+);
+pub(crate) const SIGHTINGS: MapTable = MapTable {
+    restore_stamps_updated: false,
+    ..map_table(
+        "sightings",
+        "version_sightings",
+        "room_id, mob",
+        "room_id, mob",
+    )
+};
+
+/// Every table a map version copies, parents first.
+pub(crate) const MAP_TABLES: [MapTable; 7] =
+    [ROOMS, EXITS, LINKS, DOORWAYS, NOTES, FEATURES, SIGHTINGS];
 
 /// A small value object kept as JSON text in one column.
 struct Json<T>(T);

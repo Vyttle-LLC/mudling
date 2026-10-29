@@ -41,12 +41,12 @@ pub use batch::{Batch, Key, Record};
 pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;
 pub use schema::LATEST_VERSION;
-pub use writer::Writer;
+pub use writer::{Failures, Writer};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Statements each connection keeps compiled: every upsert, delete and
 /// select fits.
@@ -87,8 +87,7 @@ impl Database {
             path: folder.join(format!("{server}.sqlite")),
         };
         let mut connection = database.connect(OpenFlags::default())?;
-        // WAL is a property of the file: set once, every connection uses it.
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        use_wal(&connection)?;
         schema::migrate(&mut connection)?;
         Ok(database)
     }
@@ -137,8 +136,8 @@ pub enum Error {
     BadServerName(String),
     /// The writer thread is gone (it panicked), so nothing more is written.
     WriterStopped,
-    /// Batches that failed since the last flush; each was rolled back whole.
-    BatchesFailed(Vec<rusqlite::Error>),
+    /// Batches that failed since failures were last collected.
+    BatchesFailed(Failures),
 }
 
 impl fmt::Display for Error {
@@ -151,9 +150,9 @@ impl fmt::Display for Error {
             Error::BatchesFailed(failures) => {
                 write!(
                     f,
-                    "{} batch(es) failed and were rolled back; the first: {}",
-                    failures.len(),
-                    failures[0]
+                    "{} batch(es) failed and were rolled back; the latest: {}",
+                    failures.count(),
+                    failures.errors.back().expect("a failure was kept")
                 )
             }
         }
@@ -161,6 +160,24 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Puts the file in WAL mode, which every later connection then uses.
+/// Switching needs the file to itself, and SQLite won't wait for that (it
+/// could deadlock), so an open racing another retries until the timeout.
+fn use_wal(connection: &Connection) -> rusqlite::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match connection.pragma_update(None, "journal_mode", "WAL") {
+            Err(error)
+                if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            result => return result,
+        }
+    }
+}
 
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Error {

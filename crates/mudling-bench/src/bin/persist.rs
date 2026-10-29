@@ -5,7 +5,7 @@
 //! cargo run --release -p mudling-bench --bin persist -- [--check] [--json <report.json>]
 //! ```
 //!
-//! - A move's writes (a room, its exits, the mobs seen there): what
+//! - A move's writes (a room, its exits, the link to it, the mobs seen there): what
 //!   queueing them costs the caller, at a speedwalk's pace (one move every
 //!   100 ms) and in a burst, and whether the writer thread keeps up.
 //! - Listing 500 map-history versions of a prototype-sized map.
@@ -13,7 +13,7 @@
 //!
 //! `--check` exits non-zero when a budget is missed.
 
-use mudling_core::persist::{Batch, Database, Exit, Room, Sighting, Timestamp, Writer};
+use mudling_core::persist::{Batch, Database, Exit, Link, Room, Sighting, Timestamp, Writer};
 use mudling_core::stats::Summary;
 use serde::Serialize;
 use std::path::Path;
@@ -160,7 +160,8 @@ fn measure_moves(folder: &Path) -> (Vec<Duration>, Vec<Duration>, Duration) {
     (enqueue, paced_commit, burst_started.elapsed())
 }
 
-/// What one move writes: the room entered, its exits, and the mobs there.
+/// What one move writes: the room entered, its exits, the link from the
+/// room before, and the mobs there.
 fn move_batch(step: usize) -> Batch {
     let room_id = (step as i64 % HISTORY_MAP_ROOMS) + 1;
     let now = Timestamp::now();
@@ -173,9 +174,15 @@ fn move_batch(step: usize) -> Batch {
         batch.upsert(Exit {
             room_id,
             direction: direction.to_owned(),
-            door: None,
-            doorway: false,
-            to_room: None,
+            state: "open".to_owned(),
+            updated: now,
+        });
+    }
+    if room_id > 1 {
+        batch.upsert(Link {
+            room_id: room_id - 1,
+            direction: "east".to_owned(),
+            to_room: room_id,
             updated: now,
         });
     }
@@ -260,22 +267,20 @@ fn write_map(writer: &Writer, rooms: i64) {
         batch.upsert(room(id, now));
         let index = id - 1;
         let mut link = |direction: &str, back: &str, neighbour: i64| {
-            batch.upsert(Exit {
-                room_id: id,
-                direction: direction.to_owned(),
-                door: None,
-                doorway: false,
-                to_room: Some(neighbour),
-                updated: now,
-            });
-            batch.upsert(Exit {
-                room_id: neighbour,
-                direction: back.to_owned(),
-                door: None,
-                doorway: false,
-                to_room: Some(id),
-                updated: now,
-            });
+            for (from, way, to) in [(id, direction, neighbour), (neighbour, back, id)] {
+                batch.upsert(Exit {
+                    room_id: from,
+                    direction: way.to_owned(),
+                    state: "open".to_owned(),
+                    updated: now,
+                });
+                batch.upsert(Link {
+                    room_id: from,
+                    direction: way.to_owned(),
+                    to_room: to,
+                    updated: now,
+                });
+            }
         };
         if index % side + 1 < side && id < rooms {
             link("east", "west", id + 1);
@@ -328,8 +333,11 @@ fn print_report(report: &Report) {
             s.samples
         );
     };
+    let interval_ms = SPEEDWALK_INTERVAL.as_millis();
     line(
-        "enqueue a move (room + 4 exits + 3 sightings)",
+        &format!(
+            "enqueue a move (room + {EXITS_PER_MOVE} exits + link + {SIGHTINGS_PER_MOVE} sightings)"
+        ),
         &report.enqueue,
         1.0,
         "µs",
@@ -340,13 +348,13 @@ fn print_report(report: &Report) {
         verdict(report.enqueue_within_budget)
     );
     line(
-        "paced move, queued to committed (1 move / 100 ms)",
+        &format!("paced move, queued to committed (1 move / {interval_ms} ms)"),
         &report.paced_commit,
         1e3,
         "ms",
     );
     println!(
-        "burst of {} moves drained in {:.0} ms ({:.0} moves/s); writer keeps up with 10 moves/s: {}",
+        "burst of {} moves drained in {:.0} ms ({:.0} moves/s); writer keeps up with 1 move / {interval_ms} ms: {}",
         report.burst_moves,
         report.burst_drain_ms,
         report.burst_moves_per_second,
