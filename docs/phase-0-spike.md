@@ -27,6 +27,7 @@ all 12 cores are busy.
 | Frame while scrolling back through history as lines arrive (3 runs) | informational (same 8 ms) | p50 1.1–1.3 ms, p99 4.5–6.2 ms | 10.5–11.4 | Within 8 ms |
 | Find over 100,000 lines, every match, real logs | ≤ 50 ms | p50 2.6 ms, **p99 4.6 ms** | 11.1 | Pass |
 | Find, synthetic lines | ≤ 50 ms | p50 5.1 ms, **p99 8.9 ms** | 11.1 | Pass |
+| Find under heavy load (another tester's run, about seven parallel builds) | ≤ 50 ms | **p99 378 ms** synthetic, **175 ms** real logs | not recorded | **Miss** (see below) |
 | Find, first 500 matches (newest first) | informational | p99 3.0 ms (logs), 1.9 ms (synthetic) | 11.1 | — |
 | Memory: the 100,000 lines themselves | informational (≤ 200 MB with a 10,000-room map) | 8.7 MB heap (logs), 11.7 MB (synthetic) | 11.1 | Well under |
 | Memory: the whole app | informational | 35 MB resident after loading, 122 MB after streaming and scrolling | 10.5–11.4 | Well under |
@@ -52,9 +53,12 @@ timer measures wall time, so preemption counts against the budget. Plan:
    rules for stores and revisions (§5 #5, #7) mean a line redraws only the
    chat, and that is what keeps the headroom.
 
-**Find under load.** Another tester measured find at a p99 of 175–378 ms with
-about seven builds running. Find itself is a single scan over the plain text,
-with no allocation per line, and it measured 4.6 ms at load 11. To return
+**Find under load, also a miss.** Like the frames, headless find can miss its
+50 ms budget on a loaded machine: another tester measured a p99 of 378 ms on
+synthetic lines and 175 ms on the real logs with about seven builds running,
+so `mudling-bench --check` failed there. Find itself is a single scan over
+the plain text, with no allocation per line, and it measured 4.6 ms (logs)
+and 8.9 ms (synthetic) at load 11. To return
 early results under any load, find now searches newest first and stops at a
 limit; the first 500 matches come back in about 3 ms. Moving find off the UI
 thread (PRD §12) is the Phase 1 step that keeps a slow find from ever
@@ -113,7 +117,8 @@ and clippy job. **None of that has run yet**: CI starts once the pull request
 is published, and this Mac has no Windows or Linux toolchains, so the
 non-macOS code paths were reviewed by hand but not compiled. The benchmark in
 CI records numbers without gating on them, since shared runners aren't
-reference hardware.
+reference hardware. The macOS job also runs `mudling-desktop --synthetic
+--ax-check`, which fails the job if a check fails.
 
 To take the measured replay on a Windows laptop or a Linux desktop, copy the
 logs there (never into the repo), then:
@@ -125,14 +130,15 @@ cargo build --release
 # WAYLAND_DISPLAY is set; unset it (or log in to an X11 session) for X11.
 ```
 
-On Linux, install `libfontconfig-dev libfreetype-dev libwayland-dev
-libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev` first.
+On Debian or Ubuntu, install gpui's libraries first with
+[`scripts/install-linux-deps.sh`](../scripts/install-linux-deps.sh), the
+same script CI runs.
 
 ## What was verified, and what is only documented
 
 | Claim | How it was checked | Status |
 |---|---|---|
-| Build, tests, clippy on macOS | `cargo build --release`, `cargo test --workspace` (23 tests), `cargo clippy --workspace --all-targets --release`, `cargo fmt --check` | Verified |
+| Build, tests, clippy on macOS | `cargo build --release`, `cargo test --workspace` (25 tests), `cargo clippy --workspace --all-targets --release`, `cargo fmt --check` | Verified |
 | 100,000-line replay renders, stays pinned while streaming, scrolls | The measured runs above, the AX check below (36 visible line elements, the newest last), and the tests `follows_the_newest_line_while_pinned` and `scrolled_back_view_holds_still_while_lines_are_trimmed` | Verified programmatically. **I could not look at the window:** this session has no Screen Recording permission, so the look (column, colors, fonts) is unchecked. See the manual steps |
 | Only visible lines are laid out | `uniform_list` renders only the rows in view; the AX tree holds 36 line elements out of 100,000 | Verified |
 | Trimming costs nothing to draw | The ring buffer drops the oldest line in place; the view moves its offset by one line instead of re-laying out (tested by mutation: removing the shift makes the test fail) | Verified |
@@ -162,14 +168,14 @@ The workspace pins `gpui = { package = "gpui-pre", version = "=0.3.10" }`.
 
 ### Do its sources match zed@08cbb88?
 
-I downloaded Zed's source at `08cbb88a` and diffed each `gpui-pre-*`
-crate's sources against the Zed crate it names in its metadata (20 crates).
-The result:
+[`scripts/verify-gpui-pre.sh`](../scripts/verify-gpui-pre.sh) downloads Zed
+at the revision each `gpui-pre-*` crate names in its metadata and diffs the
+crate against the Zed crate it names (20 crates). Run it before every gpui
+upgrade. For 0.3.10 against `08cbb88a`:
 
-- **Identical:** 17 crates, including `gpui_macos`, `gpui_windows`,
-  `gpui_linux`, `gpui_platform`, `gpui_apple`, `scheduler` and every
-  accessibility file in `gpui` (`window/a11y.rs`, its debug module and the
-  element code).
+- **Identical:** 16 crates, including `gpui_macos`, `gpui_windows`,
+  `gpui_linux`, `gpui_platform`, `scheduler` and every accessibility file
+  in `gpui` (`window/a11y.rs`, its debug module and the element code).
 - **Changed, each labelled "Modified for gpui-pre" at the top:**
   - `gpui/src/action.rs`: the `actions!` macro uses `$crate::Action` in
     place of `gpui::Action`.
@@ -179,6 +185,10 @@ The result:
     files and runs nothing.
   - `gpui_wgpu`: three one-line changes that adapt it to the crates.io
     `wgpu` 30.0.1 API.
+  - `gpui_apple`: its `build.rs` reads five gpui source files (scene,
+    color, window, geometry, platform) from a bundled `vendor/gpui`
+    instead of `../gpui`, which a published crate can't reach. The bundled
+    files are identical to gpui's.
 - **Dependencies differ where Zed patches them:** `gpui-pre` uses crates.io
   `async-task` 4.7, `calloop` 0.14 and `wgpu` 30.0.1, where Zed uses its own
   forks and a later `wgpu` revision. One example of what that loses: Zed's

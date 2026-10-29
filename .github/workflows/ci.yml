@@ -18,7 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install gpui's Linux libraries
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev
+        run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --release -- -D warnings
@@ -35,10 +35,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install gpui's Linux libraries (X11 and Wayland)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev
+        run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --release
       - run: cargo test --workspace
+      # Reads the window's accessibility tree from inside the app, as
+      # VoiceOver would see it; exits non-zero if a check fails.
+      - name: Accessibility check (macOS)
+        if: runner.os == 'macOS'
+        run: ./target/release/mudling-desktop --synthetic --ax-check
       # Synthetic lines only: session logs hold other players' chat and are
       # never committed. Shared runners aren't the reference hardware, so this
       # records the numbers without gating on them (add --check to gate).

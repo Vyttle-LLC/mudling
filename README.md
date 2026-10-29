@@ -34,8 +34,8 @@ cargo run --release -p mudling-bench                 # append and find budgets
 cargo run --release -p mudling-desktop -- --synthetic # the chat, with made-up lines
 ```
 
-On Linux, gpui needs `libfontconfig-dev libfreetype-dev libwayland-dev
-libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev`.
+On Debian or Ubuntu, `scripts/install-linux-deps.sh` installs the libraries
+gpui needs.
 
 Release builds carry line-table debug info, so daily builds are release
 builds that still give useful backtraces.
