@@ -495,6 +495,9 @@ pub enum Problem {
     /// The merged matcher couldn't be built, such as a set of patterns too
     /// large to compile together.
     Matcher(String),
+    /// A Luau VM for the plugin's hooks couldn't be set up; no fault of
+    /// its files.
+    LuauSetup(String),
 }
 
 impl PluginError {
@@ -525,6 +528,11 @@ impl fmt::Display for PluginError {
             Problem::Matcher(message) => write!(
                 f,
                 "{}: the patterns couldn't be compiled together: {message}",
+                self.source
+            ),
+            Problem::LuauSetup(message) => write!(
+                f,
+                "{}: couldn't set up a Luau VM for the hooks: {message}",
                 self.source
             ),
         }

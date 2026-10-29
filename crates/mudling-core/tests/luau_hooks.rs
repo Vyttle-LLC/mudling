@@ -6,7 +6,7 @@ use mudling_core::plugin::luau::{
     DisabledReason, HookFailed, HookLimits, HookOutput, HookRunner, LuauHooks, PluginDisabled,
     SendCommand, StateView, StoreWrite, Value,
 };
-use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginId};
+use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginId, Problem};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -478,6 +478,47 @@ fn state_is_read_only_with_read_state() {
             .contains("`read_state` permission"),
         "{outputs:?}"
     );
+}
+
+#[test]
+fn a_failed_hooks_sends_are_refunded_to_the_rate_limit() {
+    let plugin = hooked(
+        &["send_commands", "write_store:s"],
+        "calls = 0\n\
+         function on_go(event)\n\
+         calls += 1\n\
+         local sent = 0\n\
+         for i = 1, 5 do if mud.send('look ' .. i) then sent += 1 end end\n\
+         if calls == 1 then error('stop') end\n\
+         mud.store('s', 'sent', sent)\n\
+         end",
+    );
+    let limits = HookLimits {
+        commands_per_second: 5,
+        ..HookLimits::default()
+    };
+    let mut runner = runner_with(&plugin, limits, no_state());
+    runner.set_approved(plugin.id(), true);
+    let outputs = run(&plugin, &mut runner, &["go", "go"]);
+    assert_eq!(sends(&outputs).len(), 5, "{outputs:?}");
+    assert_eq!(
+        writes(&outputs),
+        [("s".to_owned(), "sent".to_owned(), Value::Number(5.0))]
+    );
+}
+
+#[test]
+fn a_vm_that_cant_be_set_up_says_so() {
+    let plugin = hooked(&[], "function on_go(event) end");
+    let limits = HookLimits {
+        memory: 1,
+        ..HookLimits::default()
+    };
+    let error = HookRunner::new(limits, no_state())
+        .add(&plugin)
+        .unwrap_err();
+    assert!(matches!(error.problem, Problem::LuauSetup(_)), "{error:?}");
+    assert_eq!(error.source, "hooked");
 }
 
 #[test]

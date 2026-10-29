@@ -224,6 +224,7 @@ struct Vm {
     lua: Lua,
     meter: Rc<Meter>,
     outbox: Rc<RefCell<Vec<HookOutput>>>,
+    rate_limit: Rc<RateLimit>,
     needs_approval: bool,
     approved: bool,
     overruns: u32,
@@ -355,7 +356,13 @@ impl HookRunner {
                 .drain(..)
                 .for_each(|output| sink.output(output)),
             Err((overran, message)) => {
-                vm.outbox.borrow_mut().clear();
+                let unsent = vm
+                    .outbox
+                    .borrow_mut()
+                    .drain(..)
+                    .filter(|output| matches!(output, HookOutput::SendCommand(_)))
+                    .count();
+                vm.rate_limit.refund(unsent);
                 let plugin = vm.plugin.clone();
                 sink.output(HookOutput::HookFailed(HookFailed {
                     plugin: plugin.clone(),
@@ -392,6 +399,7 @@ impl Vm {
         let id = plugin.id().clone();
         let meter = Rc::new(Meter::new());
         let outbox = Rc::new(RefCell::new(Vec::new()));
+        let rate_limit = Rc::new(RateLimit::new(limits.commands_per_second));
         let invalid = |file: &str, error: mlua::Error| PluginError {
             source: file.to_owned(),
             problem: Problem::Invalid(format!("the Luau hooks couldn't load: {error}")),
@@ -402,9 +410,13 @@ impl Vm {
             limits,
             &meter,
             &outbox,
+            &rate_limit,
             state,
         )
-        .map_err(|error| invalid("plugin.toml", error))?;
+        .map_err(|error| PluginError {
+            source: id.to_string(),
+            problem: Problem::LuauSetup(error.to_string()),
+        })?;
         for script in &plugin.scripts {
             // Compiling isn't the plugin's code running, so only running counts.
             let chunk = lua
@@ -422,6 +434,7 @@ impl Vm {
             lua,
             meter,
             outbox,
+            rate_limit,
             needs_approval: plugin
                 .manifest
                 .permissions
@@ -549,6 +562,7 @@ fn sandbox(
     limits: HookLimits,
     meter: &Rc<Meter>,
     outbox: &Rc<RefCell<Vec<HookOutput>>>,
+    rate_limit: &Rc<RateLimit>,
     state: Arc<dyn StateView>,
 ) -> mlua::Result<Lua> {
     let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::BIT;
@@ -606,7 +620,7 @@ fn sandbox(
     )?;
 
     let send_commands = permissions.contains(&Permission::SendCommands);
-    let limit = RateLimit::new(limits.commands_per_second);
+    let limit = rate_limit.clone();
     let (id, sends) = (plugin.clone(), outbox.clone());
     mud.set(
         "send",
@@ -713,6 +727,14 @@ impl RateLimit {
             recent.push_back(now);
         }
         allowed
+    }
+
+    /// Gives back the newest `sends` slots: the sends of a hook that failed,
+    /// which never went out.
+    fn refund(&self, sends: usize) {
+        let mut recent = self.recent.borrow_mut();
+        let kept = recent.len().saturating_sub(sends);
+        recent.truncate(kept);
     }
 }
 
