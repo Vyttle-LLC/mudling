@@ -3,6 +3,7 @@
 
 pub mod ansi;
 pub mod line;
+pub mod plugin;
 pub mod replay;
 pub mod scrollback;
 pub mod stats;

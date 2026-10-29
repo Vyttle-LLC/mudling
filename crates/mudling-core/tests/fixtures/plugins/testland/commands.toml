@@ -1,0 +1,15 @@
+separator = ";"
+
+[verbs]
+remove = "unequip"
+
+[doors]
+open = "open door {dir}"
+
+[speedwalk]
+step = "{count}{dir}"
+join = " "
+
+[[alias]]
+name = "rr"
+expansion = "rest;sleep"

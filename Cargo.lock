@@ -2963,7 +2963,10 @@ version = "0.0.0"
 dependencies = [
  "aho-corasick",
  "memchr",
+ "regex",
+ "regex-syntax",
  "serde",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

@@ -1,0 +1,24 @@
+# A synthetic game plugin for the made-up game Testland. It declares all
+# nine extension points.
+id = "testland"
+name = "Testland"
+version = "1.2.0"
+api = 1
+license = "MIT"
+layer = "game"
+encoding = "latin-1"
+
+[servers]
+hosts = ["mud.testland.example", "*.testland.example"]
+mssp_names = ["Testland"]
+
+[points]
+connection = "connection.toml"
+commands = "commands.toml"
+text = "text.toml"
+hud = "hud.toml"
+map = "map.toml"
+character = "character.toml"
+gear = "gear.toml"
+mobs = "mobs.toml"
+ui = "ui.toml"

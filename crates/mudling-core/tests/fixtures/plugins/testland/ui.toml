@@ -1,0 +1,2 @@
+panels = ["character", "gear"]
+character_fields = ["life", "level"]

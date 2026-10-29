@@ -1,0 +1,13 @@
+[[command]]
+command = "stats"
+reader = "stats"
+
+[[reader]]
+name = "stats"
+start = '''^-- Stats --$'''
+row = '''^(?<stat>\w+): (?<value>\d+)$'''
+end = '''^-- End --$'''
+
+[[skill_improved]]
+name = "skill.improved"
+pattern = '''^Your (?<skill>.+) improves\.$'''
