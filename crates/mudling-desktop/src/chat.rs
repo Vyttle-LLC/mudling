@@ -209,12 +209,14 @@ impl Render for Chat {
 }
 
 /// A polite live region holding the newest lines. Each batch is a new node,
-/// so screen readers announce it even when the text repeats a line.
+/// so screen readers announce it even when the text repeats a line. The text
+/// is both the label and the value: the Windows and Linux adapters announce a
+/// status node's name (its label), while macOS announces its value.
 fn live_region(batch: u64, text: SharedString) -> impl IntoElement {
     div()
         .id(ElementId::NamedInteger("new-lines".into(), batch))
         .role(Role::Status)
-        .aria_label("New lines")
+        .aria_label(text.clone())
         .aria_value(text)
         .a11y_synthetic_children(|builder| {
             builder

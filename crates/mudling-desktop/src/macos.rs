@@ -185,8 +185,10 @@ pub fn run_ax_check(chat: Entity<Chat>, cx: &mut App) {
         });
         let expected = PROBE_LINES.join("\n");
         checks.push(Check {
-            name: "new lines reach the live region",
-            passed: statuses.len() == 1 && statuses[0].value.as_deref() == Some(expected.as_str()),
+            name: "new lines reach the live region, as its value (macOS) and name (NVDA, Orca)",
+            passed: statuses.len() == 1
+                && statuses[0].value.as_deref() == Some(expected.as_str())
+                && statuses[0].title.as_deref() == Some(expected.as_str()),
             detail: format!(
                 "{:?}",
                 statuses.iter().map(|s| &s.value).collect::<Vec<_>>()
