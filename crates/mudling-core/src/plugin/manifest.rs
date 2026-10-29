@@ -16,11 +16,18 @@
 //!
 //! [points]                # each extension point and the file declaring it
 //! text = "text.toml"
+//!
+//! # Optional: Luau hooks, and what they may do (see `plugin::luau`).
+//! permissions = ["read_state", "write_store:skills", "send_commands"]
+//!
+//! [hooks]
+//! files = ["skills.luau"]
 //! ```
 //!
 //! Loading validates everything, every pattern included, and reports the
 //! first problem as a [`PluginError`] naming the file. It never panics.
 
+use super::luau::{self, Script};
 use super::points::{Character, Commands, Connection, Gear, Hud, Map, Mobs, Point, Points, Text, Ui};
 use crate::line::Encoding;
 use serde::Deserialize;
@@ -200,6 +207,47 @@ pub struct Manifest {
     pub servers: Servers,
     #[serde(default)]
     pub points: PointFiles,
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+    #[serde(default)]
+    pub hooks: HookFiles,
+}
+
+/// The Luau files a plugin's hooks are in, loaded in order into one VM.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookFiles {
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// What a plugin's Luau hooks may do beyond reading their event.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub enum Permission {
+    /// Read the state view the caller supplies.
+    ReadState,
+    /// Write to the named store.
+    WriteStore(String),
+    /// Send commands to the game; needs the player's approval at install.
+    SendCommands,
+}
+
+impl TryFrom<String> for Permission {
+    type Error = String;
+
+    fn try_from(permission: String) -> Result<Permission, String> {
+        match permission.as_str() {
+            "read_state" => Ok(Permission::ReadState),
+            "send_commands" => Ok(Permission::SendCommands),
+            other => match other.strip_prefix("write_store:") {
+                Some(store) if !store.trim().is_empty() => Ok(Permission::WriteStore(store.to_owned())),
+                _ => Err(format!(
+                    "`{permission}` isn't a permission: use \"read_state\", \"write_store:<name>\" or \"send_commands\""
+                )),
+            },
+        }
+    }
 }
 
 impl Manifest {
@@ -235,21 +283,24 @@ impl Manifest {
         self.servers.validate()?;
         for point in Point::ALL {
             if let Some(file) = self.points.get(point) {
-                check_relative_toml(file).map_err(|problem| format!("points.{point} = \"{file}\": {problem}"))?;
+                check_relative(file, "toml").map_err(|problem| format!("points.{point} = \"{file}\": {problem}"))?;
             }
+        }
+        for file in &self.hooks.files {
+            check_relative(file, "luau").map_err(|problem| format!("hooks.files: \"{file}\": {problem}"))?;
         }
         Ok(())
     }
 }
 
-/// A point file must be a `.toml` file inside the plugin folder.
-fn check_relative_toml(file: &str) -> Result<(), &'static str> {
+/// A point or hook file must be inside the plugin folder, with `extension`.
+fn check_relative(file: &str, extension: &str) -> Result<(), String> {
     let path = Path::new(file);
     if !path.components().all(|component| matches!(component, Component::Normal(_))) {
-        return Err("the file must be inside the plugin folder");
+        return Err("the file must be inside the plugin folder".into());
     }
-    if path.extension().is_none_or(|extension| extension != "toml") {
-        return Err("the file must be a .toml file");
+    if path.extension().is_none_or(|found| found != extension) {
+        return Err(format!("the file must be a .{extension} file"));
     }
     Ok(())
 }
@@ -259,6 +310,8 @@ fn check_relative_toml(file: &str) -> Result<(), &'static str> {
 pub struct Plugin {
     pub manifest: Manifest,
     pub points: Points,
+    /// The `[hooks]` files, in order, each checked to compile.
+    pub scripts: Vec<Script>,
 }
 
 impl Plugin {
@@ -295,7 +348,13 @@ impl Plugin {
             mobs: point::<Mobs>(load(Point::Mobs)?)?,
             ui: point::<Ui>(load(Point::Ui)?)?,
         };
-        Ok(Plugin { manifest, points })
+        let mut scripts = Vec::with_capacity(manifest.hooks.files.len());
+        for file in &manifest.hooks.files {
+            let source = read_file(&mut read, file)?;
+            luau::check_syntax(file, &source).map_err(|problem| PluginError::invalid(file, problem))?;
+            scripts.push(Script { file: file.clone(), source: source.into() });
+        }
+        Ok(Plugin { manifest, points, scripts })
     }
 
     pub fn id(&self) -> &PluginId {

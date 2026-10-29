@@ -1,0 +1,13 @@
+id = "columns"
+name = "Columns"
+version = "1.0.0"
+api = 1
+license = "MIT"
+layer = "default"
+permissions = ["write_store:abilities"]
+
+[points]
+text = "text.toml"
+
+[hooks]
+files = ["columns.luau"]

@@ -8,6 +8,7 @@
 //! [`PluginSink`] as [`PluginEvent`]s.
 
 mod host;
+pub mod luau;
 pub mod manifest;
 mod matcher;
 pub mod points;
