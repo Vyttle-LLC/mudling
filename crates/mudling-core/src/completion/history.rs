@@ -95,11 +95,9 @@ impl History {
         }
     }
 
-    /// Whether the box still holds a command this browse would show; if not,
-    /// the player typed, and browsing starts over from their text. Told from
-    /// the text itself, since a box's change notices can't tell a command
-    /// shown from history from one typed. While the box holds a match, Up
-    /// keeps the browse's original prefix instead of taking a new one.
+    /// Whether a browse is under way and `line` is a history entry starting
+    /// with its prefix. Told from the text itself, since a box's change
+    /// notices can't tell a command shown from history from one typed.
     fn is_showing_a_match(&self, line: &str) -> bool {
         self.browse
             .as_ref()

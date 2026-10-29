@@ -1,6 +1,6 @@
 //! `completion-bench`: times a Tab completion against 20,000 known words
-//! (the history's 500 commands included) and checks it against the budget of
-//! 1 ms at p99.
+//! alongside a full history of 500 commands, and checks it against the
+//! budget of 1 ms at p99.
 //!
 //! ```text
 //! completion-bench [--check] [--json <report.json>]
