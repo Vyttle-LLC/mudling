@@ -5,6 +5,7 @@ pub mod ansi;
 pub mod replay;
 pub mod scrollback;
 pub mod stats;
+pub mod store;
 
 pub use ansi::{AnsiParser, Color, Line, LineKind, Span, Style};
 pub use scrollback::Scrollback;

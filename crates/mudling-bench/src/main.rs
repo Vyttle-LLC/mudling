@@ -10,6 +10,8 @@
 //! one parses a raw line and evicts the oldest), and finds over the full
 //! buffer. `--check` exits non-zero when a budget is missed.
 
+mod stores;
+
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::stats::Summary;
 use mudling_core::{AnsiParser, Scrollback};
@@ -76,6 +78,7 @@ struct Report {
     find_budget_us: f64,
     append_within_budget: bool,
     find_within_budget: bool,
+    stores: stores::Report,
 }
 
 fn main() -> ExitCode {
@@ -111,7 +114,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if options.check && !(report.append_within_budget && report.find_within_budget) {
+    if options.check
+        && !(report.append_within_budget && report.find_within_budget && report.stores.within_budget)
+    {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
     }
@@ -178,6 +183,7 @@ fn run(source: String, mut feed: ReplayFeed) -> Report {
         find_matches,
         append_budget_us: APPEND_BUDGET_US,
         find_budget_us: FIND_BUDGET_US,
+        stores: stores::run(),
     }
 }
 
@@ -209,4 +215,5 @@ fn print_report(report: &Report) {
         report.find_budget_us / 1e3,
         verdict(report.find_within_budget)
     );
+    stores::print(&report.stores);
 }
