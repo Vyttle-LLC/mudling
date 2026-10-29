@@ -10,8 +10,10 @@
 //! one parses a raw line and evicts the oldest), and finds over the full
 //! buffer. `--check` exits non-zero when a budget is missed.
 //! It also times the line pipeline per line over the same text, and the
-//! plugin host with a synthetic set of 300 patterns.
+//! plugin host with a synthetic set of 300 patterns, and the default
+//! plugins, which replay the logs' GMCP too.
 
+mod defaults;
 mod line_pipeline;
 mod plugin_host;
 
@@ -83,6 +85,7 @@ struct Report {
     find_within_budget: bool,
     line_pipeline: line_pipeline::Report,
     plugin_host: plugin_host::Report,
+    defaults: defaults::Report,
 }
 
 fn main() -> ExitCode {
@@ -111,10 +114,12 @@ fn main() -> ExitCode {
 
     let line_pipeline = line_pipeline::run(&lines);
     let plugin_host = plugin_host::run(&lines);
-    let report = run(source, ReplayFeed::new(lines), line_pipeline, plugin_host);
+    let defaults = defaults::run(&options.logs);
+    let report = run(source, ReplayFeed::new(lines), line_pipeline, plugin_host, defaults);
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
     plugin_host::print(&report.plugin_host);
+    defaults::print(&report.defaults);
     if let Some(path) = &options.json {
         let json = serde_json::to_string_pretty(&report).expect("the report serializes");
         if let Err(error) = std::fs::write(path, json) {
@@ -124,7 +129,8 @@ fn main() -> ExitCode {
     }
     if options.check
         && !(report.append_within_budget && report.find_within_budget && report.line_pipeline.within_budget
-            && report.plugin_host.within_budget)
+            && report.plugin_host.within_budget
+            && report.defaults.within_budget)
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
@@ -151,6 +157,7 @@ fn run(
     mut feed: ReplayFeed,
     line_pipeline: line_pipeline::Report,
     plugin_host: plugin_host::Report,
+    defaults: defaults::Report,
 ) -> Report {
     let mut parser = AnsiParser::default();
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
@@ -199,6 +206,7 @@ fn run(
         find_budget_us: FIND_BUDGET_US,
         line_pipeline,
         plugin_host,
+        defaults,
     }
 }
 
