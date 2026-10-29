@@ -30,8 +30,10 @@
 //! `print`, so no file or network access. Its memory is capped.
 //!
 //! **Time boxes.** Every hook call gets an instruction budget, counted by
-//! Luau's interrupt (about one tick per loop iteration or function call). A
-//! hook past its budget, or its memory cap, is stopped; a plugin whose hooks
+//! Luau's interrupt (about one tick per loop iteration or function call),
+//! and a time limit, checked at each tick, for hooks whose ticks are slow
+//! (big string work, say). A hook past either, or its memory cap, is
+//! stopped; a plugin whose hooks
 //! overrun [`OVERRUNS_TO_TURN_OFF`] times in a session is turned off, with a
 //! [`PluginDisabled`] notice.
 //!
@@ -55,9 +57,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// Interrupt ticks a hook call may use. On an M-series Mac this stops an
-/// endless loop in about 80 µs (mudling-bench): 5 µs a line amortized over
+/// endless loop in about 100 µs (mudling-bench): 5 µs a line amortized over
 /// the 20 or so lines that don't reach the hook. Real hooks use far fewer.
-pub const DEFAULT_BUDGET: u32 = 10_000;
+pub const DEFAULT_BUDGET: u32 = 4_000;
+/// Wall-clock time a hook call may take: real hooks take a few µs, and this
+/// leaves room for the worker being preempted on a busy machine.
+pub const DEFAULT_TIME_LIMIT: Duration = Duration::from_millis(2);
 pub const DEFAULT_COMMANDS_PER_SECOND: u32 = 5;
 pub const DEFAULT_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 /// Overruns in one session that turn a plugin off.
@@ -82,6 +87,8 @@ pub(super) fn check_syntax(file: &str, source: &str) -> Result<(), String> {
 pub struct HookLimits {
     /// Interrupt ticks per hook call.
     pub budget: u32,
+    /// Wall-clock time per hook call.
+    pub time: Duration,
     /// Commands each plugin may send in any one second.
     pub commands_per_second: u32,
     /// Bytes each plugin's VM may hold.
@@ -92,6 +99,7 @@ impl Default for HookLimits {
     fn default() -> HookLimits {
         HookLimits {
             budget: DEFAULT_BUDGET,
+            time: DEFAULT_TIME_LIMIT,
             commands_per_second: DEFAULT_COMMANDS_PER_SECOND,
             memory: DEFAULT_MEMORY_LIMIT,
         }
@@ -201,9 +209,35 @@ struct Vm {
     disabled: bool,
 }
 
-/// The budget left in the current call, shared with the interrupt.
+/// The current call's time box, shared with the interrupt.
 struct Meter {
     left: Cell<u32>,
+    deadline: Cell<Instant>,
+    overran: Cell<bool>,
+}
+
+impl Meter {
+    fn new() -> Meter {
+        Meter { left: Cell::new(0), deadline: Cell::new(Instant::now()), overran: Cell::new(false) }
+    }
+
+    fn start(&self, limits: HookLimits) {
+        self.left.set(limits.budget);
+        self.deadline.set(Instant::now() + limits.time);
+        self.overran.set(false);
+    }
+
+    /// Counts one interrupt tick. Once over, stays over until the next
+    /// start, so a `pcall` that catches the error fails at its next tick.
+    fn tick(&self) -> mlua::Result<VmState> {
+        let left = self.left.get();
+        if self.overran.get() || left == 0 || Instant::now() >= self.deadline.get() {
+            self.overran.set(true);
+            return Err(mlua::Error::runtime("the hook ran past its time box"));
+        }
+        self.left.set(left - 1);
+        Ok(VmState::Continue)
+    }
 }
 
 impl HookRunner {
@@ -238,9 +272,9 @@ impl HookRunner {
     /// Runs the hook `event` names, if any, and sends its outputs to `sink`.
     pub fn run(&mut self, event: &PluginEvent, sink: &mut impl HookSink) {
         let Some(hook) = &event.hook else { return };
-        let budget = self.limits.budget;
+        let limits = self.limits;
         let Some(vm) = self.vm(&event.plugin).filter(|vm| vm.is_active()) else { return };
-        match vm.call(hook, event, budget) {
+        match vm.call(hook, event, limits) {
             Ok(()) => vm.outbox.borrow_mut().drain(..).for_each(|output| sink.output(output)),
             Err((overran, message)) => {
                 vm.outbox.borrow_mut().clear();
@@ -271,7 +305,7 @@ impl HookRunner {
 impl Vm {
     fn new(plugin: &Plugin, limits: HookLimits, state: Arc<dyn StateView>) -> Result<Vm, PluginError> {
         let id = plugin.id().clone();
-        let meter = Rc::new(Meter { left: Cell::new(0) });
+        let meter = Rc::new(Meter::new());
         let outbox = Rc::new(RefCell::new(Vec::new()));
         let invalid = |file: &str, error: mlua::Error| PluginError {
             file: file.to_owned(),
@@ -280,7 +314,7 @@ impl Vm {
         let lua = sandbox(&id, &plugin.manifest.permissions, limits, &meter, &outbox, state)
             .map_err(|error| invalid("plugin.toml", error))?;
         for script in &plugin.scripts {
-            meter.left.set(limits.budget);
+            meter.start(limits);
             lua.load(&*script.source).set_name(format!("={}", script.file)).exec().map_err(|error| invalid(&script.file, error))?;
         }
         Ok(Vm {
@@ -299,17 +333,17 @@ impl Vm {
         !self.disabled && (self.approved || !self.needs_approval)
     }
 
-    /// Calls `hook` on `event` inside the budget. An error says whether the
-    /// hook overran, and why it stopped.
-    fn call(&self, hook: &HookName, event: &PluginEvent, budget: u32) -> Result<(), (bool, String)> {
+    /// Calls `hook` on `event` inside its time box. An error says whether
+    /// the hook overran, and why it stopped.
+    fn call(&self, hook: &HookName, event: &PluginEvent, limits: HookLimits) -> Result<(), (bool, String)> {
         let function: Function = match self.lua.globals().get(hook.as_str()) {
             Ok(mlua::Value::Function(function)) => function,
             _ => return Err((false, format!("the plugin has no function `{}`", hook.as_str()))),
         };
-        self.meter.left.set(budget);
+        self.meter.start(limits);
         let result = event_table(&self.lua, event).and_then(|table| function.call::<()>(table));
         result.map_err(|error| {
-            let overran = self.meter.left.get() == 0 || is_memory_error(&error);
+            let overran = self.meter.overran.get() || is_memory_error(&error);
             (overran, error.to_string())
         })
     }
@@ -383,14 +417,7 @@ fn sandbox(
     globals.set("mud", mud)?;
 
     let meter = meter.clone();
-    lua.set_interrupt(move |_| match meter.left.get() {
-        // Stays at zero, so a `pcall` that catches this fails at its next tick.
-        0 => Err(mlua::Error::runtime("the hook ran past its instruction budget")),
-        left => {
-            meter.left.set(left - 1);
-            Ok(VmState::Continue)
-        }
-    });
+    lua.set_interrupt(move |_| meter.tick());
     lua.sandbox(true)?;
     Ok(lua)
 }

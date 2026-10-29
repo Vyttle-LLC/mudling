@@ -12,6 +12,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, ThreadId};
+use std::time::{Duration, Instant};
 
 /// The patterns most tests use: `go` runs `on_go`; `stay` names no hook.
 const PATTERNS: &str = r#"
@@ -210,13 +211,29 @@ fn each_plugin_has_its_own_vm() {
 
 // ---- Budget ----
 
+/// Limits where only the given one can stop a hook.
+const NO_TIME_LIMIT: Duration = Duration::from_secs(60);
+
 #[test]
 fn an_infinite_loop_is_stopped_by_the_budget() {
     let plugin = hooked(&[], "function on_go(event) while true do end end");
-    let outputs = run(&plugin, &mut runner(&plugin), &["go"]);
+    let limits = HookLimits { time: NO_TIME_LIMIT, ..HookLimits::default() };
+    let outputs = run(&plugin, &mut runner_with(&plugin, limits, no_state()), &["go"]);
     let failed = failures(&outputs);
     assert_eq!(failed.len(), 1);
     assert!(failed[0].overran, "{failed:?}");
+}
+
+#[test]
+fn a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
+    let plugin = hooked(
+        &[],
+        "function on_go(event) for i = 1, 2000 do local s = string.rep('x', 100000) s = s:upper() end end",
+    );
+    let started = Instant::now();
+    let outputs = run(&plugin, &mut runner(&plugin), &["go"]);
+    assert!(failures(&outputs)[0].overran, "{outputs:?}");
+    assert!(started.elapsed() < Duration::from_millis(200), "took {:?}", started.elapsed());
 }
 
 #[test]
@@ -234,9 +251,10 @@ fn a_pcall_cant_catch_the_budget() {
 #[test]
 fn the_memory_cap_counts_as_an_overrun() {
     let plugin = hooked(&[], "function on_go(event) local t = {} for i = 1, 1e7 do t[i] = string.rep('x', 64) .. i end end");
-    let limits = HookLimits { budget: u32::MAX, memory: 1024 * 1024, ..HookLimits::default() };
+    let limits = HookLimits { budget: u32::MAX, time: NO_TIME_LIMIT, memory: 1024 * 1024, ..HookLimits::default() };
     let outputs = run(&plugin, &mut runner_with(&plugin, limits, no_state()), &["go"]);
-    assert!(failures(&outputs)[0].overran, "{outputs:?}");
+    let failed = failures(&outputs);
+    assert!(failed[0].overran && failed[0].message.contains("memory"), "{failed:?}");
 }
 
 #[test]
@@ -394,7 +412,7 @@ fn a_plugin_whose_hooks_dont_load_fails_to_start() {
     let plugin = hooked(&[], "while true do end");
     let error = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()).err().unwrap();
     assert_eq!(error.file, "hooks.luau");
-    assert!(error.to_string().contains("instruction budget"), "{error}");
+    assert!(error.to_string().contains("time box"), "{error}");
 }
 
 // ---- A column-splitting hook ----
