@@ -11,6 +11,7 @@ publish.workspace = true
 mudling-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+flate2.workspace = true
 
 [lints]
 workspace = true

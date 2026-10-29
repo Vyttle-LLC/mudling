@@ -2,9 +2,11 @@
 //! shell (gpui on the desktop, SwiftUI through UniFFI on iOS) shares it.
 
 pub mod ansi;
+pub mod net;
 pub mod replay;
 pub mod scrollback;
 pub mod stats;
+pub mod telnet;
 
 pub use ansi::{AnsiParser, Color, Line, LineKind, Span, Style};
 pub use scrollback::Scrollback;
