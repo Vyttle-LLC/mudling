@@ -11,12 +11,19 @@
 //!   pending partial line is a view of these same buffers, and finishing a
 //!   line only copies them into the shared [`Line`].
 //!
-//! A line ends at `\n`, `\r\n`, `\n\r` or a lone `\r`, or at GA/EOR
-//! ([`LinePipeline::prompt_end`]). Text with no ending yet is the pending
-//! partial line, often a prompt; see [`LinePipeline::pending`].
+//! A line ends at `\n`, or at GA/EOR ([`LinePipeline::prompt_end`]). Every
+//! `\r` is dropped, as the prototype did, so `\r\n`, `\n\r` and `\r\r\n` each
+//! end one line and `a\rb` stays one line. Text with no ending yet is the
+//! pending partial line, often a prompt; see [`LinePipeline::pending`]. It
+//! can't grow past [`MAX_LINE_BYTES`].
 
 use crate::ansi::{AnsiParser, Span};
 use std::sync::Arc;
+
+/// The most server bytes one line may hold. A server that sends more
+/// without a newline gets its line cut, so it can't grow memory without
+/// limit.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// How server bytes become text. A game plugin picks it per connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,6 +41,8 @@ pub enum LineEnd {
     Newline,
     /// GA or EOR from the server, or a reader that recognized a prompt.
     PromptEnd,
+    /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next.
+    Cut,
 }
 
 /// A link or action over a byte range of a line's plain text. Nothing
@@ -120,17 +129,6 @@ pub struct Pending<'a> {
     pub number: u64,
 }
 
-/// A line end still allowed to pair with the one just read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Absorb {
-    #[default]
-    Nothing,
-    /// The other half of a `\r\n` or `\n\r` pair.
-    Byte(u8),
-    /// Any one line ending: a prompt already ended the line it would end.
-    LineEnd,
-}
-
 /// Turns one connection's server text into lines. Feed it the bytes of each
 /// telnet data event in order, and call [`LinePipeline::prompt_end`] for
 /// GA/EOR.
@@ -143,7 +141,10 @@ pub struct LinePipeline {
     styled: Vec<Span>,
     /// The start of a UTF-8 code point split from its end by a chunk boundary.
     utf8_tail: Vec<u8>,
-    absorb: Absorb,
+    /// Server bytes in the line in progress, `\r` aside.
+    line_bytes: usize,
+    /// A prompt end already ended the line the next `\n` would end.
+    prompt_ended_line: bool,
     finished: u64,
 }
 
@@ -161,14 +162,15 @@ impl LinePipeline {
     /// `lines`. Bytes may be cut anywhere, even inside an escape sequence or
     /// a UTF-8 code point.
     pub fn push(&mut self, bytes: &[u8], lines: &mut Vec<Line>) {
-        let mut rest = self.absorb_pair(bytes);
+        let mut rest = bytes;
         while let Some(at) = memchr::memchr2(b'\n', b'\r', rest) {
-            self.append(&rest[..at]);
-            lines.push(self.finish(LineEnd::Newline));
-            self.absorb = Absorb::Byte(if rest[at] == b'\n' { b'\r' } else { b'\n' });
-            rest = self.absorb_pair(&rest[at + 1..]);
+            self.append(&rest[..at], lines);
+            if rest[at] == b'\n' && !std::mem::take(&mut self.prompt_ended_line) {
+                lines.push(self.finish(LineEnd::Newline));
+            }
+            rest = &rest[at + 1..];
         }
-        self.append(rest);
+        self.append(rest, lines);
     }
 
     /// The server marked a prompt (GA or EOR): the pending text is a whole
@@ -179,7 +181,7 @@ impl LinePipeline {
             return None;
         }
         let line = self.finish(LineEnd::PromptEnd);
-        self.absorb = Absorb::LineEnd;
+        self.prompt_ended_line = true;
         Some(line)
     }
 
@@ -195,26 +197,38 @@ impl LinePipeline {
         })
     }
 
-    /// Skips the second half of a line-ending pair at the start of `bytes`.
-    fn absorb_pair<'a>(&mut self, bytes: &'a [u8]) -> &'a [u8] {
-        let Some(&first) = bytes.first() else {
-            return bytes;
-        };
-        match std::mem::take(&mut self.absorb) {
-            Absorb::Byte(byte) if first == byte => &bytes[1..],
-            Absorb::LineEnd if first == b'\n' || first == b'\r' => {
-                self.absorb = Absorb::Byte(if first == b'\n' { b'\r' } else { b'\n' });
-                self.absorb_pair(&bytes[1..])
-            }
-            _ => bytes,
+    /// Adds text bytes (no line ends) to the line in progress, cutting it
+    /// into `lines` each time it reaches [`MAX_LINE_BYTES`].
+    fn append(&mut self, mut bytes: &[u8], lines: &mut Vec<Line>) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.prompt_ended_line = false;
+        while self.line_bytes + bytes.len() > MAX_LINE_BYTES {
+            let cut = self.cut_point(bytes, MAX_LINE_BYTES - self.line_bytes);
+            self.decode(&bytes[..cut]);
+            lines.push(self.finish(LineEnd::Cut));
+            bytes = &bytes[cut..];
+        }
+        self.decode(bytes);
+    }
+
+    /// Where to cut `bytes` to fit `room`: before the code point that would
+    /// cross it, so a cut never splits one.
+    fn cut_point(&self, bytes: &[u8], room: usize) -> usize {
+        let is_continuation = |byte: u8| byte & 0xC0 == 0x80;
+        match self.encoding {
+            Encoding::Latin1 => room,
+            Encoding::Utf8 => (room.saturating_sub(3)..=room)
+                .rev()
+                .find(|&at| !is_continuation(bytes[at]))
+                .unwrap_or(room),
         }
     }
 
     /// Decodes `bytes` onto the line in progress and parses only that text.
-    fn append(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
+    fn decode(&mut self, bytes: &[u8]) {
+        self.line_bytes += bytes.len();
         let start = self.raw.len();
         match self.encoding {
             Encoding::Utf8 if self.utf8_tail.is_empty() => self.decode_utf8(bytes),
@@ -260,6 +274,7 @@ impl LinePipeline {
         self.raw.clear();
         self.plain.clear();
         self.styled.clear();
+        self.line_bytes = 0;
         self.finished += 1;
         line
     }
@@ -287,9 +302,21 @@ mod tests {
 
     #[test]
     fn every_line_ending_variant() {
-        let (lines, pending) = plain_lines(&[b"a\r\nb\n\rc\rd\ne\r\n\r\nf\n\r\n\rg"]);
+        let (lines, pending) = plain_lines(&[b"a\r\nb\n\rc\nd\r\r\ne\r\n\r\nf\n\r\n\rg"]);
         assert_eq!(lines, ["a", "b", "c", "d", "e", "", "f", ""]);
         assert_eq!(pending.as_deref(), Some("g"));
+    }
+
+    #[test]
+    fn a_lone_carriage_return_is_dropped() {
+        let (lines, _) = lines_and_pending(&[b"a\rb\r\n"]);
+        assert_eq!((lines.len(), lines[0].raw(), lines[0].plain()), (1, "ab", "ab"));
+    }
+
+    #[test]
+    fn any_run_of_carriage_returns_before_a_newline_ends_one_line() {
+        assert_eq!(plain_lines(&[b"a\r\r\nb\r\r\r\r\nc\n"]).0, ["a", "b", "c"]);
+        assert_eq!(plain_lines(&[b"a\r", b"\r", b"\n"]).0, ["a"]);
     }
 
     #[test]
@@ -301,8 +328,8 @@ mod tests {
     /// UTF-8 and an invalid byte.
     const STREAM: &[u8] = b"\x1b[1;31mWelcome\x1b[0m to Testland.\n\r\
         A caf\xc3\xa9 \xe4\xb8\xad sign \xf0\x9f\x8f\xb0 glows.\r\n\
-        \x1b]0;title\x07Bad \xff byte\r\
-        \x1b[38;5;208morange\x1b[m line\n\
+        \x1b]0;title\x07Bad \xff byte\r\r\n\
+        \x1b[38;5;208morange\x1b[m\r line\n\
         \n\r\
         (10h 20m) \x1b[32mprompt";
 
@@ -439,6 +466,32 @@ mod tests {
     #[test]
     fn a_code_point_cut_off_by_a_line_end_is_replaced() {
         assert_eq!(plain_lines(&[b"a\xe4\xb8", b"\nb"]).0, ["a\u{FFFD}"]);
+    }
+
+    #[test]
+    fn a_line_without_end_is_cut_at_the_cap() {
+        let mut pipeline = LinePipeline::default();
+        let mut lines = Vec::new();
+        for _ in 0..200 {
+            pipeline.push(&[b'x'; 1000], &mut lines);
+            assert!(pipeline.pending().is_none_or(|p| p.raw.len() <= MAX_LINE_BYTES));
+        }
+        pipeline.push(b"\n", &mut lines);
+        let lengths: Vec<(usize, LineEnd)> = lines.iter().map(|l| (l.raw().len(), l.end())).collect();
+        let full = (MAX_LINE_BYTES, LineEnd::Cut);
+        assert_eq!(lengths, [full, full, full, (200_000 - 3 * MAX_LINE_BYTES, LineEnd::Newline)]);
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_code_point() {
+        // "a" then two-byte "é"s: the cap falls inside an "é".
+        let mut bytes = b"a".to_vec();
+        bytes.extend("é".repeat(MAX_LINE_BYTES).as_bytes());
+        let (lines, pending) = lines_and_pending(&[&bytes]);
+        assert_eq!(lines[0].raw().len(), MAX_LINE_BYTES - 1);
+        assert!(lines.iter().chain(&pending).all(|line| !line.raw().contains('\u{FFFD}')));
+        let text: String = lines.iter().chain(&pending).map(Line::raw).collect();
+        assert_eq!(text.as_bytes(), bytes);
     }
 
     #[test]
