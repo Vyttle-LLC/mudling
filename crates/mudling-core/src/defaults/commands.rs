@@ -13,7 +13,11 @@ const OPEN_DOOR: &str = "open {dir}";
 
 /// The commands in a typed chain, trimmed, empty ones dropped.
 pub fn split_chain(typed: &str) -> Vec<&str> {
-    typed.split(CHAIN_SEPARATOR).map(str::trim).filter(|command| !command.is_empty()).collect()
+    typed
+        .split(CHAIN_SEPARATOR)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .collect()
 }
 
 /// The lines that send `commands`. With no separator each command is its
@@ -116,7 +120,12 @@ impl WalkSyntax {
     /// its own command; with it, runs between doors go as one command.
     pub fn expand(&self, typed: &str) -> Option<Vec<String>> {
         let steps = parse_speedwalk(typed)?;
-        let open = |direction: Direction| self.open_door.as_deref().unwrap_or(OPEN_DOOR).replace("{dir}", direction.word());
+        let open = |direction: Direction| {
+            self.open_door
+                .as_deref()
+                .unwrap_or(OPEN_DOOR)
+                .replace("{dir}", direction.word())
+        };
         let mut commands = Vec::new();
         let mut runs: Vec<(u32, Direction)> = Vec::new();
         for step in steps {
@@ -125,9 +134,14 @@ impl WalkSyntax {
                 commands.push(open(step.direction));
             }
             match &self.speedwalk {
-                None => commands.extend(std::iter::repeat_n(step.direction.word().to_owned(), step.count as usize)),
+                None => commands.extend(std::iter::repeat_n(
+                    step.direction.word().to_owned(),
+                    step.count as usize,
+                )),
                 Some(_) => match runs.last_mut() {
-                    Some((count, direction)) if *direction == step.direction => *count += step.count,
+                    Some((count, direction)) if *direction == step.direction => {
+                        *count += step.count
+                    }
                     _ => runs.push((step.count, step.direction)),
                 },
             }
@@ -138,14 +152,19 @@ impl WalkSyntax {
 
     /// Writes `runs` as one command in the game's syntax.
     fn flush(&self, runs: &mut Vec<(u32, Direction)>, commands: &mut Vec<String>) {
-        let Some(speedwalk) = &self.speedwalk else { return };
+        let Some(speedwalk) = &self.speedwalk else {
+            return;
+        };
         if runs.is_empty() {
             return;
         }
         let steps: Vec<String> = runs
             .drain(..)
             .map(|(count, direction)| {
-                speedwalk.step.replace("{count}", &count.to_string()).replace("{dir}", direction.letter())
+                speedwalk
+                    .step
+                    .replace("{count}", &count.to_string())
+                    .replace("{dir}", direction.letter())
             })
             .collect();
         commands.push(steps.join(&speedwalk.join));
@@ -157,7 +176,10 @@ impl WalkSyntax {
 /// may be written together only with counts or brackets, so a word such as
 /// `news` or `sw` isn't taken for one.
 pub fn parse_speedwalk(typed: &str) -> Option<Vec<Step>> {
-    let tokens: Vec<&str> = typed.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&str> = typed
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
     let marked = |token: &str| token.starts_with(|c: char| c.is_ascii_digit() || c == '[');
     if !(tokens.len() > 1 || tokens.first().is_some_and(|token| marked(token))) {
         return None;
@@ -186,7 +208,9 @@ fn parse_step(text: &str) -> Option<(Step, &str)> {
     if digits > 2 {
         return None;
     }
-    let count = text[..digits].parse::<u32>().map_or(1, |count| count.max(1));
+    let count = text[..digits]
+        .parse::<u32>()
+        .map_or(1, |count| count.max(1));
     let rest = &text[digits..];
     let (door, rest) = match rest.strip_prefix('[') {
         Some(rest) => (true, rest),
@@ -196,5 +220,12 @@ fn parse_step(text: &str) -> Option<(Step, &str)> {
     let direction = Direction::from_letter(letter)?;
     let rest = &rest[1..];
     let rest = if door { rest.strip_prefix(']')? } else { rest };
-    Some((Step { count, direction, door }, rest))
+    Some((
+        Step {
+            count,
+            direction,
+            door,
+        },
+        rest,
+    ))
 }

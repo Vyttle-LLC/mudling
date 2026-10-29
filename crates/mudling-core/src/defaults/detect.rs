@@ -29,19 +29,39 @@ pub struct Suggestion {
 
 /// The first game plugin the server's own name for its game matches (MSSP,
 /// then the GMCP hello, each against `mssp_names`), or else its host.
-pub fn suggest<'a>(plugins: impl IntoIterator<Item = &'a Plugin>, signals: ServerSignals<'_>) -> Option<Suggestion> {
-    let games: Vec<&Plugin> = plugins.into_iter().filter(|plugin| plugin.layer() == Layer::Game).collect();
+pub fn suggest<'a>(
+    plugins: impl IntoIterator<Item = &'a Plugin>,
+    signals: ServerSignals<'_>,
+) -> Option<Suggestion> {
+    let games: Vec<&Plugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.layer() == Layer::Game)
+        .collect();
     fn by_name(name: &str) -> ServerInfo<'_> {
-        ServerInfo { host: "", mssp_name: Some(name) }
+        ServerInfo {
+            host: "",
+            mssp_name: Some(name),
+        }
     }
     let tries = [
         (Source::Mssp, signals.mssp_name.map(by_name)),
         (Source::GmcpHello, signals.gmcp_hello.map(by_name)),
-        (Source::Host, Some(ServerInfo { host: signals.host, mssp_name: None })),
+        (
+            Source::Host,
+            Some(ServerInfo {
+                host: signals.host,
+                mssp_name: None,
+            }),
+        ),
     ];
     tries.into_iter().find_map(|(source, server)| {
         let server = server?;
-        let plugin = games.iter().find(|plugin| plugin.manifest.matches_server(server))?;
-        Some(Suggestion { plugin: plugin.id().clone(), source })
+        let plugin = games
+            .iter()
+            .find(|plugin| plugin.manifest.matches_server(server))?;
+        Some(Suggestion {
+            plugin: plugin.id().clone(),
+            source,
+        })
     })
 }

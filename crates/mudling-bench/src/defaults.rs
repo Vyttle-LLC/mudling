@@ -28,7 +28,14 @@ use std::time::{Duration, Instant};
 
 pub const BUDGET_US: f64 = 5.0;
 /// The prototype's notes, as `replay` lists them.
-const NOTES: [&str; 6] = ["[GMCP] ", "[telnet] ", "[auto-login] ", "[disconnected] ", "[MAP] ", "[connected]"];
+const NOTES: [&str; 6] = [
+    "[GMCP] ",
+    "[telnet] ",
+    "[auto-login] ",
+    "[disconnected] ",
+    "[MAP] ",
+    "[connected]",
+];
 /// Reads in the split runs are 1 to this many bytes.
 const LONGEST_SPLIT_READ: usize = 48;
 const SPLIT_RUNS: u64 = 3;
@@ -61,7 +68,8 @@ pub fn run(logs: &[String]) -> Report {
     } else {
         let mut events = Vec::new();
         for path in logs {
-            let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("couldn't read {path}: {error}"));
+            let bytes =
+                std::fs::read(path).unwrap_or_else(|error| panic!("couldn't read {path}: {error}"));
             events.extend(log_events(&String::from_utf8_lossy(&bytes)));
         }
         (format!("{} log(s)", logs.len()), events)
@@ -72,17 +80,25 @@ pub fn run(logs: &[String]) -> Report {
     for seed in 1..=SPLIT_RUNS {
         ever_learned_split.extend(Replay::run(&events, Some(seed)).ever_learned);
     }
-    let is_start_of_a_top_shape =
-        |shape: &str| whole.top_shapes.iter().any(|top| shape.len() < top.len() && top.starts_with(shape));
+    let is_start_of_a_top_shape = |shape: &str| {
+        whole
+            .top_shapes
+            .iter()
+            .any(|top| shape.len() < top.len() && top.starts_with(shape))
+    };
     let half_shapes = whole
         .ever_learned
         .union(&ever_learned_split)
         .filter(|shape| !whole.ever_learned.contains(*shape) || is_start_of_a_top_shape(shape))
         .count();
 
-    let summary = |samples: &[Duration]| Summary::of(samples).expect("lines, pending text and GMCP were timed");
-    let per_line = summary(&whole.line_samples);
-    let per_pending = summary(&whole.pending_samples);
+    let per_line = Summary::of(&whole.line_samples).expect("lines were timed");
+    // A log may hold no GMCP, or no text left pending, at all.
+    let or_zero = |samples: &[Duration]| {
+        Summary::of(samples).unwrap_or_else(|| Summary::of(&[Duration::ZERO]).unwrap())
+    };
+    let per_pending = or_zero(&whole.pending_samples);
+    let per_gmcp = or_zero(&whole.gmcp_samples);
     Report {
         source,
         lines: whole.line_samples.len(),
@@ -96,14 +112,22 @@ pub fn run(logs: &[String]) -> Report {
         within_budget: per_line.p99_us + per_pending.p99_us <= BUDGET_US && half_shapes == 0,
         per_line,
         per_pending,
-        per_gmcp: summary(&whole.gmcp_samples),
+        per_gmcp,
         budget_us: BUDGET_US,
     }
 }
 
 pub fn print(report: &Report) {
-    let summary = |s: &Summary| format!("p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs", s.p50_us, s.p99_us, s.max_us);
-    println!("defaults over {} ({} lines, {} Char.Vitals):", report.source, report.lines, report.vitals);
+    let summary = |s: &Summary| {
+        format!(
+            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
+            s.p50_us, s.p99_us, s.max_us
+        )
+    };
+    println!(
+        "defaults over {} ({} lines, {} Char.Vitals):",
+        report.source, report.lines, report.vitals
+    );
     println!(
         "  prompt after Char.Vitals matched a learned shape: {} of {} ({:.1}%); {} prompts ended by the defaults from pending text; \
          {} shapes learned; half-prompt shapes over {} split replays: {}",
@@ -115,7 +139,11 @@ pub fn print(report: &Report) {
         report.split_runs,
         report.half_shapes
     );
-    println!("  per line: {}; per pending check: {}", summary(&report.per_line), summary(&report.per_pending));
+    println!(
+        "  per line: {}; per pending check: {}",
+        summary(&report.per_line),
+        summary(&report.per_pending)
+    );
     println!("  per GMCP message: {}", summary(&report.per_gmcp));
     println!(
         "  line + pending p99: {:.2} µs; budget ≤ {} µs: {}",
@@ -130,7 +158,10 @@ enum Event {
     /// A session starts.
     Connected,
     Text(String),
-    Gmcp { package: String, json: String },
+    Gmcp {
+        package: String,
+        json: String,
+    },
     /// GA or EOR.
     PromptEnd,
 }
@@ -153,10 +184,15 @@ fn log_events(log: &str) -> Vec<Event> {
             continue;
         }
         push_text(&mut events, &log[text_start..found]);
-        let note_end = log[note_start..].find('\n').map_or(log.len(), |offset| note_start + offset);
+        let note_end = log[note_start..]
+            .find('\n')
+            .map_or(log.len(), |offset| note_start + offset);
         if let Some(gmcp) = log[note_start..note_end].strip_prefix("[GMCP] ") {
             let (package, json) = gmcp.split_once(' ').unwrap_or((gmcp, ""));
-            events.push(Event::Gmcp { package: package.to_owned(), json: json.to_owned() });
+            events.push(Event::Gmcp {
+                package: package.to_owned(),
+                json: json.to_owned(),
+            });
         }
         text_start = (note_end + 1).min(log.len());
         at = text_start;
@@ -169,11 +205,17 @@ fn log_events(log: &str) -> Vec<Event> {
 /// line, ended by GA as Diku-family servers end them, for runs without logs.
 fn synthetic_events() -> Vec<Event> {
     let mut events = vec![Event::Connected];
-    for (index, line) in replay::synthetic_lines(SYNTHETIC_LINES).into_iter().enumerate() {
+    for (index, line) in replay::synthetic_lines(SYNTHETIC_LINES)
+        .into_iter()
+        .enumerate()
+    {
         events.push(Event::Text(format!("{line}\n\r")));
         if index % 4 == 3 {
             let (hp, mv) = (index % 500, index % 97);
-            events.push(Event::Gmcp { package: "Char.Vitals".into(), json: format!(r#"{{"hp": "{hp}", "mv": "{mv}"}}"#) });
+            events.push(Event::Gmcp {
+                package: "Char.Vitals".into(),
+                json: format!(r#"{{"hp": "{hp}", "mv": "{mv}"}}"#),
+            });
             events.push(Event::Text(format!("\n\r<{hp}hp {mv}mv> ")));
             events.push(Event::PromptEnd);
         }
@@ -236,7 +278,8 @@ impl Replay {
                     Some(random) => {
                         let mut rest = text.as_bytes();
                         while !rest.is_empty() {
-                            let (read, after) = rest.split_at((1 + random.below(LONGEST_SPLIT_READ)).min(rest.len()));
+                            let (read, after) = rest
+                                .split_at((1 + random.below(LONGEST_SPLIT_READ)).min(rest.len()));
                             replay.push(read);
                             rest = after;
                         }
@@ -262,7 +305,8 @@ impl Replay {
     /// Ends the session so far, keeping its most-seen shape, and starts
     /// another from nothing learned.
     fn start_session(&mut self) {
-        self.top_shapes.extend(self.defaults.prompt.shapes().next().map(|(shape, _)| shape));
+        self.top_shapes
+            .extend(self.defaults.prompt.shapes().next().map(|(shape, _)| shape));
         self.pipeline = LinePipeline::default();
         self.host = PluginHost::new([defaults::plugin()]).expect("the defaults compile");
         self.defaults = Defaults::default();
@@ -280,7 +324,8 @@ impl Replay {
         for line in std::mem::take(&mut self.lines) {
             if self.after_vitals && !line.plain().trim().is_empty() {
                 self.after_vitals = false;
-                self.matched += usize::from(self.defaults.prompt.prefix_len(line.plain()).is_some());
+                self.matched +=
+                    usize::from(self.defaults.prompt.prefix_len(line.plain()).is_some());
             }
             let started = Instant::now();
             std::hint::black_box(self.host.read_line(&line, &mut Vec::new()));
@@ -291,7 +336,9 @@ impl Replay {
     }
 
     fn check_pending(&mut self) {
-        let Some(pending) = self.pipeline.pending() else { return };
+        let Some(pending) = self.pipeline.pending() else {
+            return;
+        };
         let started = Instant::now();
         let kind = self.host.read_pending(&pending);
         let action = self.defaults.read_pending(&pending, kind);
@@ -310,7 +357,8 @@ impl Replay {
         let seen_total = shapes.iter().map(|(_, seen)| seen).sum();
         if seen_total != self.seen_total {
             self.seen_total = seen_total;
-            self.ever_learned.extend(shapes.into_iter().map(|(shape, _)| shape));
+            self.ever_learned
+                .extend(shapes.into_iter().map(|(shape, _)| shape));
         }
     }
 }
@@ -346,9 +394,15 @@ mod tests {
                 Event::Connected,
                 Event::Text("Welcome.\r\n".into()),
                 Event::Text("[B]ack here\n".into()),
-                Event::Gmcp { package: "Char.Vitals".into(), json: "{ \"hp\": \"7\" }".into() },
+                Event::Gmcp {
+                    package: "Char.Vitals".into(),
+                    json: "{ \"hp\": \"7\" }".into()
+                },
                 Event::Text("\n\r<7hp> ".into()),
-                Event::Gmcp { package: "Room.Info".into(), json: String::new() },
+                Event::Gmcp {
+                    package: "Room.Info".into(),
+                    json: String::new()
+                },
                 Event::Text("You rest.".into()),
             ]
         );

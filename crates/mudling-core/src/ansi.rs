@@ -136,20 +136,28 @@ impl AnsiParser {
                     self.escape = match next {
                         '[' => Escape::Csi,
                         ']' => Escape::Osc,
-                        c if c.is_ascii() && INTERMEDIATE.contains(&(c as u8)) => Escape::Intermediate,
+                        c if c.is_ascii() && INTERMEDIATE.contains(&(c as u8)) => {
+                            Escape::Intermediate
+                        }
                         _ => Escape::None,
                     };
                     &rest[next.len_utf8()..]
                 }
-                Escape::Intermediate => match bytes.iter().position(|b| !INTERMEDIATE.contains(b)) {
-                    Some(at) => {
-                        self.escape = Escape::None;
-                        // A byte that can't end the sequence aborts it and stays text.
-                        let end = if ESCAPE_FINAL.contains(&bytes[at]) { at + 1 } else { at };
-                        &rest[end..]
+                Escape::Intermediate => {
+                    match bytes.iter().position(|b| !INTERMEDIATE.contains(b)) {
+                        Some(at) => {
+                            self.escape = Escape::None;
+                            // A byte that can't end the sequence aborts it and stays text.
+                            let end = if ESCAPE_FINAL.contains(&bytes[at]) {
+                                at + 1
+                            } else {
+                                at
+                            };
+                            &rest[end..]
+                        }
+                        None => "",
                     }
-                    None => "",
-                },
+                }
                 Escape::Csi => {
                     let end = bytes.iter().position(|b| CSI_FINAL.contains(b));
                     let params = &rest[..end.unwrap_or(rest.len())];
@@ -181,7 +189,11 @@ impl AnsiParser {
                 },
                 Escape::Osc => match memchr::memchr2(BEL, ESC, bytes) {
                     Some(end) => {
-                        self.escape = if bytes[end] == BEL { Escape::None } else { Escape::OscEsc };
+                        self.escape = if bytes[end] == BEL {
+                            Escape::None
+                        } else {
+                            Escape::OscEsc
+                        };
                         &rest[end + 1..]
                     }
                     None => "",
@@ -226,9 +238,13 @@ impl AnsiParser {
     }
 
     fn apply_sgr(&mut self, params: &str) {
-        let mut codes = params
-            .split([';', ':'])
-            .map(|p| if p.is_empty() { Some(0) } else { p.parse::<u16>().ok() });
+        let mut codes = params.split([';', ':']).map(|p| {
+            if p.is_empty() {
+                Some(0)
+            } else {
+                p.parse::<u16>().ok()
+            }
+        });
         while let Some(code) = codes.next() {
             match code {
                 Some(0) => self.style = Style::default(),
@@ -293,11 +309,19 @@ mod tests {
         assert_eq!(
             &*line.spans,
             &[
-                Span { start: 0, end: 3, style: fg(1) },
+                Span {
+                    start: 0,
+                    end: 3,
+                    style: fg(1)
+                },
                 Span {
                     start: 4,
                     end: 9,
-                    style: Style { fg: Some(Color(10)), bg: None, bold: true },
+                    style: Style {
+                        fg: Some(Color(10)),
+                        bg: None,
+                        bold: true
+                    },
                 },
             ]
         );
@@ -308,7 +332,11 @@ mod tests {
         let line = parse("\x1b[38;5;208;48;5;17mx");
         assert_eq!(
             line.spans[0].style,
-            Style { fg: Some(Color(208)), bg: Some(Color(17)), bold: false }
+            Style {
+                fg: Some(Color(208)),
+                bg: Some(Color(17)),
+                bold: false
+            }
         );
     }
 
@@ -325,7 +353,14 @@ mod tests {
         let mut parser = AnsiParser::default();
         parser.parse_line("\x1b[33mstart");
         let next = parser.parse_line("continued");
-        assert_eq!(&*next.spans, &[Span { start: 0, end: 9, style: fg(3) }]);
+        assert_eq!(
+            &*next.spans,
+            &[Span {
+                start: 0,
+                end: 9,
+                style: fg(3)
+            }]
+        );
     }
 
     #[test]
@@ -343,7 +378,11 @@ mod tests {
             let (mut text, mut spans) = (String::new(), Vec::new());
             parser.feed(&raw[..split], &mut text, &mut spans);
             parser.feed(&raw[split..], &mut text, &mut spans);
-            assert_eq!((&*text, &*spans), (&*whole.text, &*whole.spans), "split at {split}");
+            assert_eq!(
+                (&*text, &*spans),
+                (&*whole.text, &*whole.spans),
+                "split at {split}"
+            );
         }
     }
 
@@ -363,7 +402,15 @@ mod tests {
             parser.feed(&raw[..split], &mut text, &mut spans);
             parser.feed(&raw[split..], &mut text, &mut spans);
             assert_eq!(text, "red plain end", "split at {split}");
-            assert_eq!(spans, [Span { start: 0, end: 3, style: fg(1) }], "split at {split}");
+            assert_eq!(
+                spans,
+                [Span {
+                    start: 0,
+                    end: 3,
+                    style: fg(1)
+                }],
+                "split at {split}"
+            );
         }
     }
 
@@ -386,6 +433,13 @@ mod tests {
     #[test]
     fn adjacent_runs_of_one_style_merge() {
         let line = parse("\x1b[31ma\x1b[31mb");
-        assert_eq!(&*line.spans, &[Span { start: 0, end: 2, style: fg(1) }]);
+        assert_eq!(
+            &*line.spans,
+            &[Span {
+                start: 0,
+                end: 2,
+                style: fg(1)
+            }]
+        );
     }
 }

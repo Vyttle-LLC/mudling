@@ -59,7 +59,9 @@ impl PromptLearner {
     /// A `Char.Vitals` arrived: the next text is a prompt.
     pub fn vitals_arrived(&mut self) {
         self.gmcp_arrived();
-        self.awaiting = Awaiting::Prompt { from: self.lines_read + u64::from(self.pending_seen) };
+        self.awaiting = Awaiting::Prompt {
+            from: self.lines_read + u64::from(self.pending_seen),
+        };
     }
 
     /// Any GMCP message arrived. The server writes in order, so a prompt
@@ -81,7 +83,9 @@ impl PromptLearner {
             Awaiting::Pending { .. } => true,
         };
         if awaiting && !is_blank(pending.plain) {
-            self.awaiting = Awaiting::Pending { text: pending.plain.to_owned() };
+            self.awaiting = Awaiting::Pending {
+                text: pending.plain.to_owned(),
+            };
         }
         self.is_whole_prompt(pending.plain)
     }
@@ -98,8 +102,12 @@ impl PromptLearner {
         if !is_blank(text) {
             match std::mem::take(&mut self.awaiting) {
                 Awaiting::Nothing => {}
-                Awaiting::Prompt { from } if number < from => self.awaiting = Awaiting::Prompt { from },
-                Awaiting::Prompt { .. } | Awaiting::Pending { .. } => self.learn_line(text, line.end()),
+                Awaiting::Prompt { from } if number < from => {
+                    self.awaiting = Awaiting::Prompt { from }
+                }
+                Awaiting::Prompt { .. } | Awaiting::Pending { .. } => {
+                    self.learn_line(text, line.end())
+                }
             }
         }
         self.prefix_len(text)
@@ -113,22 +121,29 @@ impl PromptLearner {
     /// The learned shapes, most seen first, each with the times seen. A
     /// shape shows each number as `#`.
     pub fn shapes(&self) -> impl Iterator<Item = (String, u32)> + '_ {
-        self.shapes.iter().map(|shape| (shape.pieces.join("#"), shape.seen))
+        self.shapes
+            .iter()
+            .map(|shape| (shape.pieces.join("#"), shape.seen))
     }
 
     /// Whether `text` is all prompt. A prompt that ends in a number isn't
     /// trusted here: the network may have cut that number short.
     fn is_whole_prompt(&self, text: &str) -> bool {
-        self.shapes
-            .iter()
-            .any(|shape| shape.pieces.last().is_some_and(|last| !last.is_empty()) && shape.prefix_len(text) == Some(text.len()))
+        self.shapes.iter().any(|shape| {
+            shape.pieces.last().is_some_and(|last| !last.is_empty())
+                && shape.prefix_len(text) == Some(text.len())
+        })
     }
 
     /// A line ended by GA is a whole prompt. A line ended by a newline may
     /// have output glued on: if a known prompt opens it, that one is seen
     /// again, and otherwise the line is learned whole.
     fn learn_line(&mut self, text: &str, end: LineEnd) {
-        let known = (end != LineEnd::PromptEnd).then(|| self.shapes.iter().position(|shape| shape.prefix_len(text).is_some()));
+        let known = (end != LineEnd::PromptEnd).then(|| {
+            self.shapes
+                .iter()
+                .position(|shape| shape.prefix_len(text).is_some())
+        });
         match known.flatten() {
             Some(index) => self.seen_again(index),
             None => self.learn(text),
@@ -140,13 +155,21 @@ impl PromptLearner {
         if shape.length == 0 {
             return;
         }
-        if let Some(index) = self.shapes.iter().position(|known| known.pieces == shape.pieces) {
+        if let Some(index) = self
+            .shapes
+            .iter()
+            .position(|known| known.pieces == shape.pieces)
+        {
             self.seen_again(index);
             return;
         }
         if self.shapes.len() == MOST_SHAPES
-            && let Some(rarest) = (0..self.shapes.len())
-                .min_by_key(|&index| (self.shapes[index].seen, std::cmp::Reverse(self.shapes[index].length)))
+            && let Some(rarest) = (0..self.shapes.len()).min_by_key(|&index| {
+                (
+                    self.shapes[index].seen,
+                    std::cmp::Reverse(self.shapes[index].length),
+                )
+            })
         {
             self.shapes.remove(rarest);
         }
@@ -160,7 +183,8 @@ impl PromptLearner {
     }
 
     fn sort(&mut self) {
-        self.shapes.sort_by_key(|shape| (std::cmp::Reverse(shape.seen), shape.length));
+        self.shapes
+            .sort_by_key(|shape| (std::cmp::Reverse(shape.seen), shape.length));
     }
 }
 
@@ -189,7 +213,11 @@ impl Shape {
         }
         pieces.push(rest.to_owned());
         let length = pieces.iter().map(String::len).sum();
-        Shape { pieces, length, seen: 1 }
+        Shape {
+            pieces,
+            length,
+            seen: 1,
+        }
     }
 
     /// Where the prompt ends, if it opens `text`.
@@ -211,7 +239,11 @@ impl Shape {
 /// The first number in `text`, `-?[0-9]+`, as a byte range.
 fn find_number(text: &str) -> Option<(usize, usize)> {
     let digit = text.bytes().position(|byte| byte.is_ascii_digit())?;
-    let start = if digit > 0 && text.as_bytes()[digit - 1] == b'-' { digit - 1 } else { digit };
+    let start = if digit > 0 && text.as_bytes()[digit - 1] == b'-' {
+        digit - 1
+    } else {
+        digit
+    };
     Some((start, digit + digits_len(&text[digit..])))
 }
 
@@ -234,7 +266,10 @@ mod tests {
     fn a_shape_has_a_slot_for_each_number() {
         let shape = Shape::new("(110h-125m-120v-1062)");
         assert_eq!(shape.pieces, ["(", "h", "m", "v", ")"]);
-        assert_eq!(shape.prefix_len("(-9h-2m-0v-1)rest"), Some("(-9h-2m-0v-1)".len()));
+        assert_eq!(
+            shape.prefix_len("(-9h-2m-0v-1)rest"),
+            Some("(-9h-2m-0v-1)".len())
+        );
         assert_eq!(shape.prefix_len("(9h-m-0v-1)"), None);
     }
 

@@ -21,7 +21,9 @@
 //! Loading validates everything, every pattern included, and reports the
 //! first problem as a [`PluginError`] naming the file. It never panics.
 
-use super::points::{Character, Commands, Connection, Gear, Hud, Map, Mobs, Point, Points, Text, Ui};
+use super::points::{
+    Character, Commands, Connection, Gear, Hud, Map, Mobs, Point, Points, Text, Ui,
+};
 use crate::line::Encoding;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -63,12 +65,18 @@ impl TryFrom<String> for PluginId {
 
     fn try_from(id: String) -> Result<PluginId, String> {
         let mut chars = id.chars();
-        let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'));
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && chars.all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+            });
         if valid {
             Ok(PluginId(id.into()))
         } else {
-            Err(format!("`{id}` isn't a plugin id: use lowercase letters, digits, `.`, `_` and `-`"))
+            Err(format!(
+                "`{id}` isn't a plugin id: use lowercase letters, digits, `.`, `_` and `-`"
+            ))
         }
     }
 }
@@ -137,13 +145,17 @@ impl Servers {
 
     fn matches(&self, server: ServerInfo<'_>) -> bool {
         let host_matches = |pattern: &String| match pattern.strip_prefix('*') {
-            Some(suffix) => server.host.len() > suffix.len() && ends_with_ignoring_case(server.host, suffix),
+            Some(suffix) => {
+                server.host.len() > suffix.len() && ends_with_ignoring_case(server.host, suffix)
+            }
             None => pattern.eq_ignore_ascii_case(server.host),
         };
         self.hosts.iter().any(host_matches)
-            || server
-                .mssp_name
-                .is_some_and(|name| self.mssp_names.iter().any(|known| known.eq_ignore_ascii_case(name)))
+            || server.mssp_name.is_some_and(|name| {
+                self.mssp_names
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(name))
+            })
     }
 }
 
@@ -222,20 +234,35 @@ impl Manifest {
             return Err("`license` is empty".into());
         }
         let semver = self.version.split('.').collect::<Vec<_>>();
-        if semver.len() != 3 || semver.iter().any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())) {
-            return Err(format!("`version = \"{}\"` isn't MAJOR.MINOR.PATCH, such as \"1.0.0\"", self.version));
+        if semver.len() != 3
+            || semver
+                .iter()
+                .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(format!(
+                "`version = \"{}\"` isn't MAJOR.MINOR.PATCH, such as \"1.0.0\"",
+                self.version
+            ));
         }
         match (self.layer, self.servers.is_empty()) {
-            (Layer::Default, false) => return Err("a default plugin is for every server, so it can't list `[servers]`".into()),
+            (Layer::Default, false) => {
+                return Err(
+                    "a default plugin is for every server, so it can't list `[servers]`".into(),
+                );
+            }
             (Layer::Game | Layer::Override, true) => {
-                return Err("a game plugin or override must list its `[servers]` (hosts or mssp_names)".into());
+                return Err(
+                    "a game plugin or override must list its `[servers]` (hosts or mssp_names)"
+                        .into(),
+                );
             }
             _ => {}
         }
         self.servers.validate()?;
         for point in Point::ALL {
             if let Some(file) = self.points.get(point) {
-                check_relative_toml(file).map_err(|problem| format!("points.{point} = \"{file}\": {problem}"))?;
+                check_relative_toml(file)
+                    .map_err(|problem| format!("points.{point} = \"{file}\": {problem}"))?;
             }
         }
         Ok(())
@@ -245,7 +272,10 @@ impl Manifest {
 /// A point file must be a `.toml` file inside the plugin folder.
 fn check_relative_toml(file: &str) -> Result<(), &'static str> {
     let path = Path::new(file);
-    if !path.components().all(|component| matches!(component, Component::Normal(_))) {
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
         return Err("the file must be inside the plugin folder");
     }
     if path.extension().is_none_or(|extension| extension != "toml") {
@@ -274,15 +304,22 @@ impl Plugin {
     /// Loads a plugin whose files come from `read`, given each file's name
     /// relative to the plugin folder (`plugin.toml` first). Built-in plugins
     /// load this way from text compiled into the app.
-    pub fn from_files(mut read: impl FnMut(&str) -> io::Result<String>) -> Result<Plugin, PluginError> {
+    pub fn from_files(
+        mut read: impl FnMut(&str) -> io::Result<String>,
+    ) -> Result<Plugin, PluginError> {
         let manifest_text = read_file(&mut read, MANIFEST_FILE)?;
         check_api(&manifest_text)?;
         let manifest: Manifest = parse(MANIFEST_FILE, &manifest_text)?;
-        manifest.validate().map_err(|problem| PluginError::invalid(MANIFEST_FILE, problem))?;
+        manifest
+            .validate()
+            .map_err(|problem| PluginError::invalid(MANIFEST_FILE, problem))?;
 
         let files = &manifest.points;
         let mut load = |point: Point| -> Result<Option<(String, String)>, PluginError> {
-            files.get(point).map(|file| Ok((file.to_owned(), read_file(&mut read, file)?))).transpose()
+            files
+                .get(point)
+                .map(|file| Ok((file.to_owned(), read_file(&mut read, file)?)))
+                .transpose()
         };
         let points = Points {
             connection: point::<Connection>(load(Point::Connection)?)?,
@@ -307,8 +344,14 @@ impl Plugin {
     }
 }
 
-fn read_file(read: &mut impl FnMut(&str) -> io::Result<String>, file: &str) -> Result<String, PluginError> {
-    read(file).map_err(|error| PluginError { source: file.to_owned(), problem: Problem::Read(error.to_string()) })
+fn read_file(
+    read: &mut impl FnMut(&str) -> io::Result<String>,
+    file: &str,
+) -> Result<String, PluginError> {
+    read(file).map_err(|error| PluginError {
+        source: file.to_owned(),
+        problem: Problem::Read(error.to_string()),
+    })
 }
 
 /// Reads `api` before anything else, so a plugin for another API version
@@ -316,14 +359,20 @@ fn read_file(read: &mut impl FnMut(&str) -> io::Result<String>, file: &str) -> R
 fn check_api(manifest_text: &str) -> Result<(), PluginError> {
     let table: toml::Table = parse(MANIFEST_FILE, manifest_text)?;
     match table.get("api") {
-        None => Err(PluginError::invalid(MANIFEST_FILE, format!("`api` is missing; write `api = {API_VERSION}`"))),
+        None => Err(PluginError::invalid(
+            MANIFEST_FILE,
+            format!("`api` is missing; write `api = {API_VERSION}`"),
+        )),
         Some(toml::Value::Integer(API_VERSION)) => Ok(()),
         Some(other) => {
             let found = match other {
                 toml::Value::Integer(version) => version.to_string(),
                 other => format!("a {}", other.type_str()),
             };
-            Err(PluginError { source: MANIFEST_FILE.into(), problem: Problem::UnsupportedApi(found) })
+            Err(PluginError {
+                source: MANIFEST_FILE.into(),
+                problem: Problem::UnsupportedApi(found),
+            })
         }
     }
 }
@@ -381,7 +430,10 @@ pub enum Problem {
 
 impl PluginError {
     fn invalid(file: &str, problem: impl Into<String>) -> PluginError {
-        PluginError { source: file.to_owned(), problem: Problem::Invalid(problem.into()) }
+        PluginError {
+            source: file.to_owned(),
+            problem: Problem::Invalid(problem.into()),
+        }
     }
 }
 
@@ -396,8 +448,16 @@ impl fmt::Display for PluginError {
                 self.source
             ),
             Problem::Invalid(message) => write!(f, "{}: {message}", self.source),
-            Problem::DuplicateId(id) => write!(f, "{}: another plugin already has the id `{id}`", self.source),
-            Problem::Matcher(message) => write!(f, "{}: the patterns couldn't be compiled together: {message}", self.source),
+            Problem::DuplicateId(id) => write!(
+                f,
+                "{}: another plugin already has the id `{id}`",
+                self.source
+            ),
+            Problem::Matcher(message) => write!(
+                f,
+                "{}: the patterns couldn't be compiled together: {message}",
+                self.source
+            ),
         }
     }
 }

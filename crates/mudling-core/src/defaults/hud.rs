@@ -28,14 +28,22 @@ impl Vital {
     /// The vital a field or HUD name stands for, by common names; case,
     /// `_` and `-` are ignored.
     pub fn from_name(name: &str) -> Vital {
-        let key: String = name.chars().filter(|c| !matches!(c, '_' | '-')).collect::<String>().to_lowercase();
+        let key: String = name
+            .chars()
+            .filter(|c| !matches!(c, '_' | '-'))
+            .collect::<String>()
+            .to_lowercase();
         match key.as_str() {
             "hp" | "health" | "hits" | "hitpoints" | "curhp" => Vital::Hp,
-            "maxhp" | "hpmax" | "maxhealth" | "healthmax" | "maxhits" | "maxhitpoints" => Vital::MaxHp,
+            "maxhp" | "hpmax" | "maxhealth" | "healthmax" | "maxhits" | "maxhitpoints" => {
+                Vital::MaxHp
+            }
             "mana" | "mp" | "sp" | "curmana" => Vital::Mana,
             "maxmana" | "manamax" | "maxmp" | "mpmax" | "maxsp" => Vital::MaxMana,
             "moves" | "move" | "mv" | "movement" | "curmoves" => Vital::Moves,
-            "maxmoves" | "maxmove" | "movesmax" | "maxmv" | "mvmax" | "maxmovement" => Vital::MaxMoves,
+            "maxmoves" | "maxmove" | "movesmax" | "maxmv" | "mvmax" | "maxmovement" => {
+                Vital::MaxMoves
+            }
             _ => Vital::Other(name.to_owned()),
         }
     }
@@ -52,7 +60,10 @@ impl Field {
     /// Reads `Char.Vitals.hp`: the package, then the key after the last `.`.
     pub fn parse(path: &str) -> Option<Field> {
         let (package, key) = path.rsplit_once('.')?;
-        (!package.is_empty() && !key.is_empty()).then(|| Field { package: package.to_owned(), key: key.to_owned() })
+        (!package.is_empty() && !key.is_empty()).then(|| Field {
+            package: package.to_owned(),
+            key: key.to_owned(),
+        })
     }
 }
 
@@ -75,7 +86,13 @@ impl HudFields {
             .keys()
             .filter_map(|key| match Vital::from_name(key) {
                 Vital::Other(_) => None,
-                vital => Some((vital, Field { package: VITALS.to_owned(), key: key.clone() })),
+                vital => Some((
+                    vital,
+                    Field {
+                        package: VITALS.to_owned(),
+                        key: key.clone(),
+                    },
+                )),
             })
             .collect();
         self.learned = Some(learned);

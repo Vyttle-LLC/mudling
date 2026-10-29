@@ -43,7 +43,10 @@ pub fn plugin() -> Plugin {
     Plugin::from_files(|file| match file {
         "plugin.toml" => Ok(include_str!("plugin/plugin.toml").to_owned()),
         "text.toml" => Ok(include_str!("plugin/text.toml").to_owned()),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::NotFound, file.to_owned())),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            file.to_owned(),
+        )),
     })
     .expect("the built-in defaults are valid")
 }
@@ -94,7 +97,8 @@ impl Defaults {
         }
         self.prompt.gmcp_arrived();
         if package.eq_ignore_ascii_case("Core.Hello")
-            && let Some(Value::String(name)) = message.as_ref().and_then(|message| message.get("name"))
+            && let Some(Value::String(name)) =
+                message.as_ref().and_then(|message| message.get("name"))
         {
             self.gmcp_hello = Some(name.clone());
         }
@@ -112,10 +116,16 @@ impl Defaults {
     }
 
     /// The pending text, and what the plugin host made of it.
-    pub fn read_pending(&mut self, pending: &Pending<'_>, kind: Option<PendingKind>) -> PendingAction {
+    pub fn read_pending(
+        &mut self,
+        pending: &Pending<'_>,
+        kind: Option<PendingKind>,
+    ) -> PendingAction {
         let learned = self.prompt.read_pending(pending);
         match kind {
-            Some(PendingKind::Pager { key }) if self.pager.answer(pending.number) => PendingAction::Send(key),
+            Some(PendingKind::Pager { key }) if self.pager.answer(pending.number) => {
+                PendingAction::Send(key)
+            }
             Some(PendingKind::Pager { .. }) => PendingAction::Wait,
             Some(PendingKind::Prompt) => PendingAction::EndPrompt,
             None if learned => PendingAction::EndPrompt,
