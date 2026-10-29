@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-pub const FRAME_BUDGET_US: f64 = 8_000.0;
 const FRAME: Duration = Duration::from_millis(8);
+const FRAME_BUDGET_US: f64 = FRAME.as_micros() as f64;
 const APPLY_ROUNDS: usize = 10_000;
 /// A typical frame while text arrives: a few lines, the vitals and the room.
 const LINES_PER_FRAME: usize = 10;

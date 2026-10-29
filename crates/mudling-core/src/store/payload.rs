@@ -47,9 +47,14 @@ impl StoreState for TerminalState {
         !lines.is_empty()
     }
 
+    /// Keeps at most [`TERMINAL_CAPACITY`] lines, so a shell that stops
+    /// draining (a minimized window) doesn't grow the pending diff forever.
+    /// The dropped lines are ones the terminal would trim anyway.
     fn coalesce(earlier: &mut TerminalChange, later: TerminalChange) {
         let (TerminalChange::Append(earlier), TerminalChange::Append(later)) = (earlier, later);
         earlier.extend(later);
+        let overflow = earlier.len().saturating_sub(TERMINAL_CAPACITY);
+        earlier.drain(..overflow);
     }
 }
 
@@ -106,4 +111,48 @@ whole_value_stores! {
     GearState,
     /// Settings for the server and the app.
     SettingsState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines named "0", "1", … up to `count - 1`.
+    fn numbered(count: usize) -> TerminalChange {
+        TerminalChange::Append((0..count).map(|n| TerminalLine { text: n.to_string() }).collect())
+    }
+
+    fn append(text: &str) -> TerminalChange {
+        TerminalChange::Append(vec![TerminalLine { text: text.to_owned() }])
+    }
+
+    #[test]
+    fn the_terminal_store_keeps_its_newest_lines() {
+        let mut terminal = TerminalState::default();
+        terminal.apply(&numbered(TERMINAL_CAPACITY + 3));
+        terminal.apply(&append("newest"));
+
+        let held = terminal.lines();
+        assert_eq!(held.len(), TERMINAL_CAPACITY);
+        assert_eq!(held.front().unwrap().text, "4");
+        assert_eq!(held.back().unwrap().text, "newest");
+    }
+
+    #[test]
+    fn a_coalesced_append_keeps_at_most_the_capacity() {
+        let mut pending = numbered(TERMINAL_CAPACITY);
+        TerminalState::coalesce(&mut pending, append("newest"));
+
+        let TerminalChange::Append(lines) = &pending;
+        assert_eq!(lines.len(), TERMINAL_CAPACITY);
+        assert_eq!(lines.first().unwrap().text, "1");
+        assert_eq!(lines.last().unwrap().text, "newest");
+
+        let mut in_order = TerminalState::default();
+        in_order.apply(&numbered(TERMINAL_CAPACITY));
+        in_order.apply(&append("newest"));
+        let mut coalesced = TerminalState::default();
+        coalesced.apply(&pending);
+        assert_eq!(coalesced, in_order);
+    }
 }

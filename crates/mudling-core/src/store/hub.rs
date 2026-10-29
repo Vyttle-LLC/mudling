@@ -103,7 +103,7 @@ impl StoreHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Fields, Revision, StoreState, TerminalChange, TerminalLine, TerminalState, VitalsState};
+    use crate::store::{Fields, Revision, TerminalChange, TerminalLine, TerminalState, VitalsState};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -206,19 +206,5 @@ mod tests {
         hub.read(|core: &Versioned<TerminalState>| assert_eq!(*core, shell.terminal));
         hub.read(|core: &Versioned<VitalsState>| assert_eq!(*core, shell.vitals));
         assert_eq!(shell.terminal.value().lines().len(), 11);
-    }
-
-    #[test]
-    fn the_terminal_store_keeps_its_newest_lines() {
-        let mut terminal = TerminalState::default();
-        let many: Vec<String> = (0..crate::store::TERMINAL_CAPACITY + 3).map(|n| n.to_string()).collect();
-        let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        terminal.apply(&lines(&many));
-        terminal.apply(&lines(&["newest"]));
-
-        let held = terminal.lines();
-        assert_eq!(held.len(), crate::store::TERMINAL_CAPACITY);
-        assert_eq!(held.front().unwrap().text, "4");
-        assert_eq!(held.back().unwrap().text, "newest");
     }
 }
