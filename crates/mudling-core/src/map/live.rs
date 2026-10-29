@@ -206,7 +206,7 @@ impl LiveMap {
         };
         let arrived = self.tracker.enter(step, dark, now);
         if maze && !dark {
-            self.tracker.layout.update_current(|room| room.maze = true);
+            self.tracker.refresh_current(|room| room.maze = true);
         }
         Some(arrived)
     }

@@ -666,6 +666,18 @@ fn a_maze_message_makes_the_room_one_square() {
 }
 
 #[test]
+fn a_maze_message_while_unsure_survives_the_next_room() {
+    let mut walk = mapped_meadow();
+    walk.arrive("The temple", &["e"]);
+    let now = walk.now();
+    walk.map.line("You are lost.", now);
+    walk.go("e", "In shade", &CROSSROADS);
+    assert!(walk.map.whereabouts().unsure);
+    walk.go("n", "A field", &["w", "s", "e"]);
+    assert_eq!(walk.map.rooms().filter(|room| room.maze).count(), 1);
+}
+
+#[test]
 fn a_way_back_that_leads_elsewhere_is_tangled() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A twisty passage", &["e", "w"]);
