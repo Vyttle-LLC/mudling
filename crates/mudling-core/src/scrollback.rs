@@ -42,10 +42,6 @@ impl Scrollback {
         self.lines.is_empty()
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// The line at `index`, where 0 is the oldest line still held.
     pub fn get(&self, index: usize) -> Option<&Line> {
         self.lines.get(index)
@@ -60,8 +56,10 @@ impl Scrollback {
         self.evicted
     }
 
-    /// Indexes of the lines containing `needle`, ignoring ASCII case.
-    pub fn find(&self, needle: &str) -> Vec<usize> {
+    /// Indexes of up to `limit` lines containing `needle`, ignoring ASCII
+    /// case, newest first. The search reads each line's plain text in place
+    /// and stops at `limit`, so the first page of results comes quickly.
+    pub fn find(&self, needle: &str, limit: usize) -> Vec<usize> {
         if needle.is_empty() {
             return Vec::new();
         }
@@ -72,8 +70,10 @@ impl Scrollback {
         self.lines
             .iter()
             .enumerate()
+            .rev()
             .filter(|(_, line)| matcher.is_match(&*line.text))
             .map(|(index, _)| index)
+            .take(limit)
             .collect()
     }
 }
@@ -118,7 +118,13 @@ mod tests {
     #[test]
     fn find_ignores_case_and_matches_plain_text_only() {
         let scrollback = scrollback_of(10, &["A Goblin waits", "\x1b[31mgob\x1b[0mlin", "nothing"]);
-        assert_eq!(scrollback.find("GOBLIN"), [0, 1]);
-        assert!(scrollback.find("").is_empty());
+        assert_eq!(scrollback.find("GOBLIN", 10), [1, 0]);
+        assert!(scrollback.find("", 10).is_empty());
+    }
+
+    #[test]
+    fn find_returns_the_newest_matches_up_to_the_limit() {
+        let scrollback = scrollback_of(10, &["hit 1", "miss", "hit 2", "hit 3"]);
+        assert_eq!(scrollback.find("hit", 2), [3, 2]);
     }
 }
