@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! for each finished line:   defaults.read_line(&line)
-//! for each GMCP message:    defaults.gmcp(package, json), then check the pending text again
+//! for each GMCP message:    defaults.gmcp_arrived(package, json), then check the pending text again
 //! after each read, the pending text:
 //!                           match defaults.read_pending(&pending, host.read_pending(&pending)) {
 //!                               EndPrompt => pipeline.prompt_end(), then read that line too
@@ -83,7 +83,7 @@ impl Default for Defaults {
 
 impl Defaults {
     /// A GMCP message from the server; `json` is its body.
-    pub fn gmcp(&mut self, package: &str, json: &str) {
+    pub fn gmcp_arrived(&mut self, package: &str, json: &str) {
         let message: Option<Map<String, Value>> = serde_json::from_str(json).ok();
         if package.eq_ignore_ascii_case(hud::VITALS) {
             self.prompt.vitals_arrived();

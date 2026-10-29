@@ -28,14 +28,20 @@ pub struct PromptLearner {
     /// Most seen first; ties shortest first.
     shapes: Vec<Shape>,
     awaiting: Awaiting,
+    /// Lines read: the number of the line in progress.
+    lines_read: u64,
+    /// The line in progress has pending text that isn't blank.
+    pending_seen: bool,
 }
 
 #[derive(Debug, Default)]
 enum Awaiting {
     #[default]
     Nothing,
-    /// A `Char.Vitals` arrived: the next text is a prompt.
-    Prompt,
+    /// A `Char.Vitals` arrived: the next text is a prompt, on the line with
+    /// this number or a later one. Text already pending when it arrived
+    /// came before it, so it isn't the prompt.
+    Prompt { from: u64 },
     /// The prompt is pending, this much of it so far. It may still grow.
     Pending { text: String },
 }
@@ -53,34 +59,48 @@ impl PromptLearner {
     /// A `Char.Vitals` arrived: the next text is a prompt.
     pub fn vitals_arrived(&mut self) {
         self.gmcp_arrived();
-        self.awaiting = Awaiting::Prompt;
+        self.awaiting = Awaiting::Prompt { from: self.lines_read + u64::from(self.pending_seen) };
     }
 
     /// Any GMCP message arrived. The server writes in order, so a prompt
     /// still pending is whole.
     pub fn gmcp_arrived(&mut self) {
-        if let Awaiting::Pending { text } =std::mem::take(&mut self.awaiting) {
+        if let Awaiting::Pending { text } = std::mem::take(&mut self.awaiting) {
             self.learn(&text);
         }
     }
 
-    /// Text the server hasn't ended. Returns whether it is a prompt already
-    /// learned, which the caller ends with `LinePipeline::prompt_end`.
+    /// Text the server hasn't ended; read it after every read. Returns
+    /// whether it is a prompt already learned, which the caller ends with
+    /// `LinePipeline::prompt_end`.
     pub fn read_pending(&mut self, pending: &Pending<'_>) -> bool {
-        let awaiting = matches!(self.awaiting, Awaiting::Prompt | Awaiting::Pending { .. });
+        self.pending_seen = !is_blank(pending.plain);
+        let awaiting = match self.awaiting {
+            Awaiting::Nothing => false,
+            Awaiting::Prompt { from } => pending.number >= from,
+            Awaiting::Pending { .. } => true,
+        };
         if awaiting && !is_blank(pending.plain) {
             self.awaiting = Awaiting::Pending { text: pending.plain.to_owned() };
         }
         self.is_whole_prompt(pending.plain)
     }
 
-    /// A finished line. Learns it if it's the prompt being awaited (a
-    /// pending prompt that grew into this line included), and returns how
-    /// many bytes of its plain text a prompt takes up at its start.
+    /// A finished line; read every one, in order. Learns it if it's the
+    /// prompt being awaited (a pending prompt that grew into this line
+    /// included), and returns how many bytes of its plain text a prompt
+    /// takes up at its start.
     pub fn read_line(&mut self, line: &Line) -> Option<usize> {
+        let number = self.lines_read;
+        self.lines_read += 1;
+        self.pending_seen = false;
         let text = line.plain();
-        if !is_blank(text) && !matches!(std::mem::take(&mut self.awaiting), Awaiting::Nothing) {
-            self.learn_line(text, line.end());
+        if !is_blank(text) {
+            match std::mem::take(&mut self.awaiting) {
+                Awaiting::Nothing => {}
+                Awaiting::Prompt { from } if number < from => self.awaiting = Awaiting::Prompt { from },
+                Awaiting::Prompt { .. } | Awaiting::Pending { .. } => self.learn_line(text, line.end()),
+            }
         }
         self.prefix_len(text)
     }

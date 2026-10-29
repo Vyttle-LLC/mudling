@@ -12,12 +12,12 @@
 //!   random reads, so prompts are split across them. A shape learned only
 //!   then, or one that's the start of a session's most-seen shape, is half
 //!   a prompt. There must be none.
-//!
-//! Each log is a session: the defaults start over with each one.
 //! - **Cost**: per line, the host's and the defaults' reading of it, then
 //!   of the pending text; the budget is on their p99s added.
+//!
+//! Each log is a session: the defaults start over with each one.
 
-use mudling_core::defaults::{self, Defaults, PendingAction};
+use mudling_core::defaults::{self, Defaults, PendingAction, hud};
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::PluginHost;
 use mudling_core::replay;
@@ -80,7 +80,7 @@ pub fn run(logs: &[String]) -> Report {
         .filter(|shape| !whole.ever_learned.contains(*shape) || is_start_of_a_top_shape(shape))
         .count();
 
-    let summary = |samples: &[Duration]| Summary::of(samples).unwrap_or(Summary::of(&[Duration::ZERO]).unwrap());
+    let summary = |samples: &[Duration]| Summary::of(samples).expect("lines, pending text and GMCP were timed");
     let per_line = summary(&whole.line_samples);
     let per_pending = summary(&whole.pending_samples);
     Report {
@@ -243,12 +243,12 @@ impl Replay {
                     }
                 },
                 Event::Gmcp { package, json } => {
-                    if package == "Char.Vitals" {
+                    if package.eq_ignore_ascii_case(hud::VITALS) {
                         replay.vitals += 1;
                         replay.after_vitals = true;
                     }
                     let started = Instant::now();
-                    replay.defaults.gmcp(package, json);
+                    replay.defaults.gmcp_arrived(package, json);
                     replay.gmcp_samples.push(started.elapsed());
                     replay.note_learned();
                     replay.check_pending();

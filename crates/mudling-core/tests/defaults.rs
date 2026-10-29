@@ -76,13 +76,13 @@ impl Session {
     }
 
     fn vitals(&mut self) {
-        self.defaults.gmcp("Char.Vitals", r#"{"hp": "20", "maxhp": "30"}"#);
+        self.defaults.gmcp_arrived("Char.Vitals", r#"{"hp": "20", "maxhp": "30"}"#);
     }
 
     /// Another GMCP message, after which the shell looks at the pending
     /// text again: a prompt learned from it ends.
     fn gmcp(&mut self, package: &str) {
-        self.defaults.gmcp(package, "{}");
+        self.defaults.gmcp_arrived(package, "{}");
         self.push("");
     }
 
@@ -125,6 +125,23 @@ fn only_text_after_vitals_is_learned() {
     session.gmcp("Room.Info");
     session.push("You rest.\n\r");
     assert!(session.shapes().is_empty());
+}
+
+/// Text already pending when `Char.Vitals` arrives came before it: the
+/// prompt is what follows.
+#[test]
+fn text_pending_before_vitals_isnt_the_prompt() {
+    for earlier in ["--More--", "You feel hungry."] {
+        for ending in ["", "\n\r"] {
+            let mut session = Session::new(Vec::new());
+            session.push(earlier);
+            session.vitals();
+            session.push(ending);
+            session.push("\n\r<20hp 30mv> ");
+            session.gmcp("Room.Info");
+            assert_eq!(session.shapes(), ["<#hp #mv> "], "{earlier:?} then {ending:?}");
+        }
+    }
 }
 
 /// The network splits a prompt at every possible offset; the half that
@@ -333,7 +350,7 @@ fn a_game_is_suggested_from_each_source() {
 #[test]
 fn the_gmcp_hello_names_the_game() {
     let mut defaults = Defaults::default();
-    defaults.gmcp("Core.Hello", r#"{"name": "Testland", "version": "2"}"#);
+    defaults.gmcp_arrived("Core.Hello",r#"{"name": "Testland", "version": "2"}"#);
     assert_eq!(defaults.gmcp_hello(), Some("Testland"));
 }
 
