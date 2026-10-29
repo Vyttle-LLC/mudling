@@ -1,22 +1,26 @@
-//! One matcher for many patterns: a `RegexSet` behind an Aho-Corasick filter.
+//! One matcher for many patterns: `RegexSet`s behind an Aho-Corasick filter.
 //!
 //! At build time each pattern is searched for literals that every match must
 //! contain (` tells you ` in `^(?<who>\w+) tells you '(?<what>.*)'$`). The
 //! literals of all patterns go into one Aho-Corasick automaton. A line that
 //! contains none of them can't match any of those patterns, so it costs one
-//! literal scan, however many plugins are on. Only a line that hits a literal
-//! goes through the `RegexSet`, again one pass for every pattern. Patterns
-//! with no such literal sit in a second, unfiltered set that every line runs.
+//! literal scan, however many plugins are on. The patterns are split into
+//! chunks of a few dozen, each one `RegexSet`; the same scan says which
+//! chunks' literals the line holds, and only those chunks run, each in one
+//! pass. Patterns with no such literal sit in an unfiltered set that every
+//! line runs.
 
 use aho_corasick::AhoCorasick;
-use regex::{Regex, RegexSet, RegexSetBuilder};
+use regex::{RegexSet, RegexSetBuilder};
 use regex_syntax::hir::literal::{Extractor, Seq};
 use regex_syntax::hir::{Hir, HirKind};
+use std::collections::BTreeMap;
 
 /// Room for hundreds of patterns, Unicode classes included, in one set.
 const SET_SIZE_LIMIT: usize = 64 << 20;
-/// The [`DfaCache::Large`] limit.
-const LARGE_DFA_CACHE: usize = 16 << 20;
+/// The [`DfaCache::Large`] limit. Chunks of [`CHUNK_PATTERNS`] settle at
+/// 3–4 MiB on the replay benchmark, so this is headroom, not what they take.
+const LARGE_DFA_CACHE: usize = 8 << 20;
 
 /// How much the lazy DFA of each set may cache. The cache grows only as
 /// lines need it.
@@ -24,18 +28,28 @@ const LARGE_DFA_CACHE: usize = 16 << 20;
 pub(crate) enum DfaCache {
     /// The `regex` crate's default (2 MiB), for matchers off the hot path.
     Default,
-    /// For the merged matcher every line runs. At the default, a set of 300
-    /// patterns keeps clearing its cache and falls back to the slow engine:
-    /// 190 µs p99 per line on the replay benchmark, against 4 µs with 16 MiB.
+    /// For the merged matcher every line runs. At the default, a chunk keeps
+    /// clearing its cache and falls back to the slow engine: 157 µs p99 per
+    /// line on the replay benchmark with 300 patterns, against 4 µs.
     Large,
 }
 
+/// The most patterns in one filtered set. A lazy DFA's states are sets of its
+/// patterns' NFA states, so a bigger set needs far more of them per line.
+/// With 1,000 patterns in one set its cache keeps clearing (661 µs p99 per
+/// line); in chunks this size, 14 µs.
+const CHUNK_PATTERNS: usize = 64;
+/// Which chunks hit is a bit mask; past this many chunks they grow instead.
+const MAX_CHUNKS: usize = u64::BITS as usize;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Matcher {
-    regexes: Vec<Regex>,
-    filtered: Group,
+    /// The patterns with required literals, in id order.
+    chunks: Vec<Group>,
     unfiltered: Group,
     prefilter: Option<AhoCorasick>,
+    /// For each prefilter literal, the chunks with a pattern that needs it.
+    literal_chunks: Vec<u64>,
 }
 
 /// Patterns run as one set, and the matcher index of each.
@@ -46,8 +60,8 @@ struct Group {
 }
 
 impl Group {
-    fn new(regexes: &[Regex], ids: Vec<usize>, cache: DfaCache) -> Result<Group, String> {
-        let mut builder = RegexSetBuilder::new(ids.iter().map(|&id| regexes[id].as_str()));
+    fn new(sources: &[&str], ids: Vec<usize>, cache: DfaCache) -> Result<Group, String> {
+        let mut builder = RegexSetBuilder::new(ids.iter().map(|&id| sources[id]));
         builder.size_limit(SET_SIZE_LIMIT);
         if cache == DfaCache::Large {
             builder.dfa_size_limit(LARGE_DFA_CACHE);
@@ -65,45 +79,49 @@ impl Group {
 }
 
 impl Matcher {
-    /// Builds one matcher over `regexes`; their indexes are the ids
-    /// [`Matcher::matching`] reports.
-    pub(crate) fn new(regexes: Vec<Regex>, cache: DfaCache) -> Result<Matcher, String> {
-        let mut literals: Vec<Vec<u8>> = Vec::new();
-        let (mut filtered, mut unfiltered) = (Vec::new(), Vec::new());
-        for (id, regex) in regexes.iter().enumerate() {
-            match required_literals(regex.as_str()) {
-                Some(found) => {
-                    literals.extend(found);
-                    filtered.push(id);
-                }
+    /// Builds one matcher over the patterns in `sources`; their indexes are
+    /// the ids [`Matcher::matching`] reports.
+    pub(crate) fn new(sources: &[&str], cache: DfaCache) -> Result<Matcher, String> {
+        let mut filtered = Vec::new();
+        let mut unfiltered = Vec::new();
+        for (id, source) in sources.iter().enumerate() {
+            match required_literals(source) {
+                Some(literals) => filtered.push((id, literals)),
                 None => unfiltered.push(id),
             }
         }
-        literals.sort();
-        literals.dedup();
-        let prefilter = if literals.is_empty() {
+
+        let chunk_size = CHUNK_PATTERNS.max(filtered.len().div_ceil(MAX_CHUNKS));
+        let mut literal_chunks: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        let mut chunks = Vec::new();
+        for (chunk, patterns) in filtered.chunks(chunk_size).enumerate() {
+            for literal in patterns.iter().flat_map(|(_, literals)| literals) {
+                *literal_chunks.entry(literal.clone()).or_default() |= 1 << chunk;
+            }
+            chunks.push(Group::new(sources, patterns.iter().map(|(id, _)| *id).collect(), cache)?);
+        }
+        let prefilter = if literal_chunks.is_empty() {
             None
         } else {
-            Some(AhoCorasick::new(&literals).map_err(|error| error.to_string())?)
+            Some(AhoCorasick::new(literal_chunks.keys()).map_err(|error| error.to_string())?)
         };
         Ok(Matcher {
-            filtered: Group::new(&regexes, filtered, cache)?,
-            unfiltered: Group::new(&regexes, unfiltered, cache)?,
+            chunks,
+            unfiltered: Group::new(sources, unfiltered, cache)?,
             prefilter,
-            regexes,
+            literal_chunks: literal_chunks.into_values().collect(),
         })
-    }
-
-    pub(crate) fn regex(&self, id: usize) -> &Regex {
-        &self.regexes[id]
     }
 
     /// Replaces `out` with the ids of the patterns that match `text`, in
     /// ascending order.
     pub(crate) fn matching(&self, text: &str, out: &mut Vec<usize>) {
         out.clear();
-        if self.prefilter.as_ref().is_some_and(|prefilter| prefilter.is_match(text)) {
-            self.filtered.matching(text, out);
+        let hit = self.chunks_hit(text);
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            if hit & (1 << index) != 0 {
+                chunk.matching(text, out);
+            }
         }
         if !self.unfiltered.ids.is_empty() {
             let filtered = out.len();
@@ -114,9 +132,25 @@ impl Matcher {
         }
     }
 
+    /// The chunks with a pattern whose literal `text` contains, in one scan.
+    fn chunks_hit(&self, text: &str) -> u64 {
+        let Some(prefilter) = &self.prefilter else {
+            return 0;
+        };
+        let all = u64::MAX >> (u64::BITS as usize - self.chunks.len());
+        let mut hit = 0;
+        for found in prefilter.find_overlapping_iter(text) {
+            hit |= self.literal_chunks[found.pattern().as_usize()];
+            if hit == all {
+                break;
+            }
+        }
+        hit
+    }
+
     #[cfg(test)]
     fn filtered_count(&self) -> usize {
-        self.filtered.ids.len()
+        self.chunks.iter().map(|chunk| chunk.ids.len()).sum()
     }
 }
 
@@ -157,7 +191,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn matcher(patterns: &[&str]) -> Matcher {
-        Matcher::new(patterns.iter().map(|p| Regex::new(p).unwrap()).collect(), DfaCache::Default).unwrap()
+        Matcher::new(patterns, DfaCache::Default).unwrap()
     }
 
     fn matching(matcher: &Matcher, text: &str) -> Vec<usize> {
@@ -193,6 +227,20 @@ mod tests {
         assert_eq!(matching(&m, "north"), [3]);
         assert_eq!(matching(&m, "4"), [0, 2]);
         assert!(matching(&m, "nothing here").is_empty());
+    }
+
+    #[test]
+    fn patterns_in_different_chunks_match_in_order() {
+        let words: Vec<String> = (0..CHUNK_PATTERNS * 3).map(|n| format!("word{n:04}")).collect();
+        let mut patterns: Vec<&str> = words.iter().map(String::as_str).collect();
+        patterns.push(r"^\d");
+        let m = matcher(&patterns);
+        assert_eq!(m.chunks.len(), 3);
+        let last = CHUNK_PATTERNS * 3 - 1;
+        let text = format!("1 word{last:04} word0000 word{:04}", CHUNK_PATTERNS + 1);
+        assert_eq!(matching(&m, &text), [0, CHUNK_PATTERNS + 1, last, last + 1]);
+        assert_eq!(matching(&m, "word0005"), [5]);
+        assert!(matching(&m, "no words").is_empty());
     }
 
     #[test]

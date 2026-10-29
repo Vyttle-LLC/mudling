@@ -7,7 +7,8 @@
 //! plugin is rejected before it runs.
 
 use crate::ansi::{Color, Style};
-use regex::Regex;
+use regex_automata::PatternID;
+use regex_automata::meta;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -67,27 +68,93 @@ pub struct Points {
     pub ui: Option<Ui>,
 }
 
-/// A regex over a line's plain text, compiled once at load. Rust's `regex`
-/// matches in linear time, so no pattern can hang the client.
+/// A regex over a line's plain text, in the syntax of Rust's `regex` crate,
+/// compiled once at load. It matches in linear time, so no pattern can hang
+/// the client.
+///
+/// The engine is private, so it can change without changing the API. It is
+/// built without the one-pass DFA: for patterns with Unicode classes (`\w`,
+/// `\d`) that engine alone can cost hundreds of KB per pattern, and the
+/// engines left extract captures just as well on lines this short.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
-pub struct Pattern(Regex);
+pub struct Pattern {
+    source: Box<str>,
+    regex: meta::Regex,
+    /// Each named group and its index.
+    names: Box<[(Arc<str>, usize)]>,
+}
+
+/// A named capture, as a byte range of the text matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capture {
+    pub name: Arc<str>,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Why a pattern doesn't compile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternError(String);
+
+impl fmt::Display for PatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PatternError {}
 
 impl Pattern {
-    pub fn new(source: &str) -> Result<Pattern, regex::Error> {
-        Regex::new(source).map(Pattern)
+    pub fn new(source: &str) -> Result<Pattern, PatternError> {
+        let regex = meta::Regex::builder()
+            .configure(meta::Config::new().onepass(false))
+            .build(source)
+            .map_err(|error| PatternError(error.syntax_error().map_or_else(|| error.to_string(), ToString::to_string)))?;
+        let names = regex
+            .group_info()
+            .pattern_names(PatternID::ZERO)
+            .enumerate()
+            .filter_map(|(group, name)| Some((Arc::from(name?), group)))
+            .collect();
+        Ok(Pattern { source: source.into(), regex, names })
     }
 
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        &self.source
     }
 
-    pub fn regex(&self) -> &Regex {
-        &self.0
+    pub fn is_match(&self, text: &str) -> bool {
+        self.regex.is_match(text)
     }
 
-    fn has_group(&self, name: &str) -> bool {
-        self.0.capture_names().flatten().any(|group| group == name)
+    /// The named captures of the first match in `text`, those that took part
+    /// in it; `None` if the pattern doesn't match.
+    pub fn captures(&self, text: &str) -> Option<Box<[Capture]>> {
+        let mut found = self.regex.create_captures();
+        self.regex.captures(text, &mut found);
+        found.is_match().then(|| {
+            self.names
+                .iter()
+                .filter_map(|(name, group)| {
+                    let span = found.get_group(*group)?;
+                    Some(Capture { name: name.clone(), start: span.start as u32, end: span.end as u32 })
+                })
+                .collect()
+        })
+    }
+
+    /// The index of the named group.
+    pub(crate) fn group(&self, name: &str) -> Option<usize> {
+        self.names.iter().find(|(group, _)| &**group == name).map(|(_, index)| *index)
+    }
+
+    /// The byte range of `group` (0 is the whole match) in every match in
+    /// `text`, skipping matches it took no part in.
+    pub(crate) fn spans<'a>(&'a self, text: &'a str, group: usize) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.regex
+            .captures_iter(text)
+            .filter_map(move |found| found.get_group(group).map(|span| (span.start, span.end)))
     }
 }
 
@@ -308,7 +375,7 @@ impl Text {
                 return Err(format!("the color rule `{}` sets no fg, bg or bold", color.pattern.as_str()));
             }
             if let Some(group) = &color.group
-                && !color.pattern.has_group(group)
+                && color.pattern.group(group).is_none()
             {
                 return Err(format!(
                     "the color rule `{}` names the group `{group}`, which the pattern doesn't capture",
@@ -447,4 +514,37 @@ pub struct Ui {
     pub panels: Vec<String>,
     #[serde(default)]
     pub character_fields: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(captures: &[Capture]) -> Vec<(&str, u32, u32)> {
+        captures.iter().map(|capture| (&*capture.name, capture.start, capture.end)).collect()
+    }
+
+    #[test]
+    fn captures_are_the_named_groups_that_took_part() {
+        let pattern = Pattern::new(r"^(?<who>\w+) (?:says|asks)(?<loud>!)? '(?<what>.*)'$").unwrap();
+        assert_eq!(named(&pattern.captures("Ana says 'hi'").unwrap()), [("who", 0, 3), ("what", 10, 12)]);
+        assert_eq!(named(&pattern.captures("Bo asks! 'why'").unwrap())[1], ("loud", 7, 8));
+        assert_eq!(pattern.captures("nothing"), None);
+        assert_eq!(Pattern::new("plain").unwrap().captures("a plain line").as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn spans_cover_every_match_of_a_group() {
+        let pattern = Pattern::new(r"(?<n>\d+)(?<unit>h)?").unwrap();
+        let unit = pattern.group("unit").unwrap();
+        assert_eq!(pattern.spans("10h 20m 30h", 0).collect::<Vec<_>>(), [(0, 3), (4, 6), (8, 11)]);
+        assert_eq!(pattern.spans("10h 20m 30h", unit).collect::<Vec<_>>(), [(2, 3), (10, 11)]);
+        assert_eq!(pattern.group("missing"), None);
+    }
+
+    #[test]
+    fn a_pattern_that_does_not_compile_says_why() {
+        let error = Pattern::new("(unclosed").unwrap_err();
+        assert!(error.to_string().contains("unclosed group"), "{error}");
+    }
 }

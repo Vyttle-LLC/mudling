@@ -12,8 +12,6 @@ pub mod manifest;
 mod matcher;
 pub mod points;
 
-pub use host::{
-    Capture, DEFAULT_COST_SAMPLING, PendingKind, PluginCost, PluginEvent, PluginHost, PluginSink, Settings,
-};
+pub use host::{DEFAULT_COST_SAMPLING, PendingKind, PluginCost, PluginEvent, PluginHost, PluginSink, Settings};
 pub use manifest::{Layer, Manifest, Plugin, PluginError, PluginId, Problem, ServerInfo};
-pub use points::{Point, Points};
+pub use points::{Capture, Pattern, PatternError, Point, Points};

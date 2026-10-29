@@ -18,15 +18,17 @@
 
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
-use super::points::{HookName, Pager, Point, Points, RoomIdentity};
+use super::points::{Capture, HookName, Pager, Pattern, Point, Points, RoomIdentity};
 use crate::ansi::{Span, Style};
 use crate::line::{Encoding, Line, Pending};
 use crate::stats::Summary;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// By default, every 256th line also times each plugin on its own: often
-/// enough to fill Settings › Plugins, too rarely to move the p99.
+/// By default, every 256th line also times each plugin on its own, running
+/// its rules one by one: often enough to fill Settings › Plugins, too rarely
+/// to move the p99.
 pub const DEFAULT_COST_SAMPLING: u64 = 256;
 /// The samples each plugin keeps for its cost summary.
 const COST_SAMPLES_KEPT: usize = 1024;
@@ -44,14 +46,6 @@ pub struct PluginEvent {
     /// point: the Luau host (VYT-197) is a sink that runs it on this event,
     /// off this thread, inside its time box.
     pub hook: Option<HookName>,
-}
-
-/// A named capture, as a byte range of the line's plain text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Capture {
-    pub name: Arc<str>,
-    pub start: u32,
-    pub end: u32,
 }
 
 impl PluginEvent {
@@ -230,18 +224,10 @@ impl PluginHost {
         lines.matcher.matching(text, &mut self.matched);
         let mut coloring = Vec::new();
         for &id in &self.matched {
-            let regex = lines.matcher.regex(id);
             let rule = &lines.rules[id];
             match &rule.action {
-                Action::Event { name, hook, groups } => {
-                    let Some(found) = regex.captures(text) else { continue };
-                    let captures = groups
-                        .iter()
-                        .filter_map(|(name, group)| {
-                            let part = found.get(*group)?;
-                            Some(Capture { name: name.clone(), start: part.start() as u32, end: part.end() as u32 })
-                        })
-                        .collect();
+                Action::Event { name, hook } => {
+                    let Some(captures) = rule.pattern.captures(text) else { continue };
                     sink.event(PluginEvent {
                         plugin: rule.plugin.clone(),
                         point: Point::Text,
@@ -252,13 +238,8 @@ impl PluginHost {
                     });
                 }
                 Action::Color { style, group } if line.styled().is_empty() => {
-                    for found in regex.captures_iter(text) {
-                        if let Some(part) = found.get(group.unwrap_or(0))
-                            && !part.is_empty()
-                        {
-                            let span = Span { start: part.start() as u32, end: part.end() as u32, style: *style };
-                            paint(&mut coloring, span);
-                        }
+                    for (start, end) in rule.pattern.spans(text, *group).filter(|(start, end)| start < end) {
+                        paint(&mut coloring, Span { start: start as u32, end: end as u32, style: *style });
                     }
                 }
                 Action::Color { .. } => {}
@@ -300,14 +281,22 @@ impl PluginHost {
             .collect()
     }
 
-    /// Times each enabled plugin's own matcher over `text`, as if it were
-    /// the only plugin on.
+    /// Times each enabled plugin's own rules over `text`, one by one. That
+    /// keeps no second matcher per plugin, and runs no slower than the
+    /// plugin would on its own: an upper bound on its share of the pass.
     fn sample_costs(&mut self, text: &str) {
-        for (alone, &index) in self.compiled.alone.iter().zip(&self.compiled.order) {
+        let rules = &self.compiled.lines.rules;
+        for (range, &index) in self.compiled.plugin_rules.iter().zip(&self.compiled.order) {
             let started = Instant::now();
-            alone.matching(text, &mut self.matched);
-            for &id in &self.matched {
-                std::hint::black_box(alone.regex(id).captures(text));
+            for rule in &rules[range.clone()] {
+                match rule.action {
+                    Action::Event { .. } => {
+                        std::hint::black_box(rule.pattern.captures(text));
+                    }
+                    Action::Color { group, .. } => {
+                        std::hint::black_box(rule.pattern.spans(text, group).count());
+                    }
+                }
             }
             self.installed[index].cost.record(started.elapsed());
         }
@@ -336,8 +325,8 @@ struct Compiled {
     lines: LineRules,
     pending: Matcher,
     pending_kinds: Vec<PendingKind>,
-    /// Each enabled plugin's line rules alone, in run order, for costs.
-    alone: Vec<Matcher>,
+    /// Each enabled plugin's rules in `lines`, in run order, for costs.
+    plugin_rules: Vec<Range<usize>>,
     settings: Settings,
 }
 
@@ -348,12 +337,14 @@ struct LineRules {
 
 struct LineRule {
     plugin: PluginId,
+    pattern: Pattern,
     action: Action,
 }
 
 enum Action {
-    Event { name: Arc<str>, hook: Option<HookName>, groups: Box<[(Arc<str>, usize)]> },
-    Color { style: Style, group: Option<usize> },
+    Event { name: Arc<str>, hook: Option<HookName> },
+    /// Colors `group` of each match; 0 is the whole match.
+    Color { style: Style, group: usize },
 }
 
 impl Compiled {
@@ -364,63 +355,57 @@ impl Compiled {
         let settings = settings(&plugins);
 
         let mut rules = Vec::new();
-        let mut regexes = Vec::new();
-        let mut alone = Vec::with_capacity(plugins.len());
+        let mut plugin_rules = Vec::with_capacity(plugins.len());
         for plugin in &plugins {
-            let first = regexes.len();
-            for (regex, action) in line_rules(plugin) {
-                regexes.push(regex);
-                rules.push(LineRule { plugin: plugin.id().clone(), action });
-            }
-            alone.push(matcher(regexes[first..].to_vec(), DfaCache::Default)?);
+            let first = rules.len();
+            rules.extend(line_rules(plugin));
+            plugin_rules.push(first..rules.len());
         }
+        let sources: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
+        let lines = matcher(&sources, DfaCache::Large)?;
 
-        let mut pending_regexes = Vec::new();
+        let mut pending_sources = Vec::new();
         let mut pending_kinds = Vec::new();
         if let Some(pager) = &settings.pager {
-            pending_regexes.push(pager.prompt.regex().clone());
+            pending_sources.push(pager.prompt.as_str());
             pending_kinds.push(PendingKind::Pager { key: pager.key.as_str().into() });
         }
         for text in plugins.iter().filter_map(|plugin| plugin.points.text.as_ref()) {
             for hint in &text.prompts {
-                pending_regexes.push(hint.pattern.regex().clone());
+                pending_sources.push(hint.pattern.as_str());
                 pending_kinds.push(PendingKind::Prompt);
             }
         }
+        let pending = matcher(&pending_sources, DfaCache::Default)?;
 
         Ok(Compiled {
             order,
-            lines: LineRules { matcher: matcher(regexes, DfaCache::Large)?, rules },
-            pending: matcher(pending_regexes, DfaCache::Default)?,
+            lines: LineRules { matcher: lines, rules },
+            pending,
             pending_kinds,
-            alone,
+            plugin_rules,
             settings,
         })
     }
 }
 
-fn matcher(regexes: Vec<regex::Regex>, cache: DfaCache) -> Result<Matcher, PluginError> {
-    Matcher::new(regexes, cache).map_err(|message| PluginError { source: "plugin host".into(), problem: Problem::Matcher(message) })
+fn matcher(sources: &[&str], cache: DfaCache) -> Result<Matcher, PluginError> {
+    Matcher::new(sources, cache)
+        .map_err(|message| PluginError { source: "plugin host".into(), problem: Problem::Matcher(message) })
 }
 
 /// A plugin's Text patterns, then its color rules.
-fn line_rules(plugin: &Plugin) -> Vec<(regex::Regex, Action)> {
+fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
     let Some(text) = &plugin.points.text else {
         return Vec::new();
     };
-    let events = text.patterns.iter().map(|rule| {
-        let regex = rule.pattern.regex();
-        let groups = regex
-            .capture_names()
-            .enumerate()
-            .filter_map(|(group, name)| Some((Arc::from(name?), group)))
-            .collect();
-        (regex.clone(), Action::Event { name: rule.name.shared(), hook: rule.hook.clone(), groups })
+    let rule = |pattern: &Pattern, action| LineRule { plugin: plugin.id().clone(), pattern: pattern.clone(), action };
+    let events = text.patterns.iter().map(|event| {
+        rule(&event.pattern, Action::Event { name: event.name.shared(), hook: event.hook.clone() })
     });
-    let colors = text.colors.iter().map(|rule| {
-        let regex = rule.pattern.regex();
-        let group = rule.group.as_ref().and_then(|name| regex.capture_names().position(|group| group == Some(name)));
-        (regex.clone(), Action::Color { style: rule.style(), group })
+    let colors = text.colors.iter().map(|color| {
+        let group = color.group.as_deref().and_then(|name| color.pattern.group(name)).unwrap_or(0);
+        rule(&color.pattern, Action::Color { style: color.style(), group })
     });
     events.chain(colors).collect()
 }

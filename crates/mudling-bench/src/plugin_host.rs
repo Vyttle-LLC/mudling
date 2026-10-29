@@ -6,11 +6,13 @@
 //!   ≤ 5 µs; and each plugin timed alone by the host's own cost sampling,
 //!   ≤ 5 µs p99.
 //!
-//! It also reports the heap a host holds after replaying every line, matcher
-//! caches included, with six plugins and with twenty.
+//! It also reports the heap a host holds after replaying every line, caches
+//! included, for a realistic set (defaults, a 150-pattern game, an override)
+//! and for six and twenty uniform plugins.
 
 use crate::HEAP_BYTES;
 use mudling_core::line::{Line, LinePipeline};
+use mudling_core::plugin::points::Text;
 use mudling_core::plugin::{Plugin, PluginEvent, PluginHost, PluginSink};
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -92,7 +94,11 @@ pub fn run(source: &[String]) -> Report {
         .map(|cost| (cost.plugin.to_string(), cost.per_line.map_or(0.0, |summary| summary.p99_us)))
         .collect();
     drop(sampled);
-    let host_heap = [PLUGINS, MANY_PLUGINS].map(|plugins| host_heap(plugins, &lines)).into();
+    let host_heap = vec![
+        host_heap("realistic", realistic_plugins, &lines),
+        host_heap("uniform", || synthetic_plugins(PLUGINS), &lines),
+        host_heap("uniform", || synthetic_plugins(MANY_PLUGINS), &lines),
+    ];
 
     let one_more_plugin_p99_us = all.p99_us - without_one.p99_us;
     let within_budget = whole_line.p99_us <= LINE_BUDGET_US
@@ -132,36 +138,58 @@ pub fn print(report: &Report) {
     );
     for heap in &report.host_heap {
         println!(
-            "  host heap, {} plugins: loaded {:.1} MB, built {:.1} MB, after the replay {:.1} MB",
-            heap.plugins, heap.loaded_mb, heap.built_mb, heap.after_replay_mb
+            "  host heap, {} ({} plugins / {} patterns): loaded {:.1} MB, built {:.1} MB, after the replay {:.1} MB; \
+             host p99 {:.2} µs",
+            heap.set,
+            heap.plugins,
+            heap.patterns,
+            heap.loaded_mb,
+            heap.built_mb,
+            heap.after_replay_mb,
+            heap.per_line.p99_us
         );
     }
 }
 
-/// The heap a host of `plugins` synthetic plugins holds, by stage: the
-/// loaded plugins (each pattern compiled for its captures), the host's sets
-/// built, and every line read, so the matcher caches have grown as far as
-/// these lines take them.
-fn host_heap(plugins: usize, lines: &[Line]) -> HostHeap {
+/// The heap a host of the plugins `load` makes holds, by stage: the loaded
+/// plugins (each pattern compiled for its captures), the host's matchers
+/// built, and every line read, so the caches have grown as far as these
+/// lines take them. Also times each line, with the default cost sampling.
+fn host_heap(set: &str, load: impl FnOnce() -> Vec<Plugin>, lines: &[Line]) -> HostHeap {
+    let mut samples = Vec::with_capacity(lines.len());
     let before = HEAP_BYTES.load(Ordering::Relaxed);
     let held = || HEAP_BYTES.load(Ordering::Relaxed).saturating_sub(before) as f64 / (1024.0 * 1024.0);
-    let loaded = synthetic_plugins(plugins);
+    let loaded = load();
     let loaded_mb = held();
+    let plugins = loaded.len();
+    let patterns = loaded.iter().filter_map(|plugin| plugin.points.text.as_ref()).map(text_patterns).sum();
     let mut host = PluginHost::new(loaded).expect("compiles");
     let built_mb = held();
     let mut sink = Counter::default();
     for line in lines {
+        let started = Instant::now();
         std::hint::black_box(host.read_line(line, &mut sink));
+        samples.push(started.elapsed());
     }
-    HostHeap { plugins, loaded_mb, built_mb, after_replay_mb: held() }
+    let after_replay_mb = held();
+    let per_line = Summary::of(&samples).expect("lines were timed");
+    HostHeap { set: set.to_owned(), plugins, patterns, loaded_mb, built_mb, after_replay_mb, per_line }
+}
+
+fn text_patterns(text: &Text) -> usize {
+    text.patterns.len() + text.colors.len() + text.prompts.len() + usize::from(text.pager.is_some())
 }
 
 #[derive(Serialize)]
 pub struct HostHeap {
+    pub set: String,
     pub plugins: usize,
+    pub patterns: usize,
     pub loaded_mb: f64,
     pub built_mb: f64,
     pub after_replay_mb: f64,
+    /// The host alone, per line, while the caches grew.
+    pub per_line: Summary,
 }
 
 /// Bytes in, through the pipeline and every plugin, timed per server line.
@@ -222,38 +250,61 @@ impl PluginSink for Counter {
     }
 }
 
-/// `count` plugins, each with its own words: defaults, games, then an
-/// override.
+/// `count` plugins of [`EVENT_RULES`] patterns and [`COLOR_RULES`] colors
+/// each: defaults, games, then an override.
 fn synthetic_plugins(count: usize) -> Vec<Plugin> {
     (0..count)
         .map(|index| {
-            let (id, layer) = match index {
-                0 => ("bench-defaults".to_owned(), "default"),
-                last if last == count - 1 => ("bench-override".to_owned(), "override"),
-                game => (format!("bench-game-{game}"), "game"),
+            let id = match index {
+                0 => "bench-defaults".to_owned(),
+                last if last == count - 1 => "bench-override".to_owned(),
+                game => format!("bench-game-{game}"),
             };
-            let servers = if layer == "default" { "" } else { "[servers]\nhosts = [\"bench.example\"]\n" };
-            let manifest = format!(
-                "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\nlicense = \"MIT\"\nlayer = \"{layer}\"\n\
-                 {servers}[points]\ntext = \"text.toml\"\n"
-            );
-            let text = text_toml(index);
-            Plugin::from_files(|file| Ok(if file == "text.toml" { text.clone() } else { manifest.clone() }))
-                .unwrap_or_else(|error| panic!("{error}"))
+            synthetic_plugin(index, &id, layer(index, count), EVENT_RULES, COLOR_RULES)
         })
         .collect()
 }
 
-fn text_toml(plugin: usize) -> String {
+/// What one server might run: defaults, one game plugin of 150 patterns and
+/// a small override.
+fn realistic_plugins() -> Vec<Plugin> {
+    vec![
+        synthetic_plugin(0, "bench-defaults", "default", 25, 5),
+        synthetic_plugin(1, "bench-game", "game", 130, 20),
+        synthetic_plugin(2, "bench-override", "override", 5, 1),
+    ]
+}
+
+fn layer(index: usize, count: usize) -> &'static str {
+    match index {
+        0 => "default",
+        last if last == count - 1 => "override",
+        _ => "game",
+    }
+}
+
+/// A plugin with its own words, from `index`, and one prompt hint.
+fn synthetic_plugin(index: usize, id: &str, layer: &str, events: usize, colors: usize) -> Plugin {
+    let servers = if layer == "default" { "" } else { "[servers]\nhosts = [\"bench.example\"]\n" };
+    let manifest = format!(
+        "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\nlicense = \"MIT\"\nlayer = \"{layer}\"\n\
+         {servers}[points]\ntext = \"text.toml\"\n"
+    );
+    let text = text_toml(index, events, colors);
+    Plugin::from_files(|file| Ok(if file == "text.toml" { text.clone() } else { manifest.clone() }))
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn text_toml(plugin: usize, events: usize, colors: usize) -> String {
     let word = |rule: usize| WORDS[(plugin * 7 + rule) % WORDS.len()];
     let mut text = String::new();
-    for rule in 0..EVENT_RULES {
+    for rule in 0..events {
         let pattern = EVENT_TEMPLATES[rule % EVENT_TEMPLATES.len()].replace("{w}", word(rule));
         writeln!(text, "[[pattern]]\nname = \"rule-{rule}\"\npattern = '''{pattern}'''\n").unwrap();
     }
-    for rule in 0..COLOR_RULES {
+    for rule in 0..colors {
         let fg = rule % 16;
-        writeln!(text, "[[color]]\npattern = '''\\b{}\\b'''\nfg = {fg}\n", word(EVENT_RULES + rule)).unwrap();
+        writeln!(text, "[[color]]\npattern = '''\\b{}\\b'''\nfg = {fg}\n", word(events + rule)).unwrap();
     }
     writeln!(text, "[[prompt]]\npattern = '''^<(?<hp>\\d+)hp {plugin}> $'''").unwrap();
     text
