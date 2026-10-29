@@ -9,6 +9,9 @@
 //! It fills a 100,000-line scrollback, then times 100,000 more appends (each
 //! one parses a raw line and evicts the oldest), and finds over the full
 //! buffer. `--check` exits non-zero when a budget is missed.
+//! It also times the line pipeline per line over the same text.
+
+mod line_pipeline;
 
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::stats::Summary;
@@ -76,6 +79,7 @@ struct Report {
     find_budget_us: f64,
     append_within_budget: bool,
     find_within_budget: bool,
+    line_pipeline: line_pipeline::Report,
 }
 
 fn main() -> ExitCode {
@@ -102,8 +106,10 @@ fn main() -> ExitCode {
         }
     };
 
-    let report = run(source, ReplayFeed::new(lines));
+    let line_pipeline = line_pipeline::run(&lines);
+    let report = run(source, ReplayFeed::new(lines), line_pipeline);
     print_report(&report);
+    line_pipeline::print(&report.line_pipeline);
     if let Some(path) = &options.json {
         let json = serde_json::to_string_pretty(&report).expect("the report serializes");
         if let Err(error) = std::fs::write(path, json) {
@@ -111,7 +117,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if options.check && !(report.append_within_budget && report.find_within_budget) {
+    if options.check
+        && !(report.append_within_budget && report.find_within_budget && report.line_pipeline.within_budget)
+    {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
     }
@@ -132,7 +140,7 @@ fn parse_options() -> Result<Options, String> {
     Ok(options)
 }
 
-fn run(source: String, mut feed: ReplayFeed) -> Report {
+fn run(source: String, mut feed: ReplayFeed, line_pipeline: line_pipeline::Report) -> Report {
     let mut parser = AnsiParser::default();
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
     let fill_started = Instant::now();
@@ -178,6 +186,7 @@ fn run(source: String, mut feed: ReplayFeed) -> Report {
         find_matches,
         append_budget_us: APPEND_BUDGET_US,
         find_budget_us: FIND_BUDGET_US,
+        line_pipeline,
     }
 }
 

@@ -2962,6 +2962,7 @@ name = "mudling-core"
 version = "0.0.0"
 dependencies = [
  "aho-corasick",
+ "memchr",
  "serde",
 ]
 

@@ -2,6 +2,11 @@
 //!
 //! Only SGR (`ESC [ … m`) is interpreted: the 16 basic colors, the 256-color
 //! palette and bold. Every other escape sequence is removed from the text.
+//!
+//! The parser streams: [`AnsiParser::feed`] takes a line in as many pieces as
+//! it arrives in, and an escape sequence may be split between pieces. The
+//! line pipeline ([`crate::line`]) feeds it each byte of a line exactly once;
+//! [`AnsiParser::parse_line`] is the same pass over a whole line.
 
 /// A palette index: 0–15 are the basic and bright colors, 16–255 the
 /// 256-color cube and grays. The shell maps indexes to its theme.
@@ -21,7 +26,7 @@ impl Style {
     }
 }
 
-/// A byte range of [`Line::text`] drawn in a non-default style.
+/// A byte range of a line's plain text drawn in a non-default style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     pub start: u32,
@@ -57,30 +62,116 @@ impl Line {
     }
 }
 
-const ESC: char = '\x1b';
+const ESC: u8 = 0x1b;
+const BEL: u8 = 0x07;
+
+/// Where the parser is between pieces of a line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Escape {
+    #[default]
+    None,
+    /// Just after `ESC`.
+    Start,
+    /// Inside `ESC [`, collecting parameters until the final byte.
+    Csi,
+    /// Inside `ESC ]`, until `BEL` or `ESC \`.
+    Osc,
+    /// An `ESC` inside an OSC: `\` ends it, anything else starts a new escape.
+    OscEsc,
+}
 
 /// Parses lines in order. The current style carries from one line to the
 /// next, as servers expect.
 #[derive(Debug, Default)]
 pub struct AnsiParser {
     style: Style,
+    escape: Escape,
+    /// CSI parameters seen so far, when a sequence is split between pieces.
+    csi: String,
 }
 
 impl AnsiParser {
     pub fn parse_line(&mut self, raw: &str) -> Line {
         let mut text = String::with_capacity(raw.len());
         let mut spans = Vec::new();
-        let mut rest = raw;
-        while let Some(esc) = rest.find(ESC) {
-            self.push_text(&mut text, &mut spans, &rest[..esc]);
-            rest = self.consume_escape(&rest[esc + 1..]);
-        }
-        self.push_text(&mut text, &mut spans, rest);
+        self.feed(raw, &mut text, &mut spans);
+        self.end_line();
         Line {
             text: text.into_boxed_str(),
             spans: spans.into_boxed_slice(),
             kind: LineKind::Server,
         }
+    }
+
+    /// Parses the next piece of the current line, appending its plain text
+    /// to `plain` and its styled runs to `spans` (ranges of `plain`).
+    pub fn feed(&mut self, piece: &str, plain: &mut String, spans: &mut Vec<Span>) {
+        let mut rest = piece;
+        while !rest.is_empty() {
+            let bytes = rest.as_bytes();
+            rest = match self.escape {
+                Escape::None => match memchr::memchr(ESC, bytes) {
+                    Some(esc) => {
+                        self.push_text(plain, spans, &rest[..esc]);
+                        self.escape = Escape::Start;
+                        &rest[esc + 1..]
+                    }
+                    None => {
+                        self.push_text(plain, spans, rest);
+                        ""
+                    }
+                },
+                Escape::Start => {
+                    let next = rest.chars().next().expect("rest isn't empty");
+                    self.escape = match next {
+                        '[' => Escape::Csi,
+                        ']' => Escape::Osc,
+                        _ => Escape::None,
+                    };
+                    &rest[next.len_utf8()..]
+                }
+                Escape::Csi => match bytes.iter().position(|b| (0x40..=0x7e).contains(b)) {
+                    Some(end) => {
+                        if bytes[end] == b'm' {
+                            self.csi.push_str(&rest[..end]);
+                            let params = std::mem::take(&mut self.csi);
+                            self.apply_sgr(&params);
+                            self.csi = params;
+                        }
+                        self.csi.clear();
+                        self.escape = Escape::None;
+                        &rest[end + 1..]
+                    }
+                    None => {
+                        self.csi.push_str(rest);
+                        ""
+                    }
+                },
+                Escape::Osc => match memchr::memchr2(BEL, ESC, bytes) {
+                    Some(end) => {
+                        self.escape = if bytes[end] == BEL { Escape::None } else { Escape::OscEsc };
+                        &rest[end + 1..]
+                    }
+                    None => "",
+                },
+                Escape::OscEsc => {
+                    if let Some(after) = rest.strip_prefix('\\') {
+                        self.escape = Escape::None;
+                        after
+                    } else {
+                        self.escape = Escape::Start;
+                        rest
+                    }
+                }
+            };
+        }
+    }
+
+    /// Ends the current line. An escape sequence still open is dropped: it
+    /// swallows the rest of its line and never the next one.
+    pub fn end_line(&mut self) {
+        self.escape = Escape::None;
+        self.csi.clear();
     }
 
     fn push_text(&self, text: &mut String, spans: &mut Vec<Span>, chunk: &str) {
@@ -99,36 +190,6 @@ impl AnsiParser {
                 end: end as u32,
                 style: self.style,
             }),
-        }
-    }
-
-    /// Consumes one escape sequence (the text just after `ESC`) and returns
-    /// what follows it. An unterminated sequence swallows the rest of the line.
-    fn consume_escape<'a>(&mut self, after_esc: &'a str) -> &'a str {
-        let mut chars = after_esc.char_indices();
-        match chars.next() {
-            Some((_, '[')) => {
-                let body = &after_esc[1..];
-                match body.find(|c: char| ('\x40'..='\x7e').contains(&c)) {
-                    Some(end) => {
-                        if body.as_bytes()[end] == b'm' {
-                            self.apply_sgr(&body[..end]);
-                        }
-                        &body[end + 1..]
-                    }
-                    None => "",
-                }
-            }
-            Some((_, ']')) => {
-                let body = &after_esc[1..];
-                match body.find(['\x07', ESC]) {
-                    Some(end) if body.as_bytes()[end] == 0x07 => &body[end + 1..],
-                    Some(end) => body[end + 1..].strip_prefix('\\').unwrap_or(&body[end..]),
-                    None => "",
-                }
-            }
-            Some((_, c)) => &after_esc[c.len_utf8()..],
-            None => "",
         }
     }
 
@@ -239,6 +300,28 @@ mod tests {
     fn other_sequences_and_controls_are_removed() {
         let line = parse("\x1b[2Ja\x1b]0;title\x07b\x1b]0;t\x1b\\c\rd\x1b[");
         assert_eq!(&*line.text, "abcd");
+    }
+
+    #[test]
+    fn a_line_fed_in_two_pieces_parses_as_one() {
+        let raw = "\x1b[1;31mré\x1b[0md \x1b]0;t\x1b\\x\x1b]0;u\x07y\x1b[38;5;208mz";
+        let whole = parse(raw);
+        for (split, _) in raw.char_indices().skip(1) {
+            let mut parser = AnsiParser::default();
+            let (mut text, mut spans) = (String::new(), Vec::new());
+            parser.feed(&raw[..split], &mut text, &mut spans);
+            parser.feed(&raw[split..], &mut text, &mut spans);
+            assert_eq!((&*text, &*spans), (&*whole.text, &*whole.spans), "split at {split}");
+        }
+    }
+
+    #[test]
+    fn an_open_escape_ends_with_its_line() {
+        let mut parser = AnsiParser::default();
+        assert_eq!(&*parser.parse_line("a\x1b[31").text, "a");
+        let next = parser.parse_line("b");
+        assert_eq!(&*next.text, "b");
+        assert!(next.spans.is_empty());
     }
 
     #[test]
