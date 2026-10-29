@@ -10,6 +10,12 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "1.1"
 serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
