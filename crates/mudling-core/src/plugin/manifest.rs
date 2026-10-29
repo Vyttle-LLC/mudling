@@ -120,6 +120,21 @@ impl Servers {
         self.hosts.is_empty() && self.mssp_names.is_empty()
     }
 
+    /// A host is exact (`mud.example.org`) or has one leading wildcard label
+    /// (`*.example.org`); no other `*` is allowed.
+    fn validate(&self) -> Result<(), String> {
+        for host in &self.hosts {
+            let domain = host.strip_prefix("*.").unwrap_or(host);
+            if domain.is_empty() || domain.contains('*') {
+                return Err(format!(
+                    "the host \"{host}\" isn't one; write an exact host (\"mud.example.org\") \
+                     or a leading wildcard (\"*.example.org\")"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn matches(&self, server: ServerInfo<'_>) -> bool {
         let host_matches = |pattern: &String| match pattern.strip_prefix('*') {
             Some(suffix) => server.host.len() > suffix.len() && ends_with_ignoring_case(server.host, suffix),
@@ -217,6 +232,7 @@ impl Manifest {
             }
             _ => {}
         }
+        self.servers.validate()?;
         for point in Point::ALL {
             if let Some(file) = self.points.get(point) {
                 check_relative_toml(file).map_err(|problem| format!("points.{point} = \"{file}\": {problem}"))?;
@@ -250,7 +266,7 @@ impl Plugin {
     pub fn load(dir: impl AsRef<Path>) -> Result<Plugin, PluginError> {
         let dir = dir.as_ref();
         Plugin::from_files(|file| std::fs::read_to_string(dir.join(file))).map_err(|mut error| {
-            error.file = dir.join(&error.file).display().to_string();
+            error.source = dir.join(&error.source).display().to_string();
             error
         })
     }
@@ -292,7 +308,7 @@ impl Plugin {
 }
 
 fn read_file(read: &mut impl FnMut(&str) -> io::Result<String>, file: &str) -> Result<String, PluginError> {
-    read(file).map_err(|error| PluginError { file: file.to_owned(), problem: Problem::Read(error.to_string()) })
+    read(file).map_err(|error| PluginError { source: file.to_owned(), problem: Problem::Read(error.to_string()) })
 }
 
 /// Reads `api` before anything else, so a plugin for another API version
@@ -307,14 +323,14 @@ fn check_api(manifest_text: &str) -> Result<(), PluginError> {
                 toml::Value::Integer(version) => version.to_string(),
                 other => format!("a {}", other.type_str()),
             };
-            Err(PluginError { file: MANIFEST_FILE.into(), problem: Problem::UnsupportedApi(found) })
+            Err(PluginError { source: MANIFEST_FILE.into(), problem: Problem::UnsupportedApi(found) })
         }
     }
 }
 
 fn parse<T: DeserializeOwned>(file: &str, text: &str) -> Result<T, PluginError> {
     toml::from_str(text).map_err(|error| PluginError {
-        file: file.to_owned(),
+        source: file.to_owned(),
         problem: Problem::Toml(error.to_string().trim_end().to_owned()),
     })
 }
@@ -335,10 +351,13 @@ fn point_checked<T: DeserializeOwned>(
     Ok(Some(declaration))
 }
 
-/// Why a plugin was rejected, and in which file.
+/// Why a plugin was rejected, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginError {
-    pub file: String,
+    /// Where the problem is: the file (with the plugin folder's path when
+    /// loaded from one), the plugin's id for a [`Problem::DuplicateId`], or
+    /// `plugin host` for a [`Problem::Matcher`].
+    pub source: String,
     pub problem: Problem,
 }
 
@@ -362,23 +381,23 @@ pub enum Problem {
 
 impl PluginError {
     fn invalid(file: &str, problem: impl Into<String>) -> PluginError {
-        PluginError { file: file.to_owned(), problem: Problem::Invalid(problem.into()) }
+        PluginError { source: file.to_owned(), problem: Problem::Invalid(problem.into()) }
     }
 }
 
 impl fmt::Display for PluginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.problem {
-            Problem::Read(error) => write!(f, "{}: couldn't read the file: {error}", self.file),
-            Problem::Toml(message) => write!(f, "{}: {message}", self.file),
+            Problem::Read(error) => write!(f, "{}: couldn't read the file: {error}", self.source),
+            Problem::Toml(message) => write!(f, "{}: {message}", self.source),
             Problem::UnsupportedApi(found) => write!(
                 f,
                 "{}: `api = {found}` isn't supported; this MUDling reads plugins written for api = {API_VERSION}",
-                self.file
+                self.source
             ),
-            Problem::Invalid(message) => write!(f, "{}: {message}", self.file),
-            Problem::DuplicateId(id) => write!(f, "{}: another plugin already has the id `{id}`", self.file),
-            Problem::Matcher(message) => write!(f, "{}: the patterns couldn't be compiled together: {message}", self.file),
+            Problem::Invalid(message) => write!(f, "{}: {message}", self.source),
+            Problem::DuplicateId(id) => write!(f, "{}: another plugin already has the id `{id}`", self.source),
+            Problem::Matcher(message) => write!(f, "{}: the patterns couldn't be compiled together: {message}", self.source),
         }
     }
 }

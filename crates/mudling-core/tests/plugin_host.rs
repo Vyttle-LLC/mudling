@@ -128,6 +128,18 @@ fn with(extra: &str) -> String {
 }
 
 #[test]
+fn a_host_is_exact_or_has_one_leading_wildcard() {
+    let game = |hosts: &str| {
+        format!("{}[servers]\nhosts = [{hosts}]\n", MANIFEST.replace("\"default\"", "\"game\""))
+    };
+    assert!(plugin(&[("plugin.toml", &game(r#""mud.example.org", "*.example.org""#))]).is_ok());
+    for host in ["*example.org", "mud.*.org", "*.*.example.org", "mud.example.*", "*", "*.", ""] {
+        let error = rejection(&game(&format!("\"{host}\"")), &[]).to_string();
+        assert!(error.contains(&format!("the host \"{host}\" isn't one")), "{error}");
+    }
+}
+
+#[test]
 fn a_manifest_for_another_api_is_rejected_before_anything_else() {
     let manifest = MANIFEST.replace("api = 1", "api = 2\nsomething_new = true");
     let error = rejection(&manifest, &[]);
@@ -320,6 +332,21 @@ fn prompt_hints_and_the_pager_read_pending_text() {
     pipeline.push(b"--More--", &mut finished);
     assert_eq!(host.read_pending(&pipeline.pending().unwrap()), None, "the game's pager replaces the defaults'");
     assert!(finished.is_empty());
+}
+
+#[test]
+fn a_new_pipeline_gets_fresh_answers_from_the_same_host() {
+    let mut host = PluginHost::new([testland()]).unwrap();
+    let mut first = LinePipeline::default();
+    first.push(b"(20 life) ", &mut Vec::new());
+    assert_eq!(host.read_pending(&first.pending().unwrap()), Some(PendingKind::Prompt));
+
+    // A reconnect: line 0 again, and text of the same length.
+    let mut second = LinePipeline::default();
+    second.push(b"Hello you ", &mut Vec::new());
+    let pending = second.pending().unwrap();
+    assert_eq!((pending.number, pending.raw.len()), (0, 10));
+    assert_eq!(host.read_pending(&pending), None);
 }
 
 #[test]

@@ -13,46 +13,38 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-/// An extension point, as named in `plugin.toml`'s `[points]` table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Point {
-    Connection,
-    Commands,
-    Text,
-    Hud,
-    Map,
-    Character,
-    Gear,
-    Mobs,
-    Ui,
+/// Declares [`Point`], [`Point::ALL`] and [`Point::name`] from one list, so
+/// a new point can't be left out of any of them.
+macro_rules! points {
+    ($($point:ident => $name:literal),+ $(,)?) => {
+        /// An extension point, as named in `plugin.toml`'s `[points]` table.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum Point {
+            $($point),+
+        }
+
+        impl Point {
+            pub const ALL: [Point; [$($name),+].len()] = [$(Point::$point),+];
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Point::$point => $name),+
+                }
+            }
+        }
+    };
 }
 
-impl Point {
-    pub const ALL: [Point; 9] = [
-        Point::Connection,
-        Point::Commands,
-        Point::Text,
-        Point::Hud,
-        Point::Map,
-        Point::Character,
-        Point::Gear,
-        Point::Mobs,
-        Point::Ui,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Point::Connection => "connection",
-            Point::Commands => "commands",
-            Point::Text => "text",
-            Point::Hud => "hud",
-            Point::Map => "map",
-            Point::Character => "character",
-            Point::Gear => "gear",
-            Point::Mobs => "mobs",
-            Point::Ui => "ui",
-        }
-    }
+points! {
+    Connection => "connection",
+    Commands => "commands",
+    Text => "text",
+    Hud => "hud",
+    Map => "map",
+    Character => "character",
+    Gear => "gear",
+    Mobs => "mobs",
+    Ui => "ui",
 }
 
 impl fmt::Display for Point {

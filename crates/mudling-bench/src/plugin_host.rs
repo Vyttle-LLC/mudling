@@ -5,18 +5,24 @@
 //! - **one more plugin**: the p99 with all six minus the p99 without one,
 //!   ≤ 5 µs; and each plugin timed alone by the host's own cost sampling,
 //!   ≤ 5 µs p99.
+//!
+//! It also reports the heap a host holds after replaying every line, matcher
+//! caches included, with six plugins and with twenty.
 
+use crate::HEAP_BYTES;
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::{Plugin, PluginEvent, PluginHost, PluginSink};
 use mudling_core::stats::Summary;
 use serde::Serialize;
 use std::fmt::Write;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 pub const LINE_BUDGET_US: f64 = 20.0;
 pub const PLUGIN_BUDGET_US: f64 = 5.0;
 const MIN_LINES: usize = 100_000;
 const PLUGINS: usize = 6;
+const MANY_PLUGINS: usize = 20;
 /// Text patterns per plugin, then color rules and prompt hints.
 const EVENT_RULES: usize = 40;
 const COLOR_RULES: usize = 9;
@@ -57,6 +63,7 @@ pub struct Report {
     pub one_more_plugin_p99_us: f64,
     /// Each plugin's p99 as the host's sampling timed it alone.
     pub alone_p99_us: Vec<(String, f64)>,
+    pub host_heap: Vec<HostHeap>,
     pub line_budget_us: f64,
     pub plugin_budget_us: f64,
     pub within_budget: bool,
@@ -64,7 +71,7 @@ pub struct Report {
 
 pub fn run(source: &[String]) -> Report {
     let count = source.len().max(MIN_LINES);
-    let plugins = synthetic_plugins();
+    let plugins = synthetic_plugins(PLUGINS);
     let patterns = PLUGINS * (EVENT_RULES + COLOR_RULES + PROMPT_HINTS);
 
     let mut host = PluginHost::new(plugins.clone()).expect("the synthetic plugins compile");
@@ -84,6 +91,8 @@ pub fn run(source: &[String]) -> Report {
         .into_iter()
         .map(|cost| (cost.plugin.to_string(), cost.per_line.map_or(0.0, |summary| summary.p99_us)))
         .collect();
+    drop(sampled);
+    let host_heap = [PLUGINS, MANY_PLUGINS].map(|plugins| host_heap(plugins, &lines)).into();
 
     let one_more_plugin_p99_us = all.p99_us - without_one.p99_us;
     let within_budget = whole_line.p99_us <= LINE_BUDGET_US
@@ -99,6 +108,7 @@ pub fn run(source: &[String]) -> Report {
         host_without_one: without_one,
         one_more_plugin_p99_us,
         alone_p99_us,
+        host_heap,
         line_budget_us: LINE_BUDGET_US,
         plugin_budget_us: PLUGIN_BUDGET_US,
         within_budget,
@@ -120,6 +130,38 @@ pub fn print(report: &Report) {
         "  one more plugin: +{:.2} µs p99; each alone p99 (µs): {alone}; budget ≤ {} µs: {verdict}",
         report.one_more_plugin_p99_us, report.plugin_budget_us
     );
+    for heap in &report.host_heap {
+        println!(
+            "  host heap, {} plugins: loaded {:.1} MB, built {:.1} MB, after the replay {:.1} MB",
+            heap.plugins, heap.loaded_mb, heap.built_mb, heap.after_replay_mb
+        );
+    }
+}
+
+/// The heap a host of `plugins` synthetic plugins holds, by stage: the
+/// loaded plugins (each pattern compiled for its captures), the host's sets
+/// built, and every line read, so the matcher caches have grown as far as
+/// these lines take them.
+fn host_heap(plugins: usize, lines: &[Line]) -> HostHeap {
+    let before = HEAP_BYTES.load(Ordering::Relaxed);
+    let held = || HEAP_BYTES.load(Ordering::Relaxed).saturating_sub(before) as f64 / (1024.0 * 1024.0);
+    let loaded = synthetic_plugins(plugins);
+    let loaded_mb = held();
+    let mut host = PluginHost::new(loaded).expect("compiles");
+    let built_mb = held();
+    let mut sink = Counter::default();
+    for line in lines {
+        std::hint::black_box(host.read_line(line, &mut sink));
+    }
+    HostHeap { plugins, loaded_mb, built_mb, after_replay_mb: held() }
+}
+
+#[derive(Serialize)]
+pub struct HostHeap {
+    pub plugins: usize,
+    pub loaded_mb: f64,
+    pub built_mb: f64,
+    pub after_replay_mb: f64,
 }
 
 /// Bytes in, through the pipeline and every plugin, timed per server line.
@@ -180,13 +222,14 @@ impl PluginSink for Counter {
     }
 }
 
-/// Six plugins, one per layer and four games, each with its own words.
-fn synthetic_plugins() -> Vec<Plugin> {
-    (0..PLUGINS)
+/// `count` plugins, each with its own words: defaults, games, then an
+/// override.
+fn synthetic_plugins(count: usize) -> Vec<Plugin> {
+    (0..count)
         .map(|index| {
             let (id, layer) = match index {
                 0 => ("bench-defaults".to_owned(), "default"),
-                5 => ("bench-override".to_owned(), "override"),
+                last if last == count - 1 => ("bench-override".to_owned(), "override"),
                 game => (format!("bench-game-{game}"), "game"),
             };
             let servers = if layer == "default" { "" } else { "[servers]\nhosts = [\"bench.example\"]\n" };

@@ -17,7 +17,7 @@
 //! only then.
 
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
-use super::matcher::Matcher;
+use super::matcher::{DfaCache, Matcher};
 use super::points::{HookName, Pager, Point, Points, RoomIdentity};
 use crate::ansi::{Span, Style};
 use crate::line::{Encoding, Line, Pending};
@@ -109,7 +109,8 @@ pub struct PluginHost {
     generation: u64,
     cost_sampling: u64,
     lines_read: u64,
-    last_pending: Option<((u64, usize), Option<PendingKind>)>,
+    /// The pending text last read, and what it was.
+    last_pending: Option<(Box<str>, Option<PendingKind>)>,
     matched: Vec<usize>,
 }
 
@@ -272,18 +273,18 @@ impl PluginHost {
 
     /// Says whether the text the server hasn't ended is the pager's prompt
     /// or a prompt. The pager wins when both match. Asking again about the
-    /// same pending text, unchanged, doesn't match again.
+    /// same text doesn't match again: the answer depends on the text alone,
+    /// so it holds across pipelines, as after a reconnect.
     pub fn read_pending(&mut self, pending: &Pending<'_>) -> Option<PendingKind> {
-        let seen = (pending.number, pending.raw.len());
         if let Some((last, kind)) = &self.last_pending
-            && *last == seen
+            && **last == *pending.plain
         {
             return kind.clone();
         }
         let compiled = &self.compiled;
         compiled.pending.matching(pending.plain, &mut self.matched);
         let kind = self.matched.first().map(|&id| compiled.pending_kinds[id].clone());
-        self.last_pending = Some((seen, kind.clone()));
+        self.last_pending = Some((pending.plain.into(), kind.clone()));
         kind
     }
 
@@ -325,7 +326,7 @@ impl PluginHost {
 }
 
 fn duplicate(id: &PluginId) -> PluginError {
-    PluginError { file: id.to_string(), problem: Problem::DuplicateId(id.clone()) }
+    PluginError { source: id.to_string(), problem: Problem::DuplicateId(id.clone()) }
 }
 
 /// Everything derived from the set of enabled plugins.
@@ -371,7 +372,7 @@ impl Compiled {
                 regexes.push(regex);
                 rules.push(LineRule { plugin: plugin.id().clone(), action });
             }
-            alone.push(matcher(regexes[first..].to_vec())?);
+            alone.push(matcher(regexes[first..].to_vec(), DfaCache::Default)?);
         }
 
         let mut pending_regexes = Vec::new();
@@ -389,8 +390,8 @@ impl Compiled {
 
         Ok(Compiled {
             order,
-            lines: LineRules { matcher: matcher(regexes)?, rules },
-            pending: matcher(pending_regexes)?,
+            lines: LineRules { matcher: matcher(regexes, DfaCache::Large)?, rules },
+            pending: matcher(pending_regexes, DfaCache::Default)?,
             pending_kinds,
             alone,
             settings,
@@ -398,8 +399,8 @@ impl Compiled {
     }
 }
 
-fn matcher(regexes: Vec<regex::Regex>) -> Result<Matcher, PluginError> {
-    Matcher::new(regexes).map_err(|message| PluginError { file: "plugin host".into(), problem: Problem::Matcher(message) })
+fn matcher(regexes: Vec<regex::Regex>, cache: DfaCache) -> Result<Matcher, PluginError> {
+    Matcher::new(regexes, cache).map_err(|message| PluginError { source: "plugin host".into(), problem: Problem::Matcher(message) })
 }
 
 /// A plugin's Text patterns, then its color rules.

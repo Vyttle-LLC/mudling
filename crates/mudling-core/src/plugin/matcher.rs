@@ -15,11 +15,20 @@ use regex_syntax::hir::{Hir, HirKind};
 
 /// Room for hundreds of patterns, Unicode classes included, in one set.
 const SET_SIZE_LIMIT: usize = 64 << 20;
-/// The lazy DFA's cache. At the default (2 MiB) a set of 300 patterns keeps
-/// clearing it and falls back to the slow engine: 190 µs p99 per line on
-/// the replay benchmark, against 4 µs with this much room. It grows only as
+/// The [`DfaCache::Large`] limit.
+const LARGE_DFA_CACHE: usize = 16 << 20;
+
+/// How much the lazy DFA of each set may cache. The cache grows only as
 /// lines need it.
-const DFA_CACHE_LIMIT: usize = 16 << 20;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DfaCache {
+    /// The `regex` crate's default (2 MiB), for matchers off the hot path.
+    Default,
+    /// For the merged matcher every line runs. At the default, a set of 300
+    /// patterns keeps clearing its cache and falls back to the slow engine:
+    /// 190 µs p99 per line on the replay benchmark, against 4 µs with 16 MiB.
+    Large,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Matcher {
@@ -37,12 +46,13 @@ struct Group {
 }
 
 impl Group {
-    fn new(regexes: &[Regex], ids: Vec<usize>) -> Result<Group, String> {
-        let set = RegexSetBuilder::new(ids.iter().map(|&id| regexes[id].as_str()))
-            .size_limit(SET_SIZE_LIMIT)
-            .dfa_size_limit(DFA_CACHE_LIMIT)
-            .build()
-            .map_err(|error| error.to_string())?;
+    fn new(regexes: &[Regex], ids: Vec<usize>, cache: DfaCache) -> Result<Group, String> {
+        let mut builder = RegexSetBuilder::new(ids.iter().map(|&id| regexes[id].as_str()));
+        builder.size_limit(SET_SIZE_LIMIT);
+        if cache == DfaCache::Large {
+            builder.dfa_size_limit(LARGE_DFA_CACHE);
+        }
+        let set = builder.build().map_err(|error| error.to_string())?;
         Ok(Group { set, ids })
     }
 
@@ -57,7 +67,7 @@ impl Group {
 impl Matcher {
     /// Builds one matcher over `regexes`; their indexes are the ids
     /// [`Matcher::matching`] reports.
-    pub(crate) fn new(regexes: Vec<Regex>) -> Result<Matcher, String> {
+    pub(crate) fn new(regexes: Vec<Regex>, cache: DfaCache) -> Result<Matcher, String> {
         let mut literals: Vec<Vec<u8>> = Vec::new();
         let (mut filtered, mut unfiltered) = (Vec::new(), Vec::new());
         for (id, regex) in regexes.iter().enumerate() {
@@ -77,8 +87,8 @@ impl Matcher {
             Some(AhoCorasick::new(&literals).map_err(|error| error.to_string())?)
         };
         Ok(Matcher {
-            filtered: Group::new(&regexes, filtered)?,
-            unfiltered: Group::new(&regexes, unfiltered)?,
+            filtered: Group::new(&regexes, filtered, cache)?,
+            unfiltered: Group::new(&regexes, unfiltered, cache)?,
             prefilter,
             regexes,
         })
@@ -147,7 +157,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn matcher(patterns: &[&str]) -> Matcher {
-        Matcher::new(patterns.iter().map(|p| Regex::new(p).unwrap()).collect()).unwrap()
+        Matcher::new(patterns.iter().map(|p| Regex::new(p).unwrap()).collect(), DfaCache::Default).unwrap()
     }
 
     fn matching(matcher: &Matcher, text: &str) -> Vec<usize> {
