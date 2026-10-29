@@ -109,7 +109,11 @@ impl Matcher {
                     used.patterns.push(*id);
                 }
             }
-            chunks.push(Group::new(sources, patterns.iter().map(|(id, _)| *id).collect(), cache)?);
+            chunks.push(Group::new(
+                sources,
+                patterns.iter().map(|(id, _)| *id).collect(),
+                cache,
+            )?);
         }
         let prefilter = if literals.is_empty() {
             None
@@ -192,7 +196,12 @@ fn required_literals(pattern: &str) -> Option<Vec<Vec<u8>>> {
     let mut best: Option<(usize, Seq)> = None;
     consider(&hir, &mut best);
     let (_, seq) = best?;
-    Some(seq.literals()?.iter().map(|literal| literal.as_bytes().to_vec()).collect())
+    Some(
+        seq.literals()?
+            .iter()
+            .map(|literal| literal.as_bytes().to_vec())
+            .collect(),
+    )
 }
 
 fn consider(hir: &Hir, best: &mut Option<(usize, Seq)>) {
@@ -227,15 +236,28 @@ mod tests {
     }
 
     fn literals(pattern: &str) -> Option<Vec<String>> {
-        required_literals(pattern)
-            .map(|found| found.into_iter().map(|l| String::from_utf8(l).unwrap()).collect())
+        required_literals(pattern).map(|found| {
+            found
+                .into_iter()
+                .map(|l| String::from_utf8(l).unwrap())
+                .collect()
+        })
     }
 
     #[test]
     fn the_longest_required_literal_is_chosen() {
-        assert_eq!(literals(r"^(?<who>\w+) tells you '(?<what>.*)'$"), Some(vec![" tells you '".into()]));
-        assert_eq!(literals(r"^You (hit|miss) (?<target>.+)\.$").unwrap().len(), 2);
-        assert_eq!(literals(r"(?:north|south)+ gatehouse"), Some(vec![" gatehouse".into()]));
+        assert_eq!(
+            literals(r"^(?<who>\w+) tells you '(?<what>.*)'$"),
+            Some(vec![" tells you '".into()])
+        );
+        assert_eq!(
+            literals(r"^You (hit|miss) (?<target>.+)\.$").unwrap().len(),
+            2
+        );
+        assert_eq!(
+            literals(r"(?:north|south)+ gatehouse"),
+            Some(vec![" gatehouse".into()])
+        );
     }
 
     #[test]
@@ -257,7 +279,9 @@ mod tests {
 
     #[test]
     fn patterns_in_different_chunks_match_in_order() {
-        let words: Vec<String> = (0..CHUNK_PATTERNS * 3).map(|n| format!("word{n:04}")).collect();
+        let words: Vec<String> = (0..CHUNK_PATTERNS * 3)
+            .map(|n| format!("word{n:04}"))
+            .collect();
         let mut patterns: Vec<&str> = words.iter().map(String::as_str).collect();
         patterns.push(r"^\d");
         let m = matcher(&patterns);
@@ -303,6 +327,9 @@ mod tests {
         time(1_000);
         let (short, long) = (time(10_000), time(100_000));
         // Ten times the text may cost about ten times the time, never 2^n.
-        assert!(long < short * 40 + Duration::from_millis(5), "{short:?} → {long:?}");
+        assert!(
+            long < short * 40 + Duration::from_millis(5),
+            "{short:?} → {long:?}"
+        );
     }
 }

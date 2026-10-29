@@ -35,11 +35,12 @@ const PROMPT_HINTS: usize = 1;
 
 /// Generic MUD wording; no game's.
 const WORDS: [&str; 60] = [
-    "hit", "slash", "pierce", "crush", "bite", "claw", "kick", "punch", "bash", "smite", "cast", "chant", "flee",
-    "arrive", "leave", "enter", "drop", "get", "give", "wear", "wield", "remove", "open", "close", "lock", "unlock",
-    "eat", "drink", "sleep", "rest", "stand", "sit", "say", "shout", "yell", "tell", "whisper", "sell", "buy", "kill",
-    "die", "bleed", "heal", "glow", "hum", "shimmer", "gold", "sword", "shield", "door", "gate", "north", "south",
-    "east", "west", "potion", "scroll", "armor", "guard", "dragon",
+    "hit", "slash", "pierce", "crush", "bite", "claw", "kick", "punch", "bash", "smite", "cast",
+    "chant", "flee", "arrive", "leave", "enter", "drop", "get", "give", "wear", "wield", "remove",
+    "open", "close", "lock", "unlock", "eat", "drink", "sleep", "rest", "stand", "sit", "say",
+    "shout", "yell", "tell", "whisper", "sell", "buy", "kill", "die", "bleed", "heal", "glow",
+    "hum", "shimmer", "gold", "sword", "shield", "door", "gate", "north", "south", "east", "west",
+    "potion", "scroll", "armor", "guard", "dragon",
 ];
 
 const EVENT_TEMPLATES: [&str; 8] = [
@@ -86,12 +87,28 @@ pub fn run(source: &[String]) -> Report {
     let whole_line = time_whole_lines(source, count, &mut host, &mut sink);
 
     let lines = split(source, count);
-    let all_lines = time_host(&mut PluginHost::new(plugins.clone()).expect("compiles"), &lines);
-    let without: Vec<Plugin> = plugins.iter().filter(|plugin| plugin.id().as_str() != "bench-game-4").cloned().collect();
-    let without_one = summary(&time_host(&mut PluginHost::new(without).expect("compiles"), &lines));
+    let all_lines = time_host(
+        &mut PluginHost::new(plugins.clone()).expect("compiles"),
+        &lines,
+    );
+    let without: Vec<Plugin> = plugins
+        .iter()
+        .filter(|plugin| plugin.id().as_str() != "bench-game-4")
+        .cloned()
+        .collect();
+    let without_one = summary(&time_host(
+        &mut PluginHost::new(without).expect("compiles"),
+        &lines,
+    ));
     // The host samples the 256th line it reads, the 512th, and so on.
     let every = DEFAULT_COST_SAMPLING as usize;
-    let sampled: Vec<Duration> = all_lines.iter().skip(every - 1).step_by(every).copied().collect();    let all = summary(&all_lines);
+    let sampled: Vec<Duration> = all_lines
+        .iter()
+        .skip(every - 1)
+        .step_by(every)
+        .copied()
+        .collect();
+    let all = summary(&all_lines);
 
     let mut sampling = PluginHost::new(plugins).expect("compiles");
     sampling.set_cost_sampling(1);
@@ -99,7 +116,12 @@ pub fn run(source: &[String]) -> Report {
     let sampled_p99_us: Vec<(String, f64)> = sampling
         .costs()
         .into_iter()
-        .map(|cost| (cost.plugin.to_string(), cost.per_line.map_or(0.0, |summary| summary.p99_us)))
+        .map(|cost| {
+            (
+                cost.plugin.to_string(),
+                cost.per_line.map_or(0.0, |summary| summary.p99_us),
+            )
+        })
         .collect();
     drop(sampling);
     let host_heap = vec![
@@ -109,7 +131,8 @@ pub fn run(source: &[String]) -> Report {
     ];
 
     let one_more_plugin_p99_us = all.p99_us - without_one.p99_us;
-    let within_budget = whole_line.p99_us <= LINE_BUDGET_US && one_more_plugin_p99_us <= PLUGIN_BUDGET_US;
+    let within_budget =
+        whole_line.p99_us <= LINE_BUDGET_US && one_more_plugin_p99_us <= PLUGIN_BUDGET_US;
     Report {
         lines: count,
         plugins: PLUGINS,
@@ -130,7 +153,12 @@ pub fn run(source: &[String]) -> Report {
 
 pub fn print(report: &Report) {
     let verdict = |ok: bool| if ok { "ok" } else { "MISSED" };
-    let summary = |s: &Summary| format!("p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs", s.p50_us, s.p99_us, s.max_us);
+    let summary = |s: &Summary| {
+        format!(
+            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
+            s.p50_us, s.p99_us, s.max_us
+        )
+    };
     println!(
         "plugin host, {} plugins / {} patterns, {} events over {} lines:",
         report.plugins, report.patterns, report.events, report.lines
@@ -142,16 +170,29 @@ pub fn print(report: &Report) {
         verdict(report.whole_line.p99_us <= report.line_budget_us)
     );
     println!("  host, all plugins: {}", summary(&report.host_all));
-    println!("  host, one plugin off: {}", summary(&report.host_without_one));
+    println!(
+        "  host, one plugin off: {}",
+        summary(&report.host_without_one)
+    );
     println!(
         "  one more plugin: +{:.2} µs p99; budget ≤ {} µs: {}",
         report.one_more_plugin_p99_us,
         report.plugin_budget_us,
         verdict(report.one_more_plugin_p99_us <= report.plugin_budget_us)
     );
-    let sampled = report.sampled_p99_us.iter().map(|(id, p99)| format!("{id} {p99:.2}")).collect::<Vec<_>>();
-    println!("  each plugin as sampled, p99 (µs, an upper bound; not gated): {}", sampled.join(", "));
-    println!("  host on the lines that also sample (every {DEFAULT_COST_SAMPLING}th): {}", summary(&report.sampled_lines));
+    let sampled = report
+        .sampled_p99_us
+        .iter()
+        .map(|(id, p99)| format!("{id} {p99:.2}"))
+        .collect::<Vec<_>>();
+    println!(
+        "  each plugin as sampled, p99 (µs, an upper bound; not gated): {}",
+        sampled.join(", ")
+    );
+    println!(
+        "  host on the lines that also sample (every {DEFAULT_COST_SAMPLING}th): {}",
+        summary(&report.sampled_lines)
+    );
     for heap in &report.host_heap {
         println!(
             "  host heap, {} ({} plugins / {} patterns): loaded {:.1} MB, built {:.1} MB, after the replay {:.1} MB; \
@@ -174,7 +215,8 @@ pub fn print(report: &Report) {
 fn host_heap(set: &str, load: impl FnOnce() -> Vec<Plugin>, lines: &[Line]) -> HostHeap {
     let mut samples = Vec::with_capacity(lines.len());
     let before = HEAP_BYTES.load(Ordering::Relaxed);
-    let held = || HEAP_BYTES.load(Ordering::Relaxed).saturating_sub(before) as f64 / (1024.0 * 1024.0);
+    let held =
+        || HEAP_BYTES.load(Ordering::Relaxed).saturating_sub(before) as f64 / (1024.0 * 1024.0);
     let loaded = load();
     let loaded_mb = held();
     let plugins = loaded.len();
@@ -189,12 +231,29 @@ fn host_heap(set: &str, load: impl FnOnce() -> Vec<Plugin>, lines: &[Line]) -> H
     }
     let after_replay_mb = held();
     let per_line = summary(&samples);
-    HostHeap { set: set.to_owned(), plugins, patterns, loaded_mb, built_mb, after_replay_mb, per_line }
+    HostHeap {
+        set: set.to_owned(),
+        plugins,
+        patterns,
+        loaded_mb,
+        built_mb,
+        after_replay_mb,
+        per_line,
+    }
 }
 
 fn pattern_count(plugins: &[Plugin]) -> usize {
-    let count = |text: &Text| text.patterns.len() + text.colors.len() + text.prompts.len() + usize::from(text.pager.is_some());
-    plugins.iter().filter_map(|plugin| plugin.points.text.as_ref()).map(count).sum()
+    let count = |text: &Text| {
+        text.patterns.len()
+            + text.colors.len()
+            + text.prompts.len()
+            + usize::from(text.pager.is_some())
+    };
+    plugins
+        .iter()
+        .filter_map(|plugin| plugin.points.text.as_ref())
+        .map(count)
+        .sum()
 }
 
 fn summary(samples: &[Duration]) -> Summary {
@@ -214,7 +273,12 @@ struct HostHeap {
 }
 
 /// Bytes in, through the pipeline and every plugin, timed per server line.
-fn time_whole_lines(source: &[String], count: usize, host: &mut PluginHost, sink: &mut Counter) -> Summary {
+fn time_whole_lines(
+    source: &[String],
+    count: usize,
+    host: &mut PluginHost,
+    sink: &mut Counter,
+) -> Summary {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(1);
     let mut bytes = Vec::new();
@@ -307,14 +371,24 @@ fn layer(index: usize, count: usize) -> &'static str {
 /// A plugin with its own words, from `index`, and [`PROMPT_HINTS`] prompt
 /// hints.
 fn synthetic_plugin(index: usize, id: &str, layer: &str, events: usize, colors: usize) -> Plugin {
-    let servers = if layer == "default" { "" } else { "[servers]\nhosts = [\"bench.example\"]\n" };
+    let servers = if layer == "default" {
+        ""
+    } else {
+        "[servers]\nhosts = [\"bench.example\"]\n"
+    };
     let manifest = format!(
         "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\nlicense = \"MIT\"\nlayer = \"{layer}\"\n\
          {servers}[points]\ntext = \"text.toml\"\n"
     );
     let text = text_toml(index, events, colors);
-    Plugin::from_files(|file| Ok(if file == "text.toml" { text.clone() } else { manifest.clone() }))
-        .unwrap_or_else(|error| panic!("{error}"))
+    Plugin::from_files(|file| {
+        Ok(if file == "text.toml" {
+            text.clone()
+        } else {
+            manifest.clone()
+        })
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn text_toml(plugin: usize, events: usize, colors: usize) -> String {
@@ -322,14 +396,27 @@ fn text_toml(plugin: usize, events: usize, colors: usize) -> String {
     let mut text = String::new();
     for rule in 0..events {
         let pattern = EVENT_TEMPLATES[rule % EVENT_TEMPLATES.len()].replace("{w}", word(rule));
-        writeln!(text, "[[pattern]]\nname = \"rule-{rule}\"\npattern = '''{pattern}'''\n").unwrap();
+        writeln!(
+            text,
+            "[[pattern]]\nname = \"rule-{rule}\"\npattern = '''{pattern}'''\n"
+        )
+        .unwrap();
     }
     for rule in 0..colors {
         let fg = rule % 16;
-        writeln!(text, "[[color]]\npattern = '''\\b{}\\b'''\nfg = {fg}\n", word(events + rule)).unwrap();
+        writeln!(
+            text,
+            "[[color]]\npattern = '''\\b{}\\b'''\nfg = {fg}\n",
+            word(events + rule)
+        )
+        .unwrap();
     }
     for hint in 0..PROMPT_HINTS {
-        writeln!(text, "[[prompt]]\npattern = '''^<(?<hp>\\d+)hp {plugin}.{hint}> $'''\n").unwrap();
+        writeln!(
+            text,
+            "[[prompt]]\npattern = '''^<(?<hp>\\d+)hp {plugin}.{hint}> $'''\n"
+        )
+        .unwrap();
     }
     text
 }
