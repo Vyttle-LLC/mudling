@@ -3,6 +3,7 @@
 # flees are text, read in text.toml.
 room_identity = "description"
 
-# "Lost in the Dark Woods": rooms that look the same and whose paths don't
-# add up, in the area of this name.
+# The maze is only the "Lost in the Dark Woods" rooms, which look the same
+# and whose paths don't add up. The Map point takes area names only, so the
+# whole area they're in is declared; the rest of it holds still.
 mazes = ["Brothers Grimm"]

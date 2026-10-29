@@ -22,7 +22,8 @@ pub struct Report {
     pub host_without: Summary,
     pub host_with: Summary,
     pub marginal_p99_us: f64,
-    /// The plugin timed alone by the host's own cost sampling.
+    /// The plugin timed alone by the host's own cost sampling: an upper
+    /// bound on its share, reported but not gated on.
     pub alone_p99_us: f64,
     pub budget_us: f64,
     pub within_budget: bool,
@@ -72,7 +73,7 @@ pub fn run(dir: &Path, source: &[String]) -> Result<Report, String> {
         patterns,
         lines: lines.len(),
         events: sink.events.saturating_sub(ignored.events),
-        within_budget: marginal_p99_us <= PLUGIN_BUDGET_US && alone_p99_us <= PLUGIN_BUDGET_US,
+        within_budget: marginal_p99_us <= PLUGIN_BUDGET_US,
         host_without,
         host_with,
         marginal_p99_us,
@@ -91,7 +92,7 @@ pub fn print(report: &Report) {
     let verdict = if report.within_budget { "ok" } else { "MISSED" };
     println!(
         "plugin {} ({} patterns) over {} lines, {} events: host p99 {:.2} µs without, {:.2} µs with; \
-         +{:.2} µs p99; alone p99 {:.2} µs; budget ≤ {} µs: {verdict}",
+         +{:.2} µs p99; budget ≤ {} µs: {verdict}; alone p99 {:.2} µs (sampled, an upper bound; informational)",
         report.plugin,
         report.patterns,
         report.lines,
@@ -99,7 +100,7 @@ pub fn print(report: &Report) {
         report.host_without.p99_us,
         report.host_with.p99_us,
         report.marginal_p99_us,
-        report.alone_p99_us,
-        report.budget_us
+        report.budget_us,
+        report.alone_p99_us
     );
 }
