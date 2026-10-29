@@ -133,9 +133,13 @@ impl AnsiParser {
     }
 
     fn apply_sgr(&mut self, params: &str) {
-        let mut codes = params
-            .split([';', ':'])
-            .map(|p| if p.is_empty() { Some(0) } else { p.parse::<u16>().ok() });
+        let mut codes = params.split([';', ':']).map(|p| {
+            if p.is_empty() {
+                Some(0)
+            } else {
+                p.parse::<u16>().ok()
+            }
+        });
         while let Some(code) = codes.next() {
             match code {
                 Some(0) => self.style = Style::default(),
@@ -200,11 +204,19 @@ mod tests {
         assert_eq!(
             &*line.spans,
             &[
-                Span { start: 0, end: 3, style: fg(1) },
+                Span {
+                    start: 0,
+                    end: 3,
+                    style: fg(1)
+                },
                 Span {
                     start: 4,
                     end: 9,
-                    style: Style { fg: Some(Color(10)), bg: None, bold: true },
+                    style: Style {
+                        fg: Some(Color(10)),
+                        bg: None,
+                        bold: true
+                    },
                 },
             ]
         );
@@ -215,7 +227,11 @@ mod tests {
         let line = parse("\x1b[38;5;208;48;5;17mx");
         assert_eq!(
             line.spans[0].style,
-            Style { fg: Some(Color(208)), bg: Some(Color(17)), bold: false }
+            Style {
+                fg: Some(Color(208)),
+                bg: Some(Color(17)),
+                bold: false
+            }
         );
     }
 
@@ -232,7 +248,14 @@ mod tests {
         let mut parser = AnsiParser::default();
         parser.parse_line("\x1b[33mstart");
         let next = parser.parse_line("continued");
-        assert_eq!(&*next.spans, &[Span { start: 0, end: 9, style: fg(3) }]);
+        assert_eq!(
+            &*next.spans,
+            &[Span {
+                start: 0,
+                end: 9,
+                style: fg(3)
+            }]
+        );
     }
 
     #[test]
@@ -244,6 +267,13 @@ mod tests {
     #[test]
     fn adjacent_runs_of_one_style_merge() {
         let line = parse("\x1b[31ma\x1b[31mb");
-        assert_eq!(&*line.spans, &[Span { start: 0, end: 2, style: fg(1) }]);
+        assert_eq!(
+            &*line.spans,
+            &[Span {
+                start: 0,
+                end: 2,
+                style: fg(1)
+            }]
+        );
     }
 }

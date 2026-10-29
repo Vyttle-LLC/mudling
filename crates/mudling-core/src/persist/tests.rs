@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 const T1: Timestamp = Timestamp(1_790_000_000_000);
 const T2: Timestamp = Timestamp(1_790_000_060_000);
-const MEADOW: &str = "{ 1 10} Builder  The Meadow";
+const MEADOW: &str = "The Meadow";
 
 fn open() -> (TempDir, Database) {
     let folder = TempDir::new().unwrap();

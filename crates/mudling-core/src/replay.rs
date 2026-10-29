@@ -14,7 +14,13 @@ use std::io;
 use std::path::Path;
 
 /// Notes written by the prototype, not by the server.
-const NOTE_PREFIXES: [&str; 5] = ["[GMCP] ", "[telnet] ", "[auto-login] ", "[disconnected] ", "[MAP] "];
+const NOTE_PREFIXES: [&str; 5] = [
+    "[GMCP] ",
+    "[telnet] ",
+    "[auto-login] ",
+    "[disconnected] ",
+    "[MAP] ",
+];
 const CONNECTED_NOTE: &str = "[connected]";
 
 /// The server text of one session log, one entry per line.
@@ -84,7 +90,14 @@ pub fn synthetic_lines(count: usize) -> Vec<String> {
         "torch", "glade", "path", "leads", "quiet", "stone", "river", "guard", "says", "hello",
         "attack", "misses", "hits",
     ];
-    const COLORS: [&str; 6] = ["\x1b[31m", "\x1b[1;32m", "\x1b[33m", "\x1b[36m", "\x1b[38;5;208m", "\x1b[0m"];
+    const COLORS: [&str; 6] = [
+        "\x1b[31m",
+        "\x1b[1;32m",
+        "\x1b[33m",
+        "\x1b[36m",
+        "\x1b[38;5;208m",
+        "\x1b[0m",
+    ];
     // xorshift64: a fixed seed keeps every run identical.
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut next = move |bound: usize| {
