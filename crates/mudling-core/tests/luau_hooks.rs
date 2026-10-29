@@ -4,7 +4,7 @@
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
     DisabledReason, HookFailed, HookLimits, HookOutput, HookRunner, LuauHooks, PluginDisabled, SendCommand,
-    StateView, StoreWrite, Value,
+    StartError, StateView, StoreWrite, Value,
 };
 use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginId};
 use std::collections::HashMap;
@@ -236,6 +236,28 @@ fn a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
     assert!(started.elapsed() < Duration::from_millis(200), "took {:?}", started.elapsed());
 }
 
+/// A state whose every read sleeps, as a blocked or preempted thread would.
+struct Slow;
+
+impl StateView for Slow {
+    fn get(&self, _key: &str) -> Option<Value> {
+        thread::sleep(Duration::from_millis(20));
+        Some(Value::Bool(true))
+    }
+}
+
+#[test]
+fn time_a_hook_spends_off_the_cpu_isnt_charged() {
+    let plugin = hooked(
+        &["read_state", "write_store:s"],
+        "function on_go(event) for i = 1, 3 do mud.state('k') end mud.store('s', 'done', true) end",
+    );
+    let started = Instant::now();
+    let outputs = run(&plugin, &mut runner_with(&plugin, HookLimits::default(), Arc::new(Slow)), &["go"]);
+    assert!(started.elapsed() >= 30 * HookLimits::default().time, "the hook took {:?}", started.elapsed());
+    assert_eq!(writes(&outputs), [("s".to_owned(), "done".to_owned(), Value::Bool(true))], "{outputs:?}");
+}
+
 #[test]
 fn a_pcall_cant_catch_the_budget() {
     let plugin = hooked(
@@ -410,9 +432,96 @@ fn hooks_run_off_the_calling_thread() {
 #[test]
 fn a_plugin_whose_hooks_dont_load_fails_to_start() {
     let plugin = hooked(&[], "while true do end");
-    let error = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()).err().unwrap();
+    let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
+        panic!("the plugin loaded");
+    };
     assert_eq!(error.file, "hooks.luau");
     assert!(error.to_string().contains("time box"), "{error}");
+}
+
+#[test]
+fn every_hook_a_pattern_names_must_be_defined() {
+    let plugin = hooked(&[], "function on_other(event) end");
+    let error = HookRunner::new(HookLimits::default(), no_state()).add(&plugin).unwrap_err();
+    assert_eq!(error.file, "plugin.toml");
+    assert!(error.to_string().contains("`hook = \"on_go\"` names a function the hook files (hooks.luau) don't define"), "{error}");
+
+    let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
+        panic!("the plugin loaded");
+    };
+    assert!(error.to_string().contains("on_go"), "{error}");
+}
+
+#[test]
+fn a_plugin_naming_hooks_without_hook_files_is_rejected() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/testland");
+    let plugin = Plugin::load(&dir).unwrap();
+    let error = HookRunner::new(HookLimits::default(), no_state()).add(&plugin).unwrap_err();
+    assert!(error.to_string().contains("names a function"), "{error}");
+}
+
+/// A state whose reads block until the test lets them go, and say when
+/// one has begun.
+struct Gate {
+    entered: Mutex<mpsc::Sender<()>>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl StateView for Gate {
+    fn get(&self, _key: &str) -> Option<Value> {
+        let _ = self.entered.lock().unwrap().send(());
+        let _ = self.release.lock().unwrap().recv();
+        None
+    }
+}
+
+#[test]
+fn a_full_queue_drops_new_events_without_waiting_and_counts_them() {
+    let plugin = hooked(&["read_state", "write_store:s"], "function on_go(event) mud.state('k') mud.store('s', 'ran', true) end");
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let gate = Arc::new(Gate { entered: Mutex::new(entered_tx), release: Mutex::new(release_rx) });
+    let (outputs, received) = mpsc::channel();
+    let limits = HookLimits { queue: 2, ..HookLimits::default() };
+    let mut hooks = LuauHooks::start([&plugin], limits, gate, outputs).unwrap();
+    let mut host = PluginHost::new([plugin.clone()]).unwrap();
+    let go = lines(&["go"]).remove(0);
+
+    host.read_line(&go, &mut hooks);
+    entered.recv().unwrap();
+    let started = Instant::now();
+    for _ in 0..9 {
+        host.read_line(&go, &mut hooks);
+    }
+    assert!(started.elapsed() < Duration::from_millis(100), "the line thread waited");
+    assert_eq!(hooks.dropped().get(plugin.id()), Some(&7));
+
+    for _ in 0..3 {
+        release.send(()).unwrap();
+    }
+    hooks.flush();
+    assert_eq!(writes(&received.try_iter().collect::<Vec<_>>()).len(), 3);
+}
+
+// ---- The manifest doc's example ----
+
+#[test]
+fn the_manifest_doc_example_loads_as_written() {
+    let source = include_str!("../src/plugin/manifest.rs");
+    let example: String = source
+        .lines()
+        .skip_while(|line| *line != "//! ```toml")
+        .skip(1)
+        .take_while(|line| *line != "//! ```")
+        .map(|line| format!("{}\n", line.trim_start_matches("//!").strip_prefix(' ').unwrap_or("")))
+        .collect();
+    let plugin = Plugin::from_files(|file| match file {
+        "plugin.toml" => Ok(example.clone()),
+        _ => Ok(String::new()),
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{example}"));
+    assert_eq!(plugin.manifest.permissions.len(), 3);
+    assert_eq!(plugin.manifest.hooks.files, ["skills.luau"]);
 }
 
 // ---- A column-splitting hook ----

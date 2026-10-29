@@ -9,6 +9,8 @@
 //! license = "MIT"
 //! layer = "game"          # "default", "game" or "override"
 //! encoding = "latin-1"    # optional: "utf-8" or "latin-1"
+//! # Optional: what Luau hooks may do (see `plugin::luau`).
+//! permissions = ["read_state", "write_store:skills", "send_commands"]
 //!
 //! [servers]               # which servers it's for; not for defaults
 //! hosts = ["mud.testland.example", "*.testland.example"]
@@ -17,10 +19,7 @@
 //! [points]                # each extension point and the file declaring it
 //! text = "text.toml"
 //!
-//! # Optional: Luau hooks, and what they may do (see `plugin::luau`).
-//! permissions = ["read_state", "write_store:skills", "send_commands"]
-//!
-//! [hooks]
+//! [hooks]                 # optional: the Luau files defining hooks
 //! files = ["skills.luau"]
 //! ```
 //!

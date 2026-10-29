@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 aho-corasick = "1.1"
+cpu-time = "1"
 memchr = "2.7"
 mlua = { version = "0.12", features = ["luau", "vendored"] }
 regex = "1.12"

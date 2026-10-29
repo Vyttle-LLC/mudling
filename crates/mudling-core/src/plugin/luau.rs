@@ -1,9 +1,11 @@
-//! Luau hooks: the reading patterns alone can't do, such as a table cut into
-//! columns by width (PRD §11, "How plugins are written" item 2).
+//! Luau hooks: small functions a plugin writes for text that patterns alone
+//! can't read, such as a table cut into columns by width (PRD §11, "How
+//! plugins are written" item 2).
 //!
 //! A plugin lists its Luau files under `[hooks]` and what they may do under
-//! `permissions`. A Text pattern or table reader names a hook; when it
-//! matches, the event goes to that global function, and to nothing else:
+//! `permissions`. A Text pattern or table reader names a hook, which the
+//! files must define; when it matches, the event goes to that global
+//! function, and to nothing else:
 //!
 //! ```lua
 //! function read_row(event)
@@ -31,11 +33,16 @@
 //!
 //! **Time boxes.** Every hook call gets an instruction budget, counted by
 //! Luau's interrupt (about one tick per loop iteration or function call),
-//! and a time limit, checked at each tick, for hooks whose ticks are slow
-//! (big string work, say). A hook past either, or its memory cap, is
-//! stopped; a plugin whose hooks
-//! overrun [`OVERRUNS_TO_TURN_OFF`] times in a session is turned off, with a
-//! [`PluginDisabled`] notice.
+//! and a limit on the CPU time its thread spends, for hooks whose ticks are
+//! slow (big string work, say). CPU time, not wall-clock time, so a hook
+//! isn't charged while its thread is preempted, the app is suspended, or a
+//! [`StateView`] read blocks. A hook past either, or its memory cap, is
+//! stopped; a plugin whose hooks overrun [`OVERRUNS_TO_TURN_OFF`] times in a
+//! session is turned off, with a [`PluginDisabled`] notice.
+//!
+//! **Queue.** The worker takes at most [`HookLimits::queue`] events at a
+//! time. When it's full, a new event is dropped, never waited for, and
+//! counted against its plugin in [`LuauHooks::dropped`].
 //!
 //! **Approval.** A plugin asking for `send_commands` runs no hooks until the
 //! caller approves it.
@@ -45,14 +52,17 @@
 //! worker thread, which owns a runner.
 
 use super::host::{PluginEvent, PluginHost, PluginSink};
-use super::manifest::{Permission, Plugin, PluginError, PluginId, Problem};
-use super::points::HookName;
+use super::manifest::{MANIFEST_FILE, Permission, Plugin, PluginError, PluginId, Problem};
+use super::points::{Character, EventRule, Gear, HookName, Map, Mobs, Points, TableReader, Text};
+use cpu_time::ThreadTime;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::fmt;
+use std::io;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -60,9 +70,12 @@ use std::time::{Duration, Instant};
 /// endless loop in about 100 µs (mudling-bench): 5 µs a line amortized over
 /// the 20 or so lines that don't reach the hook. Real hooks use far fewer.
 pub const DEFAULT_BUDGET: u32 = 4_000;
-/// Wall-clock time a hook call may take: real hooks take a few µs, and this
-/// leaves room for the worker being preempted on a busy machine.
+/// CPU time a hook call may take; real hooks take a few µs. On Windows the
+/// thread's CPU time advances in scheduler ticks (about 15 ms), so a hook may
+/// run that long before it's stopped.
 pub const DEFAULT_TIME_LIMIT: Duration = Duration::from_millis(2);
+/// Events waiting for the worker, at most.
+pub const DEFAULT_QUEUE: usize = 1024;
 pub const DEFAULT_COMMANDS_PER_SECOND: u32 = 5;
 pub const DEFAULT_MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 /// Overruns in one session that turn a plugin off.
@@ -87,12 +100,14 @@ pub(super) fn check_syntax(file: &str, source: &str) -> Result<(), String> {
 pub struct HookLimits {
     /// Interrupt ticks per hook call.
     pub budget: u32,
-    /// Wall-clock time per hook call.
+    /// CPU time per hook call.
     pub time: Duration,
     /// Commands each plugin may send in any one second.
     pub commands_per_second: u32,
     /// Bytes each plugin's VM may hold.
     pub memory: usize,
+    /// Events waiting for [`LuauHooks`]' worker, at most.
+    pub queue: usize,
 }
 
 impl Default for HookLimits {
@@ -102,6 +117,7 @@ impl Default for HookLimits {
             time: DEFAULT_TIME_LIMIT,
             commands_per_second: DEFAULT_COMMANDS_PER_SECOND,
             memory: DEFAULT_MEMORY_LIMIT,
+            queue: DEFAULT_QUEUE,
         }
     }
 }
@@ -210,20 +226,35 @@ struct Vm {
 }
 
 /// The current call's time box, shared with the interrupt.
+///
+/// Reading the thread's CPU time costs a system call, so a tick reads only
+/// the cheap wall clock. A thread can't use more CPU time than wall-clock
+/// time passes, so the CPU time needs reading only once the wall clock
+/// reaches the next point where the limit could have been crossed.
 struct Meter {
     left: Cell<u32>,
-    deadline: Cell<Instant>,
+    limit: Cell<Duration>,
+    cpu_start: Cell<ThreadTime>,
+    next_check: Cell<Instant>,
     overran: Cell<bool>,
 }
 
 impl Meter {
     fn new() -> Meter {
-        Meter { left: Cell::new(0), deadline: Cell::new(Instant::now()), overran: Cell::new(false) }
+        Meter {
+            left: Cell::new(0),
+            limit: Cell::new(Duration::ZERO),
+            cpu_start: Cell::new(ThreadTime::now()),
+            next_check: Cell::new(Instant::now()),
+            overran: Cell::new(false),
+        }
     }
 
     fn start(&self, limits: HookLimits) {
         self.left.set(limits.budget);
-        self.deadline.set(Instant::now() + limits.time);
+        self.limit.set(limits.time);
+        self.cpu_start.set(ThreadTime::now());
+        self.next_check.set(Instant::now() + limits.time);
         self.overran.set(false);
     }
 
@@ -231,12 +262,27 @@ impl Meter {
     /// start, so a `pcall` that catches the error fails at its next tick.
     fn tick(&self) -> mlua::Result<VmState> {
         let left = self.left.get();
-        if self.overran.get() || left == 0 || Instant::now() >= self.deadline.get() {
+        if self.overran.get() || left == 0 || self.past_time_limit() {
             self.overran.set(true);
             return Err(mlua::Error::runtime("the hook ran past its time box"));
         }
         self.left.set(left - 1);
         Ok(VmState::Continue)
+    }
+
+    fn past_time_limit(&self) -> bool {
+        let now = Instant::now();
+        if now < self.next_check.get() {
+            return false;
+        }
+        let used = self.cpu_start.get().elapsed();
+        match self.limit.get().checked_sub(used) {
+            Some(remaining) if !remaining.is_zero() => {
+                self.next_check.set(now + remaining);
+                false
+            }
+            _ => true,
+        }
     }
 }
 
@@ -245,13 +291,22 @@ impl HookRunner {
         HookRunner { limits, state, vms: Vec::new() }
     }
 
-    /// Loads `plugin`'s hook files into a fresh VM, replacing any it had.
-    /// A plugin without hooks needs no VM.
+    /// Loads `plugin`'s hook files into a fresh VM, replacing any it had,
+    /// and checks they define every hook its points name. A plugin without
+    /// hooks needs no VM.
     pub fn add(&mut self, plugin: &Plugin) -> Result<(), PluginError> {
         self.vms.retain(|vm| vm.plugin != *plugin.id());
-        if !plugin.scripts.is_empty() {
-            self.vms.push(Vm::new(plugin, self.limits, self.state.clone())?);
+        let named = named_hooks(&plugin.points);
+        if plugin.scripts.is_empty() && named.is_empty() {
+            return Ok(());
         }
+        let vm = Vm::new(plugin, self.limits, self.state.clone())?;
+        if let Some(missing) = named.into_iter().find(|hook| !vm.defines(hook)) {
+            let files = plugin.manifest.hooks.files.join(", ");
+            let problem = format!("`hook = \"{}\"` names a function the hook files ({files}) don't define", missing.as_str());
+            return Err(PluginError { file: MANIFEST_FILE.into(), problem: Problem::Invalid(problem) });
+        }
+        self.vms.push(vm);
         Ok(())
     }
 
@@ -333,6 +388,10 @@ impl Vm {
         !self.disabled && (self.approved || !self.needs_approval)
     }
 
+    fn defines(&self, hook: &HookName) -> bool {
+        matches!(self.lua.globals().get(hook.as_str()), Ok(mlua::Value::Function(_)))
+    }
+
     /// Calls `hook` on `event` inside its time box. An error says whether
     /// the hook overran, and why it stopped.
     fn call(&self, hook: &HookName, event: &PluginEvent, limits: HookLimits) -> Result<(), (bool, String)> {
@@ -347,6 +406,39 @@ impl Vm {
             (overran, error.to_string())
         })
     }
+}
+
+/// Every hook a plugin's points name. The structs are taken apart field by
+/// field, so a new field that could name a hook fails to compile here.
+fn named_hooks(points: &Points) -> Vec<&HookName> {
+    let Points { connection: _, commands: _, text, hud: _, map, character, gear, mobs, ui: _ } = points;
+    let mut rules: Vec<&EventRule> = Vec::new();
+    let mut readers: Vec<&TableReader> = Vec::new();
+    if let Some(Text { pager: _, prompts: _, patterns, colors: _ }) = text {
+        rules.extend(patterns);
+    }
+    if let Some(Map { room_identity: _, areas: _, exits, failed_move, darkness, flee, mazes: _ }) = map {
+        rules.extend(exits.iter().chain(failed_move).chain(darkness).chain(flee));
+    }
+    if let Some(Character { commands: _, readers: tables, skill_improved }) = character {
+        readers.extend(tables);
+        rules.extend(skill_improved);
+    }
+    if let Some(Gear { identify, examine, equipment, slots: _, wear, remove, put, containers: _ }) = gear {
+        readers.extend(identify.iter().chain(examine).chain(equipment));
+        rules.extend(wear.iter().chain(remove).chain(put));
+    }
+    if let Some(Mobs { aggro, room_title }) = mobs {
+        rules.extend(aggro.iter().chain(room_title));
+    }
+    let mut hooks: Vec<&HookName> = rules
+        .iter()
+        .filter_map(|rule| rule.hook.as_ref())
+        .chain(readers.iter().filter_map(|reader| reader.hook.as_ref()))
+        .collect();
+    hooks.sort_by_key(|hook| hook.as_str());
+    hooks.dedup_by_key(|hook| hook.as_str());
+    hooks
 }
 
 /// A sandboxed VM for one plugin, with the `mud` API its permissions allow.
@@ -494,9 +586,10 @@ impl RateLimit {
 /// event naming a hook to a worker thread, which runs it and sends the
 /// outputs to the [`HookSink`] given at start.
 pub struct LuauHooks {
-    jobs: Option<Sender<Job>>,
+    jobs: Option<SyncSender<Job>>,
     turned_off: Receiver<PluginId>,
     worker: Option<JoinHandle<()>>,
+    dropped: HashMap<PluginId, u64>,
 }
 
 enum Job {
@@ -504,6 +597,26 @@ enum Job {
     Approve(PluginId, bool),
     Flush(SyncSender<()>),
 }
+
+/// Why [`LuauHooks`] couldn't start.
+#[derive(Debug)]
+pub enum StartError {
+    /// A plugin's hooks didn't load.
+    Load(PluginError),
+    /// The worker thread couldn't be spawned.
+    Spawn(io::Error),
+}
+
+impl fmt::Display for StartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StartError::Load(error) => error.fmt(f),
+            StartError::Spawn(error) => write!(f, "couldn't start the Luau hook thread: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StartError {}
 
 impl LuauHooks {
     /// Starts the worker with each of `plugins` that has hooks. Fails, with
@@ -513,9 +626,9 @@ impl LuauHooks {
         limits: HookLimits,
         state: Arc<dyn StateView>,
         sink: impl HookSink + Send + 'static,
-    ) -> Result<LuauHooks, PluginError> {
-        let plugins: Vec<Plugin> = plugins.into_iter().filter(|plugin| !plugin.scripts.is_empty()).cloned().collect();
-        let (jobs, inbox) = mpsc::channel();
+    ) -> Result<LuauHooks, StartError> {
+        let plugins: Vec<Plugin> = plugins.into_iter().cloned().collect();
+        let (jobs, inbox) = mpsc::sync_channel(limits.queue);
         let (turned_off_tx, turned_off) = mpsc::channel();
         let (loaded_tx, loaded) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
@@ -529,16 +642,22 @@ impl LuauHooks {
                     work(runner, inbox, TurnOff { sink, turned_off: turned_off_tx });
                 }
             })
-            .map_err(|error| PluginError { file: "plugin host".into(), problem: Problem::Invalid(error.to_string()) })?;
+            .map_err(StartError::Spawn)?;
         // Dropped on an error, which joins the stopped worker.
-        let hooks = LuauHooks { jobs: Some(jobs), turned_off, worker: Some(worker) };
-        loaded.recv().expect("the hook worker reports whether the plugins loaded")?;
+        let hooks = LuauHooks { jobs: Some(jobs), turned_off, worker: Some(worker), dropped: HashMap::new() };
+        loaded.recv().expect("the hook worker reports whether the plugins loaded").map_err(StartError::Load)?;
         Ok(hooks)
     }
 
-    /// See [`HookRunner::set_approved`].
+    /// See [`HookRunner::set_approved`]. Waits for room if the queue is full.
     pub fn set_approved(&mut self, plugin: &PluginId, approved: bool) {
         self.send(Job::Approve(plugin.clone(), approved));
+    }
+
+    /// Each plugin's events dropped this session because the queue was full,
+    /// for the plugin inspector. Plugins with none aren't listed.
+    pub fn dropped(&self) -> &HashMap<PluginId, u64> {
+        &self.dropped
     }
 
     /// Turns off, in `host`, each plugin the worker turned off for
@@ -575,9 +694,15 @@ impl LuauHooks {
 }
 
 impl PluginSink for LuauHooks {
+    /// Queues an event naming a hook, or drops it if the queue is full: the
+    /// line thread never waits for hooks.
     fn event(&mut self, event: PluginEvent) {
-        if event.hook.is_some() {
-            self.send(Job::Event(event));
+        let Some(jobs) = &self.jobs else { return };
+        if event.hook.is_none() {
+            return;
+        }
+        if let Err(TrySendError::Full(Job::Event(event))) = jobs.try_send(Job::Event(event)) {
+            *self.dropped.entry(event.plugin).or_default() += 1;
         }
     }
 }
