@@ -96,12 +96,13 @@ impl HudFields {
     }
 }
 
-/// The vitals `message` (of `package`) holds, by `fields`. Games send
-/// numbers or numeric strings; anything else is skipped.
+/// The vitals `message` (of `package`, in any case, as GMCP allows) holds,
+/// by `fields`. Games send numbers or numeric strings; anything else is
+/// skipped.
 pub fn values(fields: &FieldMap, package: &str, message: &Map<String, Value>) -> Vec<(Vital, i64)> {
     fields
         .iter()
-        .filter(|(_, field)| field.package == package)
+        .filter(|(_, field)| field.package.eq_ignore_ascii_case(package))
         .filter_map(|(vital, field)| {
             let value = match message.get(&field.key)? {
                 Value::Number(number) => number.as_i64()?,

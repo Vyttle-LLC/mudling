@@ -230,6 +230,8 @@ fn a_plugins_hud_mapping_wins() {
     // Numeric strings count, as games send them.
     let read = values(&fields, "Char.Vitals", &object(r#"{"life": "7", "maxhp": 9}"#));
     assert_eq!(read, [(Vital::Hp, 7), (Vital::MaxHp, 9)]);
+    // GMCP package names ignore case.
+    assert_eq!(values(&fields, "char.vitals", &object(r#"{"life": 7}"#)), [(Vital::Hp, 7)]);
 }
 
 // ---- Chaining and speedwalk ----
