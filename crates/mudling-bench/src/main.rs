@@ -127,7 +127,9 @@ fn main() -> ExitCode {
         }
     }
     if options.check
-        && !(report.append_within_budget && report.find_within_budget && report.line_pipeline.within_budget)
+        && !(report.append_within_budget
+            && report.find_within_budget
+            && report.line_pipeline.within_budget)
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;

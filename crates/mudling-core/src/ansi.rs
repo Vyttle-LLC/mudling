@@ -136,20 +136,28 @@ impl AnsiParser {
                     self.escape = match next {
                         '[' => Escape::Csi,
                         ']' => Escape::Osc,
-                        c if c.is_ascii() && INTERMEDIATE.contains(&(c as u8)) => Escape::Intermediate,
+                        c if c.is_ascii() && INTERMEDIATE.contains(&(c as u8)) => {
+                            Escape::Intermediate
+                        }
                         _ => Escape::None,
                     };
                     &rest[next.len_utf8()..]
                 }
-                Escape::Intermediate => match bytes.iter().position(|b| !INTERMEDIATE.contains(b)) {
-                    Some(at) => {
-                        self.escape = Escape::None;
-                        // A byte that can't end the sequence aborts it and stays text.
-                        let end = if ESCAPE_FINAL.contains(&bytes[at]) { at + 1 } else { at };
-                        &rest[end..]
+                Escape::Intermediate => {
+                    match bytes.iter().position(|b| !INTERMEDIATE.contains(b)) {
+                        Some(at) => {
+                            self.escape = Escape::None;
+                            // A byte that can't end the sequence aborts it and stays text.
+                            let end = if ESCAPE_FINAL.contains(&bytes[at]) {
+                                at + 1
+                            } else {
+                                at
+                            };
+                            &rest[end..]
+                        }
+                        None => "",
                     }
-                    None => "",
-                },
+                }
                 Escape::Csi => {
                     let end = bytes.iter().position(|b| CSI_FINAL.contains(b));
                     let params = &rest[..end.unwrap_or(rest.len())];
@@ -181,7 +189,11 @@ impl AnsiParser {
                 },
                 Escape::Osc => match memchr::memchr2(BEL, ESC, bytes) {
                     Some(end) => {
-                        self.escape = if bytes[end] == BEL { Escape::None } else { Escape::OscEsc };
+                        self.escape = if bytes[end] == BEL {
+                            Escape::None
+                        } else {
+                            Escape::OscEsc
+                        };
                         &rest[end + 1..]
                     }
                     None => "",
@@ -366,7 +378,11 @@ mod tests {
             let (mut text, mut spans) = (String::new(), Vec::new());
             parser.feed(&raw[..split], &mut text, &mut spans);
             parser.feed(&raw[split..], &mut text, &mut spans);
-            assert_eq!((&*text, &*spans), (&*whole.text, &*whole.spans), "split at {split}");
+            assert_eq!(
+                (&*text, &*spans),
+                (&*whole.text, &*whole.spans),
+                "split at {split}"
+            );
         }
     }
 
@@ -386,7 +402,15 @@ mod tests {
             parser.feed(&raw[..split], &mut text, &mut spans);
             parser.feed(&raw[split..], &mut text, &mut spans);
             assert_eq!(text, "red plain end", "split at {split}");
-            assert_eq!(spans, [Span { start: 0, end: 3, style: fg(1) }], "split at {split}");
+            assert_eq!(
+                spans,
+                [Span {
+                    start: 0,
+                    end: 3,
+                    style: fg(1)
+                }],
+                "split at {split}"
+            );
         }
     }
 
