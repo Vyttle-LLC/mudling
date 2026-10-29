@@ -304,7 +304,7 @@ impl HookRunner {
         if let Some(missing) = named.into_iter().find(|hook| !vm.defines(hook)) {
             let files = plugin.manifest.hooks.files.join(", ");
             let problem = format!("`hook = \"{}\"` names a function the hook files ({files}) don't define", missing.as_str());
-            return Err(PluginError { file: MANIFEST_FILE.into(), problem: Problem::Invalid(problem) });
+            return Err(PluginError { source: MANIFEST_FILE.into(), problem: Problem::Invalid(problem) });
         }
         self.vms.push(vm);
         Ok(())
@@ -363,7 +363,7 @@ impl Vm {
         let meter = Rc::new(Meter::new());
         let outbox = Rc::new(RefCell::new(Vec::new()));
         let invalid = |file: &str, error: mlua::Error| PluginError {
-            file: file.to_owned(),
+            source: file.to_owned(),
             problem: Problem::Invalid(format!("the Luau hooks couldn't load: {error}")),
         };
         let lua = sandbox(&id, &plugin.manifest.permissions, limits, &meter, &outbox, state)

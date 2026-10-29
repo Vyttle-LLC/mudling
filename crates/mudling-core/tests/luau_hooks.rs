@@ -142,7 +142,7 @@ fn a_manifest_declares_hook_files_and_permissions() {
 #[test]
 fn a_bad_hook_file_or_permission_is_rejected_at_load() {
     let error = try_hooked(&[], "function on_go(event").unwrap_err();
-    assert_eq!(error.file, "hooks.luau");
+    assert_eq!(error.source,"hooks.luau");
     assert!(error.to_string().contains("doesn't compile"), "{error}");
 
     let error = try_hooked(&["write_store:"], "").unwrap_err();
@@ -435,7 +435,7 @@ fn a_plugin_whose_hooks_dont_load_fails_to_start() {
     let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
         panic!("the plugin loaded");
     };
-    assert_eq!(error.file, "hooks.luau");
+    assert_eq!(error.source,"hooks.luau");
     assert!(error.to_string().contains("time box"), "{error}");
 }
 
@@ -443,7 +443,7 @@ fn a_plugin_whose_hooks_dont_load_fails_to_start() {
 fn every_hook_a_pattern_names_must_be_defined() {
     let plugin = hooked(&[], "function on_other(event) end");
     let error = HookRunner::new(HookLimits::default(), no_state()).add(&plugin).unwrap_err();
-    assert_eq!(error.file, "plugin.toml");
+    assert_eq!(error.source,"plugin.toml");
     assert!(error.to_string().contains("`hook = \"on_go\"` names a function the hook files (hooks.luau) don't define"), "{error}");
 
     let Err(StartError::Load(error)) = LuauHooks::start([&plugin], HookLimits::default(), no_state(), Vec::new()) else {
