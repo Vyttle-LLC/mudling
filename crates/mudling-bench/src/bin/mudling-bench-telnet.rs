@@ -17,19 +17,13 @@
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use mudling_core::stats::Summary;
-use mudling_core::telnet::{Bytes, Parser};
+use mudling_core::telnet::command::{GA, IAC, SB, SE, WILL};
+use mudling_core::telnet::option::{COMPRESS2, GMCP};
+use mudling_core::telnet::{Bytes, Parser, gmcp};
 use serde::Serialize;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
-
-const IAC: u8 = 255;
-const SB: u8 = 250;
-const SE: u8 = 240;
-const GA: u8 = 249;
-const WILL: u8 = 251;
-const GMCP: u8 = 201;
-const COMPRESS2: u8 = 86;
 
 const CHUNK: usize = 4 * 1024;
 const BURSTS: usize = 20_000;
@@ -38,10 +32,10 @@ const CHUNK_BUDGET_US: f64 = 100.0;
 #[derive(Serialize)]
 struct Run {
     wire_mb: f64,
-    text_mb: f64,
+    telnet_mb: f64,
     chunks: usize,
     wire_mb_per_s: f64,
-    text_mb_per_s: f64,
+    telnet_mb_per_s: f64,
     per_chunk: Summary,
 }
 
@@ -75,9 +69,9 @@ fn main() -> ExitCode {
         .into_iter()
         .chain(bursts.concat())
         .collect();
-    let text_bytes = plain.len();
-    let plain = measure(&plain, text_bytes);
-    let mccp2 = measure(&compressed(&bursts), text_bytes);
+    let telnet_bytes = plain.len();
+    let plain = measure(&plain, telnet_bytes);
+    let mccp2 = measure(&compressed(&bursts), telnet_bytes);
     let gmcp_32kb_ns_per_byte = gmcp_ns_per_byte(32 * 1024);
     let gmcp_1mb_ns_per_byte = gmcp_ns_per_byte(1024 * 1024);
     let within_budget =
@@ -121,15 +115,16 @@ fn burst(index: usize) -> Vec<u8> {
             }
             out.extend_from_slice(b"\x1b[0;32m[Exits: north east south]\x1b[0m\r\n");
             out.extend_from_slice(b"\x1b[1;33mA small brown rabbit is here.\x1b[0m\r\n");
-            gmcp(
-                &mut out,
+            gmcp::encode(
+                "Room.Info",
                 &format!(
-                    "Room.Info {{\"num\":{index},\"name\":\"A Winding Path\",\"area\":\"The Fields\",\
+                    "{{\"num\":{index},\"name\":\"A Winding Path\",\"area\":\"The Fields\",\
                      \"environment\":\"field\",\"coords\":\"0,{index},0,0\",\"exits\":{{\"n\":{},\"e\":{},\"s\":{}}}}}",
                     index + 1,
                     index + 2,
                     index + 3
                 ),
+                &mut out,
             );
         }
         1 | 2 => {
@@ -145,27 +140,23 @@ fn burst(index: usize) -> Vec<u8> {
         let items: Vec<String> = (0..200)
             .map(|item| format!("{{\"id\":{item},\"name\":\"\x1b[1;34ma shiny thing {item}\x1b[0m\",\"attrib\":\"wt\"}}"))
             .collect();
-        gmcp(
+        gmcp::encode(
+            "Char.Items.List",
+            &format!("{{\"items\":[{}]}}", items.join(",")),
             &mut out,
-            &format!("Char.Items.List {{\"items\":[{}]}}", items.join(",")),
         );
     }
-    gmcp(
-        &mut out,
+    gmcp::encode(
+        "Char.Vitals",
         &format!(
-            "Char.Vitals {{\"hp\":{},\"maxhp\":120,\"mana\":80,\"maxmana\":90}}",
+            "{{\"hp\":{},\"maxhp\":120,\"mana\":80,\"maxmana\":90}}",
             index % 120
         ),
+        &mut out,
     );
     out.extend_from_slice(format!("<{}hp 80m 90mv> ", index % 120).as_bytes());
     out.extend_from_slice(&[IAC, GA]);
     out
-}
-
-fn gmcp(out: &mut Vec<u8>, message: &str) {
-    out.extend_from_slice(&[IAC, SB, GMCP]);
-    out.extend_from_slice(message.as_bytes());
-    out.extend_from_slice(&[IAC, SE]);
 }
 
 fn negotiation(compress: bool) -> Vec<u8> {
@@ -186,7 +177,7 @@ fn compressed(bursts: &[Vec<u8>]) -> Vec<u8> {
     encoder.finish().expect("writing to a Vec succeeds")
 }
 
-fn measure(stream: &[u8], text_bytes: usize) -> Run {
+fn measure(stream: &[u8], telnet_bytes: usize) -> Run {
     let chunks: Vec<Bytes> = stream.chunks(CHUNK).map(Bytes::copy_from_slice).collect();
     let mut parser = Parser::new();
     let mut events = Vec::new();
@@ -204,10 +195,10 @@ fn measure(stream: &[u8], text_bytes: usize) -> Run {
     let megabytes = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
     Run {
         wire_mb: megabytes(stream.len()),
-        text_mb: megabytes(text_bytes),
+        telnet_mb: megabytes(telnet_bytes),
         chunks: times.len(),
         wire_mb_per_s: megabytes(stream.len()) / total.as_secs_f64(),
-        text_mb_per_s: megabytes(text_bytes) / total.as_secs_f64(),
+        telnet_mb_per_s: megabytes(telnet_bytes) / total.as_secs_f64(),
         per_chunk: Summary::of(&times).expect("chunks were timed"),
     }
 }
@@ -215,10 +206,7 @@ fn measure(stream: &[u8], text_bytes: usize) -> Run {
 /// Parses one GMCP message of `size` bytes, arriving in 4 KB chunks.
 fn gmcp_ns_per_byte(size: usize) -> f64 {
     let mut stream = Vec::new();
-    gmcp(
-        &mut stream,
-        &format!("Char.Items.List {}", "x".repeat(size)),
-    );
+    gmcp::encode("Char.Items.List", &"x".repeat(size), &mut stream);
     let chunks: Vec<Bytes> = stream.chunks(CHUNK).map(Bytes::copy_from_slice).collect();
     let rounds = (64 * 1024 * 1024 / size).max(1);
     let started = Instant::now();
@@ -239,7 +227,7 @@ fn print_report(report: &Report) {
     for (name, run) in [("plain", &report.plain), ("MCCP2", &report.mccp2)] {
         println!(
             "{name}: {:.1} MB on the wire ({:.1} MB of telnet) in {} chunks of 4 KB; {:.0} MB/s wire, {:.0} MB/s telnet",
-            run.wire_mb, run.text_mb, run.chunks, run.wire_mb_per_s, run.text_mb_per_s
+            run.wire_mb, run.telnet_mb, run.chunks, run.wire_mb_per_s, run.telnet_mb_per_s
         );
         println!(
             "  per chunk: p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",

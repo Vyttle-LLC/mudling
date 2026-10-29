@@ -4,7 +4,8 @@
 use super::{Bytes, CompressionError};
 use flate2::{Decompress, FlushDecompress, Status};
 
-/// Output is produced in blocks of this size.
+/// Output is produced in blocks of this size: one block holds a typical
+/// server write, and text slices still held pin no more than that.
 const BLOCK: usize = 16 * 1024;
 
 #[derive(Debug)]

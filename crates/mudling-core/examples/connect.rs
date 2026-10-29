@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         ConnectOptions {
             host,
             port,
+            connect_timeout: net::DEFAULT_CONNECT_TIMEOUT,
             client_name: "MUDling".to_owned(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             gmcp_supports: vec![

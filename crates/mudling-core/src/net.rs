@@ -8,18 +8,26 @@
 use crate::telnet::{self, DisconnectReason, Event, gmcp};
 use bytes::BytesMut;
 use std::io;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A fresh read buffer's size, allocated when the current one has less than
+/// `MIN_READ` left. It is reclaimed in place once the text slices cut from it
+/// have been dropped.
 const READ_SIZE: usize = 64 * 1024;
+const MIN_READ: usize = 4 * 1024;
 const EVENT_QUEUE: usize = 1024;
 
 /// Answers login prompts. The prompts and answers come from a plugin; the
 /// connection only shows it each event until it says login is over.
 pub trait LoginHook: Send {
-    /// The line to send in answer to `event`, if it is a prompt.
-    fn answer(&mut self, event: &Event) -> Option<String>;
+    /// The line to send in answer to `event`, if it is a prompt, already in
+    /// the server's encoding.
+    fn answer(&mut self, event: &Event) -> Option<Vec<u8>>;
     /// Whether login is over, so the hook sees no more events.
     fn is_done(&self) -> bool;
 }
@@ -27,6 +35,9 @@ pub trait LoginHook: Send {
 pub struct ConnectOptions {
     pub host: String,
     pub port: u16,
+    /// How long to wait for the TCP connection, usually
+    /// [`DEFAULT_CONNECT_TIMEOUT`].
+    pub connect_timeout: Duration,
     pub client_name: String,
     pub client_version: String,
     /// GMCP modules to subscribe to once the server agrees to GMCP, such as
@@ -89,18 +100,26 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: &mpsc::Sender<Event>,
 ) -> io::Result<DisconnectReason> {
-    let stream = TcpStream::connect((options.host.as_str(), options.port)).await?;
+    let mut out = Vec::new();
+    let address = (options.host.as_str(), options.port, options.connect_timeout);
+    let stream = match open(address, &mut commands, &mut out).await? {
+        Ok(stream) => stream,
+        Err(reason) => return Ok(reason),
+    };
     stream.set_nodelay(true)?;
     if events.send(Event::Connected).await.is_err() {
         return Ok(DisconnectReason::ClosedByClient);
     }
     let (mut reader, mut writer) = stream.into_split();
+    writer.write_all(&out).await?;
+    out.clear();
     let mut parser = telnet::Parser::new();
     let mut parsed = Vec::new();
     let mut buffer = BytesMut::new();
-    let mut out = Vec::new();
     loop {
-        buffer.reserve(READ_SIZE);
+        if buffer.capacity() < MIN_READ {
+            buffer.reserve(READ_SIZE);
+        }
         tokio::select! {
             read = reader.read_buf(&mut buffer) => {
                 if read? == 0 {
@@ -123,19 +142,52 @@ async fn run(
                 }
             }
             command = commands.recv() => {
-                match command {
-                    Some(Command::Line(line)) => telnet::encode_line(&line, &mut out),
-                    Some(Command::Gmcp { package, data }) => gmcp::encode(&package, &data, &mut out),
-                    Some(Command::Close) | None => {
-                        let _ = writer.shutdown().await;
-                        return Ok(DisconnectReason::ClosedByClient);
-                    }
+                if !encode_command(command, &mut out) {
+                    let _ = writer.shutdown().await;
+                    return Ok(DisconnectReason::ClosedByClient);
                 }
                 writer.write_all(&out).await?;
                 out.clear();
             }
         }
     }
+}
+
+/// Opens the TCP connection within the timeout. Lines sent meanwhile wait in
+/// `out`; a close, or every handle dropped, aborts the connect.
+async fn open(
+    (host, port, timeout): (&str, u16, Duration),
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    out: &mut Vec<u8>,
+) -> io::Result<Result<TcpStream, DisconnectReason>> {
+    let connecting = tokio::time::timeout(timeout, TcpStream::connect((host, port)));
+    tokio::pin!(connecting);
+    loop {
+        tokio::select! {
+            connected = &mut connecting => {
+                return match connected {
+                    Ok(stream) => Ok(Ok(stream?)),
+                    Err(_) => Ok(Err(DisconnectReason::Failed("connect timed out".to_owned()))),
+                };
+            }
+            command = commands.recv() => {
+                if !encode_command(command, out) {
+                    return Ok(Err(DisconnectReason::Failed("closed while connecting".to_owned())));
+                }
+            }
+        }
+    }
+}
+
+/// Appends a command's bytes to `out`. Returns false when the command closes
+/// the connection: a close, or every handle dropped.
+fn encode_command(command: Option<Command>, out: &mut Vec<u8>) -> bool {
+    match command {
+        Some(Command::Line(line)) => telnet::encode_line(&line, out),
+        Some(Command::Gmcp { package, data }) => gmcp::encode(&package, &data, out),
+        Some(Command::Close) | None => return false,
+    }
+    true
 }
 
 /// Writes what the client says in answer to `event`: its GMCP hello and
@@ -147,7 +199,7 @@ fn answer(event: &Event, options: &mut ConnectOptions, out: &mut Vec<u8>) {
     }
     if let Some(login) = &mut options.login {
         if let Some(line) = login.answer(event) {
-            telnet::encode_line(line.as_bytes(), out);
+            telnet::encode_line(&line, out);
         }
         if login.is_done() {
             options.login = None;
@@ -173,11 +225,11 @@ mod tests {
     }
 
     impl LoginHook for NameOnce {
-        fn answer(&mut self, event: &Event) -> Option<String> {
+        fn answer(&mut self, event: &Event) -> Option<Vec<u8>> {
             match event {
                 Event::Data(text) if text.ends_with(b"name? ") => {
                     self.answered = true;
-                    Some("Tester".to_owned())
+                    Some(b"Tester".to_vec())
                 }
                 _ => None,
             }
@@ -188,6 +240,28 @@ mod tests {
         }
     }
 
+    fn options(host: &str, port: u16) -> ConnectOptions {
+        ConnectOptions {
+            host: host.to_owned(),
+            port,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            client_name: "MUDling".to_owned(),
+            client_version: "0.0.0".to_owned(),
+            gmcp_supports: vec!["Char 1".to_owned()],
+            login: None,
+        }
+    }
+
+    /// An address from TEST-NET-1 (RFC 5737): a connect to it never
+    /// completes, or fails at once where the network has no route.
+    const UNREACHABLE: &str = "192.0.2.1";
+
+    async fn failure(events: &mut mpsc::Receiver<Event>) -> Option<Event> {
+        tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("the connection ends promptly")
+    }
+
     #[tokio::test]
     async fn negotiates_says_hello_answers_login_and_sends_lines() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -195,12 +269,8 @@ mod tests {
         let (connection, mut events) = connect(
             &tokio::runtime::Handle::current(),
             ConnectOptions {
-                host: "127.0.0.1".to_owned(),
-                port,
-                client_name: "MUDling".to_owned(),
-                client_version: "0.0.0".to_owned(),
-                gmcp_supports: vec!["Char 1".to_owned()],
                 login: Some(Box::new(NameOnce::default())),
+                ..options("127.0.0.1", port)
             },
         );
         let (mut server, _) = listener.accept().await.unwrap();
@@ -248,17 +318,51 @@ mod tests {
         drop(listener);
         let (_connection, mut events) = connect(
             &tokio::runtime::Handle::current(),
-            ConnectOptions {
-                host: "127.0.0.1".to_owned(),
-                port,
-                client_name: "MUDling".to_owned(),
-                client_version: "0.0.0".to_owned(),
-                gmcp_supports: Vec::new(),
-                login: None,
-            },
+            options("127.0.0.1", port),
         );
         assert!(matches!(
             events.recv().await,
+            Some(Event::Disconnected(DisconnectReason::Failed(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_connect_that_hangs_times_out() {
+        let (_connection, mut events) = connect(
+            &tokio::runtime::Handle::current(),
+            ConnectOptions {
+                connect_timeout: Duration::from_millis(100),
+                ..options(UNREACHABLE, 4000)
+            },
+        );
+        assert!(matches!(
+            failure(&mut events).await,
+            Some(Event::Disconnected(DisconnectReason::Failed(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_aborts_a_pending_connect() {
+        let (connection, mut events) = connect(
+            &tokio::runtime::Handle::current(),
+            options(UNREACHABLE, 4000),
+        );
+        connection.close();
+        assert!(matches!(
+            failure(&mut events).await,
+            Some(Event::Disconnected(DisconnectReason::Failed(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_every_handle_aborts_a_pending_connect() {
+        let (connection, mut events) = connect(
+            &tokio::runtime::Handle::current(),
+            options(UNREACHABLE, 4000),
+        );
+        drop(connection);
+        assert!(matches!(
+            failure(&mut events).await,
             Some(Event::Disconnected(DisconnectReason::Failed(_)))
         ));
     }

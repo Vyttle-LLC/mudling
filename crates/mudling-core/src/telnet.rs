@@ -19,7 +19,7 @@ use memchr::memchr;
 use std::fmt;
 
 /// Telnet command bytes (RFC 854, RFC 885).
-mod command {
+pub mod command {
     pub const IAC: u8 = 255;
     pub const DONT: u8 = 254;
     pub const DO: u8 = 253;

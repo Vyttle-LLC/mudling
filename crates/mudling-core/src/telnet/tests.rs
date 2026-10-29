@@ -224,9 +224,10 @@ fn gmcp_round_trips_through_the_parser() {
 }
 
 #[test]
+#[ignore = "compares wall-clock times; mudling-bench-telnet measures this"]
 fn a_32_kb_gmcp_message_parses_in_linear_time() {
-    // Doubling the size should about double the time; quadratic collection
-    // (the prototype's) would quadruple it. Small chunks make the split count
+    // 32× the size should take about 32× the time; quadratic collection (the
+    // prototype's) would take about 1,000×. Small chunks make the split count
     // as large as possible.
     let seconds = |size: usize| {
         let mut stream = vec![IAC, SB, option::GMCP];
