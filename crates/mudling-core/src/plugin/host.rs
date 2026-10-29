@@ -51,7 +51,10 @@ pub struct PluginEvent {
 impl PluginEvent {
     /// The text of the named capture, if it took part in the match.
     pub fn capture(&self, name: &str) -> Option<&str> {
-        let capture = self.captures.iter().find(|capture| &*capture.name == name)?;
+        let capture = self
+            .captures
+            .iter()
+            .find(|capture| &*capture.name == name)?;
         Some(&self.line.plain()[capture.start as usize..capture.end as usize])
     }
 }
@@ -119,10 +122,17 @@ impl PluginHost {
     pub fn new(plugins: impl IntoIterator<Item = Plugin>) -> Result<PluginHost, PluginError> {
         let mut installed: Vec<Installed> = Vec::new();
         for plugin in plugins {
-            if installed.iter().any(|other| other.plugin.id() == plugin.id()) {
+            if installed
+                .iter()
+                .any(|other| other.plugin.id() == plugin.id())
+            {
                 return Err(duplicate(plugin.id()));
             }
-            installed.push(Installed { plugin, enabled: true, cost: CostLog::default() });
+            installed.push(Installed {
+                plugin,
+                enabled: true,
+                cost: CostLog::default(),
+            });
         }
         let compiled = Compiled::build(&installed)?;
         Ok(PluginHost {
@@ -146,7 +156,11 @@ impl PluginHost {
         if self.position(plugin.id()).is_some() {
             return Err(duplicate(plugin.id()));
         }
-        self.installed.push(Installed { plugin, enabled: true, cost: CostLog::default() });
+        self.installed.push(Installed {
+            plugin,
+            enabled: true,
+            cost: CostLog::default(),
+        });
         self.recompile().inspect_err(|_| {
             self.installed.pop();
         })
@@ -188,12 +202,17 @@ impl PluginHost {
 
     /// Every installed plugin, in the order added, and whether it's on.
     pub fn plugins(&self) -> impl Iterator<Item = (&Plugin, bool)> {
-        self.installed.iter().map(|entry| (&entry.plugin, entry.enabled))
+        self.installed
+            .iter()
+            .map(|entry| (&entry.plugin, entry.enabled))
     }
 
     /// The enabled plugins, in run order.
     pub fn enabled(&self) -> impl Iterator<Item = &Plugin> {
-        self.compiled.order.iter().map(|&index| &self.installed[index].plugin)
+        self.compiled
+            .order
+            .iter()
+            .map(|&index| &self.installed[index].plugin)
     }
 
     /// Each enabled plugin's declaration for one extension point, in run
@@ -202,7 +221,9 @@ impl PluginHost {
         &'a self,
         point: impl Fn(&'a Points) -> Option<&'a T> + 'a,
     ) -> impl Iterator<Item = (&'a PluginId, &'a T)> + 'a {
-        self.enabled().filter_map(move |plugin| point(&plugin.points).map(|declaration| (plugin.id(), declaration)))
+        self.enabled().filter_map(move |plugin| {
+            point(&plugin.points).map(|declaration| (plugin.id(), declaration))
+        })
     }
 
     pub fn settings(&self) -> &Settings {
@@ -227,7 +248,9 @@ impl PluginHost {
             let rule = &lines.rules[id];
             match &rule.action {
                 Action::Event { name, hook } => {
-                    let Some(captures) = rule.pattern.captures(text) else { continue };
+                    let Some(captures) = rule.pattern.captures(text) else {
+                        continue;
+                    };
                     sink.event(PluginEvent {
                         plugin: rule.plugin.clone(),
                         point: Point::Text,
@@ -238,8 +261,19 @@ impl PluginHost {
                     });
                 }
                 Action::Color { style, group } if line.styled().is_empty() => {
-                    for (start, end) in rule.pattern.spans(text, *group).filter(|(start, end)| start < end) {
-                        paint(&mut coloring, Span { start: start as u32, end: end as u32, style: *style });
+                    for (start, end) in rule
+                        .pattern
+                        .spans(text, *group)
+                        .filter(|(start, end)| start < end)
+                    {
+                        paint(
+                            &mut coloring,
+                            Span {
+                                start: start as u32,
+                                end: end as u32,
+                                style: *style,
+                            },
+                        );
                     }
                 }
                 Action::Color { .. } => {}
@@ -264,7 +298,10 @@ impl PluginHost {
         }
         let compiled = &self.compiled;
         compiled.pending.matching(pending.plain, &mut self.matched);
-        let kind = self.matched.first().map(|&id| compiled.pending_kinds[id].clone());
+        let kind = self
+            .matched
+            .first()
+            .map(|&id| compiled.pending_kinds[id].clone());
         self.last_pending = Some((pending.plain.into(), kind.clone()));
         kind
     }
@@ -284,8 +321,9 @@ impl PluginHost {
     /// Times each enabled plugin's rules over `text`, one by one, but only
     /// those the merged matcher's prefilter lets through: the rules whose
     /// required literals `text` holds, and the plugin's unfiltered rules.
-    /// The one prefilter scan is shared and isn't counted. That keeps no
-    /// second matcher per plugin, and stays close to the plugin's share.
+    /// Finding those rules takes one more prefilter scan of `text`, made
+    /// once for all plugins and counted against none. That keeps no second
+    /// matcher per plugin, and stays close to the plugin's share.
     fn sample_costs(&mut self, text: &str) {
         let lines = &self.compiled.lines;
         lines.matcher.candidates(text, &mut self.matched);
@@ -311,7 +349,9 @@ impl PluginHost {
     }
 
     fn position(&self, id: &PluginId) -> Option<usize> {
-        self.installed.iter().position(|entry| entry.plugin.id() == id)
+        self.installed
+            .iter()
+            .position(|entry| entry.plugin.id() == id)
     }
 
     fn recompile(&mut self) -> Result<(), PluginError> {
@@ -323,7 +363,10 @@ impl PluginHost {
 }
 
 fn duplicate(id: &PluginId) -> PluginError {
-    PluginError { source: id.to_string(), problem: Problem::DuplicateId(id.clone()) }
+    PluginError {
+        source: id.to_string(),
+        problem: Problem::DuplicateId(id.clone()),
+    }
 }
 
 /// Everything derived from the set of enabled plugins.
@@ -350,16 +393,24 @@ struct LineRule {
 }
 
 enum Action {
-    Event { name: Arc<str>, hook: Option<HookName> },
+    Event {
+        name: Arc<str>,
+        hook: Option<HookName>,
+    },
     /// Colors `group` of each match; 0 is the whole match.
     Color { style: Style, group: usize },
 }
 
 impl Compiled {
     fn build(installed: &[Installed]) -> Result<Compiled, PluginError> {
-        let mut order: Vec<usize> = (0..installed.len()).filter(|&index| installed[index].enabled).collect();
+        let mut order: Vec<usize> = (0..installed.len())
+            .filter(|&index| installed[index].enabled)
+            .collect();
         order.sort_by_key(|&index| installed[index].plugin.layer());
-        let plugins: Vec<&Plugin> = order.iter().map(|&index| &installed[index].plugin).collect();
+        let plugins: Vec<&Plugin> = order
+            .iter()
+            .map(|&index| &installed[index].plugin)
+            .collect();
         let settings = settings(&plugins);
 
         let mut rules = Vec::new();
@@ -376,9 +427,14 @@ impl Compiled {
         let mut pending_kinds = Vec::new();
         if let Some(pager) = &settings.pager {
             pending_sources.push(pager.prompt.as_str());
-            pending_kinds.push(PendingKind::Pager { key: pager.key.as_str().into() });
+            pending_kinds.push(PendingKind::Pager {
+                key: pager.key.as_str().into(),
+            });
         }
-        for text in plugins.iter().filter_map(|plugin| plugin.points.text.as_ref()) {
+        for text in plugins
+            .iter()
+            .filter_map(|plugin| plugin.points.text.as_ref())
+        {
             for hint in &text.prompts {
                 pending_sources.push(hint.pattern.as_str());
                 pending_kinds.push(PendingKind::Prompt);
@@ -388,7 +444,10 @@ impl Compiled {
 
         Ok(Compiled {
             order,
-            lines: LineRules { matcher: lines, rules },
+            lines: LineRules {
+                matcher: lines,
+                rules,
+            },
             pending,
             pending_kinds,
             plugin_rules,
@@ -398,8 +457,10 @@ impl Compiled {
 }
 
 fn matcher(sources: &[&str], cache: DfaCache) -> Result<Matcher, PluginError> {
-    Matcher::new(sources, cache)
-        .map_err(|message| PluginError { source: "plugin host".into(), problem: Problem::Matcher(message) })
+    Matcher::new(sources, cache).map_err(|message| PluginError {
+        source: "plugin host".into(),
+        problem: Problem::Matcher(message),
+    })
 }
 
 /// A plugin's Text patterns, then its color rules.
@@ -407,13 +468,33 @@ fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
     let Some(text) = &plugin.points.text else {
         return Vec::new();
     };
-    let rule = |pattern: &Pattern, action| LineRule { plugin: plugin.id().clone(), pattern: pattern.clone(), action };
+    let rule = |pattern: &Pattern, action| LineRule {
+        plugin: plugin.id().clone(),
+        pattern: pattern.clone(),
+        action,
+    };
     let events = text.patterns.iter().map(|event| {
-        rule(&event.pattern, Action::Event { name: event.name.shared(), hook: event.hook.clone() })
+        rule(
+            &event.pattern,
+            Action::Event {
+                name: event.name.shared(),
+                hook: event.hook.clone(),
+            },
+        )
     });
     let colors = text.colors.iter().map(|color| {
-        let group = color.group.as_deref().and_then(|name| color.pattern.group(name)).unwrap_or(0);
-        rule(&color.pattern, Action::Color { style: color.style(), group })
+        let group = color
+            .group
+            .as_deref()
+            .and_then(|name| color.pattern.group(name))
+            .unwrap_or(0);
+        rule(
+            &color.pattern,
+            Action::Color {
+                style: color.style(),
+                group,
+            },
+        )
     });
     events.chain(colors).collect()
 }
@@ -425,7 +506,9 @@ fn settings(plugins: &[&Plugin]) -> Settings {
     }
     Settings {
         encoding: last(plugins, |plugin| plugin.manifest.encoding()),
-        separator: last(plugins, |plugin| plugin.points.commands.as_ref()?.separator.clone()),
+        separator: last(plugins, |plugin| {
+            plugin.points.commands.as_ref()?.separator.clone()
+        }),
         room_identity: last(plugins, |plugin| plugin.points.map.as_ref()?.room_identity),
         pager: last(plugins, |plugin| plugin.points.text.as_ref()?.pager.clone()),
     }
@@ -441,10 +524,16 @@ fn paint(spans: &mut Vec<Span>, span: Span) {
             continue;
         }
         if old.start < span.start {
-            painted.push(Span { end: span.start, ..old });
+            painted.push(Span {
+                end: span.start,
+                ..old
+            });
         }
         if old.end > span.end {
-            painted.push(Span { start: span.end, ..old });
+            painted.push(Span {
+                start: span.end,
+                ..old
+            });
         }
     }
     painted.push(span);
@@ -475,7 +564,14 @@ mod tests {
     use crate::ansi::Color;
 
     fn span(start: u32, end: u32, color: u8) -> Span {
-        Span { start, end, style: Style { fg: Some(Color(color)), ..Style::default() } }
+        Span {
+            start,
+            end,
+            style: Style {
+                fg: Some(Color(color)),
+                ..Style::default()
+            },
+        }
     }
 
     #[test]
