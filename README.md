@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-**Mudling** is a touch-first, open-source MUD client. A mudling is a small
+**MUDling** is a touch-first, open-source MUD client. A mudling is a small
 creature of living mud — and MUD is where it lives: exits become a D-pad,
 the things in the room become tappable, and commands compose by touch
 instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
