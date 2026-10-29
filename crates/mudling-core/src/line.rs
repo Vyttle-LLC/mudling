@@ -153,8 +153,12 @@ impl LinePipeline {
         LinePipeline { encoding, ..LinePipeline::default() }
     }
 
-    /// Changes the encoding from the next byte on.
+    /// Changes the encoding from the next byte on. A UTF-8 code point still
+    /// waiting for its end becomes U+FFFD where it stands.
     pub fn set_encoding(&mut self, encoding: Encoding) {
+        if encoding != Encoding::Utf8 {
+            self.flush_utf8_tail();
+        }
         self.encoding = encoding;
     }
 
@@ -205,24 +209,34 @@ impl LinePipeline {
         }
         self.prompt_ended_line = false;
         while self.line_bytes + bytes.len() > MAX_LINE_BYTES {
-            let cut = self.cut_point(bytes, MAX_LINE_BYTES - self.line_bytes);
-            self.decode(&bytes[..cut]);
-            lines.push(self.finish(LineEnd::Cut));
-            bytes = &bytes[cut..];
+            match self.cut_point(bytes, MAX_LINE_BYTES - self.line_bytes) {
+                Some(cut) => {
+                    self.decode(&bytes[..cut]);
+                    lines.push(self.finish(LineEnd::Cut));
+                    bytes = &bytes[cut..];
+                }
+                None => {
+                    let held = std::mem::take(&mut self.utf8_tail);
+                    lines.push(self.finish(LineEnd::Cut));
+                    self.line_bytes = held.len();
+                    self.utf8_tail = held;
+                }
+            }
         }
         self.decode(bytes);
     }
 
     /// Where to cut `bytes` to fit `room`: before the code point that would
-    /// cross it, so a cut never splits one.
-    fn cut_point(&self, bytes: &[u8], room: usize) -> usize {
+    /// cross it, so a cut never splits one. `None` cuts before the code point
+    /// whose start is held from the last chunk, which then opens the next line.
+    fn cut_point(&self, bytes: &[u8], room: usize) -> Option<usize> {
         let is_continuation = |byte: u8| byte & 0xC0 == 0x80;
         match self.encoding {
-            Encoding::Latin1 => room,
+            Encoding::Latin1 => Some(room),
             Encoding::Utf8 => (room.saturating_sub(3)..=room)
                 .rev()
                 .find(|&at| !is_continuation(bytes[at]))
-                .unwrap_or(room),
+                .or((self.utf8_tail.is_empty() || room >= 3).then_some(room)),
         }
     }
 
@@ -262,13 +276,19 @@ impl LinePipeline {
         }
     }
 
-    fn finish(&mut self, end: LineEnd) -> Line {
-        if !self.utf8_tail.is_empty() {
-            self.utf8_tail.clear();
-            let start = self.raw.len();
-            self.raw.push(char::REPLACEMENT_CHARACTER);
-            self.ansi.feed(&self.raw[start..], &mut self.plain, &mut self.styled);
+    /// Replaces a held, never-finished UTF-8 code point with U+FFFD.
+    fn flush_utf8_tail(&mut self) {
+        if self.utf8_tail.is_empty() {
+            return;
         }
+        self.utf8_tail.clear();
+        let start = self.raw.len();
+        self.raw.push(char::REPLACEMENT_CHARACTER);
+        self.ansi.feed(&self.raw[start..], &mut self.plain, &mut self.styled);
+    }
+
+    fn finish(&mut self, end: LineEnd) -> Line {
+        self.flush_utf8_tail();
         self.ansi.end_line();
         let line = Line::new(&self.raw, &self.plain, &self.styled, end);
         self.raw.clear();
@@ -492,6 +512,32 @@ mod tests {
         assert!(lines.iter().chain(&pending).all(|line| !line.raw().contains('\u{FFFD}')));
         let text: String = lines.iter().chain(&pending).map(Line::raw).collect();
         assert_eq!(text.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_code_point_that_straddles_two_chunks() {
+        for character in ["é", "中", "🏰"] {
+            let encoded = character.as_bytes();
+            // The code point's first byte fills the line; the rest arrives next.
+            let mut head = vec![b'a'; MAX_LINE_BYTES - 1];
+            head.push(encoded[0]);
+            let mut tail = encoded[1..].to_vec();
+            tail.push(b'b');
+            let (lines, pending) = lines_and_pending(&[&head, &tail]);
+            assert_eq!(lines.len(), 1, "{character}");
+            assert_eq!(lines[0].raw(), "a".repeat(MAX_LINE_BYTES - 1), "{character}");
+            assert_eq!(pending.unwrap().raw(), format!("{character}b"));
+        }
+    }
+
+    #[test]
+    fn switching_encoding_mid_code_point_replaces_it_in_place() {
+        let mut pipeline = LinePipeline::default();
+        let mut lines = Vec::new();
+        pipeline.push(b"a\xc3", &mut lines);
+        pipeline.set_encoding(Encoding::Latin1);
+        pipeline.push(b"b\n", &mut lines);
+        assert_eq!(lines[0].plain(), "a\u{FFFD}b");
     }
 
     #[test]

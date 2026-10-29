@@ -8,14 +8,14 @@ use serde::Serialize;
 use std::time::Instant;
 
 /// Leaves the rest of the 20 µs line budget to plugins.
-pub const BUDGET_US: f64 = 5.0;
+const BUDGET_US: f64 = 5.0;
 const MIN_LINES: usize = 100_000;
 
 #[derive(Serialize)]
 pub struct Report {
-    pub lines: usize,
-    pub per_line: Summary,
-    pub budget_us: f64,
+    lines: usize,
+    per_line: Summary,
+    budget_us: f64,
     pub within_budget: bool,
 }
 
