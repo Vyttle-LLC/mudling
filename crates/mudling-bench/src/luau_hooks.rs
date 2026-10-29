@@ -8,7 +8,9 @@
 //! in every [`HOOKED_EVERY`] lines.
 
 use mudling_core::line::{Line, LinePipeline};
-use mudling_core::plugin::luau::{HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, StateView, Value};
+use mudling_core::plugin::luau::{
+    HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, StateView, Value,
+};
 use mudling_core::plugin::{Plugin, PluginEvent, PluginHost, PluginSink};
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -35,20 +37,40 @@ text = "text.toml"
 [hooks]
 files = ["trivial.luau"]
 "#;
-const TRIVIAL_TEXT: &str = "[[pattern]]\nname = \"row\"\npattern = '''^  \\S'''\nhook = \"on_row\"\n";
+const TRIVIAL_TEXT: &str =
+    "[[pattern]]\nname = \"row\"\npattern = '''^  \\S'''\nhook = \"on_row\"\n";
 const TRIVIAL_HOOK: &str = "function on_row(event) end";
 const RUNAWAY_HOOK: &str = "function on_row(event) while true do end end";
 const RUNAWAY_CALLS: usize = 1_000;
 
 const COLUMNS: [(&str, &str); 3] = [
-    ("plugin.toml", include_str!("../../mudling-core/tests/fixtures/plugins/columns/plugin.toml")),
-    ("text.toml", include_str!("../../mudling-core/tests/fixtures/plugins/columns/text.toml")),
-    ("columns.luau", include_str!("../../mudling-core/tests/fixtures/plugins/columns/columns.luau")),
+    (
+        "plugin.toml",
+        include_str!("../../mudling-core/tests/fixtures/plugins/columns/plugin.toml"),
+    ),
+    (
+        "text.toml",
+        include_str!("../../mudling-core/tests/fixtures/plugins/columns/text.toml"),
+    ),
+    (
+        "columns.luau",
+        include_str!("../../mudling-core/tests/fixtures/plugins/columns/columns.luau"),
+    ),
 ];
 
 const WORDS: [&str; 12] = [
-    "climb", "swim", "fishing", "weaving", "cooking", "map reading", "riding", "herbalism", "tracking", "first aid",
-    "lockpicking", "haggling",
+    "climb",
+    "swim",
+    "fishing",
+    "weaving",
+    "cooking",
+    "map reading",
+    "riding",
+    "herbalism",
+    "tracking",
+    "first aid",
+    "lockpicking",
+    "haggling",
 ];
 
 #[derive(Serialize)]
@@ -69,8 +91,16 @@ pub struct Report {
 }
 
 pub fn run() -> Report {
-    let trivial = plugin(&[("plugin.toml", TRIVIAL_MANIFEST), ("text.toml", TRIVIAL_TEXT), ("trivial.luau", TRIVIAL_HOOK)]);
-    let runaway = plugin(&[("plugin.toml", TRIVIAL_MANIFEST), ("text.toml", TRIVIAL_TEXT), ("trivial.luau", RUNAWAY_HOOK)]);
+    let trivial = plugin(&[
+        ("plugin.toml", TRIVIAL_MANIFEST),
+        ("text.toml", TRIVIAL_TEXT),
+        ("trivial.luau", TRIVIAL_HOOK),
+    ]);
+    let runaway = plugin(&[
+        ("plugin.toml", TRIVIAL_MANIFEST),
+        ("text.toml", TRIVIAL_TEXT),
+        ("trivial.luau", RUNAWAY_HOOK),
+    ]);
     let columns = plugin(&COLUMNS);
     let rows = rows();
 
@@ -88,18 +118,33 @@ pub fn run() -> Report {
         hooked_every: HOOKED_EVERY,
         columns_amortized_p99_us,
         plugin_budget_us: PLUGIN_BUDGET_US,
-        within_budget: hand_off.p99_us <= PLUGIN_BUDGET_US && columns_amortized_p99_us <= PLUGIN_BUDGET_US,
+        within_budget: hand_off.p99_us <= PLUGIN_BUDGET_US
+            && columns_amortized_p99_us <= PLUGIN_BUDGET_US,
     }
 }
 
 pub fn print(report: &Report) {
     let verdict = if report.within_budget { "ok" } else { "MISSED" };
-    let summary = |s: &Summary| format!("p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs", s.p50_us, s.p99_us, s.max_us);
+    let summary = |s: &Summary| {
+        format!(
+            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
+            s.p50_us, s.p99_us, s.max_us
+        )
+    };
     println!("luau hooks, {} calls each:", report.calls);
-    println!("  hand-off on the line thread: {}", summary(&report.hand_off));
+    println!(
+        "  hand-off on the line thread: {}",
+        summary(&report.hand_off)
+    );
     println!("  trivial hook on the worker: {}", summary(&report.trivial));
-    println!("  column-splitting hook on the worker: {}", summary(&report.columns));
-    println!("  an endless loop, stopped by the default budget: {}", summary(&report.runaway_stopped));
+    println!(
+        "  column-splitting hook on the worker: {}",
+        summary(&report.columns)
+    );
+    println!(
+        "  an endless loop, stopped by the default budget: {}",
+        summary(&report.runaway_stopped)
+    );
     println!(
         "  column hook amortized over 1 line in {}: {:.2} µs p99 per line; budget ≤ {} µs: {verdict}",
         report.hooked_every, report.columns_amortized_p99_us, report.plugin_budget_us
@@ -113,7 +158,11 @@ fn time_hand_off(plugin: &Plugin, rows: &[Line]) -> Summary {
     let limits = HookLimits::default();
     let state: Arc<dyn StateView> = Arc::new(HashMap::<String, Value>::new());
     let mut hooks = LuauHooks::start([plugin], limits, state, Discard).expect("the worker starts");
-    assert!(hooks.failed_to_load().is_empty(), "{:?}", hooks.failed_to_load());
+    assert!(
+        hooks.failed_to_load().is_empty(),
+        "{:?}",
+        hooks.failed_to_load()
+    );
     let mut samples = Vec::with_capacity(rows.len());
     let mut events = events(plugin, rows).into_iter().peekable();
     while events.peek().is_some() {
@@ -124,14 +173,21 @@ fn time_hand_off(plugin: &Plugin, rows: &[Line]) -> Summary {
         }
         hooks.wait_until_idle();
     }
-    assert!(hooks.dropped().is_empty(), "the queue filled: {:?}", hooks.dropped());
+    assert!(
+        hooks.dropped().is_empty(),
+        "the queue filled: {:?}",
+        hooks.dropped()
+    );
     Summary::of(&samples).expect("hand-offs were timed")
 }
 
 /// One hook call on the worker's runner, with its outputs.
 fn time_hook(plugin: &Plugin, rows: &[Line]) -> Summary {
     let events = events(plugin, rows);
-    let mut runner = HookRunner::new(HookLimits::default(), Arc::new(HashMap::<String, Value>::new()));
+    let mut runner = HookRunner::new(
+        HookLimits::default(),
+        Arc::new(HashMap::<String, Value>::new()),
+    );
     runner.add(plugin).expect("the hooks load");
     let mut outputs = Vec::new();
     let samples: Vec<Duration> = events
@@ -141,7 +197,12 @@ fn time_hook(plugin: &Plugin, rows: &[Line]) -> Summary {
             let started = Instant::now();
             runner.run(event, &mut outputs);
             let elapsed = started.elapsed();
-            assert!(!outputs.iter().any(|output| matches!(output, HookOutput::HookFailed(_))), "{outputs:?}");
+            assert!(
+                !outputs
+                    .iter()
+                    .any(|output| matches!(output, HookOutput::HookFailed(_))),
+                "{outputs:?}"
+            );
             elapsed
         })
         .collect();
@@ -150,7 +211,10 @@ fn time_hook(plugin: &Plugin, rows: &[Line]) -> Summary {
 
 /// Each call in a fresh VM, so three overruns never turn the plugin off.
 fn time_runaway(plugin: &Plugin, rows: &[Line]) -> Summary {
-    let mut runner = HookRunner::new(HookLimits::default(), Arc::new(HashMap::<String, Value>::new()));
+    let mut runner = HookRunner::new(
+        HookLimits::default(),
+        Arc::new(HashMap::<String, Value>::new()),
+    );
     let mut outputs = Vec::new();
     let samples: Vec<Duration> = events(plugin, rows)
         .iter()
@@ -161,13 +225,24 @@ fn time_runaway(plugin: &Plugin, rows: &[Line]) -> Summary {
             started.elapsed()
         })
         .collect();
-    assert!(outputs.iter().all(|output| matches!(output, HookOutput::HookFailed(failed) if failed.overran)));
+    assert!(
+        outputs
+            .iter()
+            .all(|output| matches!(output, HookOutput::HookFailed(failed) if failed.overran))
+    );
     Summary::of(&samples).expect("runaways were timed")
 }
 
 fn plugin(files: &[(&str, &str)]) -> Plugin {
-    Plugin::from_files(|name| Ok(files.iter().find(|(file, _)| *file == name).expect("a bench file").1.to_owned()))
-        .unwrap_or_else(|error| panic!("{error}"))
+    Plugin::from_files(|name| {
+        Ok(files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .expect("a bench file")
+            .1
+            .to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Table rows of three cells, each `  name  NN%`.
@@ -176,7 +251,13 @@ fn rows() -> Vec<Line> {
     let mut lines = Vec::with_capacity(CALLS);
     for row in 0..CALLS {
         let cells: String = (0..3)
-            .map(|column| format!("  {:<15} {:>3}%", WORDS[(row + column) % WORDS.len()], (row * 7 + column) % 101))
+            .map(|column| {
+                format!(
+                    "  {:<15} {:>3}%",
+                    WORDS[(row + column) % WORDS.len()],
+                    (row * 7 + column) % 101
+                )
+            })
             .collect();
         pipeline.push(cells.as_bytes(), &mut lines);
         pipeline.push(b"\n", &mut lines);

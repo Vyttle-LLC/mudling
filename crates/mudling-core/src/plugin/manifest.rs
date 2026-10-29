@@ -252,7 +252,9 @@ impl TryFrom<String> for Permission {
             "read_state" => Ok(Permission::ReadState),
             "send_commands" => Ok(Permission::SendCommands),
             other => match other.strip_prefix("write_store:") {
-                Some(store) if !store.trim().is_empty() => Ok(Permission::WriteStore(store.to_owned())),
+                Some(store) if !store.trim().is_empty() => {
+                    Ok(Permission::WriteStore(store.to_owned()))
+                }
                 _ => Err(format!(
                     "`{permission}` isn't a permission: use \"read_state\", \"write_store:<name>\" or \"send_commands\""
                 )),
@@ -313,7 +315,8 @@ impl Manifest {
             }
         }
         for file in &self.hooks.files {
-            check_relative(file, "luau").map_err(|problem| format!("hooks.files: \"{file}\": {problem}"))?;
+            check_relative(file, "luau")
+                .map_err(|problem| format!("hooks.files: \"{file}\": {problem}"))?;
         }
         Ok(())
     }
@@ -387,10 +390,18 @@ impl Plugin {
         let mut scripts = Vec::with_capacity(manifest.hooks.files.len());
         for file in &manifest.hooks.files {
             let source = read_file(&mut read, file)?;
-            luau::check_syntax(file, &source).map_err(|problem| PluginError::invalid(file, problem))?;
-            scripts.push(Script { file: file.clone(), source: source.into() });
+            luau::check_syntax(file, &source)
+                .map_err(|problem| PluginError::invalid(file, problem))?;
+            scripts.push(Script {
+                file: file.clone(),
+                source: source.into(),
+            });
         }
-        Ok(Plugin { manifest, points, scripts })
+        Ok(Plugin {
+            manifest,
+            points,
+            scripts,
+        })
     }
 
     pub fn id(&self) -> &PluginId {

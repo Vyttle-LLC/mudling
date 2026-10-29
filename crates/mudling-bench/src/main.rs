@@ -123,7 +123,13 @@ fn main() -> ExitCode {
     let line_pipeline = line_pipeline::run(&lines);
     let plugin_host = plugin_host::run(&lines);
     let luau_hooks = luau_hooks::run();
-    let report = run(source, ReplayFeed::new(lines), line_pipeline, plugin_host, luau_hooks);
+    let report = run(
+        source,
+        ReplayFeed::new(lines),
+        line_pipeline,
+        plugin_host,
+        luau_hooks,
+    );
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
     plugin_host::print(&report.plugin_host);
