@@ -425,12 +425,12 @@ mod tests {
     fn half_a_prompt_split_by_the_network_stays_one_growing_line() {
         let mut pipeline = LinePipeline::default();
         let mut lines = Vec::new();
-        pipeline.push(b"(271h-17", &mut lines);
+        pipeline.push(b"<100hp 5", &mut lines);
         let half = pipeline.pending().unwrap();
-        assert_eq!((half.plain, half.number), ("(271h-17", 0));
-        pipeline.push(b"1m-310v)(-/-)", &mut lines);
+        assert_eq!((half.plain, half.number), ("<100hp 5", 0));
+        pipeline.push(b"0mp> ", &mut lines);
         let whole = pipeline.pending().unwrap();
-        assert_eq!((whole.plain, whole.number), ("(271h-171m-310v)(-/-)", 0));
+        assert_eq!((whole.plain, whole.number), ("<100hp 50mp> ", 0));
         assert!(lines.is_empty());
     }
 
