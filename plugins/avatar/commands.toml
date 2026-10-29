@@ -1,0 +1,28 @@
+# How Avatar takes commands.
+#
+# No separator: Avatar would run "n=n=w" as three moves, but its spam check
+# counts each command in a chain, so chaining saves nothing; one command
+# per line is the default. No speedwalk either: the game has none, so
+# shorthand such as "8n, [s], d" expands in the client, one move a line,
+# and a bracketed door opens first with the `open` door command.
+
+[verbs]
+wear = "wear"
+wield = "wield"
+hold = "hold"
+remove = "remove"
+get = "get"
+put = "put"
+look = "look"
+examine = "examine"
+kill = "kill"
+flee = "flee"
+cast = "cast"
+scan = "scan"
+recall = "recall"
+
+[doors]
+open = "open {dir}"
+close = "close {dir}"
+unlock = "unlock {dir}"
+lock = "lock {dir}"

@@ -1,0 +1,7 @@
+(110h-125m-108v-1471)(-/-)
+Spells and skills learnable by your class at the lower levels.
+ 50: mongoose technique            gurney
+            demonstrate      transmogrify
+
+           Ancient Ruin        North Gate
+(110h-125m-108v-1471)(-/-)

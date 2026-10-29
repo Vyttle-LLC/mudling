@@ -1,0 +1,63 @@
+# The commands that re-read the character in the background, and the
+# table that answers each. Each reader is the same as the start and row
+# patterns of the same name in text.toml (a test keeps them so); with no
+# `end`, the next prompt ends it. The client sends them when the character
+# enters the game, after a level-up (practice, slist), when affects may
+# have changed (aff), and after a gear change (equipment); slist only
+# changes with level.
+
+[[command]]
+command = "score"
+reader = "score"
+
+[[command]]
+command = "practice"
+reader = "practice"
+
+[[command]]
+command = "slist"
+reader = "slist"
+
+[[command]]
+command = "aff"
+reader = "affects"
+
+[[command]]
+command = "equipment"
+reader = "equipment"
+
+# "You are Tamsin the Quiet Attendant", then the lines that hold facts.
+[[reader]]
+name = "score"
+start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
+row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:)'''
+hook = "read_score"
+
+# The sessions line, the "at your disposal" line or the header, then rows
+# of "name  learned%  level  sub  mana".
+[[reader]]
+name = "practice"
+start = '''(?:You have (?<sessions>\d+) practice sessions? left|skills are at your disposal|^Name\s+%\s+Lvl\s+Sub\s+Mana)'''
+row = '''[a-z][a-z' -]*?\s+\d+\s+\d+\s+\S+\s+\d+'''
+hook = "read_practice"
+
+# The class's skills by level, in fixed columns, wrapped rows indented.
+[[reader]]
+name = "slist"
+start = '''Spells and skills learnable by your class'''
+row = '''^(?:.*\[C\]ontinue: ?)?(?:\s*\d+:| {4})'''
+hook = "read_slist"
+
+# "You are affected by:", then "Spell: 'bless'." rows.
+[[reader]]
+name = "affects"
+start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are affected by:'''
+row = '''^(?:Spell|Skill): '(?<name>.+?)'\s*:?\s*(?<detail>.*?)\.?\s*$'''
+hook = "read_affects"
+
+# "You are using:", then a "<slot>  item" row for every slot.
+[[reader]]
+name = "equipment"
+start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are using:'''
+row = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
+hook = "read_equipment"

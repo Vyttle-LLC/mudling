@@ -24,7 +24,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const LINE_BUDGET_US: f64 = 20.0;
-const PLUGIN_BUDGET_US: f64 = 5.0;
+pub(crate) const PLUGIN_BUDGET_US: f64 = 5.0;
 const MIN_LINES: usize = 100_000;
 const PLUGINS: usize = 6;
 const MANY_PLUGINS: usize = 20;
@@ -249,7 +249,7 @@ fn time_host(host: &mut PluginHost, lines: &[Line]) -> Vec<Duration> {
         .collect()
 }
 
-fn split(source: &[String], count: usize) -> Vec<Line> {
+pub(crate) fn split(source: &[String], count: usize) -> Vec<Line> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(count);
     for raw in source.iter().cycle().take(count) {
@@ -260,8 +260,8 @@ fn split(source: &[String], count: usize) -> Vec<Line> {
 }
 
 #[derive(Default)]
-struct Counter {
-    events: usize,
+pub(crate) struct Counter {
+    pub(crate) events: usize,
 }
 
 impl PluginSink for Counter {
@@ -288,7 +288,7 @@ fn synthetic_plugins(count: usize) -> Vec<Plugin> {
 
 /// What one server might run: defaults, one game plugin of 150 patterns and
 /// a small override.
-fn realistic_plugins() -> Vec<Plugin> {
+pub(crate) fn realistic_plugins() -> Vec<Plugin> {
     vec![
         synthetic_plugin(0, "bench-defaults", "default", 25, 5),
         synthetic_plugin(1, "bench-game", "game", 130, 20),
