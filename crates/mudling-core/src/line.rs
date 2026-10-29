@@ -41,7 +41,8 @@ pub enum LineEnd {
     Newline,
     /// GA or EOR from the server, or a reader that recognized a prompt.
     PromptEnd,
-    /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next.
+    /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next,
+    /// including an escape sequence the cut fell inside.
     Cut,
 }
 
@@ -289,7 +290,10 @@ impl LinePipeline {
 
     fn finish(&mut self, end: LineEnd) -> Line {
         self.flush_utf8_tail();
-        self.ansi.end_line();
+        // A cut line continues on the next, open escape sequence and all.
+        if end != LineEnd::Cut {
+            self.ansi.end_line();
+        }
         let line = Line::new(&self.raw, &self.plain, &self.styled, end);
         self.raw.clear();
         self.plain.clear();
@@ -344,9 +348,9 @@ mod tests {
         assert_eq!(plain_lines(&[b"a\n", b"\rb\r", b"\nc"]).0, ["a", "b"]);
     }
 
-    /// Synthetic text mixing every ending, styles, an OSC title, multi-byte
-    /// UTF-8 and an invalid byte.
-    const STREAM: &[u8] = b"\x1b[1;31mWelcome\x1b[0m to Testland.\n\r\
+    /// Synthetic text mixing every ending, styles, a character-set select,
+    /// an OSC title, multi-byte UTF-8 and an invalid byte.
+    const STREAM: &[u8] = b"\x1b[1;31mWelcome\x1b(B\x1b[0m to Testland.\n\r\
         A caf\xc3\xa9 \xe4\xb8\xad sign \xf0\x9f\x8f\xb0 glows.\r\n\
         \x1b]0;title\x07Bad \xff byte\r\r\n\
         \x1b[38;5;208morange\x1b[m\r line\n\
@@ -377,7 +381,7 @@ mod tests {
                 "",
             ]
         );
-        assert_eq!(lines[0].raw(), "\x1b[1;31mWelcome\x1b[0m to Testland.");
+        assert_eq!(lines[0].raw(), "\x1b[1;31mWelcome\x1b(B\x1b[0m to Testland.");
         assert_eq!(pending.unwrap().plain(), "(10h 20m) prompt");
     }
 
@@ -512,6 +516,17 @@ mod tests {
         assert!(lines.iter().chain(&pending).all(|line| !line.raw().contains('\u{FFFD}')));
         let text: String = lines.iter().chain(&pending).map(Line::raw).collect();
         assert_eq!(text.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn a_cut_inside_an_escape_sequence_carries_it_to_the_next_line() {
+        let mut bytes = vec![b'a'; MAX_LINE_BYTES - 3];
+        bytes.extend_from_slice(b"\x1b[31mred\n");
+        let (lines, _) = lines_and_pending(&[&bytes]);
+        assert_eq!(lines[0].end(), LineEnd::Cut);
+        assert_eq!(lines[0].plain(), "a".repeat(MAX_LINE_BYTES - 3));
+        let red = Style { fg: Some(Color(1)), ..Style::default() };
+        assert_eq!((lines[1].plain(), lines[1].styled()), ("red", &[Span { start: 0, end: 3, style: red }][..]));
     }
 
     #[test]

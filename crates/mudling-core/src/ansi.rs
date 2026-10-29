@@ -64,6 +64,11 @@ impl Line {
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
+const INTERMEDIATE: std::ops::RangeInclusive<u8> = 0x20..=0x2f;
+const ESCAPE_FINAL: std::ops::RangeInclusive<u8> = 0x30..=0x7e;
+const CSI_FINAL: std::ops::RangeInclusive<u8> = 0x40..=0x7e;
+/// Real SGR parameters are a few dozen bytes; longer ones aren't kept.
+const MAX_CSI_PARAMS: usize = 256;
 
 /// Where the parser is between pieces of a line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,8 +77,13 @@ enum Escape {
     None,
     /// Just after `ESC`.
     Start,
+    /// After `ESC` and intermediate bytes (as in `ESC ( B`), until the
+    /// final byte.
+    Intermediate,
     /// Inside `ESC [`, collecting parameters until the final byte.
     Csi,
+    /// Inside a CSI too long to be real, skipped until its final byte.
+    CsiTooLong,
     /// Inside `ESC ]`, until `BEL` or `ESC \`.
     Osc,
     /// An `ESC` inside an OSC: `\` ends it, anything else starts a new escape.
@@ -126,14 +136,30 @@ impl AnsiParser {
                     self.escape = match next {
                         '[' => Escape::Csi,
                         ']' => Escape::Osc,
+                        c if c.is_ascii() && INTERMEDIATE.contains(&(c as u8)) => Escape::Intermediate,
                         _ => Escape::None,
                     };
                     &rest[next.len_utf8()..]
                 }
-                Escape::Csi => match bytes.iter().position(|b| (0x40..=0x7e).contains(b)) {
-                    Some(end) => {
+                Escape::Intermediate => match bytes.iter().position(|b| !INTERMEDIATE.contains(b)) {
+                    Some(at) => {
+                        self.escape = Escape::None;
+                        // A byte that can't end the sequence aborts it and stays text.
+                        let end = if ESCAPE_FINAL.contains(&bytes[at]) { at + 1 } else { at };
+                        &rest[end..]
+                    }
+                    None => "",
+                },
+                Escape::Csi => {
+                    let end = bytes.iter().position(|b| CSI_FINAL.contains(b));
+                    let params = &rest[..end.unwrap_or(rest.len())];
+                    if self.csi.len() + params.len() > MAX_CSI_PARAMS {
+                        self.csi.clear();
+                        self.escape = Escape::CsiTooLong;
+                        rest
+                    } else if let Some(end) = end {
                         if bytes[end] == b'm' {
-                            self.csi.push_str(&rest[..end]);
+                            self.csi.push_str(params);
                             let params = std::mem::take(&mut self.csi);
                             self.apply_sgr(&params);
                             self.csi = params;
@@ -141,11 +167,17 @@ impl AnsiParser {
                         self.csi.clear();
                         self.escape = Escape::None;
                         &rest[end + 1..]
-                    }
-                    None => {
+                    } else {
                         self.csi.push_str(rest);
                         ""
                     }
+                }
+                Escape::CsiTooLong => match bytes.iter().position(|b| CSI_FINAL.contains(b)) {
+                    Some(end) => {
+                        self.escape = Escape::None;
+                        &rest[end + 1..]
+                    }
+                    None => "",
                 },
                 Escape::Osc => match memchr::memchr2(BEL, ESC, bytes) {
                     Some(end) => {
@@ -313,6 +345,33 @@ mod tests {
             parser.feed(&raw[split..], &mut text, &mut spans);
             assert_eq!((&*text, &*spans), (&*whole.text, &*whole.spans), "split at {split}");
         }
+    }
+
+    #[test]
+    fn character_set_selects_are_removed_whole() {
+        assert_eq!(&*parse("a\x1b(Bb\x1b)0c").text, "abc");
+        // A byte that can't end the sequence aborts it and is kept.
+        assert_eq!(&*parse("a\x1b(éb").text, "aéb");
+    }
+
+    #[test]
+    fn a_character_set_select_split_at_any_byte_is_removed_whole() {
+        let raw = "\x1b[31mred\x1b(B\x1b[m plain\x1b)0 end";
+        for split in 1..raw.len() {
+            let mut parser = AnsiParser::default();
+            let (mut text, mut spans) = (String::new(), Vec::new());
+            parser.feed(&raw[..split], &mut text, &mut spans);
+            parser.feed(&raw[split..], &mut text, &mut spans);
+            assert_eq!(text, "red plain end", "split at {split}");
+            assert_eq!(spans, [Span { start: 0, end: 3, style: fg(1) }], "split at {split}");
+        }
+    }
+
+    #[test]
+    fn an_overlong_sequence_is_skipped_without_being_kept() {
+        let line = parse(&format!("\x1b[{}31mx", "1;".repeat(MAX_CSI_PARAMS)));
+        assert_eq!(&*line.text, "x");
+        assert!(line.spans.is_empty());
     }
 
     #[test]
