@@ -79,13 +79,18 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
 
     fn word(&mut self) -> String {
         let length = 4 + self.next() % 7;
-        (0..length).map(|_| char::from(b'a' + (self.next() % 26) as u8)).collect()
+        (0..length)
+            .map(|_| char::from(b'a' + (self.next() % 26) as u8))
+            .collect()
     }
 }
 
@@ -107,7 +112,9 @@ fn run() -> Report {
     let mut samples = Vec::with_capacity(TIMED_COMPLETIONS);
     for _ in 0..TIMED_COMPLETIONS {
         let length = 1 + random.next() as usize % 3;
-        let prefix: String = (0..length).map(|_| char::from(b'a' + (random.next() % 26) as u8)).collect();
+        let prefix: String = (0..length)
+            .map(|_| char::from(b'a' + (random.next() % 26) as u8))
+            .collect();
         let line = format!("kill {prefix}");
         let started = Instant::now();
         let completion = completer.complete(&line, line.len(), &history, &known);

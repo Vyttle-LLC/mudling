@@ -23,7 +23,8 @@ struct HistoryFile {
 /// Where the history file lives in the OS data folder, or `None` when the
 /// OS names no home folder.
 pub fn default_history_path() -> Option<PathBuf> {
-    ProjectDirs::from("com", "Vyttle", "MUDling").map(|dirs| dirs.data_dir().join(HISTORY_FILE_NAME))
+    ProjectDirs::from("com", "Vyttle", "MUDling")
+        .map(|dirs| dirs.data_dir().join(HISTORY_FILE_NAME))
 }
 
 /// Reads the history file, or an empty history if there is none yet.
@@ -71,7 +72,9 @@ impl HistoryWriter {
     /// if it failed.
     pub fn finish(self) -> io::Result<()> {
         drop(self.queue);
-        self.worker.join().unwrap_or_else(|_| Err(io::Error::other("the history writer panicked")))
+        self.worker
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("the history writer panicked")))
     }
 }
 
@@ -79,7 +82,10 @@ fn write_atomically(path: &Path, commands: &[String]) -> io::Result<()> {
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder)?;
     }
-    let json = serde_json::to_string(&HistoryFile { commands: commands.to_vec() }).map_err(io::Error::other)?;
+    let json = serde_json::to_string(&HistoryFile {
+        commands: commands.to_vec(),
+    })
+    .map_err(io::Error::other)?;
     let partial = path.with_extension("json.tmp");
     std::fs::write(&partial, json)?;
     std::fs::rename(&partial, path)
@@ -96,7 +102,11 @@ mod tests {
     impl TempFolder {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let name = format!("mudling-history-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+            let name = format!(
+                "mudling-history-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
             TempFolder(std::env::temp_dir().join(name))
         }
 
@@ -120,7 +130,10 @@ mod tests {
         let writer = HistoryWriter::new(folder.file());
         writer.save(&history);
         writer.finish().unwrap();
-        assert_eq!(load_history(&folder.file()).unwrap().entries(), history.entries());
+        assert_eq!(
+            load_history(&folder.file()).unwrap().entries(),
+            history.entries()
+        );
     }
 
     #[test]
@@ -162,7 +175,10 @@ mod tests {
             writer.save(&history);
         }
         writer.finish().unwrap();
-        assert_eq!(load_history(&folder.file()).unwrap().entries(), ["a", "b", "c"]);
+        assert_eq!(
+            load_history(&folder.file()).unwrap().entries(),
+            ["a", "b", "c"]
+        );
     }
 
     #[test]

@@ -57,7 +57,10 @@ impl Completer {
         }
         let word = &cycle.candidates[cycle.shown];
         let rest = &line[cursor..];
-        let result = Completion { line: format!("{}{word}{rest}", &line[..cycle.start]), cursor: cycle.start + word.len() };
+        let result = Completion {
+            line: format!("{}{word}{rest}", &line[..cycle.start]),
+            cursor: cycle.start + word.len(),
+        };
         cycle.result = result.clone();
         Some(result)
     }
@@ -87,14 +90,24 @@ fn start_cycle(line: &str, cursor: usize, history: &History, known: &KnownWords)
     if candidates.is_empty() {
         return None;
     }
-    Some(Cycle { start, candidates, shown: 0, result: Completion { line: String::new(), cursor: 0 } })
+    Some(Cycle {
+        start,
+        candidates,
+        shown: 0,
+        result: Completion {
+            line: String::new(),
+            cursor: 0,
+        },
+    })
 }
 
 /// Whether `word` starts with `lowercase_prefix` once lowercased, without
 /// lowercasing all of `word`: a Tab checks every word of 500 commands.
 fn starts_with_ignoring_case(word: &str, lowercase_prefix: &str) -> bool {
     let mut lowered = word.chars().flat_map(char::to_lowercase);
-    lowercase_prefix.chars().all(|expected| lowered.next() == Some(expected))
+    lowercase_prefix
+        .chars()
+        .all(|expected| lowered.next() == Some(expected))
 }
 
 fn is_word_char(c: char) -> bool {
@@ -135,8 +148,15 @@ mod tests {
         history
     }
 
-    fn tab(completer: &mut Completer, line: &str, history: &History, known: &KnownWords) -> Option<String> {
-        completer.complete(line, line.len(), history, known).map(|c| c.line)
+    fn tab(
+        completer: &mut Completer,
+        line: &str,
+        history: &History,
+        known: &KnownWords,
+    ) -> Option<String> {
+        completer
+            .complete(line, line.len(), history, known)
+            .map(|c| c.line)
     }
 
     #[test]
@@ -153,7 +173,14 @@ mod tests {
         }
         assert_eq!(
             seen,
-            ["kill guard", "kill gate", "kill goblin", "kill gargoyle", "kill Guardian", "kill guard"]
+            [
+                "kill guard",
+                "kill gate",
+                "kill goblin",
+                "kill gargoyle",
+                "kill Guardian",
+                "kill guard"
+            ]
         );
     }
 
@@ -162,9 +189,18 @@ mod tests {
         let history = history(&["look east", "look eagle"]);
         let known = KnownWords::new();
         let mut completer = Completer::new();
-        assert_eq!(tab(&mut completer, "look e", &history, &known).as_deref(), Some("look eagle"));
-        assert_eq!(tab(&mut completer, "look eagle", &history, &known).as_deref(), Some("look east"));
-        assert_eq!(tab(&mut completer, "look east", &history, &known).as_deref(), Some("look eagle"));
+        assert_eq!(
+            tab(&mut completer, "look e", &history, &known).as_deref(),
+            Some("look eagle")
+        );
+        assert_eq!(
+            tab(&mut completer, "look eagle", &history, &known).as_deref(),
+            Some("look east")
+        );
+        assert_eq!(
+            tab(&mut completer, "look east", &history, &known).as_deref(),
+            Some("look eagle")
+        );
     }
 
     #[test]
@@ -173,7 +209,10 @@ mod tests {
         let known = KnownWords::new();
         let mut completer = Completer::new();
         tab(&mut completer, "look e", &history, &known);
-        assert_eq!(tab(&mut completer, "look w", &history, &known).as_deref(), Some("look wall"));
+        assert_eq!(
+            tab(&mut completer, "look w", &history, &known).as_deref(),
+            Some("look wall")
+        );
     }
 
     #[test]
@@ -181,11 +220,22 @@ mod tests {
         let history = history(&["get sword"]);
         let known = KnownWords::new();
         let mut completer = Completer::new();
-        let done = completer.complete("get sw from bag", 6, &history, &known).unwrap();
-        assert_eq!(done, Completion { line: "get sword from bag".into(), cursor: 9 });
+        let done = completer
+            .complete("get sw from bag", 6, &history, &known)
+            .unwrap();
+        assert_eq!(
+            done,
+            Completion {
+                line: "get sword from bag".into(),
+                cursor: 9
+            }
+        );
         // The next Tab continues from the new cursor.
         assert_eq!(
-            completer.complete(&done.line, done.cursor, &history, &known).unwrap().line,
+            completer
+                .complete(&done.line, done.cursor, &history, &known)
+                .unwrap()
+                .line,
             "get sword from bag"
         );
     }
@@ -196,7 +246,10 @@ mod tests {
         let mut known = KnownWords::new();
         known.add_words("item", ["Bless"]);
         let mut completer = Completer::new();
-        assert_eq!(tab(&mut completer, "cast 'BL", &history, &known).as_deref(), Some("cast 'Bless"));
+        assert_eq!(
+            tab(&mut completer, "cast 'BL", &history, &known).as_deref(),
+            Some("cast 'Bless")
+        );
     }
 
     #[test]
@@ -213,6 +266,9 @@ mod tests {
 
     #[test]
     fn words_of_splits_on_punctuation() {
-        assert_eq!(words_of("cast 'bless' guard's-axe, now").collect::<Vec<_>>(), ["cast", "bless", "guard's-axe", "now"]);
+        assert_eq!(
+            words_of("cast 'bless' guard's-axe, now").collect::<Vec<_>>(),
+            ["cast", "bless", "guard's-axe", "now"]
+        );
     }
 }

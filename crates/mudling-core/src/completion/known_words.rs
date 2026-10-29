@@ -34,13 +34,25 @@ impl KnownWords {
             }
             let key = word.to_lowercase();
             if held.insert(key.clone()) {
-                self.index.entry(key).or_insert_with(|| Entry { word: word.to_owned(), sources: 0 }).sources += 1;
+                self.index
+                    .entry(key)
+                    .or_insert_with(|| Entry {
+                        word: word.to_owned(),
+                        sources: 0,
+                    })
+                    .sources += 1;
             }
         }
     }
 
-    pub fn remove_words<S: AsRef<str>>(&mut self, source: &str, words: impl IntoIterator<Item = S>) {
-        let Some(held) = self.by_source.get_mut(source) else { return };
+    pub fn remove_words<S: AsRef<str>>(
+        &mut self,
+        source: &str,
+        words: impl IntoIterator<Item = S>,
+    ) {
+        let Some(held) = self.by_source.get_mut(source) else {
+            return;
+        };
         for word in words {
             let key = word.as_ref().to_lowercase();
             if held.remove(&key)

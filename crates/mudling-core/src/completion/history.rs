@@ -31,7 +31,10 @@ impl History {
     pub fn from_entries(mut entries: Vec<String>) -> Self {
         let excess = entries.len().saturating_sub(HISTORY_LIMIT);
         entries.drain(..excess);
-        History { entries, browse: None }
+        History {
+            entries,
+            browse: None,
+        }
     }
 
     /// The commands, oldest first.
@@ -46,7 +49,8 @@ impl History {
     pub fn record(&mut self, command: &str, echo_off: bool) -> bool {
         self.browse = None;
         let command = command.trim();
-        if echo_off || command.is_empty() || self.entries.last().is_some_and(|last| last == command) {
+        if echo_off || command.is_empty() || self.entries.last().is_some_and(|last| last == command)
+        {
             return false;
         }
         if self.entries.len() == HISTORY_LIMIT {
@@ -70,8 +74,14 @@ impl History {
         };
         // Skip what's already showing: right after sending, the sent command
         // is still in the box.
-        let index = (0..start).rev().find(|&i| self.entries[i].starts_with(&prefix) && self.entries[i] != line)?;
-        self.browse = Some(Browse { index, prefix, draft });
+        let index = (0..start)
+            .rev()
+            .find(|&i| self.entries[i].starts_with(&prefix) && self.entries[i] != line)?;
+        self.browse = Some(Browse {
+            index,
+            prefix,
+            draft,
+        });
         Some(self.entries[index].clone())
     }
 
@@ -99,9 +109,9 @@ impl History {
     /// with its prefix. Told from the text itself, since a box's change
     /// notices can't tell a command shown from history from one typed.
     fn is_showing_a_match(&self, line: &str) -> bool {
-        self.browse
-            .as_ref()
-            .is_some_and(|browse| line.starts_with(&browse.prefix) && self.entries.iter().any(|entry| entry == line))
+        self.browse.as_ref().is_some_and(|browse| {
+            line.starts_with(&browse.prefix) && self.entries.iter().any(|entry| entry == line)
+        })
     }
 }
 
@@ -138,7 +148,10 @@ mod tests {
         }
         assert_eq!(history.entries().len(), HISTORY_LIMIT);
         assert_eq!(history.entries()[0], "cmd 25");
-        assert_eq!(history.entries()[HISTORY_LIMIT - 1], format!("cmd {}", HISTORY_LIMIT + 24));
+        assert_eq!(
+            history.entries()[HISTORY_LIMIT - 1],
+            format!("cmd {}", HISTORY_LIMIT + 24)
+        );
     }
 
     #[test]
@@ -153,7 +166,10 @@ mod tests {
     fn up_with_nothing_typed_walks_back_through_everything() {
         let mut history = history(&["look", "kill rabbit", "cast 'bless'"]);
         assert_eq!(history.older("", "").as_deref(), Some("cast 'bless'"));
-        assert_eq!(history.older("cast 'bless'", "").as_deref(), Some("kill rabbit"));
+        assert_eq!(
+            history.older("cast 'bless'", "").as_deref(),
+            Some("kill rabbit")
+        );
         assert_eq!(history.older("kill rabbit", "").as_deref(), Some("look"));
         assert_eq!(history.older("look", ""), None);
     }
@@ -161,8 +177,14 @@ mod tests {
     #[test]
     fn up_finds_only_commands_starting_with_what_was_typed() {
         let mut history = history(&["cast 'bless'", "look", "cast 'armor'", "kill rabbit"]);
-        assert_eq!(history.older("cast", "cast").as_deref(), Some("cast 'armor'"));
-        assert_eq!(history.older("cast 'armor'", "cast 'armor'").as_deref(), Some("cast 'bless'"));
+        assert_eq!(
+            history.older("cast", "cast").as_deref(),
+            Some("cast 'armor'")
+        );
+        assert_eq!(
+            history.older("cast 'armor'", "cast 'armor'").as_deref(),
+            Some("cast 'bless'")
+        );
         assert_eq!(history.older("cast 'bless'", ""), None);
     }
 
@@ -172,7 +194,10 @@ mod tests {
         assert_eq!(history.older("ca", "ca").as_deref(), Some("cast 'armor'"));
         // The cursor is now at the end of the shown command; the prefix is
         // still "ca", so "look" is not offered.
-        assert_eq!(history.older("cast 'armor'", "cast 'armor'").as_deref(), Some("cast 'bless'"));
+        assert_eq!(
+            history.older("cast 'armor'", "cast 'armor'").as_deref(),
+            Some("cast 'bless'")
+        );
         assert_eq!(history.older("cast 'bless'", "cast 'bless'"), None);
     }
 
@@ -180,8 +205,14 @@ mod tests {
     fn down_goes_back_to_what_was_being_typed() {
         let mut history = history(&["cast 'bless'", "cast 'armor'"]);
         assert_eq!(history.older("cas", "cas").as_deref(), Some("cast 'armor'"));
-        assert_eq!(history.older("cast 'armor'", "").as_deref(), Some("cast 'bless'"));
-        assert_eq!(history.newer("cast 'bless'").as_deref(), Some("cast 'armor'"));
+        assert_eq!(
+            history.older("cast 'armor'", "").as_deref(),
+            Some("cast 'bless'")
+        );
+        assert_eq!(
+            history.newer("cast 'bless'").as_deref(),
+            Some("cast 'armor'")
+        );
         assert_eq!(history.newer("cast 'armor'").as_deref(), Some("cas"));
         assert_eq!(history.newer("cas"), None);
     }
@@ -196,7 +227,10 @@ mod tests {
     fn typing_starts_the_search_over() {
         let mut history = history(&["cast 'bless'", "kill rabbit"]);
         history.older("", "");
-        assert_eq!(history.older("cast", "cast").as_deref(), Some("cast 'bless'"));
+        assert_eq!(
+            history.older("cast", "cast").as_deref(),
+            Some("cast 'bless'")
+        );
         assert_eq!(history.newer("cast 'bless' x"), None);
     }
 
