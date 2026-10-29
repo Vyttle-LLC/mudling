@@ -1,0 +1,16 @@
+[package]
+name = "mudling-bench"
+description = "MUDling's headless benchmark: scrollback append and find against the PRD §6 budgets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mudling-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

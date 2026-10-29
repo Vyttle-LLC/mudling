@@ -1,0 +1,10 @@
+/target
+
+# Session logs hold other players' chat. They are read at runtime only and
+# must never be committed, wherever a local copy lands.
+*.log
+/logs/
+/replay-logs/
+
+# Measurement reports written by local runs.
+/reports/
