@@ -48,8 +48,15 @@ pub(crate) struct Matcher {
     chunks: Vec<Group>,
     unfiltered: Group,
     prefilter: Option<AhoCorasick>,
-    /// For each prefilter literal, the chunks with a pattern that needs it.
-    literal_chunks: Vec<u64>,
+    /// What needs each prefilter literal, in the prefilter's order.
+    literals: Vec<LiteralUse>,
+}
+
+/// The patterns that need one literal, and the chunks they're in.
+#[derive(Clone, Debug, Default)]
+struct LiteralUse {
+    chunks: u64,
+    patterns: Vec<usize>,
 }
 
 /// Patterns run as one set, and the matcher index of each.
@@ -92,25 +99,44 @@ impl Matcher {
         }
 
         let chunk_size = CHUNK_PATTERNS.max(filtered.len().div_ceil(MAX_CHUNKS));
-        let mut literal_chunks: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        let mut literals: BTreeMap<Vec<u8>, LiteralUse> = BTreeMap::new();
         let mut chunks = Vec::new();
         for (chunk, patterns) in filtered.chunks(chunk_size).enumerate() {
-            for literal in patterns.iter().flat_map(|(_, literals)| literals) {
-                *literal_chunks.entry(literal.clone()).or_default() |= 1 << chunk;
+            for (id, needed) in patterns {
+                for literal in needed {
+                    let used = literals.entry(literal.clone()).or_default();
+                    used.chunks |= 1 << chunk;
+                    used.patterns.push(*id);
+                }
             }
             chunks.push(Group::new(sources, patterns.iter().map(|(id, _)| *id).collect(), cache)?);
         }
-        let prefilter = if literal_chunks.is_empty() {
+        let prefilter = if literals.is_empty() {
             None
         } else {
-            Some(AhoCorasick::new(literal_chunks.keys()).map_err(|error| error.to_string())?)
+            Some(AhoCorasick::new(literals.keys()).map_err(|error| error.to_string())?)
         };
         Ok(Matcher {
             chunks,
             unfiltered: Group::new(sources, unfiltered, cache)?,
             prefilter,
-            literal_chunks: literal_chunks.into_values().collect(),
+            literals: literals.into_values().collect(),
         })
+    }
+
+    /// Replaces `out` with the ids of the patterns `text` might match, in
+    /// ascending order: those whose required literals it holds, found in the
+    /// same scan [`Matcher::matching`] makes, and every unfiltered one.
+    pub(crate) fn candidates(&self, text: &str, out: &mut Vec<usize>) {
+        out.clear();
+        if let Some(prefilter) = &self.prefilter {
+            for found in prefilter.find_overlapping_iter(text) {
+                out.extend(&self.literals[found.pattern().as_usize()].patterns);
+            }
+        }
+        out.extend(&self.unfiltered.ids);
+        out.sort_unstable();
+        out.dedup();
     }
 
     /// Replaces `out` with the ids of the patterns that match `text`, in
@@ -140,7 +166,7 @@ impl Matcher {
         let all = u64::MAX >> (u64::BITS as usize - self.chunks.len());
         let mut hit = 0;
         for found in prefilter.find_overlapping_iter(text) {
-            hit |= self.literal_chunks[found.pattern().as_usize()];
+            hit |= self.literals[found.pattern().as_usize()].chunks;
             if hit == all {
                 break;
             }
@@ -241,6 +267,18 @@ mod tests {
         assert_eq!(matching(&m, &text), [0, CHUNK_PATTERNS + 1, last, last + 1]);
         assert_eq!(matching(&m, "word0005"), [5]);
         assert!(matching(&m, "no words").is_empty());
+    }
+
+    #[test]
+    fn candidates_are_the_patterns_whose_literals_appear_and_the_unfiltered() {
+        let m = matcher(&["north", r"^\d", "gate", r"(?:north|south) gate"]);
+        let mut out = Vec::new();
+        m.candidates("the north road", &mut out);
+        assert_eq!(out, [0, 1]);
+        m.candidates("the north gate", &mut out);
+        assert_eq!(out, [0, 1, 2, 3]);
+        m.candidates("nothing", &mut out);
+        assert_eq!(out, [1]);
     }
 
     #[test]

@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// By default, every 256th line also times each plugin on its own, running
-/// its rules one by one: often enough to fill Settings › Plugins, too rarely
-/// to move the p99.
+/// the rules the prefilter lets through one by one: often enough to fill
+/// Settings › Plugins, too rarely to move the p99.
 pub const DEFAULT_COST_SAMPLING: u64 = 256;
 /// The samples each plugin keeps for its cost summary.
 const COST_SAMPLES_KEPT: usize = 1024;
@@ -281,14 +281,22 @@ impl PluginHost {
             .collect()
     }
 
-    /// Times each enabled plugin's own rules over `text`, one by one. That
-    /// keeps no second matcher per plugin, and runs no slower than the
-    /// plugin would on its own: an upper bound on its share of the pass.
+    /// Times each enabled plugin's rules over `text`, one by one, but only
+    /// those the merged matcher's prefilter lets through: the rules whose
+    /// required literals `text` holds, and the plugin's unfiltered rules.
+    /// The one prefilter scan is shared and isn't counted. That keeps no
+    /// second matcher per plugin, and stays close to the plugin's share.
     fn sample_costs(&mut self, text: &str) {
-        let rules = &self.compiled.lines.rules;
+        let lines = &self.compiled.lines;
+        lines.matcher.candidates(text, &mut self.matched);
         for (range, &index) in self.compiled.plugin_rules.iter().zip(&self.compiled.order) {
+            let first = self.matched.partition_point(|&id| id < range.start);
+            let end = self.matched.partition_point(|&id| id < range.end);
             let started = Instant::now();
-            for rule in &rules[range.clone()] {
+            for rule in self.matched[first..end].iter().map(|&id| &lines.rules[id]) {
+                if !rule.pattern.is_match(text) {
+                    continue;
+                }
                 match rule.action {
                     Action::Event { .. } => {
                         std::hint::black_box(rule.pattern.captures(text));
