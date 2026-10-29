@@ -348,3 +348,46 @@ fn corrupt_compressed_data_is_an_error_that_ends_compression() {
         .unwrap();
     assert_eq!(events.last(), Some(&text("plain")));
 }
+
+#[test]
+fn an_oversize_subnegotiation_is_dropped_and_parsing_carries_on() {
+    let mut stream = vec![IAC, SB, option::GMCP];
+    stream.extend_from_slice(b"Map.Data ");
+    stream.resize(stream.len() + MAX_SUBNEGOTIATION, b'x');
+    // An escaped IAC past the cap is skipped too, not read as the end.
+    stream.extend_from_slice(&[IAC, IAC, b'x', IAC, SE]);
+    stream.extend_from_slice(b"Still here.");
+    stream.extend_from_slice(&[IAC, SB, option::GMCP]);
+    stream.extend_from_slice(b"Core.Ping");
+    stream.extend_from_slice(&[IAC, SE]);
+
+    // Uneven chunks, with one boundary between the two bytes of an IAC IAC.
+    let escaped_iac = stream.len() - 29;
+    let mut chunks: Vec<&[u8]> = stream[..escaped_iac].chunks(1_000_003).collect();
+    chunks.push(&stream[escaped_iac..]);
+    assert_eq!(stream[escaped_iac - 1..=escaped_iac], [IAC, IAC]);
+    assert_eq!(
+        run(&chunks).0,
+        [
+            Event::SubnegotiationDropped {
+                option: option::GMCP
+            },
+            text("Still here."),
+            Event::Gmcp {
+                package: "Core.Ping".to_owned(),
+                data: String::new()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_subnegotiation_at_the_cap_is_kept() {
+    let mut stream = vec![IAC, SB, option::GMCP];
+    let package = b"Map.Data ";
+    stream.extend_from_slice(package);
+    stream.resize(stream.len() + MAX_SUBNEGOTIATION - package.len(), b'x');
+    stream.extend_from_slice(&[IAC, SE]);
+    let (events, _) = run(&[&stream]);
+    assert!(matches!(&events[..], [Event::Gmcp { package, .. }] if package == "Map.Data"));
+}

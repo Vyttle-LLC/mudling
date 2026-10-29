@@ -44,6 +44,10 @@ pub mod option {
 const MSSP_VAR: u8 = 1;
 const MSSP_VAL: u8 = 2;
 
+/// The largest subnegotiation payload kept, with room for large GMCP such as
+/// map data. A longer one is dropped, so a broken server can't grow memory.
+const MAX_SUBNEGOTIATION: usize = 8 * 1024 * 1024;
+
 /// What happened on a connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -62,6 +66,8 @@ pub enum Event {
     Echo(bool),
     /// The server's name, from MSSP.
     Mssp(String),
+    /// A subnegotiation for `option` passed the size cap and was dropped.
+    SubnegotiationDropped { option: u8 },
     /// The connection closed.
     Disconnected(DisconnectReason),
 }
@@ -112,6 +118,8 @@ pub struct Parser {
     state: State,
     /// The payload of the subnegotiation being read, which may span chunks.
     subnegotiation: Vec<u8>,
+    /// The current subnegotiation passed the cap; skip it up to `IAC SE`.
+    dropping_subnegotiation: bool,
     /// Options the server has enabled, by option number.
     server_enabled: [bool; 256],
     inflater: Option<mccp::Inflater>,
@@ -123,6 +131,7 @@ impl Default for Parser {
         Parser {
             state: State::Text,
             subnegotiation: Vec::new(),
+            dropping_subnegotiation: false,
             server_enabled: [false; 256],
             inflater: None,
             output: Vec::new(),
@@ -219,12 +228,13 @@ impl Parser {
                 }
                 State::SubnegotiationOption => {
                     self.subnegotiation.clear();
+                    self.dropping_subnegotiation = false;
                     self.state = State::Subnegotiation { option: data[at] };
                     at += 1;
                 }
                 State::Subnegotiation { option } => {
                     let end = memchr(command::IAC, &data[at..]).map_or(data.len(), |i| at + i);
-                    self.subnegotiation.extend_from_slice(&data[at..end]);
+                    self.collect(option, &data[at..end], events);
                     if end < data.len() {
                         self.state = State::SubnegotiationIac { option };
                         at = end + 1;
@@ -239,11 +249,14 @@ impl Parser {
                     match byte {
                         command::SE => {
                             self.state = State::Text;
-                            if self.finish_subnegotiation(option, events) && !compressed {
+                            if !self.dropping_subnegotiation
+                                && self.finish_subnegotiation(option, events)
+                                && !compressed
+                            {
                                 return Some(at);
                             }
                         }
-                        command::IAC => self.subnegotiation.push(command::IAC),
+                        command::IAC => self.collect(option, &[command::IAC], events),
                         // Malformed: drop the byte and keep reading the payload.
                         _ => {}
                     }
@@ -251,6 +264,21 @@ impl Parser {
             }
         }
         None
+    }
+
+    /// Adds `bytes` to the subnegotiation payload, or drops the payload once
+    /// it would pass the cap.
+    fn collect(&mut self, option: u8, bytes: &[u8], events: &mut Vec<Event>) {
+        if self.dropping_subnegotiation {
+            return;
+        }
+        if self.subnegotiation.len() + bytes.len() > MAX_SUBNEGOTIATION {
+            self.subnegotiation = Vec::new();
+            self.dropping_subnegotiation = true;
+            events.push(Event::SubnegotiationDropped { option });
+        } else {
+            self.subnegotiation.extend_from_slice(bytes);
+        }
     }
 
     /// Emits text from `start` up to the next IAC found from `search_from`,
