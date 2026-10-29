@@ -18,8 +18,8 @@ use mudling_core::replay::ReplayFeed;
 use mudling_core::{AnsiParser, Line, LineKind, Scrollback};
 use std::ops::Range;
 
-pub const LINE_HEIGHT: Pixels = px(20.);
-pub const FONT_SIZE: Pixels = px(14.);
+const LINE_HEIGHT: Pixels = px(20.);
+const FONT_SIZE: Pixels = px(14.);
 /// A comfortable reading width: about 100 columns of the chat font.
 pub const COLUMN_WIDTH: Pixels = px(860.);
 
@@ -38,9 +38,6 @@ pub struct Chat {
     scrollback: Scrollback,
     parser: AnsiParser,
     scroll: UniformListScrollHandle,
-    /// Whether the view follows the newest line. Scrolling up unpins it;
-    /// scrolling back to the bottom pins it again.
-    pinned: bool,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
 }
@@ -51,7 +48,6 @@ impl Chat {
             scrollback: Scrollback::with_capacity(capacity),
             parser: AnsiParser::default(),
             scroll: UniformListScrollHandle::new(),
-            pinned: true,
             unannounced: Vec::new(),
             announcement: None,
         }
@@ -65,11 +61,19 @@ impl Chat {
         }
     }
 
+    /// Appends a server line and queues it for the live region.
     pub fn push_server_line(&mut self, raw: &str, cx: &mut Context<Chat>) {
         let line = self.parser.parse_line(raw);
+        if self.unannounced.len() == ANNOUNCED_LINES {
+            self.unannounced.remove(0);
+        }
+        self.unannounced
+            .push(SharedString::from(line.text.to_string()));
         self.push(line, cx);
     }
 
+    /// Echoes a command the player sent. It isn't announced: the player
+    /// just typed it.
     pub fn push_command(&mut self, command: &str, cx: &mut Context<Chat>) {
         self.push(Line::command(command), cx);
     }
@@ -87,18 +91,21 @@ impl Chat {
     }
 
     fn push(&mut self, line: Line, cx: &mut Context<Chat>) {
+        let following = self.follows_newest();
         let evicted_before = self.scrollback.evicted();
-        if self.unannounced.len() == ANNOUNCED_LINES {
-            self.unannounced.remove(0);
-        }
-        self.unannounced
-            .push(SharedString::from(line.text.to_string()));
         self.scrollback.push(line);
         let evicted = self.scrollback.evicted() - evicted_before;
-        if evicted > 0 && !self.pinned {
+        if evicted > 0 && !following {
             self.keep_reading_position(evicted);
         }
         cx.notify();
+    }
+
+    /// Whether the view follows the newest line, read from the list's real
+    /// offset, so a scroll since the last frame counts at once. Scrolling up
+    /// stops following; scrolling back to the bottom follows again.
+    fn follows_newest(&self) -> bool {
+        self.scroll.is_scrolled_to_end().unwrap_or(true)
     }
 
     /// Scrolls back through history by `distance`, as a reader would.
@@ -169,10 +176,7 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
 
 impl Render for Chat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Chat>) -> impl IntoElement {
-        if let Some(at_end) = self.scroll.is_scrolled_to_end() {
-            self.pinned = at_end;
-        }
-        if self.pinned {
+        if self.follows_newest() {
             self.scroll
                 .scroll_to_item(usize::MAX, ScrollStrategy::Bottom);
         }
@@ -296,5 +300,34 @@ mod tests {
             chat.read_with(cx, |chat, _| chat.scroll.is_scrolled_to_end()),
             Some(false)
         );
+    }
+
+    #[gpui::test]
+    fn lines_arriving_before_the_next_frame_keep_a_fresh_scroll_still(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 1_000, 1_000);
+        let reading = chat.update(cx, |chat, cx| {
+            chat.scroll_back(LINE_HEIGHT * 200., cx);
+            let top = (-chat.scroll_offset().y / LINE_HEIGHT).round() as usize;
+            let reading = chat.scrollback.get(top).unwrap().text.to_string();
+            // No frame runs between the scroll and these lines.
+            (0..10).for_each(|n| chat.push_server_line(&format!("new {n}"), cx));
+            reading
+        });
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), reading);
+    }
+
+    #[gpui::test]
+    fn only_server_lines_are_announced(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 1_000, 10);
+        chat.update(cx, |chat, cx| {
+            chat.push_command("look", cx);
+            chat.push_server_line("You see a path.", cx);
+        });
+        cx.run_until_parked();
+        let announced = chat.read_with(cx, |chat, _| {
+            chat.announcement.clone().map(|(_, text)| text)
+        });
+        assert_eq!(announced.as_deref(), Some("You see a path."));
     }
 }

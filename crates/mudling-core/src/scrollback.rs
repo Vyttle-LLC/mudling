@@ -42,10 +42,6 @@ impl Scrollback {
         self.lines.is_empty()
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     /// The line at `index`, where 0 is the oldest line still held.
     pub fn get(&self, index: usize) -> Option<&Line> {
         self.lines.get(index)
