@@ -9,7 +9,9 @@ publish.workspace = true
 
 [dependencies]
 aho-corasick = "1.1"
+directories = "6"
 serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
