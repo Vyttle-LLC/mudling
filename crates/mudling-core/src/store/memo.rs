@@ -20,7 +20,11 @@ impl<K: PartialEq, V> Memo<K, V> {
     /// The value for `key`, computing it only if `key` differs from the
     /// last one.
     pub fn get(&mut self, key: K, compute: impl FnOnce() -> V) -> &V {
-        if self.cached.as_ref().is_none_or(|(cached_key, _)| *cached_key != key) {
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(cached_key, _)| *cached_key != key)
+        {
             self.cached = Some((key, compute()));
         }
         &self.cached.as_ref().expect("the value was just cached").1

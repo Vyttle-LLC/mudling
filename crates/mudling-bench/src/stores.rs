@@ -83,7 +83,9 @@ pub fn print(report: &Report) {
 fn measure_frame_apply() -> Summary {
     let hub = StoreHub::new(|| {});
     let mut shell = subscribed_shell(&hub);
-    hub.write::<TerminalState>(append(replay::synthetic_lines(TERMINAL_CAPACITY).into_iter()));
+    hub.write::<TerminalState>(append(
+        replay::synthetic_lines(TERMINAL_CAPACITY).into_iter(),
+    ));
     shell.apply_batch(&hub.drain().expect("the terminal filled"));
 
     let mut lines = replay::synthetic_lines(1_000).into_iter().cycle();
@@ -127,7 +129,9 @@ fn measure_burst() -> Burst {
             let mut lines = replay::synthetic_lines(BURST_LINES).into_iter().cycle();
             let started = Instant::now();
             for burst in 0..bursts {
-                std::thread::sleep((started + burst_gap * burst as u32).saturating_duration_since(Instant::now()));
+                std::thread::sleep(
+                    (started + burst_gap * burst as u32).saturating_duration_since(Instant::now()),
+                );
                 for line in lines.by_ref().take(BURST_LINES) {
                     hub.write::<TerminalState>(append(std::iter::once(line)));
                 }
@@ -143,7 +147,9 @@ fn measure_burst() -> Burst {
     let started = Instant::now();
     while !writer.is_finished() || frames == 0 {
         frames += 1;
-        std::thread::sleep((started + FRAME * frames as u32).saturating_duration_since(Instant::now()));
+        std::thread::sleep(
+            (started + FRAME * frames as u32).saturating_duration_since(Instant::now()),
+        );
         let tick = Instant::now();
         if let Some(batch) = hub.drain() {
             shell.apply_batch(&batch);
@@ -187,5 +193,8 @@ fn vitals(n: usize) -> VitalsState {
 
 fn room(n: usize) -> RoomState {
     let id = (n % 1_000).to_string();
-    RoomState(Fields::from([("num", id.as_str()), ("name", "A synthetic room")]))
+    RoomState(Fields::from([
+        ("num", id.as_str()),
+        ("name", "A synthetic room"),
+    ]))
 }

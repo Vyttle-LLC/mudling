@@ -27,7 +27,10 @@ impl StoreHub {
     /// drain arrives, so a shell schedules one frame per batch, not one per
     /// change.
     pub fn new(waker: impl Fn() + Send + Sync + 'static) -> Self {
-        StoreHub { inner: Mutex::default(), waker: Box::new(waker) }
+        StoreHub {
+            inner: Mutex::default(),
+            waker: Box::new(waker),
+        }
     }
 
     /// Applies `change` to the store. A change that changes nothing bumps no
@@ -96,19 +99,30 @@ impl StoreHub {
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A writer that panicked left at most one store mid-change; the
         // stores are still safe to read and write.
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Fields, Revision, TerminalChange, TerminalLine, TerminalState, VitalsState};
+    use crate::store::{
+        Fields, Revision, TerminalChange, TerminalLine, TerminalState, VitalsState,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn lines(texts: &[&str]) -> TerminalChange {
-        TerminalChange::Append(texts.iter().map(|text| TerminalLine { text: (*text).to_owned() }).collect())
+        TerminalChange::Append(
+            texts
+                .iter()
+                .map(|text| TerminalLine {
+                    text: (*text).to_owned(),
+                })
+                .collect(),
+        )
     }
 
     fn vitals(hp: &str) -> VitalsState {
@@ -134,8 +148,14 @@ mod tests {
         assert!(!hub.write::<VitalsState>(vitals("90")));
         assert!(!hub.write::<TerminalState>(lines(&[])));
 
-        assert_eq!(hub.read(|v: &Versioned<VitalsState>| v.revision()), Revision(1));
-        assert_eq!(hub.read(|v: &Versioned<TerminalState>| v.revision()), Revision(0));
+        assert_eq!(
+            hub.read(|v: &Versioned<VitalsState>| v.revision()),
+            Revision(1)
+        );
+        assert_eq!(
+            hub.read(|v: &Versioned<TerminalState>| v.revision()),
+            Revision(0)
+        );
         assert!(hub.drain().is_none());
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
     }
@@ -157,7 +177,10 @@ mod tests {
         assert_eq!(terminal.revision, Revision(2));
         assert_eq!(terminal.change, lines(&["one", "two", "three"]));
         let vitals_diff = batch.vitals.expect("the vitals changed");
-        assert_eq!((vitals_diff.revision, vitals_diff.change), (Revision(2), vitals("80")));
+        assert_eq!(
+            (vitals_diff.revision, vitals_diff.change),
+            (Revision(2), vitals("80"))
+        );
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
 
         assert!(hub.drain().is_none());
@@ -176,7 +199,10 @@ mod tests {
 
         assert!(hub.drain().is_none());
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
-        assert_eq!(hub.read(|v: &Versioned<VitalsState>| v.revision()), Revision(3));
+        assert_eq!(
+            hub.read(|v: &Versioned<VitalsState>| v.revision()),
+            Revision(3)
+        );
     }
 
     #[test]

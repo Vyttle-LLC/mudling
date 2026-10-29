@@ -64,7 +64,12 @@ pub struct Fields(pub BTreeMap<String, String>);
 
 impl<const N: usize> From<[(&str, &str); N]> for Fields {
     fn from(pairs: [(&str, &str); N]) -> Self {
-        Fields(pairs.into_iter().map(|(name, value)| (name.to_owned(), value.to_owned())).collect())
+        Fields(
+            pairs
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+        )
     }
 }
 
@@ -119,11 +124,19 @@ mod tests {
 
     /// Lines named "0", "1", … up to `count - 1`.
     fn numbered(count: usize) -> TerminalChange {
-        TerminalChange::Append((0..count).map(|n| TerminalLine { text: n.to_string() }).collect())
+        TerminalChange::Append(
+            (0..count)
+                .map(|n| TerminalLine {
+                    text: n.to_string(),
+                })
+                .collect(),
+        )
     }
 
     fn append(text: &str) -> TerminalChange {
-        TerminalChange::Append(vec![TerminalLine { text: text.to_owned() }])
+        TerminalChange::Append(vec![TerminalLine {
+            text: text.to_owned(),
+        }])
     }
 
     #[test]

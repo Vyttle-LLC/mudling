@@ -5,9 +5,8 @@
 //! cross one at a time; only store updates do.
 
 use mudling_core::store::{
-    CharactersState, Diff, Fields, GearState, MapState, MobsState, RoomState, SettingsState,
-    Store, StoreHub, StoreKind, TerminalChange, TerminalLine, TerminalState, Versioned,
-    VitalsState,
+    CharactersState, Diff, Fields, GearState, MapState, MobsState, RoomState, SettingsState, Store,
+    StoreHub, StoreKind, TerminalChange, TerminalLine, TerminalState, Versioned, VitalsState,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,16 +37,30 @@ pub trait FrameWaker: Send + Sync {
 /// A store's whole state, as a subscription starts.
 #[derive(uniffi::Enum)]
 pub enum StoreSnapshot {
-    Terminal { revision: u64, lines: Vec<String> },
-    Fields { store: StoreKind, revision: u64, fields: HashMap<String, String> },
+    Terminal {
+        revision: u64,
+        lines: Vec<String>,
+    },
+    Fields {
+        store: StoreKind,
+        revision: u64,
+        fields: HashMap<String, String>,
+    },
 }
 
 /// A store's changes in one frame. Applied in order to its snapshot, they
 /// give the core's state.
 #[derive(uniffi::Enum)]
 pub enum StoreDiff {
-    TerminalAppended { revision: u64, lines: Vec<String> },
-    Fields { store: StoreKind, revision: u64, fields: HashMap<String, String> },
+    TerminalAppended {
+        revision: u64,
+        lines: Vec<String>,
+    },
+    Fields {
+        store: StoreKind,
+        revision: u64,
+        fields: HashMap<String, String>,
+    },
 }
 
 #[derive(uniffi::Object)]
@@ -59,7 +72,9 @@ pub struct Session {
 impl Session {
     #[uniffi::constructor]
     pub fn open(waker: Arc<dyn FrameWaker>) -> Arc<Self> {
-        Arc::new(Session { hub: StoreHub::new(move || waker.changes_pending()) })
+        Arc::new(Session {
+            hub: StoreHub::new(move || waker.changes_pending()),
+        })
     }
 
     pub fn subscribe(&self, store: StoreKind) -> StoreSnapshot {
@@ -80,8 +95,16 @@ impl Session {
         let Some(batch) = self.hub.drain() else {
             return Vec::new();
         };
-        let mudling_core::store::Batch { terminal, vitals, room, map, mobs, characters, gear, settings } =
-            batch;
+        let mudling_core::store::Batch {
+            terminal,
+            vitals,
+            room,
+            map,
+            mobs,
+            characters,
+            gear,
+            settings,
+        } = batch;
         [
             terminal.map(TerminalState::diff),
             vitals.map(VitalsState::diff),
@@ -100,7 +123,8 @@ impl Session {
     /// Until the connection layer lands, a command is only echoed into the
     /// terminal store.
     pub fn send_command(&self, command: String) {
-        self.hub.write::<TerminalState>(TerminalChange::Append(vec![TerminalLine { text: command }]));
+        self.hub
+            .write::<TerminalState>(TerminalChange::Append(vec![TerminalLine { text: command }]));
     }
 }
 
@@ -157,7 +181,10 @@ fn texts<'a>(lines: impl IntoIterator<Item = &'a TerminalLine>) -> Vec<String> {
 
 impl Bridged for TerminalState {
     fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
-        StoreSnapshot::Terminal { revision: versioned.revision().0, lines: texts(versioned.value().lines()) }
+        StoreSnapshot::Terminal {
+            revision: versioned.revision().0,
+            lines: texts(versioned.value().lines()),
+        }
     }
 
     fn diff(diff: Diff<Self>) -> StoreDiff {
@@ -170,7 +197,10 @@ impl Bridged for TerminalState {
 }
 
 fn fields_map(Fields(fields): &Fields) -> HashMap<String, String> {
-    fields.iter().map(|(name, value)| (name.clone(), value.clone())).collect()
+    fields
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// The placeholder stores all cross as their named fields.
@@ -196,7 +226,15 @@ macro_rules! bridge_fields_stores {
     };
 }
 
-bridge_fields_stores!(VitalsState, RoomState, MapState, MobsState, CharactersState, GearState, SettingsState);
+bridge_fields_stores!(
+    VitalsState,
+    RoomState,
+    MapState,
+    MobsState,
+    CharactersState,
+    GearState,
+    SettingsState
+);
 
 #[cfg(test)]
 mod tests {
@@ -216,7 +254,8 @@ mod tests {
     fn a_command_reaches_a_subscribed_shell_as_one_diff() {
         let waker = Arc::new(CountingWaker::default());
         let session = Session::open(waker.clone());
-        let StoreSnapshot::Terminal { revision: 0, lines } = session.subscribe(StoreKind::Terminal) else {
+        let StoreSnapshot::Terminal { revision: 0, lines } = session.subscribe(StoreKind::Terminal)
+        else {
             panic!("an empty terminal snapshot");
         };
         assert!(lines.is_empty());
