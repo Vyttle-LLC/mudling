@@ -39,7 +39,7 @@ pub struct Repo {
 
 impl Repo {
     /// Opens the repo at `folder`, or starts one if the folder is empty or
-    /// missing. Clears stale locks left by a killed app. Fails with
+    /// missing. Clears the locks a killed MUDling left. Fails with
     /// [`GitError::Locked`] if another MUDling has it open.
     pub fn open_or_init(folder: &Path) -> Result<Self> {
         let repo = match Repository::open(folder) {
@@ -48,7 +48,7 @@ impl Repo {
             Err(error) => return Err(error.into()),
         };
         let owner = locks::take_ownership(repo.commondir())?;
-        locks::clear_stale(repo.commondir());
+        locks::clear_after_crash(repo.commondir());
         Ok(Self {
             repo,
             _owner: owner,
@@ -72,7 +72,7 @@ impl Repo {
     /// Stages every change in the folder and commits it to the current branch.
     /// Returns `None` if nothing changed.
     pub fn commit_all(&self, message: &str) -> Result<Option<Oid>> {
-        self.clear_stale_locks();
+        let _writing = self.mark_write()?;
         let mut index = self.repo.index()?;
         index.read(true)?;
         index.add_all(["*"], IndexAddOption::DEFAULT, None)?;
@@ -105,7 +105,7 @@ impl Repo {
     /// Fetches `branch` from `remote`, returning its tip there, or `None` if
     /// the remote doesn't have it yet. Local branches don't move.
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<Option<Oid>> {
-        self.clear_stale_locks();
+        let _writing = self.mark_write()?;
         let tracking = tracking_ref(remote, branch);
         let refspec = format!("+{}:{tracking}", local_ref(branch));
         let mut options = FetchOptions::new();
@@ -118,7 +118,7 @@ impl Repo {
     /// Pushes `branch` to `remote`, which takes it in one atomic step or not at
     /// all. Fails with [`GitError::NonFastForward`] if the remote is ahead.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
-        self.clear_stale_locks();
+        let _writing = self.mark_write()?;
         let name = local_ref(branch);
         let mut rejection = None;
         let mut callbacks = credentials::machine_callbacks(self.repo.config()?);
@@ -169,7 +169,7 @@ impl Repo {
     /// `from` is `None`. Fails, moving nothing, if it isn't at `from` any more.
     /// Only the ref moves: the folder's files stay as they are.
     pub fn move_branch(&self, branch: &str, from: Option<Oid>, to: Oid) -> Result<()> {
-        self.clear_stale_locks();
+        let _writing = self.mark_write()?;
         let name = local_ref(branch);
         let log_message = "mudling: move branch";
         match from {
@@ -181,8 +181,8 @@ impl Repo {
         Ok(())
     }
 
-    fn clear_stale_locks(&self) {
-        locks::clear_stale(self.repo.commondir());
+    fn mark_write(&self) -> Result<locks::WriteMarker> {
+        locks::WriteMarker::set(self.repo.commondir())
     }
 
     fn find_remote(&self, name: &str) -> Result<Remote<'_>> {

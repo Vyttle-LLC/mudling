@@ -31,6 +31,11 @@ fn reopen(folder: &Path) -> Repo {
     panic!("the repo stayed locked");
 }
 
+/// Leaves the repo as a process killed in the middle of a write does.
+fn die_mid_write(repo: Repo) {
+    std::mem::forget(repo.mark_write().unwrap());
+}
+
 fn write(folder: &Path, name: &str, contents: &str) {
     fs::write(folder.join(name), contents).unwrap();
 }
@@ -243,18 +248,17 @@ fn move_branch_moves_nothing_if_the_branch_is_not_where_the_caller_thinks() {
 }
 
 #[test]
-fn stale_locks_left_by_a_killed_app_are_cleared_at_open() {
+fn locks_left_by_an_app_killed_mid_write_are_cleared_at_open_however_young() {
     let (folder, repo) = empty_repo();
     let git_dir = repo.repo.path().to_owned();
     let main = commit(&repo, folder.path(), "a.json", "1");
-    drop(repo);
+    die_mid_write(repo);
     let locks = [
         git_dir.join("index.lock"),
         git_dir.join("refs/heads/main.lock"),
     ];
     for lock in &locks {
         fs::write(lock, "").unwrap();
-        age(lock, OLD);
     }
 
     let repo = reopen(folder.path());
@@ -267,9 +271,9 @@ fn stale_locks_left_by_a_killed_app_are_cleared_at_open() {
 #[test]
 fn a_lock_may_be_live_while_another_mudling_has_the_repo_open() {
     let (folder, holder) = empty_repo();
+    let _writing = holder.mark_write().unwrap();
     let lock = holder.repo.path().join("index.lock");
     fs::write(&lock, "").unwrap();
-    age(&lock, OLD);
 
     let refused = Repo::open_or_init(folder.path());
 
@@ -278,12 +282,25 @@ fn a_lock_may_be_live_while_another_mudling_has_the_repo_open() {
 }
 
 #[test]
-fn a_fresh_lock_may_belong_to_a_live_git_and_blocks_as_locked_until_it_ages() {
+fn a_lock_older_than_the_killed_write_belongs_to_another_git_and_stays() {
+    let (folder, repo) = empty_repo();
+    let lock = repo.repo.path().join("index.lock");
+    fs::write(&lock, "").unwrap();
+    age(&lock, OLD);
+    die_mid_write(repo);
+
+    reopen(folder.path());
+
+    assert!(lock.exists());
+}
+
+#[test]
+fn another_gits_lock_stays_however_old_and_blocks_as_locked_until_released() {
     let (folder, repo) = empty_repo();
     commit(&repo, folder.path(), "a.json", "1");
-    let git_dir = repo.repo.path().to_owned();
-    let lock = git_dir.join("index.lock");
+    let lock = repo.repo.path().join("index.lock");
     fs::write(&lock, "").unwrap();
+    age(&lock, OLD);
     drop(repo);
 
     let repo = reopen(folder.path());
@@ -291,9 +308,23 @@ fn a_fresh_lock_may_belong_to_a_live_git_and_blocks_as_locked_until_it_ages() {
     write(folder.path(), "a.json", "2");
     let failure = repo.commit_all("blocked").unwrap_err();
     assert!(matches!(failure, GitError::Locked(_)), "{failure:?}");
+    assert!(lock.exists());
 
-    age(&lock, OLD);
+    fs::remove_file(&lock).unwrap();
     assert!(repo.commit_all("retried").unwrap().is_some());
+}
+
+#[test]
+fn the_write_marker_goes_when_a_write_ends_or_fails() {
+    let (folder, repo) = empty_repo();
+    let marker = repo.repo.path().join("mudling-writing");
+    commit(&repo, folder.path(), "a.json", "1");
+    assert!(!marker.exists());
+
+    fs::write(repo.repo.path().join("index.lock"), "").unwrap();
+    write(folder.path(), "a.json", "2");
+    assert!(repo.commit_all("blocked").is_err());
+    assert!(!marker.exists());
 }
 
 #[test]

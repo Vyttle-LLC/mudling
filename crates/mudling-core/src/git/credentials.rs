@@ -5,7 +5,10 @@
 //! to `git credential-<name>`, and no code path may need a system git.
 
 use git2::{Config, Cred, CredentialType, ErrorClass, ErrorCode, RemoteCallbacks};
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use url::Url;
 
@@ -76,8 +79,19 @@ fn scope_covers(key: &str, url: &str) -> bool {
 
 /// Runs one helper's `get`, returning the username and password it gave.
 fn ask(helper: &str, url: &str, username: Option<&str>) -> Option<(String, String)> {
+    let path = search_path(env::var_os("PATH"), &git_install_dirs());
+    ask_on_path(helper, url, username, &path)
+}
+
+fn ask_on_path(
+    helper: &str,
+    url: &str,
+    username: Option<&str>,
+    path: &OsStr,
+) -> Option<(String, String)> {
     let mut command = shell(&format!("{} get", helper_command(helper)));
     let mut child = command
+        .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -96,7 +110,8 @@ fn ask(helper: &str, url: &str, username: Option<&str>) -> Option<(String, Strin
 }
 
 /// A helper's config value as a shell command. Git's three forms are a `!`
-/// command, a path, and a bare name for `git-credential-<name>` on the `PATH`.
+/// command, a path, and a bare name for `git-credential-<name>`, which
+/// [`search_path`] finds.
 fn helper_command(helper: &str) -> String {
     if let Some(command) = helper.strip_prefix('!') {
         command.to_owned()
@@ -105,6 +120,47 @@ fn helper_command(helper: &str) -> String {
     } else {
         format!("git-credential-{helper}")
     }
+}
+
+/// The `PATH` helpers run with. Helpers that ship with git live in its exec
+/// path, which only `git --exec-path` reports, and an app opened from the
+/// Finder has a short `PATH`, so the usual install folders are added after it.
+fn search_path(inherited: Option<OsString>, install_dirs: &[PathBuf]) -> OsString {
+    let inherited = inherited.unwrap_or_default();
+    let dirs = env::split_paths(&inherited).chain(install_dirs.iter().cloned());
+    env::join_paths(dirs).unwrap_or(inherited)
+}
+
+#[cfg(not(windows))]
+fn git_install_dirs() -> Vec<PathBuf> {
+    [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/opt/git/libexec/git-core",
+        "/usr/local/opt/git/libexec/git-core",
+        "/Library/Developer/CommandLineTools/usr/libexec/git-core",
+        "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core",
+        "/usr/lib/git-core",
+        "/usr/libexec/git-core",
+    ]
+    .map(PathBuf::from)
+    .into()
+}
+
+/// Git for Windows, for all users or just this one. Its installer puts only
+/// `Git\cmd` on the `PATH`, and that holds no credential helpers.
+#[cfg(windows)]
+fn git_install_dirs() -> Vec<PathBuf> {
+    let program_files = env::var_os("ProgramFiles").map(PathBuf::from);
+    let local = env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Programs"));
+    [program_files, local]
+        .into_iter()
+        .flatten()
+        .flat_map(|root| {
+            let mingw = root.join("Git").join("mingw64");
+            [mingw.join("bin"), mingw.join("libexec").join("git-core")]
+        })
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -196,6 +252,38 @@ mod tests {
         let absolute = std::env::temp_dir().join("helper");
         let absolute = absolute.to_str().unwrap();
         assert_eq!(helper_command(absolute), absolute);
+    }
+
+    #[test]
+    fn the_search_path_keeps_the_players_folders_first() {
+        let (first, second) = (PathBuf::from("first"), PathBuf::from("second"));
+        let inherited = env::join_paths([&first]).unwrap();
+
+        let path = search_path(Some(inherited), std::slice::from_ref(&second));
+
+        assert_eq!(env::split_paths(&path).collect::<Vec<_>>(), [first, second]);
+    }
+
+    /// A helper that ships with git isn't on a Finder app's `PATH`.
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_helper_name_is_found_in_a_git_install_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let exec_path = tempfile::tempdir().unwrap();
+        let helper = exec_path.path().join("git-credential-fake");
+        let script = "#!/bin/sh\ncat >/dev/null\necho username=me\necho password=p\n";
+        std::fs::write(&helper, script).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let url = "https://example.com/r.git";
+        let finder_path = OsString::from("/usr/bin:/bin");
+        let install_dirs = [exec_path.path().to_owned()];
+
+        let path = search_path(Some(finder_path.clone()), &install_dirs);
+
+        let answer = ask_on_path("fake", url, None, &path);
+        assert_eq!(answer, Some(("me".to_owned(), "p".to_owned())));
+        assert_eq!(ask_on_path("fake", url, None, &finder_path), None);
     }
 
     #[test]
