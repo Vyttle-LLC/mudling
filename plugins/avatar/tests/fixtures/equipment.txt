@@ -1,0 +1,20 @@
+$*(110h-125m-108v-1471)(-/-)You are using:
+<used as light>     <nothing>
+<worn on finger>    a pink ice ring
+<worn around neck>  an amulet of Gorn
+<worn around neck>  (Glowing) a small necklace
+<worn on body>      large white tunic
+<worn on head>      a Tiamat mask
+<worn on legs>      bloodstained trousers
+<worn on feet>      sandals
+<worn on hands>     buck-skin gloves
+<worn on arms>      bear skin bracelet
+<held in offhand>   <nothing>
+<worn about body>   a linen robe
+<worn about waist>  the captain's silver sash
+<worn on wrist>     (Humming) a copper bracelet
+<worn on wrist>     thick wooden bracelet
+<wielded>           <nothing>
+<held>              the red-eyed jewel
+
+$*(110h-125m-108v-1471)(-/-)You stop using a pink ice ring.

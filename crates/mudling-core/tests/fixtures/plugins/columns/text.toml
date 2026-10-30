@@ -1,0 +1,6 @@
+# A row of the abilities table: cells of "name  NN%", or a name too long
+# for its cell alone on a line, or the percent that wrapped after it.
+[[pattern]]
+name = "ability-row"
+pattern = '''^  (?:\S|\s+\d+%)'''
+hook = "read_row"

@@ -9,7 +9,25 @@ publish.workspace = true
 
 [dependencies]
 aho-corasick = "1.1"
+cpu-time = "1"
+memchr.workspace = true
+mlua = { version = "0.12", features = ["luau", "vendored"] }
+regex = "1.12"
+regex-automata = "0.4"
+regex-syntax = "0.8"
 serde.workspace = true
+serde_json.workspace = true
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+rusqlite.workspace = true
+directories.workspace = true
+imbl = "7"
+bytes.workspace = true
+flate2.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

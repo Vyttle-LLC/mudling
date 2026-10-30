@@ -1,0 +1,10 @@
+# The built-in defaults, on for every server.
+id = "mudling-defaults"
+name = "MUDling defaults"
+version = "1.0.0"
+api = 1
+license = "MIT"
+layer = "default"
+
+[points]
+text = "text.toml"

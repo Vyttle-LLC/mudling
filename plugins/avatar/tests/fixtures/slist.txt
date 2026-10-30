@@ -1,0 +1,15 @@
+(110h-125m-108v-1471)(-/-)
+Spells and skills learnable by your class at the lower levels.
+
+Lv:               Name
+  1:          open hand
+  3:       fast healing        meditation
+ 10:             prayer     inner balance            embalm
+ 30:          iron monk
+[B]ack,[H]elp,[R]efresh, or [C]ontinue:
+ 35:        move hidden serpent technique       weapon lore        invigorate
+ 50: mongoose technique            gurney             mercy        rejuvenate
+            demonstrate      transmogrify
+
+    A path winds north between the trees.
+(110h-125m-108v-1471)(-/-)

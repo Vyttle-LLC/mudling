@@ -1,0 +1,10 @@
+(805h-272m-314v-1462)(-/-)
+You have 12 practice sessions left.
+
+Name                 % Lvl Sub Mana  Name                 % Lvl Sub Mana
+-----------------------------------  -----------------------------------
+anticipate           0  51   9   15  armor lore           0   5   -    0
+bear technique      90  25   -    0  concentrate         90   8   -    5
+[B]ack,[H]elp,[R]efresh, or [C]ontinue:
+
+(805h-272m-314v-1462)(-/-)

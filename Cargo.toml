@@ -6,6 +6,7 @@ members = [
     "crates/mudling-ffi",
     "crates/mudling-bench",
     "crates/mudling-cli",
+    "plugins/avatar",
 ]
 
 [workspace.package]
@@ -23,6 +24,17 @@ gpui = { package = "gpui-pre", version = "=0.3.10" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# SQLite is bundled so the core builds for iOS without a system library.
+rusqlite = { version = "0.40", features = ["bundled"] }
+directories = "6"
+tempfile = "3"
+bytes = "1"
+# zlib-rs: pure Rust, and ~90× faster than the default miniz_oxide at
+# inflating MCCP2's many small flushed blocks.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+memchr = "2"
+tokio = "1"
+uniffi = "0.32"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

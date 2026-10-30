@@ -53,3 +53,23 @@ jobs:
         with:
           name: bench-report-${{ matrix.os }}
           path: bench-report.json
+
+  # Keeps the core mobile-ready (PRD §4 goal 5): mudling-ffi builds for the
+  # device and the simulator, as an XCFramework with Swift bindings.
+  ios-build:
+    name: iOS core build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the XCFramework and Swift bindings
+        run: scripts/build-ios.sh
+      - name: Type-check the Swift bindings
+        run: >
+          xcrun --sdk iphonesimulator swiftc -typecheck
+          -target arm64-apple-ios17.0-simulator
+          -Xcc -fmodule-map-file=target/ios/headers/module.modulemap
+          -I target/ios/headers target/ios/swift/mudling_ffi.swift

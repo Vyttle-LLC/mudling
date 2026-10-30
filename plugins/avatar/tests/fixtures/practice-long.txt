@@ -1,0 +1,16 @@
+(805h-272m-314v-1462)(-/-)
+You have 12 practice sessions left.
+
+Name                 % Lvl Sub Mana  Name                 % Lvl Sub Mana
+-----------------------------------  -----------------------------------
+anticipate           0  51   9   15  armor lore           0   5   -    0
+bear technique      90  25   -    0  concentrate         90   8   -    5
+dodge               95   4   -    0  endurance            0  21   -  100
+gurney               0  50   -  100  haggle               0  51   1    0
+[B]ack,[H]elp,[R]efresh, or [C]ontinue:
+heighten senses     90  19   -    0  hide                95  11   -    0
+iron monk           90  30   -   75  kick                90   7   -    0
+transmogrify         0  50   -    0  trip                90  12   -    0
+[B]ack,[H]elp,[R]efresh, or [C]ontinue: weaken               0  51  13   20  weapon lore         90  35   -    0
+
+(805h-272m-314v-1462)(-/-)
