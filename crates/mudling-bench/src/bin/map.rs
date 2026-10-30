@@ -277,8 +277,7 @@ fn replay(logs: &Path, folder: &Path) -> std::io::Result<(ReplayReport, LiveMap)
                 let command = note.strip_prefix("move ").unwrap_or(note);
                 map.sent(command, Timestamp(clock));
             } else if !is_note(line) {
-                pipeline.push(line.as_bytes(), &mut parsed);
-                pipeline.push(b"\n", &mut parsed);
+                pipeline.push_line(line.as_bytes(), &mut parsed);
                 for line in parsed.drain(..) {
                     map.line(line.plain(), Timestamp(clock));
                 }

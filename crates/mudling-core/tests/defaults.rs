@@ -300,6 +300,25 @@ fn the_longest_matching_shape_opens_a_line() {
     assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
 }
 
+/// Output learned glued to a prompt stays output, however often it's seen.
+/// What a prompt adds has a number, or no words.
+#[test]
+fn a_shape_with_output_glued_never_hides_the_output() {
+    let learner = PromptLearner::learning([
+        "<1hp> ",
+        "<1hp> ",
+        "<1hp> ",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+    ]);
+    assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+
+    let suffixed = PromptLearner::learning(["<1hp>", "<1hp>", "<1hp>[-|-]"]);
+    assert_eq!(suffixed.prefix_len("<5hp>[-|-]"), Some(10));
+}
+
 /// Learned once with output glued on, the prompt still leaves that output to
 /// be read once the bare prompt is seen.
 #[test]

@@ -16,14 +16,15 @@ use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, mob_name};
 use crate::net::DisconnectReason;
 use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
 use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
-use crate::plugin::{Layer, Plugin, PluginEvent, PluginHost, PluginSink, ServerInfo};
+use crate::plugin::{Layer, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo};
 use crate::store::{
     CharactersState, ConnectionStatus, GearState, MapState, Memo, MobsState, RoomState,
     SettingsState, StoreHub, TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -49,6 +50,8 @@ struct Link {
     login: Option<Login>,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
+    /// Plugins already reported for hook events dropped on a full queue.
+    drops_noticed: HashSet<PluginId>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
 }
@@ -184,8 +187,7 @@ impl Engine {
             HookOutputs(outputs),
         )?;
         for (plugin, error) in hooks.failed_to_load() {
-            let notice = format!("{plugin}'s hooks didn't load: {error}");
-            self.settings.notices.push(notice);
+            self.notice(format!("{plugin}'s hooks didn't load: {error}"));
         }
         for plugin in &self.config.approved {
             hooks.set_approved(plugin, true);
@@ -197,6 +199,7 @@ impl Engine {
             login: self.new_login(),
             hooks,
             hook_outputs,
+            drops_noticed: HashSet::new(),
             mssp_name: None,
             gmcp_enabled: false,
         });
@@ -249,8 +252,7 @@ impl Engine {
             return;
         }
         if self.settings.echo_off {
-            let bytes = self.encoding().encode(typed);
-            telnet::encode_line(&bytes, &mut self.output);
+            write_line(typed, self.encoding(), &mut self.output);
             return;
         }
         let mut typing = lock(&self.typing);
@@ -266,13 +268,23 @@ impl Engine {
     /// rows for the database. A move's map work finishes here.
     pub fn settle(&mut self, now: Timestamp) {
         self.take_hook_outputs(now);
+        let mut notices = Vec::new();
         if let Some(link) = &mut self.link {
             for (plugin, turned_off) in link.hooks.turn_off_overrunning(&mut self.plugins) {
                 if let Err(error) = turned_off {
-                    let notice = format!("{plugin} couldn't be turned off: {error}");
-                    self.settings.notices.push(notice);
+                    notices.push(format!("{plugin} couldn't be turned off: {error}"));
                 }
             }
+            for plugin in link.hooks.dropped().keys() {
+                if link.drops_noticed.insert(plugin.clone()) {
+                    notices.push(format!(
+                        "{plugin} is missing lines: its hooks fell behind the server"
+                    ));
+                }
+            }
+        }
+        for notice in notices {
+            self.notice(notice);
         }
         if let Some(commit) = self.map.commit(now) {
             self.publish_map(commit.change);
@@ -304,7 +316,7 @@ impl Engine {
     }
 
     /// Acts on what a hook did.
-    pub fn hook_output(&mut self, output: HookOutput, now: Timestamp) {
+    pub(super) fn hook_output(&mut self, output: HookOutput, now: Timestamp) {
         match output {
             HookOutput::StoreWrite(write) => self.plugin_store_write(write, now),
             HookOutput::SendCommand(send) => {
@@ -342,6 +354,11 @@ impl Engine {
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
         self.publish_settings();
+    }
+
+    /// The connection can't go on: closes it, saying why.
+    pub(super) fn fail_connection(&mut self, error: impl fmt::Display, now: Timestamp) {
+        self.close_connection(DisconnectReason::Failed(error.to_string()), now);
     }
 
     /// Ends the session, waiting for every write to reach the disk.
@@ -434,7 +451,7 @@ impl Engine {
             };
             match prompt.filter(|_| hide) {
                 Some(at) if at == text.len() => {}
-                Some(at) => self.terminal.push(shown.from_plain_offset(at)),
+                Some(at) => self.terminal.push(shown.after(at)),
                 None => self.terminal.push(shown),
             }
         }
@@ -454,9 +471,7 @@ impl Engine {
         let action = link.defaults.read_pending(&pending, kind);
         match action {
             PendingAction::Wait => {}
-            PendingAction::Send(key) => {
-                telnet::encode_line(&encoding.encode(&key), &mut self.output);
-            }
+            PendingAction::Send(key) => write_line(&key, encoding, &mut self.output),
             PendingAction::EndPrompt => {
                 self.lines.extend(link.pipeline.prompt_end());
                 self.read_lines(now);
@@ -610,7 +625,7 @@ impl Engine {
     fn issue(&mut self, typed: &str, now: Timestamp) {
         let encoding = self.encoding();
         if typed.trim().is_empty() {
-            telnet::encode_line(b"", &mut self.output);
+            write_line("", encoding, &mut self.output);
             return;
         }
         let mut commands = Vec::new();
@@ -633,7 +648,7 @@ impl Engine {
         }
         let separator = self.plugins.settings().separator.as_deref();
         for line in chain_lines(&commands, separator) {
-            telnet::encode_line(&encoding.encode(&line), &mut self.output);
+            write_line(&line, encoding, &mut self.output);
         }
     }
 
@@ -784,11 +799,16 @@ impl Engine {
 fn answer_login(login: &mut Option<Login>, text: &str, encoding: Encoding, output: &mut Vec<u8>) {
     let Some(prompts) = login else { return };
     if let Some(reply) = prompts.answer(text) {
-        telnet::encode_line(&encoding.encode(reply), output);
+        write_line(reply, encoding, output);
     }
     if prompts.is_done() {
         *login = None;
     }
+}
+
+/// Puts a line of text on the wire, in the server's encoding.
+fn write_line(text: &str, encoding: Encoding, output: &mut Vec<u8>) {
+    telnet::encode_line(&encoding.encode(text), output);
 }
 
 fn lock(typing: &Mutex<Typing>) -> MutexGuard<'_, Typing> {

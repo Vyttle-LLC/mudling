@@ -21,10 +21,9 @@
 //! learned there if it holds a number and its shape comes twice running, so
 //! a line that merely stalled isn't taken for a prompt.
 //!
-//! Each shape is counted. The longest that matches a line wins, unless it
-//! was seen only once and something else since (see
-//! [`PromptLearner::prefix_len`]). When the store is full, the rarest shape
-//! goes, ties going to the longest.
+//! Each shape is counted. When the store is full, the rarest shape goes, ties
+//! going to the longest. Which shape opens a line doesn't depend on the
+//! counts: see [`PromptLearner::prefix_len`].
 
 use crate::line::{Line, LineEnd, Pending};
 
@@ -35,8 +34,6 @@ const MOST_SHAPES: usize = 20;
 pub struct PromptLearner {
     /// Most seen first; ties shortest first.
     shapes: Vec<Shape>,
-    /// How many times a shape has been learned or seen again.
-    confirmations: u64,
     /// Set from a `Char.Vitals` until the prompt after it is learned.
     awaited: Option<AwaitedPrompt>,
     /// The pending text's length, as of the last read.
@@ -127,18 +124,24 @@ impl PromptLearner {
     }
 
     /// How many bytes a prompt takes up at the start of `text`, if one opens
-    /// it. The longest shape that matches wins, so a prompt that grew isn't
-    /// cut at its old shape. A shape seen once, and not last, doesn't: it may
-    /// be a prompt with output glued on, and only counts if nothing else
-    /// matches.
+    /// it. A longer matching shape wins over a shorter one only if what it
+    /// adds reads as prompt, so a prompt that grew isn't cut at its old shape
+    /// and output learned glued to a prompt is still shown.
     pub fn prefix_len(&self, text: &str) -> Option<usize> {
-        let trusted = self
+        let mut ends: Vec<usize> = self
             .shapes
             .iter()
-            .filter(|shape| shape.seen > 1 || shape.last_confirmed == self.confirmations)
             .filter_map(|shape| shape.prefix_len(text))
-            .max();
-        trusted.or_else(|| self.shapes.iter().find_map(|shape| shape.prefix_len(text)))
+            .collect();
+        ends.sort_unstable();
+        let (&shortest, longer) = ends.split_first()?;
+        Some(longer.iter().fold(shortest, |end, &next| {
+            if reads_as_prompt(&text[end..next]) {
+                next
+            } else {
+                end
+            }
+        }))
     }
 
     /// The learned shapes, most seen first, each with the times seen. A
@@ -197,17 +200,11 @@ impl PromptLearner {
         {
             self.shapes.remove(rarest);
         }
-        self.confirmations += 1;
-        self.shapes.push(Shape {
-            last_confirmed: self.confirmations,
-            ..shape
-        });
+        self.shapes.push(shape);
         self.sort();
     }
 
     fn seen_again(&mut self, index: usize) {
-        self.confirmations += 1;
-        self.shapes[index].last_confirmed = self.confirmations;
         self.shapes[index].seen += 1;
         self.sort();
     }
@@ -222,6 +219,12 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
+/// Whether text after a prompt is more prompt, not output: a number, as in
+/// `<5mv> `, or no words at all, as in `[-|-]`.
+fn reads_as_prompt(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_digit()) || !text.chars().any(char::is_alphabetic)
+}
+
 /// A prompt with a slot for each number: `(#h-#m-#v-#)`.
 #[derive(Debug, PartialEq, Eq)]
 struct Shape {
@@ -231,8 +234,6 @@ struct Shape {
     /// told from output.
     length: usize,
     seen: u32,
-    /// The learner's count of confirmations when this shape last had one.
-    last_confirmed: u64,
 }
 
 impl Shape {
@@ -249,7 +250,6 @@ impl Shape {
             pieces,
             length,
             seen: 1,
-            last_confirmed: 0,
         }
     }
 
