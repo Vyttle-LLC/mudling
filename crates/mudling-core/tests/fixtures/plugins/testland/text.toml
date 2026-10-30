@@ -1,0 +1,22 @@
+[pager]
+prompt = '''^\[Space for more\]$'''
+key = " "
+
+[[prompt]]
+pattern = '''^\(\d+ life\) $'''
+
+# Speech, read the game's way, on the same line the defaults read.
+[[pattern]]
+name = "speech"
+pattern = '''^(?<speaker>\w+) says '(?<words>.*)'$'''
+
+[[pattern]]
+name = "tell"
+pattern = '''^(?<who>\w+) tells you '(?<message>.*)'$'''
+hook = "on_tell"
+
+[[color]]
+pattern = '''^(?<who>\w+) says '''
+group = "who"
+fg = 3
+bold = true

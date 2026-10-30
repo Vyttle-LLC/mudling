@@ -1,0 +1,12 @@
+slots = ["head", "body", "hands"]
+containers = ["sack"]
+
+[equipment]
+name = "worn"
+start = '''^You wear:$'''
+row = '''^\[(?<slot>\w+)\] (?<item>.+)$'''
+hook = "read_worn"
+
+[[wear]]
+name = "wear"
+pattern = '''^You put on (?<item>.+)\.$'''

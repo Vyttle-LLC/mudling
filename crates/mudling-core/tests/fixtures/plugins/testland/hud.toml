@@ -1,0 +1,8 @@
+affects = "Char.Status"
+
+[vitals]
+life = "Char.Vitals.life"
+life_max = "Char.Vitals.life_max"
+
+[opponent]
+name = "Char.Enemy.name"
