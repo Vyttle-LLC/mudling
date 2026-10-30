@@ -71,9 +71,10 @@ use std::time::{Duration, Instant};
 /// endless loop in about 100 µs (mudling-bench): 5 µs a line amortized over
 /// the 20 or so lines that don't reach the hook. Real hooks use far fewer.
 pub const DEFAULT_BUDGET: u32 = 4_000;
-/// CPU time a hook call may take; real hooks take a few µs. On Windows the
-/// thread's CPU time advances in scheduler ticks (about 15 ms), so a hook may
-/// run that long before it's stopped.
+/// CPU time a hook call may take; real hooks take a few µs. Crossing it must
+/// be confirmed by half as much again, so a runaway is stopped at 3 ms. On
+/// Windows the thread's CPU time advances in scheduler ticks (about 15 ms),
+/// so a hook may run that long before it's stopped.
 pub const DEFAULT_TIME_LIMIT: Duration = Duration::from_millis(2);
 /// Events waiting for the worker, at most.
 pub const DEFAULT_QUEUE: usize = 1024;
@@ -237,58 +238,107 @@ struct Vm {
 /// the cheap wall clock. A thread can't use more CPU time than wall-clock
 /// time passes, so the CPU time needs reading only once the wall clock
 /// reaches the next point where the limit could have been crossed.
+///
+/// A thread's CPU clock can jump: on a virtual machine, time the host spent
+/// elsewhere may be counted as the thread's, and some systems account it in
+/// scheduler ticks. So crossing the limit once only makes the hook suspect;
+/// it overruns if it then keeps running for half the limit again. A real
+/// runaway is stopped at 1.5 times the limit; a hook that merely met a jump
+/// has returned by then.
 struct Meter {
+    budget: Cell<u32>,
     left: Cell<u32>,
     limit: Cell<Duration>,
+    /// The CPU time that overruns: the limit, then the confirming point.
+    threshold: Cell<Duration>,
+    suspect: Cell<bool>,
+    started: Cell<Instant>,
     cpu_start: Cell<ThreadTime>,
     next_check: Cell<Instant>,
-    overran: Cell<bool>,
+    /// Why the hook overran, once it has.
+    overran: RefCell<Option<String>>,
 }
+
+/// A suspect hook overruns after running `limit / CONFIRM_DIVISOR` more.
+const CONFIRM_DIVISOR: u32 = 2;
 
 impl Meter {
     fn new() -> Meter {
         Meter {
+            budget: Cell::new(0),
             left: Cell::new(0),
             limit: Cell::new(Duration::ZERO),
+            threshold: Cell::new(Duration::ZERO),
+            suspect: Cell::new(false),
+            started: Cell::new(Instant::now()),
             cpu_start: Cell::new(ThreadTime::now()),
             next_check: Cell::new(Instant::now()),
-            overran: Cell::new(false),
+            overran: RefCell::new(None),
         }
     }
 
     fn start(&self, limits: HookLimits) {
+        self.budget.set(limits.budget);
         self.left.set(limits.budget);
         self.limit.set(limits.time);
+        self.threshold.set(limits.time);
+        self.suspect.set(false);
         self.cpu_start.set(ThreadTime::now());
-        self.next_check.set(Instant::now() + limits.time);
-        self.overran.set(false);
+        let now = Instant::now();
+        self.started.set(now);
+        self.next_check.set(now + limits.time);
+        self.overran.replace(None);
+    }
+
+    fn overran(&self) -> bool {
+        self.overran.borrow().is_some()
     }
 
     /// Counts one interrupt tick. Once over, stays over until the next
     /// start, so a `pcall` that catches the error fails at its next tick.
     fn tick(&self) -> mlua::Result<VmState> {
-        let left = self.left.get();
-        if self.overran.get() || left == 0 || self.past_time_limit() {
-            self.overran.set(true);
-            return Err(mlua::Error::runtime("the hook ran past its time box"));
+        if self.overran.borrow().is_none() {
+            let reason = match self.left.get() {
+                0 => Some(format!("{} interrupt ticks", self.budget.get())),
+                _ => self.past_time_limit(),
+            };
+            self.overran.replace(reason);
         }
-        self.left.set(left - 1);
+        if let Some(reason) = &*self.overran.borrow() {
+            return Err(mlua::Error::runtime(format!(
+                "the hook ran past its time box: {reason}"
+            )));
+        }
+        self.left.set(self.left.get() - 1);
         Ok(VmState::Continue)
     }
 
-    fn past_time_limit(&self) -> bool {
+    /// Says why, if the hook has used more CPU time than it may.
+    fn past_time_limit(&self) -> Option<String> {
         let now = Instant::now();
         if now < self.next_check.get() {
-            return false;
+            return None;
         }
         let used = self.cpu_start.get().elapsed();
-        match self.limit.get().checked_sub(used) {
-            Some(remaining) if !remaining.is_zero() => {
-                self.next_check.set(now + remaining);
-                false
-            }
-            _ => true,
+        let threshold = self.threshold.get();
+        if used < threshold {
+            self.next_check.set(now + (threshold - used));
+            return None;
         }
+        let limit = self.limit.get();
+        if !self.suspect.get() {
+            let confirm = limit / CONFIRM_DIVISOR;
+            self.suspect.set(true);
+            self.threshold.set(used + confirm);
+            self.next_check.set(now + confirm);
+            return None;
+        }
+        Some(format!(
+            "{:.2} ms of CPU time in {:.2} ms, over its {:.2} ms limit",
+            used.as_secs_f64() * 1e3,
+            now.duration_since(self.started.get()).as_secs_f64() * 1e3,
+            limit.as_secs_f64() * 1e3,
+        ))
     }
 }
 
@@ -473,10 +523,14 @@ impl Vm {
                 ));
             }
         };
-        self.meter.start(limits);
-        let result = event_table(&self.lua, event).and_then(|table| function.call::<()>(table));
+        // Building the event, and any GC step that allocating it runs, isn't
+        // the hook's own work, so the time box starts after it.
+        let result = event_table(&self.lua, event).and_then(|table| {
+            self.meter.start(limits);
+            function.call::<()>(table)
+        });
         result.map_err(|error| {
-            let overran = self.meter.overran.get() || is_memory_error(&error);
+            let overran = self.meter.overran() || is_memory_error(&error);
             (overran, error.to_string())
         })
     }

@@ -258,6 +258,10 @@ fn an_infinite_loop_is_stopped_by_the_budget() {
     let failed = failures(&outputs);
     assert_eq!(failed.len(), 1);
     assert!(failed[0].overran, "{failed:?}");
+    assert!(
+        failed[0].message.contains("4000 interrupt ticks"),
+        "{failed:?}"
+    );
 }
 
 #[test]
@@ -268,11 +272,51 @@ fn a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
     );
     let started = Instant::now();
     let outputs = run(&plugin, &mut runner(&plugin), &["go"]);
-    assert!(failures(&outputs)[0].overran, "{outputs:?}");
+    let failed = failures(&outputs);
+    assert!(failed[0].overran, "{outputs:?}");
+    assert!(failed[0].message.contains("ms of CPU time"), "{failed:?}");
     assert!(
         started.elapsed() < Duration::from_millis(200),
         "took {:?}",
         started.elapsed()
+    );
+}
+
+/// A state whose first read spins the CPU past the time limit, as a jump in
+/// the thread's CPU clock would look; later reads are instant.
+#[derive(Default)]
+struct OneSpike(Mutex<bool>);
+
+impl StateView for OneSpike {
+    fn get(&self, _key: &str) -> Option<Value> {
+        let mut spiked = self.0.lock().unwrap();
+        if !*spiked {
+            *spiked = true;
+            let started = Instant::now();
+            while started.elapsed() < 2 * HookLimits::default().time {
+                std::hint::spin_loop();
+            }
+        }
+        None
+    }
+}
+
+#[test]
+fn one_jump_past_the_time_limit_isnt_an_overrun() {
+    let plugin = hooked(
+        &["read_state", "write_store:s"],
+        "function on_go(event) mud.state('k') for i = 1, 50 do end mud.store('s', 'done', true) end",
+    );
+    let mut runner = runner_with(
+        &plugin,
+        HookLimits::default(),
+        Arc::new(OneSpike::default()),
+    );
+    let outputs = run(&plugin, &mut runner, &["go"]);
+    assert_eq!(
+        writes(&outputs),
+        [("s".to_owned(), "done".to_owned(), Value::Bool(true))],
+        "{outputs:?}"
     );
 }
 
