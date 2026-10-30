@@ -70,24 +70,24 @@ impl Layout {
 
     /// Redraws the area so its paths line up, keeping its oldest room where
     /// it is. Leaves it alone when no layout with a few fixes works (a real
-    /// maze) and returns false. A long path costs the squares it stretches;
-    /// a building costs one square, and loses ties, so indoor rooms stay on
-    /// the grid unless lifting them really helps.
-    pub(super) fn straighten(&mut self, area: &FlatArea) -> bool {
+    /// maze). A long path costs the squares it stretches; a building costs
+    /// one square, and loses ties, so indoor rooms stay on the grid unless
+    /// lifting them really helps.
+    pub(super) fn straighten(&mut self, area: &FlatArea) {
         let Some(start) = area.rooms.first().and_then(|id| self.room(*id)).cloned() else {
-            return false;
+            return;
         };
         if area.rooms.len() > LARGEST_AREA {
-            return false;
+            return;
         }
         let Some(&anchor) = area.rooms.iter().min() else {
-            return false;
+            return;
         };
         let members: HashSet<RoomId> = area.rooms.iter().copied().collect();
         let passages = self.passages(&members);
         let suspects = self.suspect_passages(&area.rooms, &passages, anchor);
         if suspects.len() > MOST_SUSPECTS {
-            return false;
+            return;
         }
         let mut fixes: Vec<Fix> = suspects.iter().copied().map(Fix::Long).collect();
         fixes.extend(
@@ -101,7 +101,7 @@ impl Layout {
             members: &members,
         };
         let Some(best) = best_drawing(self, &area.rooms, &passages, &fixes, &level) else {
-            return false;
+            return;
         };
         let mut placed = best.positions;
         placed.sort_unstable();
@@ -117,7 +117,6 @@ impl Layout {
         for group in best.lifted {
             self.lift_into_building(&group, &outdoors);
         }
-        true
     }
 
     /// Rooms of the same area and level as `start`, joined by flat paths.

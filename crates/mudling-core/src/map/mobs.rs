@@ -62,10 +62,11 @@ impl MobMemory {
         memory
     }
 
-    /// A mob attacked unprovoked: its kind is aggressive. Returns whether
-    /// that's news.
-    pub fn learn_aggressor(&mut self, name: &str) -> bool {
-        noun(name).is_some_and(|noun| self.set(Mark::Aggressive, noun, true))
+    /// A mob attacked unprovoked: its kind is aggressive.
+    pub fn learn_aggressor(&mut self, name: &str) {
+        if let Some(noun) = noun(name) {
+            self.set(Mark::Aggressive, noun, true);
+        }
     }
 
     /// Whether a mob, by its room line, is of a kind known to be aggressive.
@@ -148,7 +149,7 @@ impl MobMemory {
         }
     }
 
-    fn set(&mut self, mark: Mark, name: String, set: bool) -> bool {
+    fn set(&mut self, mark: Mark, name: String, set: bool) {
         let names = self.set_of(mark);
         let changed = if set {
             names.insert(name.clone())
@@ -158,7 +159,6 @@ impl MobMemory {
         if changed {
             self.changes.push(MarkChange { name, mark, set });
         }
-        changed
     }
 }
 

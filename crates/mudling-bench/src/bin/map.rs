@@ -282,16 +282,21 @@ fn replay(logs: &Path, folder: &Path) -> std::io::Result<(ReplayReport, LiveMap)
         }
     }
     let failed_batches = flush_failures(&writer);
+    // No moves would pass any budget: that's a wrong folder, not a result.
+    let Some(summary) = Summary::of(&moves) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "no Room.Info in {} log(s) in {}",
+                paths.len(),
+                logs.display()
+            ),
+        ));
+    };
     let report = ReplayReport {
         logs: paths.len(),
         room_infos: moves.len(),
-        moves: Summary::of(&moves).unwrap_or(Summary {
-            samples: 0,
-            mean_us: 0.0,
-            p50_us: 0.0,
-            p99_us: 0.0,
-            max_us: 0.0,
-        }),
+        moves: summary,
         rooms: map.room_count(),
         links: map.rooms().map(|room| room.links.len()).sum(),
         failed_batches,

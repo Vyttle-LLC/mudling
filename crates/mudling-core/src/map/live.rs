@@ -41,6 +41,9 @@ pub struct LiveMap {
     revision: u64,
     derived: Option<Derived>,
     area_names: HashMap<String, AreaName>,
+    /// How many times derived data was computed, for tests.
+    #[cfg(test)]
+    pub(super) derivations: usize,
 }
 
 /// Where the player is, as far as the map can tell.
@@ -147,6 +150,8 @@ impl LiveMap {
             revision: 0,
             derived: None,
             area_names: HashMap::new(),
+            #[cfg(test)]
+            derivations: 0,
         };
         map.committed_whereabouts = map.whereabouts();
         map
@@ -206,7 +211,7 @@ impl LiveMap {
         };
         let arrived = self.tracker.enter(step, dark, now);
         if maze && !dark {
-            self.tracker.refresh_current(|room| room.maze = true);
+            self.tracker.update_current_rooms(|room| room.maze = true);
         }
         Some(arrived)
     }
@@ -243,7 +248,7 @@ impl LiveMap {
 
     /// The mobs in the player's room, by their room lines.
     pub fn note_sightings(&mut self, titles: &[String], now: Timestamp) {
-        self.tracker.refresh_current(|room| {
+        self.tracker.update_current_rooms(|room| {
             for title in titles {
                 room.sightings.insert(title.clone(), now);
             }
@@ -252,7 +257,7 @@ impl LiveMap {
 
     /// Something worth remembering about the player's room.
     pub fn note_feature(&mut self, feature: &str) {
-        self.tracker.refresh_current(|room| {
+        self.tracker.update_current_rooms(|room| {
             if !room.features.contains(feature) {
                 room.features.insert(feature.to_owned());
             }
@@ -391,6 +396,10 @@ impl LiveMap {
     }
 
     fn derive(&mut self) -> Derived {
+        #[cfg(test)]
+        {
+            self.derivations += 1;
+        }
         let layout = &self.committed;
         let rules = &*self.rules;
         let mut areas: Vec<Area> = layout
@@ -517,9 +526,10 @@ impl LiveMap {
         Some(Commit { change, batch })
     }
 
-    /// A batch saving the map, as committed, as a new version in map
-    /// history: commit first, then submit this after the commit's batch.
-    pub fn save_version(&self, kind: &str, label: &str, now: Timestamp) -> Batch {
+    /// A batch saving a new version in map history. The writer copies the
+    /// map as the database holds it when it reaches this batch, so submit
+    /// every commit's batch before it.
+    pub fn save_version(kind: &str, label: &str, now: Timestamp) -> Batch {
         let mut batch = Batch::new();
         batch.save_map_version(kind, label, now);
         batch

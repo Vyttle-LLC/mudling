@@ -1036,7 +1036,7 @@ fn a_route_follows_explored_links_and_opens_closed_doors() {
 }
 
 #[test]
-fn no_route_crosses_a_maze_or_reaches_an_island() {
+fn no_route_reaches_an_island() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A meadow", &["e"]);
     walk.arrive("Far away", &["n"]);
@@ -1164,6 +1164,18 @@ fn derived_data_is_computed_once_per_revision() {
     assert_eq!(derived.areas[0].name.name, "The Fields");
     assert_eq!(derived.areas[0].name.levels.as_deref(), Some("1-5"));
     assert_eq!(walk.map.derived().revision, derived.revision);
+    assert_eq!(walk.map.derivations, 1, "asked twice, computed once");
+
+    // A move is a new revision: the next ask computes again, once.
+    walk.go("w", "A meadow", &["e"]);
+    walk.map.commit(walk.now());
+    walk.map.derived();
+    walk.map.derived();
+    assert_eq!(walk.map.derivations, 2);
+    // Nothing changed, no new revision: nothing to compute.
+    assert!(walk.map.commit(walk.now()).is_none());
+    walk.map.derived();
+    assert_eq!(walk.map.derivations, 2);
 }
 
 #[test]
@@ -1230,7 +1242,7 @@ fn the_map_survives_the_database_and_carries_on() {
         }
     }
     writer
-        .submit(walk.map.save_version("named", "Barn found", walk.now()))
+        .submit(LiveMap::save_version("named", "Barn found", walk.now()))
         .unwrap();
     writer.flush().unwrap();
 

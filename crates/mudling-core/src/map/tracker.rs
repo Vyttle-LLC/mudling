@@ -419,12 +419,6 @@ impl Tracker {
         arrived
     }
 
-    /// The player's room, as the game shows it now, outside a move: a door
-    /// opened in place.
-    pub fn refresh_current(&mut self, change: impl Fn(&mut MapRoom)) {
-        self.update_current_rooms(change);
-    }
-
     /// Takes the best explanation as the truth. The player editing the map
     /// means it's what they see that counts.
     pub fn settle(&mut self) {
@@ -442,7 +436,7 @@ impl Tracker {
     /// where that is, so it survives whichever one wins. Not in the dark:
     /// the game still sends the dark room's exits and occupants, and the
     /// current room is only a guess.
-    fn update_current_rooms(&mut self, change: impl Fn(&mut MapRoom)) {
+    pub fn update_current_rooms(&mut self, change: impl Fn(&mut MapRoom)) {
         if self.dark.is_some() {
             return;
         }
