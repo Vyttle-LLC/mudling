@@ -304,19 +304,20 @@ impl Repo {
     }
 
     /// Calls `visit` for every file under `tree`, skipping any object already
-    /// in `seen`, so a walk over many commits reads each version once.
+    /// in `seen` at the same path, so a walk over many commits reads each
+    /// version once. Two paths can hold one object, and each still counts.
     fn for_each_file(
         &self,
         tree: &Tree<'_>,
         folder: &Path,
-        seen: &mut HashSet<Oid>,
+        seen: &mut HashSet<(PathBuf, Oid)>,
         visit: &mut dyn FnMut(PathBuf, &[u8]) -> Result<()>,
     ) -> Result<()> {
         for entry in tree {
-            if !seen.insert(entry.id()) {
+            let path = folder.join(entry.name()?);
+            if !seen.insert((path.clone(), entry.id())) {
                 continue;
             }
-            let path = folder.join(entry.name()?);
             match entry.kind() {
                 Some(ObjectType::Tree) => {
                     let tree = self.repo.find_tree(entry.id())?;

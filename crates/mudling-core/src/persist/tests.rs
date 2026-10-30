@@ -723,6 +723,44 @@ fn a_buried_key_spares_a_newer_row_and_old_tombstones_can_be_forgotten() {
 }
 
 #[test]
+fn a_buried_key_takes_older_children_from_a_newer_row() {
+    let (_folder, database) = open();
+    let exit = |direction: &str, updated| Exit {
+        room_id: 1,
+        direction: direction.to_owned(),
+        state: "open".to_owned(),
+        updated,
+    };
+    let mut batch = Batch::new();
+    batch.upsert(room(2, "A hill"));
+    batch.upsert(Room {
+        updated: T2,
+        ..room(1, "A road")
+    });
+    batch.upsert(exit("north", T1));
+    batch.upsert(exit("south", T2));
+    batch.upsert(Link {
+        room_id: 2,
+        direction: "east".to_owned(),
+        to_room: 1,
+        updated: T1,
+    });
+    commit(&database, batch);
+
+    let mut batch = Batch::new();
+    batch.bury(Tombstone {
+        key: Key::Room(1),
+        deleted: T2,
+    });
+    commit(&database, batch);
+
+    let map = database.reader().unwrap().map().unwrap();
+    assert_eq!(map.rooms.len(), 2);
+    assert_eq!(map.exits, [exit("south", T2)]);
+    assert!(map.links.is_empty());
+}
+
+#[test]
 fn an_empty_map_saves_a_version_with_no_areas() {
     let (_folder, database) = open();
     let mut batch = Batch::new();

@@ -318,6 +318,89 @@ fn a_record_edited_after_its_delete_comes_back() {
 }
 
 #[test]
+fn a_room_edited_after_its_delete_settles_without_its_old_children() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.delete(Key::Room(1));
+    });
+    let after_the_delete = Timestamp(Timestamp::now().0 + 60_000);
+    world.ipad.apply(|batch| {
+        batch.upsert(room(1, "iPad's road", after_the_delete));
+    });
+
+    settle(&world);
+    let settled = remote_tip(&world);
+    settle(&world);
+
+    for side in [&world.mac, &world.ipad] {
+        let map = side.database.reader().unwrap().map().unwrap();
+        assert_eq!(map.rooms.len(), 1);
+        assert!(map.exits.is_empty());
+    }
+    assert_eq!(remote_tip(&world), settled, "nothing left to sync");
+}
+
+#[test]
+fn files_with_identical_bytes_are_all_kept() {
+    let world = two_devices();
+    let license = |plugin: &str| Path::new("plugins").join(plugin).join("LICENSE");
+    for plugin in ["one", "two"] {
+        let path = world.mac.folder.join(license(plugin));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "MIT").unwrap();
+    }
+    world.mac.sync();
+
+    // A device with no history of its own, then a real two-sided merge.
+    let fresh = Device::new(world.folder.path(), "fresh");
+    let theirs = fresh.fetch().unwrap();
+    pull(&fresh.git, &fresh.repo, theirs, &[]).unwrap();
+    world.ipad.apply(|batch| {
+        batch.upsert(room(2, "iPad's hill", T2));
+    });
+    world.mac.apply(|batch| {
+        batch.upsert(room(3, "Mac's lake", T2));
+    });
+    settle(&world);
+
+    for device in [&fresh, &world.ipad, &world.mac] {
+        for plugin in ["one", "two"] {
+            assert!(device.folder.join(license(plugin)).exists(), "{plugin}");
+        }
+    }
+    let tip = world.ipad.git.branch_tip(BRANCH).unwrap().unwrap();
+    let files = world.ipad.git.files_at(tip).unwrap();
+    assert!(files.contains_key(&license("one")));
+    assert!(files.contains_key(&license("two")));
+}
+
+#[test]
+fn a_password_is_judged_at_every_path_that_holds_its_bytes() {
+    let world = two_devices();
+    let notes = "guild password: mellon\n";
+    world.mac.apply(|batch| {
+        batch.upsert(Meta {
+            key: NOTEPAD.to_owned(),
+            value: notes.to_owned(),
+            updated: T2,
+        });
+    });
+    world.mac.commit_local();
+    // Only notes are read for a bare `password:`, and this sorts before them.
+    fs::write(world.mac.folder.join("0-backup.txt"), notes).unwrap();
+    world.mac.git.commit_all("a backup").unwrap();
+    let pushed = remote_tip(&world);
+
+    let error = world.mac.git.push(REMOTE, BRANCH).unwrap_err();
+
+    assert!(
+        matches!(error, GitError::PasswordInFile { .. }),
+        "{error:?}"
+    );
+    assert_eq!(remote_tip(&world), pushed);
+}
+
+#[test]
 fn a_room_added_back_does_not_revive_the_children_deleted_with_it() {
     let world = two_devices();
     world.mac.apply(|batch| {

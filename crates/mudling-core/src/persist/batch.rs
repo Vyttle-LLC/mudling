@@ -290,14 +290,52 @@ fn bury(tx: &Transaction<'_>, tombstone: &Tombstone) -> rusqlite::Result<()> {
         return Ok(());
     }
     upsert(tx, tombstone)?;
-    key.with_row(|row, params| {
+    key.with_row(|row, params| -> rusqlite::Result<()> {
         let sql = format!("DELETE FROM {row} AND updated < ?{}", params.len() + 1);
         let mut params = params.to_vec();
         params.push(deleted);
         tx.prepare_cached(&sql)?.execute(&*params)?;
         Ok(())
-    })
+    })?;
+    bury_children(tx, key, *deleted)
 }
+
+/// A row newer than the delete survives it, but the delete still took the
+/// older rows that hang off it, as it does in a merge.
+fn bury_children(tx: &Transaction<'_>, key: &Key, deleted: Timestamp) -> rusqlite::Result<()> {
+    let run = |table: &str, owner: &str, id: &dyn ToSql| -> rusqlite::Result<()> {
+        tx.prepare_cached(&format!(
+            "DELETE FROM {table} WHERE {owner} = ?1 AND updated < ?2"
+        ))?
+        .execute(params![id, deleted])?;
+        Ok(())
+    };
+    match key {
+        Key::Room(id) => {
+            run("links", "to_room", id)?;
+            for table in ROOM_CHILDREN {
+                run(table, "room_id", id)?;
+            }
+        }
+        Key::Character(id) => {
+            for table in CHARACTER_CHILDREN {
+                run(table, "character_id", id)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+const ROOM_CHILDREN: [&str; 6] = [
+    "exits",
+    "links",
+    "doorways",
+    "room_notes",
+    "room_features",
+    "sightings",
+];
+const CHARACTER_CHILDREN: [&str; 5] = ["character_stats", "skills", "affects", "worn", "gear_sets"];
 
 /// A record's key, for [`Batch::delete`]. Deleting a room deletes its
 /// exits, links, doorways, note, features and sightings, and the links
