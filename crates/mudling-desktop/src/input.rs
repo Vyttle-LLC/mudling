@@ -96,7 +96,16 @@ impl CommandInput {
         cx.notify();
     }
 
-    /// The text on screen.
+    #[cfg(test)]
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
+    #[cfg(test)]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     fn shown(&self) -> SharedString {
         if self.masked {
             MASK.repeat(self.content.chars().count()).into()

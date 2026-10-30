@@ -28,7 +28,6 @@ pub fn reads(lines: &[impl AsRef<str>]) -> Vec<Bytes> {
         .collect()
 }
 
-/// The next `count` lines of `feed`, as reads.
 pub fn next_reads(feed: &mut ReplayFeed, count: u64) -> Vec<Bytes> {
     let lines: Vec<String> = (0..count).map(|_| feed.next_line().to_owned()).collect();
     reads(&lines)

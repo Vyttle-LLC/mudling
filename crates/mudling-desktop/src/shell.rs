@@ -23,8 +23,13 @@ pub struct Game {
     pub session: Session,
     /// A recording's throwaway data folder, or `None` for a real server.
     pub replay_folder: Option<TempDir>,
-    /// The game plugins the player turned on.
     pub enabled: Vec<PluginId>,
+}
+
+impl Game {
+    fn is_replay(&self) -> bool {
+        self.replay_folder.is_some()
+    }
 }
 
 /// The shell's copies of the stores it shows, other than the terminal.
@@ -78,7 +83,7 @@ impl Shell {
             }
         });
         window.focus(&input.focus_handle(cx), cx);
-        if let Some(game) = game.as_ref().filter(|game| game.replay_folder.is_none()) {
+        if let Some(game) = game.as_ref().filter(|game| !game.is_replay()) {
             game.session.connect();
         }
         let mut shell = Shell {
@@ -143,7 +148,7 @@ impl Shell {
             self.copies.settings.value(),
             self.copies.vitals.value(),
             &game.enabled,
-            game.replay_folder.is_some(),
+            game.is_replay(),
         );
         self.status.update(cx, |status, cx| status.show(lines, cx));
     }
@@ -154,7 +159,7 @@ impl Shell {
         let settings = self.copies.settings.value();
         let connected = settings.connection == ConnectionStatus::Connected;
         match &self.game {
-            Some(game) if connected && game.replay_folder.is_none() => game.session.send(command),
+            Some(game) if connected && !game.is_replay() => game.session.send(command),
             _ if settings.echo_off => {}
             _ => self
                 .chat
@@ -169,12 +174,14 @@ impl Shell {
         }
     }
 
-    /// Whether the first recording has reached the chat.
+    /// Whether the first recording has reached the chat, or there is none.
     pub fn replay_finished(&self) -> bool {
-        matches!(
-            self.copies.settings.value().connection,
-            ConnectionStatus::Closed(_)
-        )
+        let replaying = self.game.as_ref().is_some_and(Game::is_replay);
+        !replaying
+            || matches!(
+                self.copies.settings.value().connection,
+                ConnectionStatus::Closed(_)
+            )
     }
 
     pub fn chat(&self) -> Entity<Chat> {
@@ -191,7 +198,7 @@ impl Shell {
         Some(cx.background_spawn(async move {
             let Some(game) = game else { return };
             if let Err(error) = game.session.quit().wait() {
-                eprintln!("{error}");
+                eprintln!("couldn't finish saving the session: {error}");
             }
             drop(game.replay_folder);
         }))
@@ -435,19 +442,25 @@ mod tests {
     #[gpui::test]
     fn a_password_is_masked_sent_and_not_kept(cx: &mut TestAppContext) {
         let mut played = play(cx);
+        played.cx.simulate_input("half a comma");
         played.say(&[IAC, WILL, ECHO]);
         played.say(b"Password:\r\n");
-        played.frames_until("echo off", |shell, _| {
-            shell.copies.settings.value().echo_off
+        played.frames_until("the mask", |shell, cx| shell.input.read(cx).is_masked());
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "");
         });
 
         played.cx.simulate_input("hunter2");
         played.cx.simulate_keystrokes("enter");
         assert_eq!(played.heard(), "hunter2");
 
+        played.cx.simulate_input("half a pass");
         played.say(&[IAC, WONT, ECHO]);
-        played.frames_until("echo on", |shell, _| {
-            !shell.copies.settings.value().echo_off
+        played.frames_until("the mask off", |shell, cx| {
+            !shell.input.read(cx).is_masked()
+        });
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "");
         });
         played.cx.simulate_input("look");
         played.cx.simulate_keystrokes("enter");

@@ -218,6 +218,10 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             "{}",
             serde_json::to_string_pretty(&report).expect("the report serializes")
         );
+        // Exiting runs no destructors, so the replay's folder goes first.
+        if let Some(saved) = shell.update(cx, |shell, cx| shell.leave(cx)) {
+            crate::wait_for_save(saved, cx).await;
+        }
         std::process::exit(if passed { 0 } else { 1 });
     })
     .detach();
