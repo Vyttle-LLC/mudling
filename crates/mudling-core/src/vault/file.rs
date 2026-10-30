@@ -278,7 +278,8 @@ fn read_error(error: serde_json::Error) -> Error {
 pub(super) fn save(path: &Path, file: &VaultFile) -> io::Result<()> {
     let temporary = write_temporary(path, file)?;
     temporary.persist(path).map_err(|error| error.error)?;
-    sync_folder(path)
+    sync_folder(path);
+    Ok(())
 }
 
 /// Like [`save`], but a vault already at `path`, however recently it arrived,
@@ -291,7 +292,8 @@ pub(super) fn save_new(path: &Path, file: &VaultFile) -> Result<(), Error> {
             io::ErrorKind::AlreadyExists => Error::AlreadyExists,
             _ => error.error.into(),
         })?;
-    Ok(sync_folder(path)?)
+    sync_folder(path);
+    Ok(())
 }
 
 fn write_temporary(path: &Path, file: &VaultFile) -> io::Result<NamedTempFile> {
@@ -306,13 +308,17 @@ fn write_temporary(path: &Path, file: &VaultFile) -> io::Result<NamedTempFile> {
     Ok(temporary)
 }
 
-/// A rename is only durable once its folder is; Windows can't open one.
-fn sync_folder(path: &Path) -> io::Result<()> {
+/// A rename is only durable once its folder is; Windows can't open one. By now
+/// the new file is in place, and a recovery key may depend on it, so a failure
+/// here can't count as a failed save. The worst it costs is the old file back
+/// after a power cut on a file system that can't sync folders.
+fn sync_folder(path: &Path) {
     #[cfg(unix)]
-    fs::File::open(folder_of(path))?.sync_all()?;
+    if let Ok(folder) = fs::File::open(folder_of(path)) {
+        let _ = folder.sync_all();
+    }
     #[cfg(not(unix))]
     let _ = path;
-    Ok(())
 }
 
 fn folder_of(path: &Path) -> &Path {

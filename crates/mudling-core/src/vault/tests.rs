@@ -154,6 +154,60 @@ async fn the_device_cache_unlocks_without_the_master_password() {
 }
 
 #[tokio::test]
+async fn forgetting_a_device_works_while_the_file_is_unreadable() {
+    let fixture = Fixture::new();
+    let (vault, _) = fixture.created().await;
+    let readable = fixture.bytes();
+    fs::write(&fixture.path, "<<<<<<< HEAD").unwrap();
+
+    vault.forget_device().await.unwrap();
+
+    assert_eq!(vault.state(), VaultState::Locked);
+    fs::write(&fixture.path, readable).unwrap();
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::NotCached)
+    ));
+}
+
+#[tokio::test]
+async fn forgetting_a_device_with_no_way_to_name_its_key_says_so_and_keeps_it() {
+    let fixture = Fixture::new();
+    fixture.created().await;
+    let readable = fixture.bytes();
+    let vault = fixture.vault();
+    fs::write(&fixture.path, "<<<<<<< HEAD").unwrap();
+
+    assert!(matches!(
+        vault.forget_device().await,
+        Err(Error::Corrupt(_))
+    ));
+
+    fs::write(&fixture.path, readable).unwrap();
+    vault.unlock_from_device().await.unwrap();
+}
+
+/// A folder that can be written but not opened, as some network mounts behave:
+/// the rename lands, and the sync after it can't happen.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_folder_sync_still_hands_over_the_recovery_key() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new();
+    let folder = fixture.path.parent().unwrap();
+    let permissions = |mode| fs::Permissions::from_mode(mode);
+    fs::set_permissions(folder, permissions(0o300)).unwrap();
+
+    let created = fixture.vault().create(MASTER.into()).await;
+
+    fs::set_permissions(folder, permissions(0o700)).unwrap();
+    let recovery_key = created.unwrap().recovery_key;
+    let reader = fixture.vault();
+    let _ = reader.unlock_with_recovery_key(recovery_key).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_broken_credential_store_is_reported_and_the_vault_still_opens() {
     struct Broken;
     impl KeyStore for Broken {
@@ -682,6 +736,7 @@ async fn a_job_that_wakes_the_thread_after_sleep_finds_the_vault_locked() {
         kdf: CHEAP_KDF,
         auto_lock: AutoLock::FIVE_MINUTES,
         key: Some(VaultKey::generate()),
+        account: None,
         idle_deadline: Some(UNIX_EPOCH + Duration::from_secs(5 * 60)),
         state,
         now: clock_jumping_after_first_read,

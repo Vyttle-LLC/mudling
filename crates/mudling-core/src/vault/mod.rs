@@ -164,6 +164,7 @@ impl Vault {
             kdf,
             auto_lock,
             key: None,
+            account: None,
             idle_deadline: None,
             state: state_sender,
             now: SystemTime::now,

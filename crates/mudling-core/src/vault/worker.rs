@@ -33,6 +33,9 @@ pub(super) struct Worker {
     pub kdf: KdfParams,
     pub auto_lock: AutoLock,
     pub key: Option<VaultKey>,
+    /// Where this device last cached a key for this vault, which `forget_device`
+    /// still needs if the file has since become unreadable.
+    pub account: Option<String>,
     pub idle_deadline: Option<SystemTime>,
     pub state: watch::Sender<VaultState>,
     pub now: fn() -> SystemTime,
@@ -205,7 +208,7 @@ impl Worker {
             }
             return Err(Error::NotCached);
         }
-        self.install(key);
+        self.install(key, account);
         Ok(())
     }
 
@@ -216,7 +219,7 @@ impl Worker {
         let account = account(file);
         let replaced = self.key_store.load(&account).ok().flatten();
         let cached = self.key_store.save(&account, &key);
-        self.install(key);
+        self.install(key, account);
         if let Some(replaced) = replaced {
             let _ = self.rescue(&replaced);
         }
@@ -284,8 +287,9 @@ impl Worker {
         Ok(rescued)
     }
 
-    fn install(&mut self, key: VaultKey) {
+    fn install(&mut self, key: VaultKey, account: String) {
         self.key = Some(key);
+        self.account = Some(account);
         self.restart_idle_timer();
         self.publish(VaultState::Unlocked);
     }
@@ -383,11 +387,17 @@ impl Worker {
     }
 
     /// Locks and removes this device's cached key, so the next unlock takes
-    /// the master password or recovery key.
+    /// the master password or recovery key. It locks whatever state the file
+    /// is in; an unreadable file only fails this if nothing here has unlocked
+    /// the vault, so there's no telling which key to remove.
     pub fn forget_device(&mut self) -> Result<(), Error> {
-        let file = self.read()?;
         self.lock();
-        self.key_store.delete(&account(&file))?;
+        let account = match (self.read(), self.account.take()) {
+            (Ok(file), _) => account(&file),
+            (Err(_), Some(account)) => account,
+            (Err(error), None) => return Err(error),
+        };
+        self.key_store.delete(&account)?;
         Ok(())
     }
 }
