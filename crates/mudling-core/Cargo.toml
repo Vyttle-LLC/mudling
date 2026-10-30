@@ -23,7 +23,9 @@ directories.workspace = true
 imbl = "7"
 bytes.workspace = true
 flate2.workspace = true
+git2.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+url = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

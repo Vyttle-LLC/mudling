@@ -4,6 +4,7 @@
 pub mod ansi;
 pub mod completion;
 pub mod defaults;
+pub mod git;
 pub mod line;
 pub mod map;
 pub mod net;

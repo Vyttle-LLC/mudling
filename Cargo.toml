@@ -35,6 +35,9 @@ flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 memchr = "2"
 tokio = "1"
 uniffi = "0.32"
+# libgit2, libssh2 and OpenSSL are all vendored, so sync needs nothing
+# installed on any platform (PRD §10).
+git2 = { version = "0.21", default-features = false, features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
