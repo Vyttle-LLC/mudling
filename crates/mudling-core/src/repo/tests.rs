@@ -211,6 +211,7 @@ fn settings() -> AppSettings {
         font: "JetBrains Mono".to_owned(),
         shortcuts: BTreeMap::from([("map.toggle".to_owned(), "cmd+m".to_owned())]),
         panels: BTreeMap::from([("narrow".to_owned(), "over".to_owned())]),
+        updated: T1,
     }
 }
 
@@ -277,9 +278,12 @@ fn export_writes_the_documented_layout() {
         .expect("the non-ASCII zone has a file")
         .clone();
     let expected: BTreeSet<String> = [
+        ".gitattributes",
+        ".gitignore",
         "mudling.json",
         "servers.json",
         "settings.json",
+        "mud.example.org/tombstones.json",
         "mud.example.org/map/The Meadow.json",
         hashed_zone.as_str(),
         "mud.example.org/mobs.json",
@@ -453,6 +457,131 @@ fn import_ignores_files_the_format_does_not_name() {
 }
 
 #[test]
+fn stray_files_are_not_listed_as_read() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+    let server = root.path().join(SERVER);
+    fs::write(server.join("stray.json"), "{}").unwrap();
+    fs::write(server.join("gear").join("stray.json"), "{}").unwrap();
+    fs::write(server.join("gear").join("notes.txt"), "not the notepad").unwrap();
+    fs::write(server.join("map").join("notes.txt"), "not the notepad").unwrap();
+
+    let imported = repo.import(SERVER, &database.reader().unwrap()).unwrap();
+
+    assert!(imported.read.is_empty(), "{:?}", imported.read);
+}
+
+#[test]
+fn import_keeps_a_row_the_game_wrote_after_the_export() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+
+    let imported_rows = {
+        let other_folder = TempDir::new().unwrap();
+        let other = open(&other_folder);
+        repo.import(SERVER, &other.reader().unwrap()).unwrap()
+    };
+    let mut newer = Batch::new();
+    newer.upsert(Room {
+        updated: T2,
+        ..room(1, "Written just now", MEADOW)
+    });
+    newer.upsert(Meta {
+        key: NOTEPAD.to_owned(),
+        value: "Written just now\n".to_owned(),
+        updated: T2,
+    });
+    commit(&database, newer);
+
+    commit(&database, imported_rows.batch);
+
+    let reader = database.reader().unwrap();
+    assert_eq!(reader.map().unwrap().rooms[0].name, "Written just now");
+    let meta = reader.meta().unwrap();
+    let notes = meta.iter().find(|meta| meta.key == NOTEPAD).unwrap();
+    assert_eq!(notes.value, "Written just now\n");
+}
+
+#[test]
+fn import_does_not_bring_back_what_the_game_just_deleted() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+
+    let imported_rows = {
+        let other_folder = TempDir::new().unwrap();
+        let other = open(&other_folder);
+        repo.import(SERVER, &other.reader().unwrap()).unwrap()
+    };
+    let mut delete = Batch::new();
+    delete.delete(Key::Room(1));
+    commit(&database, delete);
+
+    commit(&database, imported_rows.batch);
+
+    let map = database.reader().unwrap().map().unwrap();
+    assert!(map.rooms.iter().all(|room| room.id != 1));
+    assert!(map.exits.iter().all(|exit| exit.room_id != 1));
+}
+
+#[test]
+fn a_tombstone_in_the_repo_deletes_an_older_row_and_spares_a_newer_one() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+    let deleted = Timestamp(T1.0 + 1);
+    let mut newer = Batch::new();
+    newer.upsert(Room {
+        updated: T2,
+        ..room(2, "Čajovna 茶室", NON_ASCII_ZONE)
+    });
+    commit(&database, newer);
+
+    let tombstones = serde_json::json!({
+        "tombstones": [
+            { "key": { "room": 1 }, "deleted": deleted },
+            { "key": { "room": 2 }, "deleted": deleted },
+        ]
+    });
+    let path = root.path().join(SERVER).join("tombstones.json");
+    fs::write(path, serde_json::to_vec(&tombstones).unwrap()).unwrap();
+    let imported = repo.import(SERVER, &database.reader().unwrap()).unwrap();
+    commit(&database, imported.batch);
+
+    let rooms = database.reader().unwrap().map().unwrap().rooms;
+    assert_eq!(rooms.iter().map(|room| room.id).collect::<Vec<_>>(), [2]);
+}
+
+#[test]
+fn the_players_own_ignore_lines_are_kept() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    fs::write(root.path().join(".gitignore"), "my-notes/\r\n*.log").unwrap();
+
+    let first = export(&repo, &database);
+    let second = export(&repo, &database);
+
+    let ignore = fs::read_to_string(root.path().join(".gitignore")).unwrap();
+    assert!(ignore.starts_with("my-notes/\r\n*.log\n"));
+    assert_eq!(ignore.lines().filter(|line| *line == "*.log").count(), 1);
+    assert!(ignore.lines().any(|line| line == ".secrets.vault.*"));
+    assert!(first.written.contains(&PathBuf::from(".gitignore")));
+    assert!(second.written.is_empty());
+}
+
+#[test]
 fn any_name_round_trips_with_no_two_files_alike() {
     let hostile = [
         "CON",
@@ -570,8 +699,8 @@ fn only_the_documented_files_reach_the_repo() {
 
     for (path, bytes) in tree(root.path()) {
         let name = path.rsplit('/').next().unwrap();
-        let allowed = name.ends_with(".json") || name == "notes.txt";
-        assert!(allowed, "{path}");
+        let allowed = name.ends_with(".json") || matches!(name, "notes.txt" | ".gitignore");
+        assert!(allowed || name == ".gitattributes", "{path}");
         let text = String::from_utf8(bytes).unwrap();
         assert!(!text.contains("SENTINEL"), "{path}");
     }
@@ -713,6 +842,17 @@ fn a_newer_format_is_refused() {
     fs::write(root.path().join("mudling.json"), r#"{"format": 999}"#).unwrap();
 
     let error = Repo::new(root.path()).servers().unwrap_err();
+
+    assert!(matches!(error, Error::NewerFormat(999)));
+}
+
+#[test]
+fn settings_in_a_newer_format_are_refused() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("mudling.json"), r#"{"format": 999}"#).unwrap();
+    fs::write(root.path().join("settings.json"), r#"{"later": true}"#).unwrap();
+
+    let error = Repo::new(root.path()).settings().unwrap_err();
 
     assert!(matches!(error, Error::NewerFormat(999)));
 }

@@ -1354,8 +1354,10 @@ fn a_cleared_note_is_deleted() {
     walk.map.commit(walk.now());
     walk.map.set_notes(meadow, "");
     let commit = walk.map.commit(walk.now()).unwrap();
-    assert_eq!(
-        written(&commit.batch).trim_end_matches("] }"),
-        "Batch { changes: [Delete(RoomNote(1))"
+    let written = written(&commit.batch);
+    assert!(
+        written.starts_with("Batch { changes: [Delete { key: RoomNote(1),"),
+        "{written}"
     );
+    assert_eq!(commit.batch.changes.len(), 1);
 }

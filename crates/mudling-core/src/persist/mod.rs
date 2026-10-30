@@ -37,6 +37,7 @@ mod records;
 mod schema;
 mod writer;
 
+pub(crate) use batch::Keyed;
 pub use batch::{Batch, Key, Record};
 pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;

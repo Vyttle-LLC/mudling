@@ -13,7 +13,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Migration `i` takes the schema from version `i` to version `i + 1`.
 /// Append new ones; never edit one that has shipped.
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -301,4 +301,14 @@ CREATE TABLE aliases (
     expansion TEXT NOT NULL,
     updated   INTEGER NOT NULL
 );
+"#;
+
+const V3: &str = r#"
+-- What a device deleted, so a merge can tell a delete from a record it never
+-- had. `key` is the record's `Key` as JSON. A delete covers a record and the
+-- rows that hang off it, so a room's exits need no tombstones of their own.
+CREATE TABLE tombstones (
+    key     TEXT PRIMARY KEY,
+    deleted INTEGER NOT NULL
+) WITHOUT ROWID;
 "#;

@@ -192,27 +192,96 @@ impl Worker {
     }
 
     /// Unlocks with this device's cached key. A stale key is removed, so the
-    /// next unlock asks for the master password.
+    /// next unlock asks for the master password, unless it still opens
+    /// stranded passwords: the next unlock uses it for those.
     pub fn unlock_from_device(&mut self) -> Result<(), Error> {
         let file = self.read()?;
         let account = account(&file);
         let key = self.key_store.load(&account)?.ok_or(Error::NotCached)?;
-        if crypto::fingerprint(&key) != file.key_fingerprint {
-            self.key_store.delete(&account)?;
+        let fingerprint = crypto::fingerprint(&key);
+        if fingerprint != file.key_fingerprint {
+            if !file.stranded.contains_key(&file::stranded_id(&fingerprint)) {
+                self.key_store.delete(&account)?;
+            }
             return Err(Error::NotCached);
         }
         self.install(key);
         Ok(())
     }
 
-    /// Unlocks with `key` and caches it on this device.
+    /// Unlocks with `key` and caches it on this device. The key it replaces
+    /// here may open stranded passwords; if that fails, they stay stranded
+    /// for the old master password to open.
     fn adopt(&mut self, key: VaultKey, file: &VaultFile) -> DeviceCache {
-        let cached = self.key_store.save(&account(file), &key);
+        let account = account(file);
+        let replaced = self.key_store.load(&account).ok().flatten();
+        let cached = self.key_store.save(&account, &key);
         self.install(key);
+        if let Some(replaced) = replaced {
+            let _ = self.rescue(&replaced);
+        }
         match cached {
             Ok(()) => DeviceCache::Saved,
             Err(error) => DeviceCache::NotSaved(error),
         }
+    }
+
+    /// Passwords the vault holds but can't read with the current key: those
+    /// stranded under a replaced key, and any entry that fails to open.
+    pub fn stranded(&mut self) -> Result<usize, Error> {
+        let (file, key) = self.unlocked()?;
+        let unreadable = file
+            .entries
+            .iter()
+            .filter(|(id, sealed)| decrypt_entry(&file, key, id, sealed).is_err())
+            .count();
+        let older: usize = file.stranded.values().map(|old| old.entries.len()).sum();
+        Ok(unreadable + older)
+    }
+
+    /// Moves what `password`, a replaced master password, can open back into
+    /// the vault, returning how many. Fails with [`Error::WrongPassword`] if
+    /// it opens nothing stranded.
+    pub fn rescue_with_password(&mut self, password: &Secret) -> Result<usize, Error> {
+        let (file, _) = self.unlocked()?;
+        for old in file.stranded.values() {
+            let wrapping = WrappingKey::from_password(password, &old.salt, old.kdf)?;
+            if let Ok(key) = old.unwrap_key(Wrapping::Master, &wrapping) {
+                return self.rescue(&key);
+            }
+        }
+        Err(Error::WrongPassword)
+    }
+
+    /// Re-seals what `old` opens under the current key. These were saved
+    /// since the key changed, so one replaces the same character's entry,
+    /// which is at best a copy of the password from before. What won't open
+    /// stays stranded.
+    fn rescue(&mut self, old: &VaultKey) -> Result<usize, Error> {
+        let stranded_id = file::stranded_id(&crypto::fingerprint(old));
+        let (mut file, key) = self.unlocked()?;
+        let Some(mut block) = file.stranded.remove(&stranded_id) else {
+            return Ok(0);
+        };
+        let mut rescued = 0;
+        for (id, sealed) in std::mem::take(&mut block.entries) {
+            match decrypt_entry(&block, old, &id, &sealed) {
+                Ok((entry, password)) => {
+                    let id = crypto::entry_id(key, &entry);
+                    let sealed = encrypt_entry(&file, key, &id, &entry, &password);
+                    file.entries.insert(id, sealed);
+                    rescued += 1;
+                }
+                Err(_) => {
+                    block.entries.insert(id, sealed);
+                }
+            }
+        }
+        if !block.entries.is_empty() {
+            file.stranded.insert(stranded_id, block);
+        }
+        file::save(&self.path, &file)?;
+        Ok(rescued)
     }
 
     fn install(&mut self, key: VaultKey) {
@@ -234,13 +303,15 @@ impl Worker {
         Ok(Some(password))
     }
 
+    /// One entry that won't open doesn't cost the player the list of the
+    /// rest: [`Worker::stranded`] counts it instead.
     pub fn entries(&mut self) -> Result<Vec<EntryKey>, Error> {
         let (file, key) = self.unlocked()?;
-        let mut entries = file
+        let mut entries: Vec<EntryKey> = file
             .entries
             .iter()
-            .map(|(id, sealed)| Ok(decrypt_entry(&file, key, id, sealed)?.0))
-            .collect::<Result<Vec<_>, Error>>()?;
+            .filter_map(|(id, sealed)| Some(decrypt_entry(&file, key, id, sealed).ok()?.0))
+            .collect();
         entries.sort();
         Ok(entries)
     }
@@ -281,6 +352,7 @@ impl Worker {
             .collect::<Result<Vec<_>, Error>>()?;
         let vault_id = old_file.vault_id();
         let (mut file, key, recovery_key) = self.new_vault(vault_id, password)?;
+        file.stranded = old_file.stranded.clone();
         for (entry, password) in &plain {
             let id = crypto::entry_id(&key, entry);
             let sealed = encrypt_entry(&file, &key, &id, entry, password);

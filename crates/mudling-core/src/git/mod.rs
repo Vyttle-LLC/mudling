@@ -18,15 +18,22 @@ mod tests;
 pub use error::GitError;
 pub use git2::Oid;
 
+use crate::merge;
 use git2::{
-    Commit, FetchOptions, IndexAddOption, PushOptions, Repository, RepositoryInitOptions, Signature,
+    Commit, FetchOptions, Index, IndexAddOption, IndexEntry, IndexTime, ObjectType, PushOptions,
+    Repository, RepositoryInitOptions, Signature, Tree,
 };
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, GitError>;
 
+/// The files of a commit, by path relative to the repo's root.
+pub type Files = BTreeMap<PathBuf, Vec<u8>>;
+
 const DEFAULT_BRANCH: &str = "main";
+const REGULAR_FILE: u32 = 0o100_644;
 /// Commits made on a machine with no git identity set up.
 const FALLBACK_NAME: &str = "MUDling";
 const FALLBACK_EMAIL: &str = "mudling@localhost";
@@ -116,8 +123,11 @@ impl Repo {
     }
 
     /// Pushes `branch` to `remote`, which takes it in one atomic step or not at
-    /// all. Fails with [`GitError::NonFastForward`] if the remote is ahead.
+    /// all. Fails with [`GitError::NonFastForward`] if the remote is ahead, and
+    /// with [`GitError::PasswordInFile`], reaching no network, if any commit
+    /// the remote lacks holds a password outside `secrets.vault`.
     pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
+        self.refuse_passwords(remote, branch)?;
         let _writing = self.mark_write()?;
         let name = local_ref(branch);
         let mut rejection = None;
@@ -178,6 +188,149 @@ impl Repo {
         Ok(())
     }
 
+    /// Every file in `commit`, by path relative to the repo's root.
+    pub fn files_at(&self, commit: Oid) -> Result<Files> {
+        let mut files = Files::new();
+        let tree = self.repo.find_commit(commit)?.tree()?;
+        self.for_each_file(
+            &tree,
+            Path::new(""),
+            &mut HashSet::new(),
+            &mut |path, bytes| {
+                files.insert(path, bytes.to_vec());
+                Ok(())
+            },
+        )?;
+        Ok(files)
+    }
+
+    /// The newest commit both sides build on, or `None` if they share no
+    /// history, as two devices that each started a repo don't.
+    pub fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
+        match self.repo.merge_base(a, b) {
+            Ok(base) => Ok(Some(base)),
+            Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Whether `commit` is `of` or something `of` builds on.
+    pub fn is_ancestor(&self, commit: Oid, of: Oid) -> Result<bool> {
+        Ok(commit == of || self.repo.graph_descendant_of(of, commit)?)
+    }
+
+    /// When `commit` was made, in seconds since the Unix epoch.
+    pub fn commit_time(&self, commit: Oid) -> Result<i64> {
+        Ok(self.repo.find_commit(commit)?.time().seconds())
+    }
+
+    /// Writes a commit holding exactly `files`, on top of `parents`. No
+    /// branch moves and the folder stays as it is.
+    pub fn write_commit(&self, files: &Files, parents: &[Oid], message: &str) -> Result<Oid> {
+        let mut index = Index::new()?;
+        for (path, bytes) in files {
+            index.add(&IndexEntry {
+                ctime: IndexTime::new(0, 0),
+                mtime: IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: REGULAR_FILE,
+                uid: 0,
+                gid: 0,
+                file_size: bytes.len() as u32,
+                id: self.repo.blob(bytes)?,
+                flags: 0,
+                flags_extended: 0,
+                path: git_path(path)?.into_bytes(),
+            })?;
+        }
+        let tree = self.repo.find_tree(index.write_tree_to(&self.repo)?)?;
+        let parents = parents
+            .iter()
+            .map(|parent| self.repo.find_commit(*parent))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let parents: Vec<&Commit> = parents.iter().collect();
+        let signature = self.signature()?;
+        Ok(self
+            .repo
+            .commit(None, &signature, &signature, message, &tree, &parents)?)
+    }
+
+    /// The messages of `branch`'s commits that `remote` lacks, newest first,
+    /// leaving out merges. Empty when there's no such remote, because then
+    /// there's nothing to sync to.
+    pub fn unpushed_messages(&self, remote: &str, branch: &str) -> Result<Vec<String>> {
+        if self.repo.find_remote(remote).is_err() {
+            return Ok(Vec::new());
+        }
+        let mut messages = Vec::new();
+        for id in self.unpushed(remote, branch)? {
+            let commit = self.repo.find_commit(id)?;
+            if commit.parent_count() < 2 {
+                messages.push(commit.message().unwrap_or_default().to_owned());
+            }
+        }
+        Ok(messages)
+    }
+
+    /// Every commit on `branch` the last fetch from `remote` didn't show.
+    fn unpushed(&self, remote: &str, branch: &str) -> Result<Vec<Oid>> {
+        let Some(tip) = self.branch_tip(branch)? else {
+            return Ok(Vec::new());
+        };
+        let mut walk = self.repo.revwalk()?;
+        walk.push(tip)?;
+        if let Some(tracked) = self.tip(&tracking_ref(remote, branch))? {
+            walk.hide(tracked)?;
+        }
+        Ok(walk.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn refuse_passwords(&self, remote: &str, branch: &str) -> Result<()> {
+        let mut seen = HashSet::new();
+        for id in self.unpushed(remote, branch)? {
+            let tree = self.repo.find_commit(id)?.tree()?;
+            self.for_each_file(&tree, Path::new(""), &mut seen, &mut |path, bytes| {
+                match merge::find_password(&path, bytes) {
+                    Some(field) => Err(GitError::PasswordInFile {
+                        path: path.display().to_string(),
+                        field,
+                    }),
+                    None => Ok(()),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Calls `visit` for every file under `tree`, skipping any object already
+    /// in `seen`, so a walk over many commits reads each version once.
+    fn for_each_file(
+        &self,
+        tree: &Tree<'_>,
+        folder: &Path,
+        seen: &mut HashSet<Oid>,
+        visit: &mut dyn FnMut(PathBuf, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for entry in tree {
+            if !seen.insert(entry.id()) {
+                continue;
+            }
+            let path = folder.join(entry.name()?);
+            match entry.kind() {
+                Some(ObjectType::Tree) => {
+                    let tree = self.repo.find_tree(entry.id())?;
+                    self.for_each_file(&tree, &path, seen, visit)?;
+                }
+                Some(ObjectType::Blob) => {
+                    visit(path, self.repo.find_blob(entry.id())?.content())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn mark_write(&self) -> Result<locks::WriteMarker> {
         locks::WriteMarker::set(self.repo.commondir())
     }
@@ -230,6 +383,14 @@ fn init(folder: &Path) -> Result<Repository> {
     let mut options = RepositoryInitOptions::new();
     options.initial_head(DEFAULT_BRANCH);
     Ok(Repository::init_opts(folder, &options)?)
+}
+
+/// `path` as git writes it, with `/` on every OS.
+fn git_path(path: &Path) -> Result<String> {
+    let parts: Option<Vec<&str>> = path.iter().map(|part| part.to_str()).collect();
+    parts
+        .map(|parts| parts.join("/"))
+        .ok_or_else(|| GitError::Failed("a file name isn't UTF-8".into()))
 }
 
 fn local_ref(branch: &str) -> String {

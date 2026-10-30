@@ -7,6 +7,7 @@ pub mod defaults;
 pub mod git;
 pub mod line;
 pub mod map;
+pub mod merge;
 pub mod net;
 pub mod persist;
 pub mod plugin;

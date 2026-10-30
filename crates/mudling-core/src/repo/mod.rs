@@ -12,12 +12,13 @@
 //! for that writer to commit.
 //!
 //! The order matters. Export first, so the repo holds every local change;
-//! then, after a pull has merged the repo's files, import. Import replaces a
-//! local record with the file's copy, so a change not yet exported would be
-//! lost; export deletes zone and character files with no records behind
-//! them, so a file pulled but not yet imported would be too. Import only
-//! adds and updates: deleting records and choosing between two copies of one
-//! belong to the merge before it.
+//! then, after a pull has merged the repo's files, import. Export deletes
+//! zone and character files with no records behind them, so a file pulled but
+//! not yet imported would be lost. Import never overrules what's newer: the
+//! writer checks each record against the row and the tombstones it finds when
+//! it commits, because the game can write between export and import.
+//! [`merge`](crate::merge) runs this order, and chooses between two sides'
+//! files before import sees them.
 //!
 //! ```no_run
 //! use mudling_core::persist::Database;
@@ -34,18 +35,18 @@
 //! # }
 //! ```
 
-mod format;
-mod names;
+pub(crate) mod format;
+pub(crate) mod names;
 mod write;
 
 pub use format::AppSettings;
 
 use crate::persist::{self, Batch, Reader};
 use format::{
-    CHARACTERS_FOLDER, FORMAT_VERSION, GEAR_FOLDER, MANIFEST, MAP_FOLDER, Manifest, NOTES, SERVERS,
-    SETTINGS, ServerEntry, ServerList, ServerRows, json, parse,
+    ATTRIBUTES, CHARACTERS_FOLDER, FORMAT_VERSION, GEAR_FOLDER, GITATTRIBUTES, GITIGNORE, IGNORED,
+    MANIFEST, MAP_FOLDER, Manifest, SERVERS, SETTINGS, ServerList, ServerRows, check_manifest,
+    is_record_file, json, parse, with_lines,
 };
-use names::Names;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -83,8 +84,9 @@ impl Repo {
     /// database. Servers the repo lists but `readers` doesn't hold stay as
     /// they are. The `map` and `characters` folders of an exported server are
     /// MUDling's: any `.json` file in them with no records behind it is
-    /// deleted, whoever wrote it. Everything else in the repo is left alone.
-    /// A repo in a newer format is refused untouched.
+    /// deleted, whoever wrote it. `.gitignore` and `.gitattributes` gain any
+    /// line MUDling needs and keep the rest. Everything else in the repo is
+    /// left alone. A repo in a newer format is refused untouched.
     pub fn export(&self, settings: &AppSettings, readers: &[Reader]) -> Result<Exported, Error> {
         let mut list = self.server_list()?;
         let mut exported = BTreeMap::new();
@@ -108,12 +110,16 @@ impl Repo {
         files.insert(PathBuf::from(MANIFEST), json(&manifest));
         files.insert(PathBuf::from(SETTINGS), json(settings));
         files.insert(PathBuf::from(SERVERS), json(&list));
+        for (name, lines) in [
+            (GITIGNORE, IGNORED.as_slice()),
+            (GITATTRIBUTES, ATTRIBUTES.as_slice()),
+        ] {
+            let current = self.read_if_present(Path::new(name))?;
+            files.insert(PathBuf::from(name), with_lines(current.as_deref(), lines));
+        }
 
-        let mut folders = Names::default();
         let mut server_folders = Vec::with_capacity(exported.len());
-        for entry in &list.servers {
-            // Every listed server claims its name, so folders never shift.
-            let folder = PathBuf::from(folders.folder(&entry.server.id));
+        for (entry, folder) in list.with_folders() {
             if let Some(rows) = exported.get(&entry.server.id) {
                 for (path, bytes) in rows.files() {
                     files.insert(folder.join(path), bytes);
@@ -154,6 +160,7 @@ impl Repo {
 
     /// The settings the repo holds, or the defaults if it holds none yet.
     pub fn settings(&self) -> Result<AppSettings, Error> {
+        self.check_format()?;
         match self.read_if_present(Path::new(SETTINGS))? {
             Some(bytes) => parse(Path::new(SETTINGS), &bytes),
             None => Ok(AppSettings::default()),
@@ -162,55 +169,69 @@ impl Repo {
 
     /// Reads back what differs from the database behind `reader`: only
     /// files that don't match what it would export are parsed. Submit the
-    /// batch to the database's writer. A fresh database gets everything.
+    /// batch to the database's writer, which keeps any row newer than the
+    /// file's copy and applies the file's deletes. A fresh database gets
+    /// everything.
     pub fn import(&self, server_id: &str, reader: &Reader) -> Result<Imported, Error> {
         let list = self.server_list()?;
-        let mut folders = Names::default();
         let (listed, folder) = list
-            .servers
-            .iter()
-            .map(|entry| (entry, PathBuf::from(folders.folder(&entry.server.id))))
+            .with_folders()
             .find(|(entry, _)| entry.server.id == server_id)
             .ok_or_else(|| Error::UnknownServer(server_id.to_owned()))?;
 
         let rows = ServerRows::load(reader)?;
         let local = rows.files();
-        let mut batch = Batch::new();
+        let mut arrived = ServerRows::default();
         let mut read = Vec::new();
         if local_entry(&rows, server_id).as_ref() != Some(listed) {
-            add_entry(listed, &mut batch);
+            arrived.add_entry(listed);
             read.push(PathBuf::from(SERVERS));
         }
         for relative in self.server_files(&folder)? {
             let path = self.root.join(&folder).join(&relative);
             let bytes = fs::read(&path).map_err(|error| Error::io(&path, error))?;
             if local.get(&relative) != Some(&bytes) {
-                format::read_file(&relative, &bytes, &mut batch)?;
+                arrived.read_file(&relative, &bytes, listed.notes_updated)?;
                 read.push(folder.join(relative));
             }
         }
-        Ok(Imported { batch, read })
+        Ok(Imported {
+            batch: arrived.into_batch(),
+            read,
+        })
+    }
+
+    /// Writes `files` to the folder and removes `gone`, for a merge. Paths
+    /// are relative to the repo's root.
+    pub(crate) fn replace_files(
+        &self,
+        files: &BTreeMap<PathBuf, Vec<u8>>,
+        gone: &[PathBuf],
+    ) -> Result<(), Error> {
+        write::write_changed(&self.root, files)?;
+        for relative in gone {
+            let path = self.root.join(relative);
+            match fs::remove_file(&path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(Error::io(&path, error));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Refuses a repo a newer MUDling wrote. A repo with no manifest yet has
     /// nothing to protect.
     fn check_format(&self) -> Result<(), Error> {
-        let Some(bytes) = self.read_if_present(Path::new(MANIFEST))? else {
-            return Ok(());
-        };
-        let Manifest { format } = parse(Path::new(MANIFEST), &bytes)?;
-        if format > FORMAT_VERSION {
-            return Err(Error::NewerFormat(format));
-        }
-        Ok(())
+        let manifest = self.read_if_present(Path::new(MANIFEST))?;
+        check_manifest(manifest.as_deref())
     }
 
     fn server_list(&self) -> Result<ServerList, Error> {
         self.check_format()?;
         let Some(bytes) = self.read_if_present(Path::new(SERVERS))? else {
-            return Ok(ServerList {
-                servers: Vec::new(),
-            });
+            return Ok(ServerList::default());
         };
         let mut list: ServerList = parse(Path::new(SERVERS), &bytes)?;
         list.sort();
@@ -226,15 +247,16 @@ impl Repo {
                 let Some(name) = path.file_name() else {
                     continue;
                 };
-                if write::is_json(&path) || name == NOTES {
-                    files.push(inner.join(name));
+                let relative = inner.join(name);
+                if is_record_file(&relative) {
+                    files.push(relative);
                 }
             }
         }
         Ok(files)
     }
 
-    fn read_if_present(&self, relative: &Path) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn read_if_present(&self, relative: &Path) -> Result<Option<Vec<u8>>, Error> {
         let path = self.root.join(relative);
         match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -244,19 +266,9 @@ impl Repo {
     }
 }
 
-fn local_entry(rows: &ServerRows, server_id: &str) -> Option<ServerEntry> {
+fn local_entry(rows: &ServerRows, server_id: &str) -> Option<format::ServerEntry> {
     let server = rows.servers.iter().find(|server| server.id == server_id)?;
     Some(rows.entry(server))
-}
-
-fn add_entry(entry: &ServerEntry, batch: &mut Batch) {
-    batch.upsert(entry.server.clone());
-    for meta in &entry.meta {
-        batch.upsert(meta.clone());
-    }
-    for character in &entry.characters {
-        batch.upsert(character.clone());
-    }
 }
 
 #[derive(Debug)]

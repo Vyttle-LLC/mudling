@@ -6,6 +6,7 @@
 
 use super::Error;
 use super::names::Names;
+use super::write::is_json;
 use crate::map::ISLANDS;
 use crate::persist::*;
 use serde::de::DeserializeOwned;
@@ -16,22 +17,62 @@ use std::path::{Path, PathBuf};
 /// Bumped when a change would stop an older MUDling reading the repo.
 pub(super) const FORMAT_VERSION: u32 = 1;
 
-pub(super) const MANIFEST: &str = "mudling.json";
-pub(super) const SERVERS: &str = "servers.json";
-pub(super) const SETTINGS: &str = "settings.json";
-pub(super) const MAP_FOLDER: &str = "map";
-pub(super) const CHARACTERS_FOLDER: &str = "characters";
-pub(super) const GEAR_FOLDER: &str = "gear";
-const MOBS: &str = "mobs.json";
+/// Refuses a manifest a newer MUDling wrote. No manifest has nothing to protect.
+pub(crate) fn check_manifest(bytes: Option<&[u8]>) -> Result<(), Error> {
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    let Manifest { format } = parse(Path::new(MANIFEST), bytes)?;
+    if format > FORMAT_VERSION {
+        return Err(Error::NewerFormat(format));
+    }
+    Ok(())
+}
+
+pub(crate) const MANIFEST: &str = "mudling.json";
+pub(crate) const SERVERS: &str = "servers.json";
+pub(crate) const SETTINGS: &str = "settings.json";
+pub(super) const GITIGNORE: &str = ".gitignore";
+pub(super) const GITATTRIBUTES: &str = ".gitattributes";
+pub(crate) const MAP_FOLDER: &str = "map";
+pub(crate) const CHARACTERS_FOLDER: &str = "characters";
+pub(crate) const GEAR_FOLDER: &str = "gear";
+pub(crate) const MOBS: &str = "mobs.json";
 const ITEMS: &str = "items.json";
 const COPIES: &str = "copies.json";
 const TRIGGERS: &str = "triggers.json";
 const ALIASES: &str = "aliases.json";
-pub(super) const NOTES: &str = "notes.txt";
+pub(crate) const NOTES: &str = "notes.txt";
+const TOMBSTONES: &str = "tombstones.json";
 
-/// The only [`Meta`] keys that sync. The rest stay on the device, such as
-/// the room this device last stood in.
+/// What stays out of git, whatever else a player's `.gitignore` says: the
+/// vault's half-written copies, MUDling's own, and all logs (PRD §10).
+pub(super) const IGNORED: [&str; 7] = [
+    ".secrets.vault.*",
+    "*.mudling-tmp",
+    "*.log",
+    "logs/",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+];
+
+/// Git leaves every file's bytes alone, so Windows can't turn LF into CRLF.
+pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
+
+/// The only [`Meta`] keys that sync besides the notepad, which has a file of
+/// its own. The rest stay on the device, such as the room this device last
+/// stood in.
 const SYNCED_META: [&str; 1] = [ISLANDS];
+
+/// How long a delete is remembered. A device offline for longer brings back
+/// what was deleted in the meantime: the cost of not keeping them forever.
+const TOMBSTONE_LIFE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+
+/// The oldest tombstone still worth keeping.
+pub(crate) fn tombstone_cutoff() -> Timestamp {
+    Timestamp(Timestamp::now().0 - TOMBSTONE_LIFE_MS)
+}
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Manifest {
@@ -39,33 +80,46 @@ pub(super) struct Manifest {
 }
 
 /// Settings that follow the player between devices. Window size and
-/// position have no place here.
+/// position have no place here. They change as one record, and `updated`
+/// says which device's copy wins.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub theme: String,
     pub font: String,
     pub shortcuts: BTreeMap<String, String>,
     pub panels: BTreeMap<String, String>,
+    pub updated: Timestamp,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(super) struct ServerList {
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct ServerList {
     pub servers: Vec<ServerEntry>,
 }
 
 impl ServerList {
     /// Puts the servers in id order, the order folder names are claimed in.
-    pub(super) fn sort(&mut self) {
+    pub(crate) fn sort(&mut self) {
         self.servers.sort_by(|a, b| a.server.id.cmp(&b.server.id));
+    }
+
+    /// Each server with its folder. Every listed server claims its name, so
+    /// folders never shift.
+    pub(crate) fn with_folders(&self) -> impl Iterator<Item = (&ServerEntry, PathBuf)> {
+        let mut names = Names::default();
+        self.servers
+            .iter()
+            .map(move |entry| (entry, PathBuf::from(names.folder(&entry.server.id))))
     }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct ServerEntry {
+pub(crate) struct ServerEntry {
     #[serde(flatten)]
     pub server: Server,
     pub meta: Vec<Meta>,
     pub characters: Vec<Character>,
+    /// When the text in `notes.txt` last changed, which the file can't hold.
+    pub notes_updated: Timestamp,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -116,20 +170,30 @@ struct AliasesFile {
     aliases: Vec<Alias>,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+struct TombstonesFile {
+    tombstones: Vec<Tombstone>,
+}
+
 /// Everything the repo keeps from one server's database.
-pub(super) struct ServerRows {
+#[derive(Default)]
+pub(crate) struct ServerRows {
     pub servers: Vec<Server>,
-    meta: Vec<Meta>,
-    map: MapRows,
-    marks: Vec<MobMark>,
-    characters: CharacterRows,
-    gear: GearRows,
-    triggers: Vec<Trigger>,
-    aliases: Vec<Alias>,
+    pub meta: Vec<Meta>,
+    pub map: MapRows,
+    pub marks: Vec<MobMark>,
+    pub characters: CharacterRows,
+    pub gear: GearRows,
+    pub triggers: Vec<Trigger>,
+    pub aliases: Vec<Alias>,
+    pub tombstones: Vec<Tombstone>,
 }
 
 impl ServerRows {
     pub(super) fn load(reader: &Reader) -> Result<ServerRows, Error> {
+        let cutoff = tombstone_cutoff();
+        let mut tombstones = reader.tombstones()?;
+        tombstones.retain(|tombstone| tombstone.deleted >= cutoff && syncs(&tombstone.key));
         Ok(ServerRows {
             servers: reader.servers()?,
             meta: reader.meta()?,
@@ -139,11 +203,38 @@ impl ServerRows {
             gear: reader.gear()?,
             triggers: reader.triggers()?,
             aliases: reader.aliases()?,
+            tombstones,
         })
     }
 
+    /// The rows one server's files hold, as `files` wrote them: `paths` are
+    /// relative to its folder, and any that aren't [record files] are skipped.
+    ///
+    /// [record files]: is_record_file
+    pub(crate) fn parse<'a>(
+        entry: &ServerEntry,
+        files: impl Iterator<Item = (&'a Path, &'a [u8])>,
+    ) -> Result<ServerRows, Error> {
+        let mut rows = ServerRows::default();
+        rows.add_entry(entry);
+        for (path, bytes) in files {
+            if is_record_file(path) {
+                rows.read_file(path, bytes, entry.notes_updated)?;
+            }
+        }
+        Ok(rows)
+    }
+
+    pub(super) fn add_entry(&mut self, entry: &ServerEntry) {
+        self.servers.push(entry.server.clone());
+        self.meta.extend(entry.meta.iter().cloned());
+        self.characters
+            .characters
+            .extend(entry.characters.iter().cloned());
+    }
+
     /// The server's line in `servers.json`.
-    pub(super) fn entry(&self, server: &Server) -> ServerEntry {
+    pub(crate) fn entry(&self, server: &Server) -> ServerEntry {
         ServerEntry {
             server: server.clone(),
             meta: self
@@ -153,11 +244,16 @@ impl ServerRows {
                 .cloned()
                 .collect(),
             characters: self.characters.characters.clone(),
+            notes_updated: self
+                .meta
+                .iter()
+                .find(|meta| meta.key == NOTEPAD)
+                .map_or_else(Timestamp::default, |meta| meta.updated),
         }
     }
 
     /// The server's files, by path inside its folder.
-    pub(super) fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+    pub(crate) fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
         for (zone, file) in self.zones() {
             let path = Path::new(MAP_FOLDER).join(zone);
@@ -184,6 +280,10 @@ impl ServerRows {
         let aliases = AliasesFile {
             aliases: self.aliases.clone(),
         };
+        let tombstones = TombstonesFile {
+            tombstones: self.tombstones.clone(),
+        };
+        files.insert(TOMBSTONES.into(), json(&tombstones));
         files.insert(MOBS.into(), json(&mobs));
         files.insert(Path::new(GEAR_FOLDER).join(ITEMS), json(&items));
         files.insert(Path::new(GEAR_FOLDER).join(COPIES), json(&copies));
@@ -267,6 +367,143 @@ impl ServerRows {
         let text = self.meta.iter().find(|meta| meta.key == NOTEPAD);
         text.map_or_else(Vec::new, |meta| notes_bytes(&meta.value))
     }
+
+    /// Adds the records a server's file holds. `path` is relative to the
+    /// server's folder.
+    pub(super) fn read_file(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        notes_updated: Timestamp,
+    ) -> Result<(), Error> {
+        match (parent_name(path), file_name(path)) {
+            (Some(MAP_FOLDER), _) => self.read_zone(parse(path, bytes)?),
+            (Some(CHARACTERS_FOLDER), _) => self.read_character(parse(path, bytes)?),
+            (Some(GEAR_FOLDER), Some(ITEMS)) => {
+                let file: ItemsFile = parse(path, bytes)?;
+                self.gear.facts.extend(file.facts);
+                self.gear.identifications.extend(file.identifications);
+            }
+            (Some(GEAR_FOLDER), Some(COPIES)) => {
+                let file: CopiesFile = parse(path, bytes)?;
+                self.gear.copies.extend(file.copies);
+            }
+            (None, Some(MOBS)) => {
+                let file: MobsFile = parse(path, bytes)?;
+                self.marks.extend(file.marks);
+                self.map.sightings.extend(file.sightings);
+            }
+            (None, Some(TRIGGERS)) => {
+                self.triggers
+                    .extend(parse::<TriggersFile>(path, bytes)?.triggers);
+            }
+            (None, Some(ALIASES)) => {
+                self.aliases
+                    .extend(parse::<AliasesFile>(path, bytes)?.aliases);
+            }
+            (None, Some(TOMBSTONES)) => {
+                self.tombstones
+                    .extend(parse::<TombstonesFile>(path, bytes)?.tombstones);
+            }
+            (None, Some(NOTES)) => {
+                let value = String::from_utf8(bytes.to_vec()).map_err(|error| Error::Format {
+                    path: path.to_owned(),
+                    detail: error.to_string(),
+                })?;
+                self.meta.push(Meta {
+                    key: NOTEPAD.to_owned(),
+                    value,
+                    updated: notes_updated,
+                });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn read_zone(&mut self, file: ZoneFile) {
+        self.map.rooms.extend(file.rooms);
+        self.map.exits.extend(file.exits);
+        self.map.links.extend(file.links);
+        self.map.doorways.extend(file.doorways);
+        self.map.notes.extend(file.notes);
+        self.map.features.extend(file.features);
+    }
+
+    fn read_character(&mut self, file: CharacterFile) {
+        let rows = &mut self.characters;
+        rows.stats.extend(file.stats);
+        rows.skills.extend(file.skills);
+        rows.affects.extend(file.affects);
+        rows.worn.extend(file.worn);
+        rows.gear_sets.extend(file.gear_sets);
+    }
+
+    /// The batch that brings a database up to these rows without overruling
+    /// anything newer in it. Deletes go first and parents before children,
+    /// so a record meets the tombstones and rows it depends on.
+    pub(super) fn into_batch(self) -> Batch {
+        let mut batch = Batch::new();
+        for tombstone in self.tombstones {
+            batch.bury(tombstone);
+        }
+        adopt_all(&mut batch, self.servers);
+        adopt_all(&mut batch, self.meta);
+        adopt_all(&mut batch, self.characters.characters);
+        adopt_all(&mut batch, self.characters.stats);
+        adopt_all(&mut batch, self.characters.skills);
+        adopt_all(&mut batch, self.characters.affects);
+        adopt_all(&mut batch, self.characters.worn);
+        adopt_all(&mut batch, self.characters.gear_sets);
+        adopt_all(&mut batch, self.map.rooms);
+        adopt_all(&mut batch, self.map.exits);
+        adopt_all(&mut batch, self.map.links);
+        adopt_all(&mut batch, self.map.doorways);
+        adopt_all(&mut batch, self.map.notes);
+        adopt_all(&mut batch, self.map.features);
+        adopt_all(&mut batch, self.map.sightings);
+        adopt_all(&mut batch, self.marks);
+        adopt_all(&mut batch, self.gear.copies);
+        adopt_all(&mut batch, self.gear.facts);
+        adopt_all(&mut batch, self.gear.identifications);
+        adopt_all(&mut batch, self.triggers);
+        adopt_all(&mut batch, self.aliases);
+        batch
+    }
+}
+
+/// Whether a delete of `key` is worth telling other devices about.
+fn syncs(key: &Key) -> bool {
+    match key {
+        Key::Meta(key) => key == NOTEPAD || SYNCED_META.contains(&key.as_str()),
+        _ => true,
+    }
+}
+
+/// Whether `path`, relative to a server's folder, is a file of records.
+/// Anything else that lands in the folder is the player's own.
+pub(crate) fn is_record_file(path: &Path) -> bool {
+    let Some(name) = file_name(path) else {
+        return false;
+    };
+    match parent_name(path) {
+        None => [MOBS, TRIGGERS, ALIASES, NOTES, TOMBSTONES].contains(&name),
+        Some(GEAR_FOLDER) => path.components().count() == 2 && [ITEMS, COPIES].contains(&name),
+        Some(MAP_FOLDER | CHARACTERS_FOLDER) => {
+            path.components().count() == 2 && is_json(Path::new(name))
+        }
+        Some(_) => false,
+    }
+}
+
+fn file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|name| name.to_str())
+}
+
+fn parent_name(path: &Path) -> Option<&str> {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
 }
 
 /// The file of a room's zone. A foreign key keeps every row's room in the
@@ -295,80 +532,36 @@ fn notes_bytes(text: &str) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// Adds the records a server's file holds to `batch`. `path` is relative to
-/// the server's folder.
-pub(super) fn read_file(path: &Path, bytes: &[u8], batch: &mut Batch) -> Result<(), Error> {
-    let name = path.file_name().and_then(|name| name.to_str());
-    let parent = path
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str());
-    match (parent, name) {
-        (Some(MAP_FOLDER), _) => read_zone(parse(path, bytes)?, batch),
-        (Some(CHARACTERS_FOLDER), _) => read_character(parse(path, bytes)?, batch),
-        (Some(GEAR_FOLDER), Some(ITEMS)) => {
-            let file: ItemsFile = parse(path, bytes)?;
-            upsert_all(batch, file.facts);
-            upsert_all(batch, file.identifications);
-        }
-        (Some(GEAR_FOLDER), Some(COPIES)) => {
-            upsert_all(batch, parse::<CopiesFile>(path, bytes)?.copies);
-        }
-        (_, Some(MOBS)) => {
-            let file: MobsFile = parse(path, bytes)?;
-            upsert_all(batch, file.marks);
-            upsert_all(batch, file.sightings);
-        }
-        (_, Some(TRIGGERS)) => upsert_all(batch, parse::<TriggersFile>(path, bytes)?.triggers),
-        (_, Some(ALIASES)) => upsert_all(batch, parse::<AliasesFile>(path, bytes)?.aliases),
-        (_, Some(NOTES)) => {
-            let value = String::from_utf8(bytes.to_vec()).map_err(|error| Error::Format {
-                path: path.to_owned(),
-                detail: error.to_string(),
-            })?;
-            // Plain text has no time of its own, so it's stamped on arrival.
-            batch.upsert(Meta {
-                key: NOTEPAD.to_owned(),
-                value,
-                updated: Timestamp::now(),
-            });
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn read_zone(file: ZoneFile, batch: &mut Batch) {
-    upsert_all(batch, file.rooms);
-    upsert_all(batch, file.exits);
-    upsert_all(batch, file.links);
-    upsert_all(batch, file.doorways);
-    upsert_all(batch, file.notes);
-    upsert_all(batch, file.features);
-}
-
-fn read_character(file: CharacterFile, batch: &mut Batch) {
-    upsert_all(batch, file.stats);
-    upsert_all(batch, file.skills);
-    upsert_all(batch, file.affects);
-    upsert_all(batch, file.worn);
-    upsert_all(batch, file.gear_sets);
-}
-
-fn upsert_all(batch: &mut Batch, records: Vec<impl Into<Record>>) {
+fn adopt_all(batch: &mut Batch, records: Vec<impl Into<Record>>) {
     for record in records {
-        batch.upsert(record);
+        batch.adopt(record);
     }
+}
+
+/// `current`, with any of the `required` lines it lacks added at the end.
+pub(super) fn with_lines(current: Option<&[u8]>, required: &[&str]) -> Vec<u8> {
+    let mut bytes = current.unwrap_or_default().to_vec();
+    if bytes.last().is_some_and(|last| *last != b'\n') {
+        bytes.push(b'\n');
+    }
+    let text = String::from_utf8_lossy(current.unwrap_or_default()).into_owned();
+    for line in required {
+        if !text.lines().any(|present| present.trim() == *line) {
+            bytes.extend_from_slice(line.as_bytes());
+            bytes.push(b'\n');
+        }
+    }
+    bytes
 }
 
 /// A file's bytes: pretty JSON, LF endings, a final newline.
-pub(super) fn json(value: &impl Serialize) -> Vec<u8> {
+pub(crate) fn json(value: &impl Serialize) -> Vec<u8> {
     let mut bytes = serde_json::to_vec_pretty(value).expect("plain records serialize");
     bytes.push(b'\n');
     bytes
 }
 
-pub(super) fn parse<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T, Error> {
+pub(crate) fn parse<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|error| Error::Format {
         path: path.to_owned(),
         detail: error.to_string(),

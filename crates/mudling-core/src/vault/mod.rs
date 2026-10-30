@@ -43,6 +43,7 @@ mod crypto;
 mod error;
 mod file;
 mod key_store;
+mod merge;
 mod secret;
 mod strength;
 mod worker;
@@ -52,6 +53,7 @@ mod tests;
 
 pub use error::Error;
 pub use key_store::{KeyStore, KeyStoreError, MemoryKeyStore, OsKeyStore};
+pub(crate) use merge::merge_files;
 pub use secret::{RecoveryKey, Secret, VaultKey};
 
 use crypto::KdfParams;
@@ -257,9 +259,27 @@ impl Vault {
             .await
     }
 
-    /// What's saved, sorted by server then character.
+    /// What's saved, sorted by server then character, leaving out what
+    /// [`Vault::stranded`] counts.
     pub async fn entries(&self) -> Result<Vec<EntryKey>, Error> {
         self.call_unlocked(Worker::entries).await
+    }
+
+    /// How many saved passwords can't be read with the current key, usually
+    /// because a device saved them offline before the master password changed
+    /// on another. Unlocking on that device brings them back by itself; on
+    /// any other, the UI asks for the old password and calls
+    /// [`Vault::rescue_with_password`].
+    pub async fn stranded(&self) -> Result<usize, Error> {
+        self.call_unlocked(Worker::stranded).await
+    }
+
+    /// Brings back the stranded passwords `old_master_password` opens,
+    /// returning how many. A wrong one gives [`Error::WrongPassword`].
+    pub async fn rescue_with_password(&self, old_master_password: Secret) -> Result<usize, Error> {
+        let password = Arc::new(old_master_password);
+        self.call_unlocked(move |worker| worker.rescue_with_password(&password))
+            .await
     }
 
     /// Changes the master password, re-encrypting everything under a new

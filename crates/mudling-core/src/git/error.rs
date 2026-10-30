@@ -40,6 +40,13 @@ pub enum GitError {
     Locked(String),
     /// The chosen folder holds files and isn't a git repo.
     FolderNotEmpty,
+    /// A file about to be pushed seems to hold a password, so nothing was
+    /// pushed. `field` says where in the file; the value itself is never
+    /// repeated. Nothing moves until the player takes it out.
+    PasswordInFile {
+        path: String,
+        field: String,
+    },
     Failed(String),
 }
 
@@ -52,6 +59,9 @@ impl fmt::Display for GitError {
             Self::NonFastForward(detail) => write!(f, "the remote is ahead: {detail}"),
             Self::Locked(detail) => write!(f, "the repo is locked: {detail}"),
             Self::FolderNotEmpty => f.write_str("the folder holds files and isn't a git repo"),
+            Self::PasswordInFile { path, field } => {
+                write!(f, "not pushed: {path} seems to hold a password in {field}")
+            }
             Self::Failed(detail) => f.write_str(detail),
         }
     }

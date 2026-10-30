@@ -4,6 +4,7 @@
 //! Values a game decides (directions, door states, features, mob marks,
 //! slots, stat keys) are plain strings: the schema has no game's words.
 
+use super::batch::Key;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Row, Statement, ToSql, params};
 use serde::de::DeserializeOwned;
@@ -868,6 +869,32 @@ impl Stored for Alias {
     }
 }
 
+/// A record deleted on some device, kept so that a copy elsewhere doesn't
+/// bring it back. It outranks copies of the record, and of the rows that hang
+/// off it, last changed before `deleted`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub key: Key,
+    pub deleted: Timestamp,
+}
+
+impl Stored for Tombstone {
+    const UPSERT: &'static str = "INSERT INTO tombstones (key, deleted) VALUES (?1, ?2)
+        ON CONFLICT (key) DO UPDATE SET deleted = max(deleted, excluded.deleted)";
+    const SELECT: &'static str = "SELECT key, deleted FROM tombstones ORDER BY key";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![Json(&self.key), self.deleted])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Tombstone {
+            key: row.get::<_, Json<_>>(0)?.0,
+            deleted: row.get(1)?,
+        })
+    }
+}
+
 /// A saved version of the map, as listed: the header row only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapVersion {
@@ -910,6 +937,8 @@ pub(crate) struct MapTable {
     pub version: &'static str,
     pub columns: &'static str,
     pub order_by: &'static str,
+    /// SQL for a row's [`Key`] as JSON, as serde writes it.
+    pub key_json: &'static str,
     /// Restoring stamps rows with the restore's time. A sighting's time is
     /// when the mob was seen, so it's kept.
     pub restore_stamps_updated: bool,
@@ -920,12 +949,14 @@ const fn map_table(
     version: &'static str,
     columns: &'static str,
     order_by: &'static str,
+    key_json: &'static str,
 ) -> MapTable {
     MapTable {
         live,
         version,
         columns,
         order_by,
+        key_json,
         restore_stamps_updated: true,
     }
 }
@@ -935,36 +966,42 @@ pub(crate) const ROOMS: MapTable = map_table(
     "version_rooms",
     "id, name, area, environment, description, x, y, z, building, tangled, maze",
     "id",
+    "json_object('room', id)",
 );
 pub(crate) const EXITS: MapTable = map_table(
     "exits",
     "version_exits",
     "room_id, direction, state",
     "room_id, direction",
+    "json_object('exit', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const LINKS: MapTable = map_table(
     "links",
     "version_links",
     "room_id, direction, to_room",
     "room_id, direction",
+    "json_object('link', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const DOORWAYS: MapTable = map_table(
     "doorways",
     "version_doorways",
     "room_id, direction",
     "room_id, direction",
+    "json_object('doorway', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const NOTES: MapTable = map_table(
     "room_notes",
     "version_room_notes",
     "room_id, text",
     "room_id",
+    "json_object('room_note', room_id)",
 );
 pub(crate) const FEATURES: MapTable = map_table(
     "room_features",
     "version_room_features",
     "room_id, feature",
     "room_id, feature",
+    "json_object('room_feature', json_object('room_id', room_id, 'feature', feature))",
 );
 pub(crate) const SIGHTINGS: MapTable = MapTable {
     restore_stamps_updated: false,
@@ -973,6 +1010,7 @@ pub(crate) const SIGHTINGS: MapTable = MapTable {
         "version_sightings",
         "room_id, mob",
         "room_id, mob",
+        "json_object('sighting', json_object('room_id', room_id, 'mob', mob))",
     )
 };
 
@@ -981,7 +1019,7 @@ pub(crate) const MAP_TABLES: [MapTable; 7] =
     [ROOMS, EXITS, LINKS, DOORWAYS, NOTES, FEATURES, SIGHTINGS];
 
 /// A small value object kept as JSON text in one column.
-struct Json<T>(T);
+pub(super) struct Json<T>(pub T);
 
 impl<T: Serialize> ToSql for Json<&T> {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {

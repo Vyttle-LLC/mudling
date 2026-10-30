@@ -58,6 +58,13 @@ impl Reader {
         Ok(self.all()?)
     }
 
+    /// Everything deleted here, in key order.
+    pub fn tombstones(&self) -> Result<Vec<Tombstone>, Error> {
+        let mut tombstones: Vec<Tombstone> = self.all()?;
+        tombstones.sort();
+        Ok(tombstones)
+    }
+
     pub fn triggers(&self) -> Result<Vec<Trigger>, Error> {
         Ok(self.all()?)
     }

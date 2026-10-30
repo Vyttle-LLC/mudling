@@ -40,12 +40,19 @@
 //! - **Merging:** there's deliberately no authentication across the whole
 //!   entry list, because it would make every two-device edit conflict. So
 //!   removing an entry's line, or restoring an older one, isn't detected.
+//! - **Replaced keys:** a device that saved a password offline sealed it under
+//!   a vault key that may since have been replaced, and a merge has no key to
+//!   re-seal it with. An optional `stranded` map, by key fingerprint, holds a
+//!   whole older vault with just those entries, so its own master password can
+//!   still open it. Each entry there moves back as soon as a device has that
+//!   key. Until then this repeats what git history already holds.
 
 use super::crypto::{
     self, CHECK_LEN, FINGERPRINT_LEN, KdfParams, SALT_LEN, VAULT_ID_LEN, WrappingKey,
 };
 use super::error::Error;
 use super::secret::VaultKey;
+use data_encoding::HEXLOWER;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -63,7 +70,7 @@ pub(super) enum Wrapping {
     Recovery,
 }
 
-#[derive(PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VaultFile {
     format: String,
@@ -80,9 +87,11 @@ pub(super) struct VaultFile {
     #[serde(with = "base64")]
     digest: [u8; CHECK_LEN],
     pub entries: BTreeMap<String, Sealed>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stranded: BTreeMap<String, VaultFile>,
 }
 
-#[derive(PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WrappedKey {
     #[serde(with = "base64")]
@@ -91,7 +100,7 @@ struct WrappedKey {
 }
 
 /// A nonce and ciphertext, as [`crypto::seal`] returns them.
-#[derive(PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(super) struct Sealed(#[serde(with = "base64")] pub Vec<u8>);
 
@@ -128,6 +137,7 @@ impl VaultFile {
             recovery_key: wrapped_with(recovery),
             digest: [0; CHECK_LEN],
             entries: BTreeMap::new(),
+            stranded: BTreeMap::new(),
         };
         file.digest = crypto::digest(&file.header_bytes());
         file.master_password.vault_key = Sealed(crypto::seal(
@@ -145,6 +155,27 @@ impl VaultFile {
 
     pub fn vault_id(&self) -> [u8; VAULT_ID_LEN] {
         self.vault_id
+    }
+
+    /// Whether both files' entries are sealed under one key.
+    pub fn same_key(&self, other: &VaultFile) -> bool {
+        self.vault_id == other.vault_id && self.key_fingerprint == other.key_fingerprint
+    }
+
+    /// Its place in another file's `stranded` map.
+    pub fn stranded_id(&self) -> String {
+        stranded_id(&self.key_fingerprint)
+    }
+
+    /// The header's own checks, which parsing alone can't make.
+    fn check(&self) -> Result<(), Error> {
+        if !self.kdf.in_bounds() {
+            return Err(Error::Corrupt("Argon2 parameters out of range"));
+        }
+        if crypto::digest(&self.header_bytes()) != self.digest {
+            return Err(Error::Corrupt("the header doesn't match its digest"));
+        }
+        Ok(())
     }
 
     /// Opens the vault key with `wrapping`, telling a key that doesn't belong
@@ -212,13 +243,23 @@ pub(super) fn parse(bytes: &[u8]) -> Result<VaultFile, Error> {
         return Err(Error::UnsupportedVersion(header.version));
     }
     let file: VaultFile = serde_json::from_slice(bytes).map_err(read_error)?;
-    if !file.kdf.in_bounds() {
-        return Err(Error::Corrupt("Argon2 parameters out of range"));
-    }
-    if crypto::digest(&file.header_bytes()) != file.digest {
-        return Err(Error::Corrupt("the header doesn't match its digest"));
+    file.check()?;
+    for older in file.stranded.values() {
+        older.check()?;
     }
     Ok(file)
+}
+
+/// The `stranded` map's key for a vault key's fingerprint.
+pub(super) fn stranded_id(fingerprint: &[u8; FINGERPRINT_LEN]) -> String {
+    HEXLOWER.encode(fingerprint)
+}
+
+/// The file's bytes, as they're saved.
+pub(super) fn to_bytes(file: &VaultFile) -> io::Result<Vec<u8>> {
+    let mut text = serde_json::to_vec_pretty(file)?;
+    text.push(b'\n');
+    Ok(text)
 }
 
 /// `serde_json` reports end-of-input apart from other errors, which is what
@@ -254,8 +295,7 @@ pub(super) fn save_new(path: &Path, file: &VaultFile) -> Result<(), Error> {
 }
 
 fn write_temporary(path: &Path, file: &VaultFile) -> io::Result<NamedTempFile> {
-    let mut text = serde_json::to_vec_pretty(file)?;
-    text.push(b'\n');
+    let text = to_bytes(file)?;
     let folder = folder_of(path);
     fs::create_dir_all(folder)?;
     let mut temporary = tempfile::Builder::new()

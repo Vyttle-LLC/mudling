@@ -868,6 +868,212 @@ async fn secrets_never_reach_debug_output_or_errors() {
     }
 }
 
+fn alda() -> EntryKey {
+    EntryKey::new("mud.example.org", "Alda")
+}
+
+impl Fixture {
+    fn bytes(&self) -> Vec<u8> {
+        fs::read(&self.path).unwrap()
+    }
+
+    /// A second device holding a copy of this vault, unlocked with `MASTER`
+    /// so its key is cached there.
+    async fn second_device(&self) -> (Fixture, Vault) {
+        let device = Fixture::new();
+        fs::copy(&self.path, &device.path).unwrap();
+        let vault = device.vault();
+        let _ = vault.unlock_with_password(MASTER.into()).await.unwrap();
+        (device, vault)
+    }
+
+    fn take_merge(&self, base: &[u8], ours: &Fixture, theirs: &Fixture, theirs_newer: bool) {
+        let merged = merge_files(Some(base), &ours.bytes(), &theirs.bytes(), theirs_newer).unwrap();
+        fs::write(&self.path, merged).unwrap();
+    }
+}
+
+/// The mac changes its master password while the iPad, offline, saves a new
+/// password under the old key; then the iPad's merge lands on both.
+async fn offline_save_across_a_password_change() -> (Fixture, Vault, Fixture, Vault) {
+    let mac = Fixture::new();
+    let (mac_vault, _) = mac.created().await;
+    let (ipad, ipad_vault) = mac.second_device().await;
+    let base = mac.bytes();
+    ipad_vault
+        .set_password(alda(), "offline-7".into())
+        .await
+        .unwrap();
+    let _ = mac_vault
+        .change_master_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+    let their_copy = Fixture::new();
+    fs::copy(&mac.path, &their_copy.path).unwrap();
+    ipad.take_merge(&base, &ipad, &their_copy, false);
+    fs::copy(&ipad.path, &mac.path).unwrap();
+    (mac, mac_vault, ipad, ipad_vault)
+}
+
+#[tokio::test]
+async fn a_merge_across_a_password_change_breaks_nothing_and_counts_what_waits() {
+    let (_mac, vault, _ipad, _) = offline_save_across_a_password_change().await;
+
+    assert_eq!(vault.entries().await.unwrap(), [fikus()]);
+    assert_eq!(saved(&vault).await.as_deref(), Some("swordfish-42"));
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn the_device_that_saved_it_rescues_it_by_unlocking() {
+    let (_mac, _, _ipad, vault) = offline_save_across_a_password_change().await;
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::NotCached)
+    ));
+
+    let _ = vault
+        .unlock_with_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+
+    assert_eq!(vault.entries().await.unwrap(), [alda(), fikus()]);
+    assert_eq!(vault.stranded().await.unwrap(), 0);
+    let rescued = vault.password(&alda()).await.unwrap().unwrap();
+    assert_eq!(rescued.expose(), "offline-7");
+}
+
+#[tokio::test]
+async fn any_device_rescues_it_with_the_old_password() {
+    let (_mac, vault, _ipad, _) = offline_save_across_a_password_change().await;
+
+    assert!(matches!(
+        vault
+            .rescue_with_password("not the old password".into())
+            .await,
+        Err(Error::WrongPassword)
+    ));
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+
+    assert_eq!(vault.rescue_with_password(MASTER.into()).await.unwrap(), 1);
+    assert_eq!(vault.stranded().await.unwrap(), 0);
+    let rescued = vault.password(&alda()).await.unwrap().unwrap();
+    assert_eq!(rescued.expose(), "offline-7");
+}
+
+#[tokio::test]
+async fn another_password_change_keeps_what_waits_for_the_old_one() {
+    let (mac, vault, _ipad, _) = offline_save_across_a_password_change().await;
+
+    let _ = vault
+        .change_master_password("a third long and unusual passphrase of ours".into())
+        .await
+        .unwrap();
+
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+    assert_eq!(vault.rescue_with_password(MASTER.into()).await.unwrap(), 1);
+    assert!(!mac.text().contains("stranded"));
+}
+
+#[tokio::test]
+async fn a_rescue_on_one_device_holds_against_a_merge_with_another() {
+    let (mac, vault, ipad, _) = offline_save_across_a_password_change().await;
+    let before_the_rescue = ipad.bytes();
+    assert_eq!(vault.rescue_with_password(MASTER.into()).await.unwrap(), 1);
+
+    ipad.take_merge(&before_the_rescue, &ipad, &mac, false);
+
+    assert!(!ipad.text().contains("stranded"));
+}
+
+#[tokio::test]
+async fn nothing_stranded_leaves_no_trace_of_the_old_key() {
+    let mac = Fixture::new();
+    let (mac_vault, _) = mac.created().await;
+    let (ipad, _ipad_vault) = mac.second_device().await;
+    let base = mac.bytes();
+    let _ = mac_vault
+        .change_master_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+
+    ipad.take_merge(&base, &ipad, &mac, false);
+
+    assert_eq!(ipad.text(), mac.text());
+}
+
+#[tokio::test]
+async fn two_devices_with_one_key_merge_entry_by_entry() {
+    let mac = Fixture::new();
+    let (mac_vault, _) = mac.created().await;
+    let (ipad, ipad_vault) = mac.second_device().await;
+    let base = mac.bytes();
+    ipad_vault
+        .set_password(alda(), "from-the-ipad".into())
+        .await
+        .unwrap();
+    mac_vault.remove_password(fikus()).await.unwrap();
+
+    ipad.take_merge(&base, &ipad, &mac, false);
+
+    assert_eq!(ipad_vault.entries().await.unwrap(), [alda()]);
+}
+
+#[tokio::test]
+async fn two_password_changes_keep_the_loser_for_its_own_password() {
+    let mac = Fixture::new();
+    let (mac_vault, _) = mac.created().await;
+    let (ipad, ipad_vault) = mac.second_device().await;
+    let base = mac.bytes();
+    let third = "a third long and unusual passphrase of ours";
+    let _ = mac_vault
+        .change_master_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+    let _ = ipad_vault
+        .change_master_password(third.into())
+        .await
+        .unwrap();
+
+    ipad.take_merge(&base, &ipad, &mac, true);
+    fs::copy(&ipad.path, &mac.path).unwrap();
+
+    assert_eq!(mac_vault.stranded().await.unwrap(), 1);
+    assert_eq!(
+        mac_vault.rescue_with_password(third.into()).await.unwrap(),
+        1
+    );
+    assert_eq!(saved(&mac_vault).await.as_deref(), Some("swordfish-42"));
+}
+
+#[tokio::test]
+async fn an_entry_that_wont_open_costs_only_itself() {
+    let mac = Fixture::new();
+    let (vault, _) = mac.created().await;
+    let other = Fixture::new();
+    let (other_vault, _) = other.created().await;
+    drop(other_vault);
+    let foreign: Value = serde_json::from_str(&other.text()).unwrap();
+    let (_, sealed) = foreign["entries"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap();
+    let id = "0".repeat(32);
+    mac.edit(|json| json["entries"][&id] = sealed.clone());
+
+    assert_eq!(vault.entries().await.unwrap(), [fikus()]);
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+}
+
+#[test]
+fn a_damaged_vault_is_not_merged() {
+    let error = merge_files(None, b"{ not json", b"{ not json either", false).unwrap_err();
+
+    assert!(matches!(error, Error::Corrupt(_)));
+}
+
 /// A vault written by the first release of format 1. If this stops opening,
 /// the change would strand every player's passwords. Regenerate it only with a
 /// new format version and a migration.
