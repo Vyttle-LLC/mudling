@@ -1,0 +1,3 @@
+[[room_title]]
+name = "mobs.name"
+pattern = '''^(?<name>.+) is here\.$'''

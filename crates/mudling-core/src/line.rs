@@ -35,6 +35,20 @@ pub enum Encoding {
     Latin1,
 }
 
+impl Encoding {
+    /// `text` as the server reads it. Latin-1 can't hold every character;
+    /// those it can't become `?`.
+    pub fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Encoding::Utf8 => text.as_bytes().to_vec(),
+            Encoding::Latin1 => text
+                .chars()
+                .map(|c| u8::try_from(c).unwrap_or(b'?'))
+                .collect(),
+        }
+    }
+}
+
 /// What finished a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnd {

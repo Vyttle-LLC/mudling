@@ -19,6 +19,8 @@ pub enum Mark {
 }
 
 impl Mark {
+    pub const ALL: [Mark; 3] = [Mark::Aggressive, Mark::Gear, Mark::Important];
+
     pub fn name(self) -> &'static str {
         match self {
             Mark::Aggressive => "aggressive",
@@ -28,9 +30,7 @@ impl Mark {
     }
 
     fn parse(name: &str) -> Option<Mark> {
-        [Mark::Aggressive, Mark::Gear, Mark::Important]
-            .into_iter()
-            .find(|mark| mark.name() == name)
+        Mark::ALL.into_iter().find(|mark| mark.name() == name)
     }
 }
 

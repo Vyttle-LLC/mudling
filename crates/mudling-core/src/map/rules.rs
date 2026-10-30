@@ -69,6 +69,11 @@ pub trait MapRules: Send {
         false
     }
 
+    /// An area whose exits don't hold still, so its rooms are one square.
+    fn maze_area(&self, _zone: &str) -> bool {
+        false
+    }
+
     /// A mob attacking the player unprovoked, by name: its kind is aggressive.
     fn aggressor(&self, _line: &str) -> Option<String> {
         None

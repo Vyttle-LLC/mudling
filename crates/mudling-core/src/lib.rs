@@ -11,6 +11,7 @@ pub mod persist;
 pub mod plugin;
 pub mod replay;
 pub mod scrollback;
+pub mod session;
 pub mod stats;
 pub mod store;
 pub mod telnet;
