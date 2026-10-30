@@ -20,6 +20,7 @@ mod game_plugin;
 mod line_pipeline;
 mod luau_hooks;
 mod plugin_host;
+mod stores;
 
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::stats::Summary;
@@ -97,6 +98,7 @@ struct Report {
     defaults: defaults::Report,
     luau_hooks: luau_hooks::Report,
     game_plugins: Vec<game_plugin::Report>,
+    stores: stores::Report,
 }
 
 fn main() -> ExitCode {
@@ -174,7 +176,8 @@ fn main() -> ExitCode {
             && report
                 .game_plugins
                 .iter()
-                .all(|plugin| plugin.within_budget))
+                .all(|plugin| plugin.within_budget)
+            && report.stores.within_budget)
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
@@ -269,6 +272,7 @@ fn run(
         defaults,
         luau_hooks,
         game_plugins,
+        stores: stores::run(),
     }
 }
 
@@ -308,4 +312,5 @@ fn print_report(report: &Report) {
         report.find_first_page.p50_us / 1e3,
         report.find_first_page.p99_us / 1e3
     );
+    stores::print(&report.stores);
 }

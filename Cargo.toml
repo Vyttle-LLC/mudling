@@ -34,6 +34,7 @@ bytes = "1"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 memchr = "2"
 tokio = "1"
+uniffi = "0.32"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
