@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mudling-core",
+    "crates/mudling-desktop",
+    "crates/mudling-ffi",
+    "crates/mudling-bench",
+    "crates/mudling-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Vyttle-LLC/mudling"
+publish = false
+
+[workspace.dependencies]
+mudling-core = { path = "crates/mudling-core" }
+# gpui is pinned to an exact snapshot of Zed's main branch. See
+# docs/phase-0-spike.md ("Why this gpui") before changing it.
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Daily builds are release builds with debug info (PRD §5 #9).
+[profile.release]
+debug = "line-tables-only"
