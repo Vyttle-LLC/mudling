@@ -14,6 +14,7 @@ pub mod scrollback;
 pub mod stats;
 pub mod store;
 pub mod telnet;
+pub mod vault;
 
 pub use ansi::{AnsiParser, Color, Line, LineKind, Span, Style};
 pub use scrollback::Scrollback;
