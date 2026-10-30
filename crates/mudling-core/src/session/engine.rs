@@ -64,7 +64,8 @@ impl HookSink for HookOutputs {
 
 /// One server's session, for a core thread. Lines and moves keep to memory
 /// and queue their disk writes on the writer threads; opening, finishing, and
-/// a game plugin turning on (which reloads the map) wait on the disk.
+/// an override coming on with the server's name (which reloads the map) wait
+/// on the disk.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -158,6 +159,7 @@ impl Engine {
             lines: Vec::new(),
             events: Vec::new(),
         };
+        engine.suggest_game();
         engine.enable_plugins_for_server();
         engine.load_saved()?;
         engine.walk = WalkSyntax::of(&engine.plugins);
@@ -170,8 +172,13 @@ impl Engine {
     pub fn start_connection(&mut self) -> io::Result<()> {
         let (outputs, hook_outputs) = unbounded_channel();
         let state = Arc::new(HubView(Arc::clone(&self.hub)));
+        // A hook file's top level runs when it loads, so a game plugin that's
+        // off gets no VM. An override can still come on with the server's name.
+        let may_run = self.config.plugins.iter().filter(|plugin| {
+            plugin.layer() == Layer::Override || self.config.enabled.contains(plugin.id())
+        });
         let mut hooks = LuauHooks::start(
-            &self.config.plugins,
+            may_run,
             self.config.hook_limits,
             state,
             HookOutputs(outputs),
@@ -480,9 +487,11 @@ impl Engine {
         self.read_pending(now);
     }
 
-    /// The server named its game, perhaps. If that turned a plugin on, the
-    /// map reloads under its rules, and the connection takes up its settings.
+    /// The server named its game, perhaps. That can suggest a game plugin,
+    /// and bring on an override for that name: then the map reloads under
+    /// its rules, and the connection takes up its settings.
     fn game_signal_arrived(&mut self, now: Timestamp) {
+        self.suggest_game();
         if self.enable_plugins_for_server() {
             self.settle(now);
             if let Err(error) = self.writer.flush().map_err(SessionError::from) {
@@ -495,32 +504,44 @@ impl Engine {
         }
     }
 
-    /// Enables the game plugin the server's signals suggest, if none is on
-    /// yet, and the overrides for this server. Returns whether any went on.
-    /// The core only compares what each plugin's manifest declares: it knows
-    /// no game itself.
-    fn enable_plugins_for_server(&mut self) -> bool {
+    /// Publishes the game plugin the server's signals suggest. It turns
+    /// nothing on: that's the player's click, which reaches the session as
+    /// [`SessionConfig::enabled`]. The core only compares what each plugin's
+    /// manifest declares: it knows no game itself.
+    fn suggest_game(&mut self) {
+        if self.settings.suggestion.is_some() {
+            return;
+        }
         let link = self.link.as_ref();
-        let mssp_name = link.and_then(|link| link.mssp_name.as_deref());
         let signals = ServerSignals {
             host: &self.config.host,
-            mssp_name,
+            mssp_name: link.and_then(|link| link.mssp_name.as_deref()),
             gmcp_hello: link.and_then(|link| link.defaults.gmcp_hello()),
         };
+        if let Some(suggestion) = suggest(&self.config.plugins, signals) {
+            self.settings.suggestion = Some(suggestion);
+            self.publish_settings();
+        }
+    }
+
+    /// Adds the game plugins the config has on and the overrides for this
+    /// server, those not added yet. Returns whether any went on.
+    fn enable_plugins_for_server(&mut self) -> bool {
+        let mssp_name = self
+            .link
+            .as_ref()
+            .and_then(|link| link.mssp_name.as_deref());
         let server = ServerInfo {
             host: &self.config.host,
             mssp_name,
         };
-        let game = suggest(&self.config.plugins, signals).filter(|_| self.settings.game.is_none());
         let wanted: Vec<Plugin> = self
             .config
             .plugins
             .iter()
             .filter(|plugin| match plugin.layer() {
                 Layer::Override => plugin.manifest.matches_server(server),
-                _ => game
-                    .as_ref()
-                    .is_some_and(|game| game.plugin == *plugin.id()),
+                _ => self.config.enabled.contains(plugin.id()),
             })
             .filter(|plugin| self.plugins.is_enabled(plugin.id()).is_none())
             .cloned()
@@ -531,10 +552,6 @@ impl Engine {
             if let Err(error) = self.plugins.add(plugin) {
                 self.notice(format!("{id} couldn't be turned on: {error}"));
             }
-        }
-        if let Some(game) = game.filter(|game| self.plugins.is_enabled(&game.plugin).is_some()) {
-            self.settings.game = Some(game);
-            self.publish_settings();
         }
         enabled
     }

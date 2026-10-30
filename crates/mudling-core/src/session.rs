@@ -61,9 +61,12 @@ pub struct SessionConfig {
     pub host: String,
     pub port: u16,
     pub connect_timeout: Duration,
-    /// The game plugins and overrides installed. Game detection turns on
-    /// the one this server turns out to be.
+    /// The game plugins and overrides installed. Overrides for this server
+    /// run. A game plugin runs only if it's in `enabled`; game detection
+    /// puts a suggestion in the settings store and turns nothing on.
     pub plugins: Vec<Plugin>,
+    /// The game plugins the player turned on for this server.
+    pub enabled: Vec<PluginId>,
     /// Plugins the player allowed to send commands.
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
@@ -81,6 +84,7 @@ impl SessionConfig {
             port,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             plugins: Vec::new(),
+            enabled: Vec::new(),
             approved: Vec::new(),
             credentials: None,
             client_name: "MUDling".to_owned(),

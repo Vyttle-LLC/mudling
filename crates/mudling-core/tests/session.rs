@@ -48,6 +48,7 @@ fn recording() -> Vec<u8> {
 fn config(folder: &Path, port: u16) -> SessionConfig {
     SessionConfig {
         plugins: vec![hearth()],
+        enabled: vec![hearth_id()],
         approved: vec![hearth_id()],
         ..SessionConfig::new(folder, HOST, port)
     }
@@ -189,7 +190,7 @@ fn a_recording_reaches_the_stores_and_the_database() {
     let gear = stores.read(|g: &Versioned<GearState>| g.value().0.clone());
     assert_eq!(gear.get("gear.worn.a pink ring"), Some(&Value::Bool(true)));
     let game = settings(&session)
-        .game
+        .suggestion
         .expect("the MSSP name named the game");
     assert_eq!((game.plugin, game.source), (hearth_id(), Source::Mssp));
 
@@ -321,13 +322,11 @@ fn a_whole_session_on_a_real_connection() {
     let mut server = FakeServer::accept(&listener);
     wait_for_status(&session, ConnectionStatus::Connected);
 
-    // GMCP: the hello and the subscriptions, the game plugin's included,
-    // once the game names itself.
+    // GMCP: the hello and the subscriptions, the game plugin's included.
     server.say(&[IAC, WILL, GMCP]);
     server.expect(&[IAC, DO, GMCP]);
     server.expect(b"Core.Hello");
     server.expect(b"Char 1");
-    server.gmcp(r#"Core.Hello {"name": "Hearth"}"#);
     server.expect(b"Char.Skills 1");
 
     // Login, from a pending prompt and one ended by a newline.
@@ -561,12 +560,14 @@ struct Driven {
 
 impl Driven {
     fn new(plugins: Vec<Plugin>, host: &str) -> Driven {
+        Driven::configured(host, |config| config.plugins = plugins)
+    }
+
+    fn configured(host: &str, adjust: impl FnOnce(&mut SessionConfig)) -> Driven {
         let folder = tempfile::tempdir().unwrap();
         let hub = Arc::new(StoreHub::new(|| {}));
-        let config = SessionConfig {
-            plugins,
-            ..SessionConfig::new(folder.path(), host, 4000)
-        };
+        let mut config = SessionConfig::new(folder.path(), host, 4000);
+        adjust(&mut config);
         let typing = Arc::new(Mutex::new(Typing::default()));
         let engine = Engine::open(config, Arc::clone(&hub), typing).unwrap();
         Driven {
@@ -604,9 +605,59 @@ fn game_detection_comes_from_the_host_at_open() {
     let driven = Driven::new(vec![hearth()], "mud.hearth.example");
     let game = driven
         .hub
-        .read(|settings: &Versioned<SettingsState>| settings.value().game.clone())
+        .read(|settings: &Versioned<SettingsState>| settings.value().suggestion.clone())
         .expect("the host names the game");
     assert_eq!((game.plugin, game.source), (hearth_id(), Source::Host));
+}
+
+/// Detection only suggests (PRD §11): with its plugin off, a game named by
+/// the server gets none of the plugin, approved or not.
+#[test]
+fn a_detected_game_with_its_plugin_off_runs_no_plugin() {
+    let folder = tempfile::tempdir().unwrap();
+    let session = open(SessionConfig {
+        enabled: Vec::new(),
+        ..config(folder.path(), 4000)
+    });
+    replay(&session, 256);
+
+    let game = settings(&session).suggestion.expect("it's still suggested");
+    assert_eq!((game.plugin, game.source), (hearth_id(), Source::Mssp));
+    assert!(
+        terminal(&session).iter().all(|line| line != "wave Mira"),
+        "no hook ran"
+    );
+    let stores = session.stores();
+    assert!(stores.read(|c: &Versioned<CharactersState>| c.value().0.is_empty()));
+    assert!(stores.read(|g: &Versioned<GearState>| g.value().0.is_empty()));
+    assert!(stores.read(|mobs: &Versioned<MobsState>| mobs.value().marks.is_empty()));
+    stores.read(|terminal: &Versioned<TerminalState>| {
+        let lines = terminal.value().lines();
+        let said = lines.iter().find(|l| l.plain().starts_with("Mira says"));
+        assert!(said.unwrap().styled().is_empty(), "no plugin coloring");
+    });
+    session.quit().wait().unwrap();
+}
+
+#[test]
+fn a_plugin_that_is_off_gets_no_login_subscription_or_separator() {
+    let mut driven = Driven::configured("mud.hearth.example", |config| {
+        config.plugins = vec![hearth()];
+        config.credentials = Some(Credentials {
+            name: "Tamsin".to_owned(),
+            password: "hunter2".to_owned(),
+        });
+    });
+    driven.engine.start_connection().unwrap();
+    driven.say(&[IAC, WILL, GMCP]);
+    let subscribed = driven.engine.take_output();
+    assert!(contains(&subscribed, b"Char 1"));
+    assert!(!contains(&subscribed, b"Char.Skills"));
+
+    driven.say(b"By what name are you known?\r\n");
+    assert_eq!(driven.engine.take_output(), b"", "no auto-login");
+    driven.engine.send("north;look", Timestamp(0));
+    assert_eq!(driven.engine.take_output(), b"north\r\nlook\r\n");
 }
 
 #[test]
@@ -619,7 +670,7 @@ fn a_server_no_plugin_claims_runs_on_the_defaults() {
         .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
     let game = driven
         .hub
-        .read(|settings: &Versioned<SettingsState>| settings.value().game.clone());
+        .read(|settings: &Versioned<SettingsState>| settings.value().suggestion.clone());
     assert_eq!(game, None);
     assert_eq!(driven.terminal(), ["Mira waves at you."]);
 }

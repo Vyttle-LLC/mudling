@@ -1,5 +1,5 @@
-//! Avatar through the whole session: picked at runtime by its host, with its
-//! hooks' writes reaching the stores and the database.
+//! Avatar through the whole session: suggested at runtime by its host, and
+//! once turned on, its hooks' writes reaching the stores.
 
 use mudling_core::defaults::detect::Source;
 use mudling_core::net::DisconnectReason;
@@ -13,11 +13,13 @@ const HOST: &str = "avatar.outland.org";
 const PROMPT: &[u8] = b"(120h-130m-104v-1210)(-/-)";
 
 #[test]
-fn the_session_picks_avatar_by_its_host_and_fills_its_stores() {
+fn the_session_suggests_avatar_by_its_host_and_fills_its_stores_when_on() {
     let folder = tempfile::tempdir().unwrap();
+    let plugin = mudling_plugin_avatar::load();
     let session = Session::open(
         SessionConfig {
-            plugins: vec![mudling_plugin_avatar::load()],
+            enabled: vec![plugin.id().clone()],
+            plugins: vec![plugin],
             ..SessionConfig::new(folder.path(), HOST, 4000)
         },
         || {},
@@ -46,7 +48,9 @@ fn the_session_picks_avatar_by_its_host_and_fills_its_stores() {
         std::thread::sleep(Duration::from_millis(2));
     }
 
-    let game = settings(&session).game.expect("the host names the game");
+    let game = settings(&session)
+        .suggestion
+        .expect("the host names the game");
     assert_eq!(
         (game.plugin.as_str(), game.source),
         ("avatar", Source::Host)

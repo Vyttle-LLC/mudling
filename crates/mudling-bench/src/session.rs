@@ -15,7 +15,7 @@
 
 use crate::plugin_host::{PLUGIN_BUDGET_US, realistic_plugins};
 use mudling_core::persist::Timestamp;
-use mudling_core::plugin::Layer;
+use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::stats::Summary;
 use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsState};
@@ -164,7 +164,7 @@ impl Bench {
         hub.subscribe::<VitalsState>();
         hub.subscribe::<RoomState>();
         hub.subscribe::<MapState>();
-        let plugins = realistic_plugins()
+        let plugins: Vec<Plugin> = realistic_plugins()
             .into_iter()
             .filter(|plugin| match plugin.layer() {
                 Layer::Default => false,
@@ -172,8 +172,14 @@ impl Bench {
                 Layer::Override => true,
             })
             .collect();
+        let enabled = plugins
+            .iter()
+            .filter(|plugin| plugin.layer() == Layer::Game)
+            .map(|plugin| plugin.id().clone())
+            .collect();
         let config = SessionConfig {
             plugins,
+            enabled,
             ..SessionConfig::new(folder.path(), HOST, 4000)
         };
         let typing = Arc::new(Mutex::new(Typing::default()));

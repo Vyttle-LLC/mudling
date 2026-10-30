@@ -218,8 +218,9 @@ pub struct SettingsState {
     pub connection: ConnectionStatus,
     /// The host of this connection, or the last one.
     pub server: Option<String>,
-    /// The game plugin on for this server, and what named the game.
-    pub game: Option<Suggestion>,
+    /// The game plugin detection suggests for this server, and what named
+    /// the game. The player turns it on; this alone runs nothing.
+    pub suggestion: Option<Suggestion>,
     /// The server turned echo off: what's typed now is a password.
     pub echo_off: bool,
     /// Things gone wrong that the player should see, newest last: a plugin
