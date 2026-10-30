@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// Meta keys the map keeps its own state under.
 const CURRENT_ROOM: &str = "map.current-room";
-const ISLANDS: &str = "map.islands";
+pub(crate) const ISLANDS: &str = "map.islands";
 
 /// One server's map, shared by every character on it, kept up to date from
 /// GMCP, the game's text and the player's commands.

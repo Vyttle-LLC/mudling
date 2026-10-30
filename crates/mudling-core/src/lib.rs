@@ -10,6 +10,7 @@ pub mod net;
 pub mod persist;
 pub mod plugin;
 pub mod replay;
+pub mod repo;
 pub mod scrollback;
 pub mod stats;
 pub mod store;

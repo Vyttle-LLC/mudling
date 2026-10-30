@@ -128,6 +128,8 @@ records!(
     GearCopy,
     ItemFacts,
     Identification,
+    Trigger,
+    Alias,
 );
 
 fn upsert<T: Stored>(tx: &Transaction<'_>, record: &T) -> rusqlite::Result<()> {
@@ -160,6 +162,8 @@ pub enum Key {
     GearCopy(String),
     ItemFacts(String),
     Identification(String),
+    Trigger(String),
+    Alias(String),
     MapVersion(i64),
 }
 
@@ -227,6 +231,8 @@ impl Key {
             Key::Identification(id) => {
                 run("DELETE FROM identifications WHERE id = ?1", params![id])
             }
+            Key::Trigger(id) => run("DELETE FROM triggers WHERE id = ?1", params![id]),
+            Key::Alias(id) => run("DELETE FROM aliases WHERE id = ?1", params![id]),
             Key::MapVersion(id) => run("DELETE FROM map_versions WHERE id = ?1", params![id]),
         }
     }

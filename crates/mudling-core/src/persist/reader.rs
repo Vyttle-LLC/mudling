@@ -58,6 +58,14 @@ impl Reader {
         Ok(self.all()?)
     }
 
+    pub fn triggers(&self) -> Result<Vec<Trigger>, Error> {
+        Ok(self.all()?)
+    }
+
+    pub fn aliases(&self) -> Result<Vec<Alias>, Error> {
+        Ok(self.all()?)
+    }
+
     /// The live map, read as one snapshot.
     pub fn map(&self) -> Result<MapRows, Error> {
         let _snapshot = self.connection.unchecked_transaction()?;

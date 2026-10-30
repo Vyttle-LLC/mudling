@@ -13,7 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// When a record last changed, in milliseconds since the Unix epoch. A
 /// later sync merges two copies of a record by keeping the newer one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
 pub struct Timestamp(pub i64);
 
 impl Timestamp {
@@ -53,7 +56,7 @@ pub(crate) trait Stored: Sized {
 }
 
 /// The server this database belongs to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Server {
     pub id: String,
     pub name: String,
@@ -95,7 +98,7 @@ impl Stored for Server {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Character {
     pub id: String,
     pub server_id: String,
@@ -122,8 +125,11 @@ impl Stored for Character {
     }
 }
 
+/// The [`Meta`] key the server's notepad is kept under.
+pub const NOTEPAD: &str = "notes.notepad";
+
 /// A small per-server value, such as the room the player was last in.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub key: String,
     pub value: String,
@@ -148,7 +154,7 @@ impl Stored for Meta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Room {
     pub id: i64,
     pub name: String,
@@ -220,7 +226,7 @@ impl Stored for Room {
 
 /// An exit the room lists now. When the room stops listing it, the row goes,
 /// but a [`Link`] or [`Doorway`] that way stays.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Exit {
     pub room_id: i64,
     pub direction: String,
@@ -257,7 +263,7 @@ impl Stored for Exit {
 
 /// An explored connection: going `direction` from the room led to `to_room`.
 /// Deleting either room deletes the link.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub room_id: i64,
     pub direction: String,
@@ -292,7 +298,7 @@ impl Stored for Link {
 }
 
 /// A direction that has shown a door at some point, open or shut.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Doorway {
     pub room_id: i64,
     pub direction: String,
@@ -320,7 +326,7 @@ impl Stored for Doorway {
 }
 
 /// The player's own notes on a room.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoomNote {
     pub room_id: i64,
     pub text: String,
@@ -347,7 +353,7 @@ impl Stored for RoomNote {
 }
 
 /// Something worth remembering about a room (water, a shop, danger).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoomFeature {
     pub room_id: i64,
     pub feature: String,
@@ -375,7 +381,7 @@ impl Stored for RoomFeature {
 }
 
 /// A mob seen in a room; `updated` is when it was last seen.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sighting {
     pub room_id: i64,
     pub mob: String,
@@ -403,7 +409,7 @@ impl Stored for Sighting {
 
 /// A mark on a mob, or a kind of mob, by name: learned (aggressive) or set
 /// by the player (drops gear, matters).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MobMark {
     pub name: String,
     pub mark: String,
@@ -429,7 +435,7 @@ impl Stored for MobMark {
 }
 
 /// One stat or score fact about a character, by key ("level", "str").
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CharacterStat {
     pub character_id: String,
     pub key: String,
@@ -462,7 +468,7 @@ impl Stored for CharacterStat {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
     pub character_id: String,
     pub name: String,
@@ -506,7 +512,7 @@ impl Stored for Skill {
 }
 
 /// A spell or skill affecting the character now.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Affect {
     pub character_id: String,
     pub name: String,
@@ -540,7 +546,7 @@ impl Stored for Affect {
 }
 
 /// An item the character wears, at its place in the game's slot order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Worn {
     pub character_id: String,
     pub position: i64,
@@ -583,7 +589,7 @@ impl Stored for Worn {
 
 /// A named set of gear to change into. It's one record: its pieces change
 /// together.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GearSet {
     pub id: String,
     pub character_id: String,
@@ -635,7 +641,7 @@ impl Stored for GearSet {
 }
 
 /// One copy of an item, by the game's id for it (GMCP).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GearCopy {
     pub id: String,
     pub name: String,
@@ -669,7 +675,7 @@ impl Stored for GearCopy {
 }
 
 /// What every copy of an item shares, by its plain name.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemFacts {
     pub name: String,
     /// The words commands use for it.
@@ -712,7 +718,7 @@ impl Stored for ItemFacts {
 /// One identify of an item: the history an estimate is built from. `base`
 /// is what every copy does; `added` is what was added to this copy (an
 /// enchant), by what added it, so estimates can leave it out.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Identification {
     pub id: String,
     /// The item's plain name.
@@ -775,6 +781,89 @@ impl Stored for Identification {
             added: row.get::<_, Json<_>>(9)?.0,
             details: row.get::<_, Json<_>>(10)?.0,
             updated: row.get(11)?,
+        })
+    }
+}
+
+/// What to do when a line matches. `scope` says who it applies to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Trigger {
+    pub id: String,
+    pub scope: String,
+    pub matches: String,
+    pub action: String,
+    pub enabled: bool,
+    pub updated: Timestamp,
+}
+
+impl Stored for Trigger {
+    const UPSERT: &'static str =
+        "INSERT INTO triggers (id, scope, matches, action, enabled, updated)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT (id) DO UPDATE SET scope = excluded.scope, matches = excluded.matches,
+            action = excluded.action, enabled = excluded.enabled, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT id, scope, matches, action, enabled, updated FROM triggers ORDER BY id";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![
+            self.id,
+            self.scope,
+            self.matches,
+            self.action,
+            self.enabled,
+            self.updated
+        ])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Trigger {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            matches: row.get(2)?,
+            action: row.get(3)?,
+            enabled: row.get(4)?,
+            updated: row.get(5)?,
+        })
+    }
+}
+
+/// A short word that expands to a longer command. `scope` says who it
+/// applies to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Alias {
+    pub id: String,
+    pub scope: String,
+    pub name: String,
+    pub expansion: String,
+    pub updated: Timestamp,
+}
+
+impl Stored for Alias {
+    const UPSERT: &'static str = "INSERT INTO aliases (id, scope, name, expansion, updated)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT (id) DO UPDATE SET scope = excluded.scope, name = excluded.name,
+            expansion = excluded.expansion, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT id, scope, name, expansion, updated FROM aliases ORDER BY id";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![
+            self.id,
+            self.scope,
+            self.name,
+            self.expansion,
+            self.updated
+        ])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Alias {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            name: row.get(2)?,
+            expansion: row.get(3)?,
+            updated: row.get(4)?,
         })
     }
 }
