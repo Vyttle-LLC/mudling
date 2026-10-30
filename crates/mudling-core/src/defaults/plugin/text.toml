@@ -1,0 +1,6 @@
+# Text passes through as the server sent it: coloring comes only from
+# plugins. The pager prompts are the common ones (PRD §11); a game plugin's
+# pager replaces them. A blank line continues each of them.
+[pager]
+prompt = '''(?i)\[C\]ontinue|--\s*More\s*--|\bPress (RETURN|ENTER)\b'''
+key = ""
