@@ -1,0 +1,24 @@
+# Avatar's gear. The tables and messages are read in text.toml; this is
+# the slot vocabulary they write.
+
+# The 15 slots in the order `equipment` lists them, by the short names the
+# equipment and gear stores use. `equipment` lists every slot, "<nothing>"
+# in an empty one; finger, neck and wrist each hold two and show a second
+# line when both are filled.
+slots = [
+    "light",   # <used as light>
+    "finger",  # <worn on finger>
+    "neck",    # <worn around neck>
+    "body",    # <worn on body>
+    "head",    # <worn on head>
+    "legs",    # <worn on legs>
+    "feet",    # <worn on feet>
+    "hands",   # <worn on hands>
+    "arms",    # <worn on arms>
+    "offhand", # <held in offhand>
+    "about",   # <worn about body>
+    "waist",   # <worn about waist>
+    "wrist",   # <worn on wrist>
+    "wield",   # <wielded>
+    "held",    # <held>
+]

@@ -1,0 +1,19 @@
+You pay 0 to identify the item.
+Ulric looks closely at your bear skin bracelet.
+Object 'black bear bracelet' type armor, extra flags none.
+Weight 3, value 40, level 8.
+Object Quality (100 / 100 hps)
+Armor class is 2.
+ Modifies constitution by  1 continuous
+ Modifies strength by  1 continuous
+
+
+(110h-125m-143v-1021)(-/-)
+(599hp 989m 188v 1046tnl)(-/-)Object 'gorn amulet newbie' type armor, extra flags magic anti-evil.
+Weight 1, value 10, level 2.
+Object Quality (100 / 100 hps)
+Armor class is 1.
+'enchant armor  '  modifies armor class by  -4 continuous
+ Modifies hit roll by  2 continuous
+
+(599hp 891m 194v 1046tnl)(-/-)

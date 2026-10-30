@@ -1,0 +1,33 @@
+# Avatar (avatar.outland.org): a Merc-derived Diku. Everything MUDling
+# knows about the game is in this folder, written against the public plugin
+# API only. See README.md for the events and stores it produces.
+id = "avatar"
+name = "Avatar"
+version = "0.1.0"
+api = 1
+license = "MIT"
+layer = "game"
+permissions = [
+    "write_store:character",
+    "write_store:skills",
+    "write_store:affects",
+    "write_store:equipment",
+    "write_store:identify",
+    "write_store:gear",
+]
+
+[servers]
+hosts = ["avatar.outland.org"]
+mssp_names = ["Avatar"]
+
+[points]
+text = "text.toml"
+commands = "commands.toml"
+character = "character.toml"
+gear = "gear.toml"
+map = "map.toml"
+mobs = "mobs.toml"
+
+[hooks]
+# readers.luau first: the others use the framing it defines.
+files = ["readers.luau", "character.luau", "gear.luau"]

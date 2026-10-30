@@ -1,0 +1,9 @@
+You see a vision of your corpse in:
+{10  15} Dev     Sarphyre's Court
+{51  51} Izanagi The Deepways
+{ 1   4} Crom    The Meadow
+(7h-111m-120v-405)(-/-)You flee north! What a COWARD! You lose 1 exps!
+(7h-111m-120v-406)(-/-)No way!  You are still fighting!
+(7h-111m-120v-406)(-/-)You are too exhausted.
+(30h-111m-120v-406)(-/-)It is pitch black...
+(30h-111m-120v-406)(-/-)Alas, you cannot go north.

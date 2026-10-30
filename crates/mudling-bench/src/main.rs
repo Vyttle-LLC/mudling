@@ -2,7 +2,7 @@
 //! headless and repeatably.
 //!
 //! ```text
-//! mudling-bench [--check] [--json <report.json>] [<session.log>…]
+//! mudling-bench [--check] [--json <report.json>] [--plugin <dir>…] [<session.log>…]
 //! ```
 //!
 //! With logs, it replays their server text; without, it uses synthetic lines.
@@ -12,7 +12,9 @@
 //! `--check` exits non-zero when a budget is missed.
 //! It also times the line pipeline per line over the same text, and the
 //! plugin host with a synthetic set of 300 patterns, and Luau hook calls.
+//! Each `--plugin` folder is timed as one more plugin in the host.
 
+mod game_plugin;
 mod line_pipeline;
 mod luau_hooks;
 mod plugin_host;
@@ -22,6 +24,7 @@ use mudling_core::stats::Summary;
 use mudling_core::{AnsiParser, Scrollback};
 use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -69,6 +72,7 @@ struct Options {
     check: bool,
     json: Option<String>,
     logs: Vec<String>,
+    plugins: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +93,7 @@ struct Report {
     line_pipeline: line_pipeline::Report,
     plugin_host: plugin_host::Report,
     luau_hooks: luau_hooks::Report,
+    game_plugins: Vec<game_plugin::Report>,
 }
 
 fn main() -> ExitCode {
@@ -96,7 +101,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "{message}\nusage: mudling-bench [--check] [--json <report.json>] [<session.log>…]"
+                "{message}\nusage: mudling-bench [--check] [--json <report.json>] [--plugin <dir>…] [<session.log>…]"
             );
             return ExitCode::from(2);
         }
@@ -123,17 +128,29 @@ fn main() -> ExitCode {
     let line_pipeline = line_pipeline::run(&lines);
     let plugin_host = plugin_host::run(&lines);
     let luau_hooks = luau_hooks::run();
+    let mut game_plugins = Vec::new();
+    for dir in &options.plugins {
+        match game_plugin::run(Path::new(dir), &lines) {
+            Ok(report) => game_plugins.push(report),
+            Err(error) => {
+                eprintln!("couldn't time the plugin in {dir}: {error}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     let report = run(
         source,
         ReplayFeed::new(lines),
         line_pipeline,
         plugin_host,
         luau_hooks,
+        game_plugins,
     );
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
     plugin_host::print(&report.plugin_host);
     luau_hooks::print(&report.luau_hooks);
+    report.game_plugins.iter().for_each(game_plugin::print);
     if let Some(path) = &options.json {
         let json = serde_json::to_string_pretty(&report).expect("the report serializes");
         if let Err(error) = std::fs::write(path, json) {
@@ -146,7 +163,11 @@ fn main() -> ExitCode {
             && report.find_within_budget
             && report.line_pipeline.within_budget
             && report.plugin_host.within_budget
-            && report.luau_hooks.within_budget)
+            && report.luau_hooks.within_budget
+            && report
+                .game_plugins
+                .iter()
+                .all(|plugin| plugin.within_budget))
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
@@ -159,12 +180,16 @@ fn parse_options() -> Result<Options, String> {
         check: false,
         json: None,
         logs: Vec::new(),
+        plugins: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" => options.check = true,
             "--json" => options.json = Some(args.next().ok_or("--json needs a path")?),
+            "--plugin" => options
+                .plugins
+                .push(args.next().ok_or("--plugin needs a folder")?),
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             _ => options.logs.push(arg),
         }
@@ -178,6 +203,7 @@ fn run(
     line_pipeline: line_pipeline::Report,
     plugin_host: plugin_host::Report,
     luau_hooks: luau_hooks::Report,
+    game_plugins: Vec<game_plugin::Report>,
 ) -> Report {
     let mut parser = AnsiParser::default();
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
@@ -233,6 +259,7 @@ fn run(
         line_pipeline,
         plugin_host,
         luau_hooks,
+        game_plugins,
     }
 }
 

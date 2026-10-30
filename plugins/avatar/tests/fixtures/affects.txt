@@ -1,0 +1,9 @@
+(53h-114m-102v-1448)(-/-)You are affected by:
+Spell: 'armor'.
+Spell: 'bless'.
+Spell: 'bless'.
+Spell: 'sanctuary': modifies none by 0 for 4 hours.
+A large rat has quite a few wounds.
+
+
+(53h-114m-102v-1448)(-/-)

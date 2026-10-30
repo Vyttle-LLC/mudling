@@ -1,0 +1,9 @@
+# Avatar's map. It sends GMCP Room.Info with no room number, so a room is
+# known by its name, exits and description. Its failed moves, darkness and
+# flees are text, read in text.toml.
+room_identity = "description"
+
+# The maze is only the "Lost in the Dark Woods" rooms, which look the same
+# and whose paths don't add up. The Map point takes area names only, so the
+# whole area they're in is declared; the rest of it holds still.
+mazes = ["Brothers Grimm"]

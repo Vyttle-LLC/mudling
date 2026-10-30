@@ -3201,6 +3201,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mudling-plugin-avatar"
+version = "0.0.0"
+dependencies = [
+ "mudling-core",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

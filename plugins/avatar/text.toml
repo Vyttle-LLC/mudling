@@ -1,0 +1,298 @@
+# Avatar's text: the prompt, the pager, every table the client reads, and
+# the game's messages about gear, moves and mobs.
+#
+# Avatar sends no GA or EOR, so a prompt is known by its shape. Players
+# style their own; Avatar's are "(110h-125m-120v-1062)(-/-)" and
+# "(599hp 1173m 514v 1046tnl)(-/-)", and a common custom one is two or
+# more <...> groups with numbers, "<46/46hp><116/116m><116/116mv>". Tags
+# such as "(AFK) " and effect marks such as "$*" may come in front. Output
+# often arrives glued after a prompt on
+# the same line, so patterns for a table's first line allow one in front:
+#
+#     (?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,})
+#
+# Tables are framed in Luau (readers.luau): a start pattern opens one, row
+# patterns feed it, and the next prompt ends it. Patterns run in this
+# order, so `prompt` comes first: it ends the last table before a table
+# glued after the prompt starts.
+
+# The pager, which arrives without a line end: "[B]ack,[H]elp,[R]efresh,
+# or [C]ontinue: ". "c" continues.
+[pager]
+prompt = '''\[C\]ontinue: ?$'''
+key = "c"
+
+# A whole prompt, waiting for input: "(110h-125m-120v-1062)(-/-)". Half a
+# prompt, as a network read can split one ("(271h-17"), doesn't match.
+[[prompt]]
+pattern = '''^(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,})\s*$'''
+
+# ---- Framing ----
+
+# A prompt opening a line, bare or with output glued after it.
+[[pattern]]
+name = "prompt"
+pattern = '''^(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,})'''
+hook = "on_prompt"
+
+# The pager's line once answered; the next page may follow on it.
+[[pattern]]
+name = "pager"
+pattern = '''\[C\]ontinue:'''
+hook = "on_pager"
+
+# A line of only spaces or dashes: a table's blank or rule line. After the
+# pager's line it shows the pager was answered; indented text after one
+# isn't a wrapped slist row.
+[[pattern]]
+name = "blank"
+pattern = '''^[\s-]*$'''
+hook = "on_blank"
+
+# ---- Character: score ----
+
+# "You are Tamsin the Quiet Attendant": the first line of `score`. The
+# capitals keep out room text ("You are in the northeast corner of ...").
+[[pattern]]
+name = "character.score.start"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
+hook = "read_score"
+
+# The score lines that hold facts: "Level 8 Harpy Monk  Exp/TNL: ...",
+# "You are 17 years old ...", "Str    :    14 (17) ...", and the
+# "Label : value" rows starting with Gold, Killed and Wimpy. Also its last
+# two, "Autoexit: Yes ..." and "Autopull: Yes ...", which hold none but
+# show a page after the pager was read.
+[[pattern]]
+name = "character.score.row"
+pattern = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
+hook = "read_score"
+
+# ---- Character: practice ----
+
+# The lines above `practice`'s table, whichever comes first: "You have 18
+# practice sessions left.", "The following skills are at your disposal :",
+# and the header "Name  % Lvl Sub Mana".
+[[pattern]]
+name = "character.practice.start"
+pattern = '''(?:You have (?<sessions>\d+) practice sessions? left|skills are at your disposal|^Name\s+%\s+Lvl\s+Sub\s+Mana)'''
+hook = "read_practice"
+
+# A row of one or two cells, "name  learned%  level  sub  mana":
+# "dodge               90   4   -    0  kick                33   7   -    0".
+[[pattern]]
+name = "character.practice.row"
+pattern = '''[a-z][a-z' -]*?\s+\d+\s+\d+\s+\S+\s+\d+'''
+hook = "read_practice"
+
+# ---- Character: slist ----
+
+# "Spells and skills learnable by your class at the lower levels."
+[[pattern]]
+name = "character.slist.start"
+pattern = '''Spells and skills learnable by your class'''
+hook = "read_slist"
+
+# "  3:       fast healing        meditation": a level and its skills in
+# fixed columns. A row too long for the line wraps onto an indented line
+# with no level; it may follow the pager's prompt.
+[[pattern]]
+name = "character.slist.row"
+pattern = '''^(?:.*\[C\]ontinue: ?)?(?:\s*\d+:| {4})'''
+hook = "read_slist"
+
+# ---- Character: aff ----
+
+# "You are affected by:", the head of `aff`.
+[[pattern]]
+name = "character.affects.start"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are affected by:'''
+hook = "read_affects"
+
+# `aff` with nothing on: Avatar's "You are not under the affects of any
+# spells", or the ROM wording "You are not affected by any spells".
+[[pattern]]
+name = "character.affects.none"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are not (?:under the affects of|affected by) any'''
+hook = "read_affects"
+
+# "Spell: 'bless'." or, at higher levels, "Spell: 'bless': modifies hit
+# roll by 3 for 6 hours."
+[[pattern]]
+name = "character.affects.row"
+pattern = '''^(?:Spell|Skill): '(?<name>.+?)'\s*:?\s*(?<detail>.*?)\.?\s*$'''
+hook = "read_affects"
+
+# ---- Character: messages ----
+
+# Practicing at a trainer gives the new level outright: "You practice
+# dodge with Ulric. Your current skill level is now 45."
+[[pattern]]
+name = "character.skill_practiced"
+pattern = '''You practice (?<skill>.+?) with .+?\. Your current skill level is now (?<learned>\d+)\.'''
+hook = "on_practiced"
+
+# Improving through use, in ROM's wording; the new percent isn't given.
+[[pattern]]
+name = "character.skill_improved"
+pattern = '''You have become better at|You learn from your mistakes'''
+
+# Spells landing and wearing off, and gear that grants affects: "You feel
+# more frail.", "Your armor spell wears off."
+[[pattern]]
+name = "character.affects_changed"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You feel |wears off'''
+
+# ---- Gear: eq ----
+
+# "You are using:", the head of `equipment`.
+[[pattern]]
+name = "gear.equipment.start"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are using:'''
+hook = "read_equipment"
+
+# "<worn on finger>    a pink ice ring"; an empty slot holds "<nothing>".
+[[pattern]]
+name = "gear.equipment.row"
+pattern = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
+hook = "read_equipment"
+
+# ---- Gear: wear, remove, put ----
+
+# "You wear a Tiamat mask on your head.", "... around your left wrist."
+[[pattern]]
+name = "gear.wore"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You wear (?<item>.+?) (?<on>on|around|about|over|in) your (?:left |right )?(?<part>\w+)\.$'''
+hook = "on_wore"
+
+# "You hold a golden feather in your hands."
+[[pattern]]
+name = "gear.wore"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You hold (?<item>.+?) in your hands?\.$'''
+hook = "on_wore"
+
+# "You light Nom's Crystal Lantern and hold it."
+[[pattern]]
+name = "gear.wore"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You light (?<item>.+?) and hold it\.$'''
+hook = "on_wore"
+
+# "You wield a long sword."
+[[pattern]]
+name = "gear.wore"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You wield (?<item>.+?)\.$'''
+hook = "on_wore"
+
+# "You stop using a round shield."
+[[pattern]]
+name = "gear.removed"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You stop using (?<item>.+?)\.$'''
+
+# "You put a rope belt in a satchel."
+[[pattern]]
+name = "gear.put"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You put (?<item>.+?) in (?<container>.+)\.$'''
+
+# The container refused what was put in it.
+[[pattern]]
+name = "gear.did_not_fit"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?It won't fit\.$'''
+
+# Nothing carried by that name.
+[[pattern]]
+name = "gear.not_carried"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You do not have that item\.$'''
+
+# ---- Gear: identify ----
+
+# A shop's identifier names the item first: "Edmund looks closely at your
+# Nom's Crystal Lantern." The spell doesn't.
+[[pattern]]
+name = "gear.identify.named"
+pattern = '''looks closely at your (?<item>.+?)\.$'''
+hook = "read_identify"
+
+# "Object 'light crystal lantern' type light, extra flags glow magic." Not
+# anchored: in a log the prompt before it may be any shape.
+[[pattern]]
+name = "gear.identify.object"
+pattern = '''Object '(?<keywords>.+?)'(?: is)? type (?<type>.+?)(?:, extra flags (?<flags>.+?))?\.?$'''
+hook = "read_identify"
+
+# "Weight 6, value 10, level 1."
+[[pattern]]
+name = "gear.identify.level"
+pattern = '''^Weight \d+, value \d+, level (?<level>\d+)\.$'''
+hook = "read_identify"
+
+# "Object Quality (20 / 20 hps)": how worn this copy is.
+[[pattern]]
+name = "gear.identify.quality"
+pattern = '''^Object Quality \((?<quality>.+?)\)$'''
+hook = "read_identify"
+
+# "Armor class is 1." Armor counts down on the character: AC -1.
+[[pattern]]
+name = "gear.identify.armor"
+pattern = '''^Armor class is (?<armor>-?\d+)\.$'''
+hook = "read_identify"
+
+# What every copy does: " Modifies dexterity by  1 continuous".
+[[pattern]]
+name = "gear.identify.base"
+pattern = '''^\s*Modifies (?<stat>.+?) by\s+(?<amount>-?\d+)'''
+hook = "read_identify"
+
+# What was added to this copy, by the spell that added it:
+# "'enchant armor  '  modifies armor class by  -4 continuous".
+[[pattern]]
+name = "gear.identify.added"
+pattern = '''^'(?<spell>.+?)'\s+modifies (?<stat>.+?) by\s+(?<amount>-?\d+)'''
+hook = "read_identify"
+
+# ---- Gear: examine ----
+
+# "You look at an amulet of Gorn in your inventory..."
+[[pattern]]
+name = "gear.examine.item"
+pattern = '''You look at (?<item>.+?) in your inventory\.\.\.$'''
+hook = "read_examine"
+
+# "This item appears meant to be worn around the neck."
+[[pattern]]
+name = "gear.examine.slot"
+pattern = '''^This item appears meant to be (?<meant>.+?)\.$'''
+hook = "read_examine"
+
+# ---- Map ----
+
+# A zone as Avatar names it, "{ 1   4} Crom    The Meadow": a level range,
+# the builder, then two or more spaces and the area's name. It shows in
+# text in "You see a vision of your corpse in:" and the area list.
+[[pattern]]
+name = "map.area"
+pattern = '''^\{\s*(?<low>\d+)\s+(?<high>\d+)\s*\}\s*(?:.*\S {2,})?(?<name>\S.*?)\s*$'''
+
+# Moves the game refuses without a Room.WrongDir.
+[[pattern]]
+name = "map.failed_move"
+pattern = '''No way!\s+You are still fighting!|You are too exhausted'''
+
+# The room name of a room too dark to see; it looks like every other.
+[[pattern]]
+name = "map.darkness"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?It is pitch black\.\.\.$'''
+
+# "You flee north! What a COWARD!": the way a flee went.
+[[pattern]]
+name = "map.flee"
+pattern = '''You flee (?<dir>north|east|south|west|up|down)'''
+
+# ---- Mobs ----
+
+# A mob attacking on sight: "The ugly bear GLARES at you and SNARLS!",
+# its last word the noun to remember. "X screams and attacks!" is a mob
+# helping a friend already fighting, which isn't aggression.
+[[pattern]]
+name = "mobs.aggro"
+pattern = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?(?<name>(?:.*[^A-Za-z])?(?<noun>[A-Za-z]+)) GLARES at you and SNARLS!'''
