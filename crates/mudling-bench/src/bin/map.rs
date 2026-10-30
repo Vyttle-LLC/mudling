@@ -327,8 +327,8 @@ fn flush_failures(writer: &Writer) -> usize {
     }
 }
 
-/// Stands in for the prototype game's plugin, which comes with the plugin
-/// host: its messages and area names live here, never in the core.
+/// The prototype game's map rules, kept here so its messages and area names
+/// never reach the core.
 struct PrototypeGameRules;
 
 impl MapRules for PrototypeGameRules {
