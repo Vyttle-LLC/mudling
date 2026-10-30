@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 fn fixture(name: &str) -> Plugin {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/plugins")
+        .join("tests")
+        .join("fixtures")
+        .join("plugins")
         .join(name);
     Plugin::load(&dir).unwrap_or_else(|error| panic!("{error}"))
 }
