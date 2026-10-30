@@ -17,7 +17,6 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true
 serde_json.workspace = true
-directories.workspace = true
 tempfile.workspace = true
 futures = "0.3"
 memory-stats = "1"

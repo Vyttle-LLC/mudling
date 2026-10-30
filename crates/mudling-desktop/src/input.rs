@@ -184,11 +184,6 @@ impl CommandInput {
         }
     }
 
-    #[cfg(test)]
-    pub fn text(&self) -> &str {
-        &self.content
-    }
-
     /// Fills the alias preview slot: what the typed alias would send.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_alias_preview(&mut self, preview: Option<SharedString>, cx: &mut Context<Self>) {
@@ -356,7 +351,16 @@ impl CommandInput {
         cx.notify();
     }
 
-    /// The text on screen.
+    #[cfg(test)]
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
+    #[cfg(test)]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     fn shown(&self) -> SharedString {
         if self.masked {
             MASK.repeat(self.content.chars().count()).into()

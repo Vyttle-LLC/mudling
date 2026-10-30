@@ -43,12 +43,11 @@ mod theme;
 #[cfg(all(test, target_os = "macos"))]
 mod window_images;
 
-use directories::ProjectDirs;
 use futures::channel::mpsc;
 use futures::future::{self, Either};
 use gpui::{
-    App, AppContext, Bounds, Entity, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
-    actions, px, size,
+    App, AppContext, AsyncApp, Bounds, Entity, KeyBinding, Task, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, px, size,
 };
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
@@ -183,12 +182,14 @@ fn main() -> ExitCode {
         .detach();
         cx.activate(true);
 
-        let Some((feed, history)) = feed else { return };
-        shell.read(cx).replay(history);
+        let feed = feed.map(|(feed, history)| {
+            shell.read(cx).replay(history);
+            feed
+        });
         match feed {
             #[cfg(target_os = "macos")]
             _ if options.ax_check => macos::run_ax_check(shell, cx),
-            feed if options.measured_run => {
+            Some(feed) if options.measured_run => {
                 measure::drive(
                     window.into(),
                     shell,
@@ -199,7 +200,7 @@ fn main() -> ExitCode {
                     cx,
                 );
             }
-            feed if options.lines_per_second > 0.0 => {
+            Some(feed) if options.lines_per_second > 0.0 => {
                 stream::stream(shell, feed, options.lines_per_second, cx).detach();
             }
             _ => {}
@@ -214,13 +215,18 @@ fn shut_down(shell: &Entity<Shell>, cx: &mut App) {
         return;
     };
     cx.spawn(async move |cx| {
-        let timeout = cx.background_executor().timer(QUIT_WAIT);
-        if let Either::Right(_) = future::select(saved, timeout).await {
-            eprintln!("the session didn't finish saving in time");
-        }
+        wait_for_save(saved, cx).await;
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+/// Waits for [`Shell::leave`]'s task, up to [`QUIT_WAIT`].
+async fn wait_for_save(saved: Task<()>, cx: &AsyncApp) {
+    let timeout = cx.background_executor().timer(QUIT_WAIT);
+    if let Either::Right(_) = future::select(saved, timeout).await {
+        eprintln!("the session didn't finish saving in time");
+    }
 }
 
 /// The session the options ask for. `None` with neither a server nor a
@@ -265,7 +271,7 @@ fn data_folder(options: &Options) -> Result<PathBuf, String> {
     options
         .data
         .clone()
-        .or_else(|| ProjectDirs::from("", "", "MUDling").map(|dirs| dirs.data_dir().to_owned()))
+        .or_else(mudling_core::data_folder)
         .ok_or_else(|| "no home folder; pass --data <folder>".to_owned())
 }
 
