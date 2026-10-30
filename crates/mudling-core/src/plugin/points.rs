@@ -1,11 +1,11 @@
 //! The nine extension points of plugin API v1 (PRD §11), as typed
 //! declarations read from a plugin's TOML files.
 //!
-//! The host runs every point's [`EventRule`]s and [`TableReader`]s over each
-//! line, in its merged matcher. The rest is exposed through
-//! [`crate::plugin::PluginHost::declared`] for what reads it. Every pattern
-//! in every point compiles at load, so a broken plugin is rejected before it
-//! runs.
+//! The host runs the rules [`Points::event_rules`] lists and every
+//! [`TableReader`] over each line. The rest, [`Mobs::room_title`] among it,
+//! is exposed through [`crate::plugin::PluginHost::declared`] for what reads
+//! it. Every pattern in every point compiles at load, so a broken plugin is
+//! rejected before it runs.
 
 use crate::ansi::{Color, Style};
 use crate::line::Link;
@@ -76,7 +76,7 @@ impl Points {
     /// tells the automap, Text's first. The structs are taken apart field by
     /// field, so a new list of rules fails to compile here.
     /// [`Mobs::room_title`] isn't one: it reads a room title, not a line.
-    pub(super) fn event_rules<'a>(&'a self) -> Vec<LineRuleSource<'a>> {
+    pub(super) fn event_rules<'a>(&'a self) -> Vec<(Point, &'a EventRule, Option<MapSignal>)> {
         let Points {
             connection: _,
             commands: _,
@@ -115,7 +115,6 @@ impl Points {
         rules
     }
 
-    /// Every table reader, with its point.
     pub(super) fn readers(&self) -> Vec<(Point, &TableReader)> {
         let character = self.character.iter().flat_map(|point| &point.readers);
         let gear = self
@@ -148,9 +147,6 @@ impl Points {
         Ok(())
     }
 }
-
-/// One rule [`Points::event_rules`] lists.
-pub(super) type LineRuleSource<'a> = (Point, &'a EventRule, Option<MapSignal>);
 
 /// What a rule from a list with a fixed meaning tells the automap, whatever
 /// the plugin named its event.
@@ -246,6 +242,13 @@ pub struct Capture {
     pub name: Arc<str>,
     pub start: u32,
     pub end: u32,
+}
+
+impl Capture {
+    /// What it captured of `text`, the text matched.
+    pub fn text<'a>(&self, text: &'a str) -> &'a str {
+        &text[self.start as usize..self.end as usize]
+    }
 }
 
 /// Why a pattern doesn't compile.
@@ -519,7 +522,7 @@ pub struct Commands {
     pub speedwalk: Option<Speedwalk>,
     #[serde(default, rename = "alias")]
     pub aliases: Vec<Alias>,
-    /// Only one applies: the highest layer's.
+    /// For this plugin's own hooks, through `mud.keyword`.
     pub keywords: Option<Keywords>,
 }
 
@@ -530,8 +533,8 @@ pub struct Keywords {
     /// Words that are never the keyword, such as articles.
     #[serde(default)]
     pub skip: Vec<String>,
-    /// Words that end the phrase holding the keyword: "of" in "a sash of
-    /// the guard".
+    /// Words that end the phrase holding the keyword: "of" in "a bottle of
+    /// water".
     #[serde(default)]
     pub phrase_ends: Vec<String>,
     /// Whether the game takes a possessive; if not, one is never chosen
@@ -542,6 +545,35 @@ pub struct Keywords {
 
 fn takes_possessives() -> bool {
     true
+}
+
+impl Keywords {
+    /// The word a command should name an item by: the last word of the
+    /// phrase its name starts with. "a wooden shield" gives "shield", and
+    /// with "of" ending a phrase, "a bottle of water" gives "bottle". If the
+    /// game takes no possessives and that's all there is, the name they're
+    /// made of.
+    pub fn word_for(&self, name: &str) -> Option<String> {
+        let lowercase = name.to_lowercase();
+        let mut words: Vec<&str> = Vec::new();
+        for word in lowercase
+            .split(|c: char| !c.is_alphabetic() && c != '\'')
+            .filter(|word| !word.is_empty())
+        {
+            if !words.is_empty() && self.phrase_ends.iter().any(|end| end == word) {
+                break;
+            }
+            if !self.skip.iter().any(|skipped| skipped == word) {
+                words.push(word);
+            }
+        }
+        let usable = |word: &&&str| self.possessives || !word.contains('\'');
+        let keyword = words.iter().rev().find(usable).copied().or_else(|| {
+            let last = words.last()?;
+            Some(last.split('\'').next().unwrap_or(last))
+        });
+        keyword.map(str::to_owned)
+    }
 }
 
 impl Default for Keywords {

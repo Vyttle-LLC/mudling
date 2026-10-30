@@ -2,7 +2,7 @@
 //! stores, database writes and bytes to send out. [`crate::session::Session`]
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
-use super::inventory::Inventory;
+use super::inventory::{self, Inventory};
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
@@ -48,6 +48,7 @@ struct Link {
     pipeline: LinePipeline,
     defaults: Defaults,
     inventory: Inventory,
+    inventory_asked: bool,
     login: Option<Login>,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
@@ -197,6 +198,7 @@ impl Engine {
             pipeline: LinePipeline::new(self.encoding()),
             defaults: Defaults::default(),
             inventory: Inventory::default(),
+            inventory_asked: false,
             login: self.new_login(),
             hooks,
             hook_outputs,
@@ -318,6 +320,11 @@ impl Engine {
                     self.issue(&send.command, now);
                 }
             }
+            HookOutput::RefreshInventory => {
+                if self.link.is_some() {
+                    gmcp::encode(inventory::ASK, "", &mut self.output);
+                }
+            }
             HookOutput::HookFailed(failed) => self.notice(format!(
                 "{}'s hook {} failed: {}",
                 failed.plugin,
@@ -335,6 +342,10 @@ impl Engine {
     /// read is lost; that can wait on a slow hook, so call it on a core
     /// thread.
     pub fn close_connection(&mut self, reason: DisconnectReason, now: Timestamp) {
+        // First, so a half row flushed next can't pass for the table's end;
+        // again, as that half line may start a table.
+        self.plugins.cut_tables(&mut self.events);
+        self.route_events(now);
         self.quiet(now);
         self.plugins.cut_tables(&mut self.events);
         self.route_events(now);
@@ -371,8 +382,13 @@ impl Engine {
             }
             Event::PromptEnd => {
                 let Some(link) = &mut self.link else { return };
-                self.lines.extend(link.pipeline.prompt_end());
+                let line = link.pipeline.prompt_end();
+                self.lines.extend(line.clone());
                 self.read_lines(now);
+                if let Some(line) = line {
+                    self.plugins.end_tables_at_signal(&line, &mut self.events);
+                    self.route_events(now);
+                }
             }
             Event::Gmcp { package, data } => self.gmcp(&package, &data, now),
             Event::GmcpEnabled => {
@@ -494,6 +510,11 @@ impl Engine {
         link.defaults.gmcp_arrived(package, json);
         if let Some(entries) = link.inventory.read(package, json) {
             self.hub.write::<CharactersState>(CharactersState(entries));
+        }
+        // The first room means the character is in the game.
+        if !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info") {
+            link.inventory_asked = true;
+            gmcp::encode(inventory::ASK, "", &mut self.output);
         }
         let learned = link.defaults.hud.has_learned();
         let hud = &link.defaults.hud;

@@ -77,8 +77,14 @@ local function slot_worn(event)
     return "wield"
 end
 
+-- Avatar sends no Char.Items when gear goes on or comes off, so ask again.
 function on_wore(event)
     note_item(mud.store, event.captures.item, slot_worn(event))
+    mud.refresh_inventory()
+end
+
+function on_removed(event)
+    mud.refresh_inventory()
 end
 
 -- ---- identify ----

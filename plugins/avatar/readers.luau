@@ -47,7 +47,6 @@ function Readers.write(reader, store, key, value)
     table.insert(reader.writes, { store, key, value })
 end
 
--- Counts a row read.
 function Readers.row(reader)
     reader.rows += 1
 end

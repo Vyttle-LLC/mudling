@@ -1,7 +1,7 @@
 //! What the player carries, from standard GMCP `Char.Items`, as hooks read
 //! it: `inventory.count`, then `inventory.<n>.id` and `inventory.<n>.name`
-//! for n from 1. Entries past `count` are stale. It's sent whole on login,
-//! so it's kept for the connection and never saved.
+//! for n from 1. Entries past `count` are stale. The session asks for it on
+//! entering the game, so it's kept for the connection and never saved.
 
 use crate::plugin::luau::Value;
 use serde::Deserialize;
@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 
 const LOCATION: &str = "inv";
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+/// The message that asks the server for the whole inventory.
+pub(super) const ASK: &str = "Char.Items.Inv";
+
+#[derive(Debug, Deserialize)]
 struct Item {
     id: String,
     name: String,

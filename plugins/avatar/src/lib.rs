@@ -55,7 +55,7 @@ impl Session {
     }
 
     /// A session that leaves every pager prompt unanswered.
-    pub fn not_answering_the_pager() -> Session {
+    fn not_answering_the_pager() -> Session {
         Session {
             answers_pager: false,
             ..Session::new()
@@ -149,11 +149,16 @@ impl Transcript {
             .collect()
     }
 
-    /// Every output that isn't a store write, such as a failed hook.
+    /// Every output the plugin shouldn't produce, such as a failed hook.
     pub fn problems(&self) -> Vec<&HookOutput> {
         self.outputs
             .iter()
-            .filter(|output| !matches!(output, HookOutput::StoreWrite(_)))
+            .filter(|output| {
+                !matches!(
+                    output,
+                    HookOutput::StoreWrite(_) | HookOutput::RefreshInventory
+                )
+            })
             .collect()
     }
 

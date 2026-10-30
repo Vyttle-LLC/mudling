@@ -748,16 +748,22 @@ fn scribe() -> Plugin {
          [servers]\nhosts = [\"mud.example.org\"]\n\
          [points]\ntext = \"text.toml\"\ncharacter = \"character.toml\"\nmap = \"map.toml\"\n\
          [hooks]\nfiles = [\"scribe.luau\"]\n";
-    let text = "[pager]\nprompt = '''--more--$'''\nkey = \"c\"\n";
+    let text = "[pager]\nprompt = '''--more--$'''\nkey = \"c\"\n\
+         [[pattern]]\nname = \"changed\"\npattern = '''^You change your gear\\.$'''\n\
+         hook = \"on_changed\"\n";
     let character = "[[reader]]\nname = \"bag\"\nstart = '''^Your bag:$'''\n\
          row = '''^- (?<item>.+)$'''\nhook = \"on_bag\"\n";
     let map = "[[exits]]\nname = \"exits\"\npattern = '''^Exits:'''\n\
          [[flee]]\nname = \"fled\"\npattern = '''^You run (?<dir>north|south)'''\n\
          [[darkness]]\nname = \"dark\"\npattern = '''^Pitch dark$'''\n";
-    let hooks = "function on_bag(event)\n\
+    let hooks = "local rows = 0\n\
+         function on_bag(event)\n\
          local kind = string.match(event.name, '[^.]+$')\n\
+         if kind == 'row' then rows += 1 end\n\
          if kind == 'end' or kind == 'cut' then\n\
-         mud.store('seen', kind, mud.state('inventory.count') or -1)\nend\nend";
+         mud.store('seen', 'rows', rows)\n\
+         mud.store('seen', kind, mud.state('inventory.count') or -1)\nend\nend\n\
+         function on_changed(event) mud.refresh_inventory() end";
     Plugin::from_files(|file| {
         Ok(match file {
             "plugin.toml" => manifest,
@@ -792,6 +798,13 @@ impl Driven {
         });
         self.hub
             .read(|stats: &Versioned<CharactersState>| stats.value().0.get(&key).cloned())
+    }
+
+    fn seen_rows(&mut self) -> usize {
+        match self.seen("rows") {
+            Some(Value::Number(rows)) => rows as usize,
+            other => panic!("{other:?}"),
+        }
     }
 
     fn learn_prompt(&mut self) {
@@ -836,6 +849,72 @@ fn a_connection_ending_in_a_table_cuts_it() {
         .hub
         .read(|stats: &Versioned<CharactersState>| stats.value().0.get("seen.cut").cloned());
     assert_eq!(cut, Some(Value::Number(-1.0)));
+}
+
+#[test]
+fn a_connection_ending_on_a_half_row_cuts_the_table() {
+    let mut driven = Driven::scribe();
+    driven.say(b"Your bag:\r\n- rope\r\n- la");
+    let now = Timestamp(0);
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, now);
+    let seen = driven.hub.read(|stats: &Versioned<CharactersState>| {
+        let seen = &stats.value().0;
+        (seen.contains_key("seen.cut"), seen.contains_key("seen.end"))
+    });
+    assert_eq!(seen, (true, false));
+}
+
+#[test]
+fn a_stall_on_a_half_row_leaves_the_table_open() {
+    let mut driven = Driven::scribe();
+    driven.say(b"Your bag:\r\n- rope\r\n- la");
+    driven.engine.quiet(Timestamp(0));
+    driven.say(b"mp\r\n- coil\r\n<20hp> ");
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.seen("end"), Some(Value::Number(-1.0)));
+    assert_eq!(
+        driven.seen_rows(),
+        3,
+        "both rows, the half one, and the last"
+    );
+}
+
+#[test]
+fn the_inventory_is_asked_for_once_on_entering_the_game() {
+    let ask = b"Char.Items.Inv";
+    let mut driven = Driven::scribe();
+    driven.say(b"Hello\r\n");
+    assert!(!contains(&driven.engine.take_output(), ask));
+    driven.gmcp(r#"Room.Info {"num":1,"name":"Hall","zone":"z","exits":{}}"#);
+    assert!(contains(&driven.engine.take_output(), ask));
+    driven.gmcp(r#"Room.Info {"num":1,"name":"Hall","zone":"z","exits":{}}"#);
+    assert!(!contains(&driven.engine.take_output(), ask));
+}
+
+#[test]
+fn a_hook_can_ask_for_the_inventory_again() {
+    let mut driven = Driven::scribe();
+    driven.say(b"You change your gear.\r\n");
+    wait_for("the hook's ask", || {
+        driven.engine.settle(Timestamp(0));
+        contains(&driven.engine.take_output(), b"Char.Items.Inv")
+    });
+}
+
+#[test]
+fn a_table_started_by_the_flushed_half_line_is_cut_too() {
+    let mut driven = Driven::scribe();
+    driven.say(b"Your bag:");
+    let now = Timestamp(0);
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, now);
+    let cut = driven
+        .hub
+        .read(|stats: &Versioned<CharactersState>| stats.value().0.contains_key("seen.cut"));
+    assert!(cut);
 }
 
 #[test]

@@ -9,10 +9,11 @@
 //! **Tables.** A plugin reads one [`TableReader`] table at a time. A start
 //! pattern opens it; row patterns run only then, in a matcher of their own,
 //! so they cost lines outside a table nothing. It ends at its `end` pattern,
-//! the plugin's next table or any prompt: one of the Text point's shapes, a
-//! line the server ended with GA or EOR, or one the caller recognized and
-//! reports with [`PluginHost::end_tables`]. Report a pager the client answers
-//! with [`PluginHost::pager_answered`]: a table that ends with its pager
+//! the plugin's next table or any prompt: the Text point's shapes end it
+//! here, and the caller reports the rest, with [`PluginHost::end_tables`] for
+//! a prompt it recognized and [`PluginHost::end_tables_at_signal`] for a line
+//! the server ended with GA or EOR. Report a pager the client answers with
+//! [`PluginHost::pager_answered`]: a table that ends with its pager
 //! unanswered ends in `<reader>.cut`, not `<reader>.end`.
 //!
 //! **Run order** is layer order, defaults first, then game plugins, then
@@ -28,11 +29,10 @@
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
 use super::points::{
-    Capture, HookName, Keywords, MapSignal, Pager, Pattern, Point, Points, RoomIdentity,
-    TableReader,
+    Capture, HookName, MapSignal, Pager, Pattern, Point, Points, RoomIdentity, TableReader,
 };
 use crate::ansi::{Span, Style};
-use crate::line::{Encoding, Line, LineEnd, Link, Pending};
+use crate::line::{Encoding, Line, Link, Pending};
 use crate::stats::Summary;
 use std::ops::Range;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ impl PluginEvent {
             .captures
             .iter()
             .find(|capture| &*capture.name == name)?;
-        Some(&self.line.plain()[capture.start as usize..capture.end as usize])
+        Some(capture.text(self.line.plain()))
     }
 }
 
@@ -103,7 +103,6 @@ pub struct Settings {
     pub room_identity: Option<RoomIdentity>,
     pub pager: Option<Pager>,
     pub area_name: Option<Pattern>,
-    pub keywords: Option<Keywords>,
 }
 
 /// One plugin's cost per line, from sampled lines.
@@ -126,11 +125,12 @@ pub struct PluginHost {
     last_pending: Option<(Box<str>, Option<PendingKind>)>,
     /// At most one table per plugin.
     open: Vec<OpenTable>,
+    /// Tables a recompile cut, for the next sink.
+    cuts: Vec<PluginEvent>,
     matched: Vec<usize>,
     matched_rows: Vec<usize>,
 }
 
-/// A table being read.
 struct OpenTable {
     /// Into [`Compiled::tables`].
     table: usize,
@@ -188,6 +188,7 @@ impl PluginHost {
             lines_read: 0,
             last_pending: None,
             open: Vec::new(),
+            cuts: Vec::new(),
             matched: Vec::new(),
             matched_rows: Vec::new(),
         })
@@ -282,10 +283,11 @@ impl PluginHost {
         self.generation
     }
 
-    /// Runs every enabled plugin's rules and open tables over `line` in one
-    /// pass, sending each match to `sink` in run order. Returns the coloring
-    /// for a line the server sent without styles (empty otherwise, or when
-    /// no rule matched), as non-overlapping spans of its plain text.
+    /// Runs every enabled plugin's line rules over `line` in one pass, and
+    /// with a table open, one more for its rows, sending each match to
+    /// `sink` in run order. Returns the coloring for a line the server sent
+    /// without styles (empty otherwise, or when no rule matched), as
+    /// non-overlapping spans of its plain text.
     pub fn read_line(&mut self, line: &Line, sink: &mut impl PluginSink) -> Vec<Span> {
         self.read_line_from(line, 0, sink)
     }
@@ -299,6 +301,7 @@ impl PluginHost {
         start: usize,
         sink: &mut impl PluginSink,
     ) -> Vec<Span> {
+        self.cuts.drain(..).for_each(|cut| sink.event(cut));
         let text = &line.plain()[start..];
         self.compiled
             .lines
@@ -358,13 +361,6 @@ impl PluginHost {
                 Action::Color { .. } | Action::Prompt | Action::TableStart { .. } => {}
             }
         }
-        // A server that ends its pager prompt with GA hasn't ended the table.
-        if line.end() == LineEnd::PromptEnd
-            && !self.open.is_empty()
-            && !matches!(self.classify_pending(text), Some(PendingKind::Pager { .. }))
-        {
-            self.end_tables(line, sink);
-        }
         self.lines_read += 1;
         if self.cost_sampling != 0 && self.lines_read.is_multiple_of(self.cost_sampling) {
             self.sample_costs(text);
@@ -386,8 +382,22 @@ impl PluginHost {
         }
     }
 
+    /// The server ended `line` with GA or EOR, which ends every open table,
+    /// unless it was the pager's prompt: that table has more to come.
+    pub fn end_tables_at_signal(&mut self, line: &Line, sink: &mut impl PluginSink) {
+        if !self.open.is_empty()
+            && !matches!(
+                self.classify_pending(line.plain()),
+                Some(PendingKind::Pager { .. })
+            )
+        {
+            self.end_tables(line, sink);
+        }
+    }
+
     /// The connection ended: no open table will get the rest of its rows.
     pub fn cut_tables(&mut self, sink: &mut impl PluginSink) {
+        self.cuts.drain(..).for_each(|cut| sink.event(cut));
         for open in std::mem::take(&mut self.open) {
             let table = &self.compiled.tables[open.table];
             table.send(TableEvent::Cut, &open.first_line, Box::default(), sink);
@@ -475,9 +485,14 @@ impl PluginHost {
             tables,
             rows,
             row_rules,
+            settings,
             ..
         } = &self.compiled;
         let text = &line.plain()[start..];
+        let is_pager = || {
+            let pager = settings.pager.as_ref();
+            pager.is_some_and(|pager| pager.prompt.is_match(text))
+        };
         let starts: Vec<(usize, &LineRule)> = self
             .matched
             .iter()
@@ -500,7 +515,8 @@ impl PluginHost {
                     .map(|&id| &row_rules[id])
                     .find(|rule| rule.table == open.table);
                 let Some(rule) = rule else {
-                    if !open.in_gap {
+                    // The pager's line is the table going on, not a gap in it.
+                    if !open.in_gap && !is_pager() {
                         open.in_gap = true;
                         table.send(TableEvent::Gap, line, Box::default(), sink);
                     }
@@ -593,13 +609,22 @@ impl PluginHost {
             .position(|entry| entry.plugin.id() == id)
     }
 
+    /// Builds the matchers again. Open tables can't carry over, as they index
+    /// the old build: each is cut, and its hook hears at the next read.
     fn recompile(&mut self) -> Result<(), PluginError> {
-        self.compiled = Compiled::build(&self.installed)?;
+        let compiled = Compiled::build(&self.installed)?;
+        for open in self.open.drain(..) {
+            let table = &self.compiled.tables[open.table];
+            table.send(
+                TableEvent::Cut,
+                &open.first_line,
+                Box::default(),
+                &mut self.cuts,
+            );
+        }
+        self.compiled = compiled;
         self.generation += 1;
         self.last_pending = None;
-        // They index the old tables. A set of plugins changes as a
-        // connection starts, not in the middle of a table.
-        self.open.clear();
         Ok(())
     }
 }
@@ -894,9 +919,6 @@ fn settings(plugins: &[&Plugin]) -> Settings {
         pager: last(plugins, |plugin| plugin.points.text.as_ref()?.pager.clone()),
         area_name: last(plugins, |plugin| {
             plugin.points.map.as_ref()?.area_name.clone()
-        }),
-        keywords: last(plugins, |plugin| {
-            plugin.points.commands.as_ref()?.keywords.clone()
         }),
     }
 }

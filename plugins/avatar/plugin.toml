@@ -8,6 +8,7 @@ api = 1
 license = "MIT"
 layer = "game"
 permissions = [
+    "read_state",
     "write_store:character",
     "write_store:skills",
     "write_store:affects",

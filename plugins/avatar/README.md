@@ -64,7 +64,7 @@ The rest are single lines:
 | Character | `character.skill_practiced` † | `skill`, `learned` | `You practice dodge with Ulric. Your current skill level is now 45.` |
 | Character | `character.skill_improved` | | `You have become better at …` (ROM wording) |
 | Gear | `gear.wore` † | `item`; `on`, `part` for wear | `You wear …`, `You hold …`, `You light … and hold it.`, `You wield …` |
-| Gear | `gear.removed` | `item` | `You stop using a round shield.` |
+| Gear | `gear.removed` † | `item` | `You stop using a round shield.` |
 | Gear | `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
 | Gear | `gear.did_not_fit` | | `It won't fit.` |
 | Gear | `gear.not_carried` | | `You do not have that item.` |
@@ -149,7 +149,9 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
   table, so there's nothing to port.
 - **Which copy a spell's identify was about**: hooks can read the inventory
   (`inventory.count`, `inventory.<n>.name`), with `read_state`, but working
-  out the copy isn't written yet.
+  out the copy isn't written yet. Avatar sends no `Char.Items` when gear goes
+  on or comes off, so the wear and remove hooks call
+  `mud.refresh_inventory()`.
 
 ## Tests
 

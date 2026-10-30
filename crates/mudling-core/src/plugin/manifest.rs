@@ -244,7 +244,8 @@ pub struct HookFiles {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub enum Permission {
-    /// Read the state view the caller supplies.
+    /// Read the state view the caller supplies, and ask for the inventory in
+    /// it again.
     ReadState,
     /// Write to the named store.
     WriteStore(String),
@@ -396,39 +397,17 @@ impl Plugin {
                 .map(|file| Ok((file.to_owned(), read_file(&mut read, file)?)))
                 .transpose()
         };
-        let sources = [
-            load(Point::Connection)?,
-            load(Point::Commands)?,
-            load(Point::Text)?,
-            load(Point::Hud)?,
-            load(Point::Map)?,
-            load(Point::Character)?,
-            load(Point::Gear)?,
-            load(Point::Mobs)?,
-            load(Point::Ui)?,
-        ];
-        let [
-            connection,
-            commands,
-            text,
-            hud,
-            map,
-            character,
-            gear,
-            mobs,
-            ui,
-        ] = sources;
         let points = with_fragments(&manifest.fragments, || {
             Ok::<_, PluginError>(Points {
-                connection: point::<Connection>(connection)?,
-                commands: point::<Commands>(commands)?,
-                text: point_checked(text, Text::validate)?,
-                hud: point::<Hud>(hud)?,
-                map: point::<Map>(map)?,
-                character: point::<Character>(character)?,
-                gear: point::<Gear>(gear)?,
-                mobs: point::<Mobs>(mobs)?,
-                ui: point::<Ui>(ui)?,
+                connection: point::<Connection>(load(Point::Connection)?)?,
+                commands: point::<Commands>(load(Point::Commands)?)?,
+                text: point_checked(load(Point::Text)?, Text::validate)?,
+                hud: point::<Hud>(load(Point::Hud)?)?,
+                map: point::<Map>(load(Point::Map)?)?,
+                character: point::<Character>(load(Point::Character)?)?,
+                gear: point::<Gear>(load(Point::Gear)?)?,
+                mobs: point::<Mobs>(load(Point::Mobs)?)?,
+                ui: point::<Ui>(load(Point::Ui)?)?,
             })
         })?;
         points.validate().map_err(|problem| {

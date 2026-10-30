@@ -22,6 +22,10 @@
 //! - `mud.send(command)` sends a command (`send_commands`), as a
 //!   [`SendCommand`] the shell shows in chat like the player's own. It's
 //!   rate-limited, and returns `false` when over the limit;
+//! - `mud.refresh_inventory()` asks the server for the inventory again
+//!   (`read_state`), as a [`HookOutput::RefreshInventory`], for a game that
+//!   doesn't report every change. It shares `mud.send`'s rate limit, and
+//!   returns `false` when over it;
 //! - `mud.keyword(name)` gives the word a command should use for an item,
 //!   by the plugin's own `[keywords]` rules, and needs no permission.
 //!
@@ -60,7 +64,6 @@
 use super::host::{PluginEvent, PluginHost, PluginSink};
 use super::manifest::{MANIFEST_FILE, Permission, Plugin, PluginError, PluginId, Problem};
 use super::points::{HookName, Points};
-use crate::defaults::commands::item_keyword;
 use cpu_time::ThreadTime;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use std::cell::{Cell, RefCell};
@@ -159,6 +162,8 @@ impl StateView for HashMap<String, Value> {
 pub enum HookOutput {
     StoreWrite(StoreWrite),
     SendCommand(SendCommand),
+    /// A hook wants the inventory asked for again.
+    RefreshInventory,
     /// A hook raised an error or overran; it sent nothing.
     HookFailed(HookFailed),
     PluginDisabled(PluginDisabled),
@@ -422,7 +427,12 @@ impl HookRunner {
                     .outbox
                     .borrow_mut()
                     .drain(..)
-                    .filter(|output| matches!(output, HookOutput::SendCommand(_)))
+                    .filter(|output| {
+                        matches!(
+                            output,
+                            HookOutput::SendCommand(_) | HookOutput::RefreshInventory
+                        )
+                    })
                     .count();
                 vm.rate_limit.refund(unsent);
                 let plugin = vm.plugin.clone();
@@ -661,9 +671,25 @@ fn sandbox(
         })?,
     )?;
 
+    let limit = rate_limit.clone();
+    let asks = outbox.clone();
+    mud.set(
+        "refresh_inventory",
+        lua.create_function(move |_, ()| {
+            if !read_state {
+                return Err(missing("read_state"));
+            }
+            if !limit.allow(Instant::now()) {
+                return Ok(false);
+            }
+            asks.borrow_mut().push(HookOutput::RefreshInventory);
+            Ok(true)
+        })?,
+    )?;
+
     mud.set(
         "keyword",
-        lua.create_function(move |_, name: String| Ok(item_keyword(&name, &keywords)))?,
+        lua.create_function(move |_, name: String| Ok(keywords.word_for(&name)))?,
     )?;
     globals.set("mud", mud)?;
 
@@ -683,10 +709,7 @@ fn event_table(lua: &Lua, event: &PluginEvent) -> mlua::Result<Table> {
     let captures = lua.create_table_with_capacity(0, event.captures.len())?;
     let plain = event.line.plain();
     for capture in &event.captures {
-        captures.raw_set(
-            &*capture.name,
-            &plain[capture.start as usize..capture.end as usize],
-        )?;
+        captures.raw_set(&*capture.name, capture.text(plain))?;
     }
     let table = lua.create_table_with_capacity(0, 5)?;
     table.raw_set("name", &*event.name)?;

@@ -92,6 +92,7 @@ hook = "on_wore"
 [[remove]]
 name = "gear.removed"
 pattern = '''^{prompt}?You stop using (?<item>.+?)\.$'''
+hook = "on_removed"
 
 # "You put a rope belt in a satchel."
 [[put]]

@@ -215,6 +215,19 @@ fn a_line_that_is_no_row_ends_the_wrapped_rows() {
 }
 
 #[test]
+fn a_wrapped_row_reads_on_past_the_pager() {
+    let skills = read(
+        "Spells and skills learnable by your class at the lower levels.\n \
+         50: mongoose technique            gurney\n\
+         [B]ack,[H]elp,[R]efresh, or [C]ontinue:\n            \
+         demonstrate      transmogrify\n(1h-1m-1v-1)(-/-)",
+    )
+    .store("skills");
+    assert_eq!(get(&skills, "transmogrify.level"), &number(50.0));
+    assert_eq!(get(&skills, "slist.read"), &number(4.0));
+}
+
+#[test]
 fn a_blank_line_ends_the_wrapped_rows() {
     let fixture = include_str!("fixtures/slist-blank.txt");
     let skills = read(fixture).store("skills");

@@ -120,7 +120,7 @@ fn a_room_title_gives_the_mob_name() {
             .iter()
             .find(|capture| &*capture.name == "name")
             .unwrap();
-        title[capture.start as usize..capture.end as usize].to_owned()
+        capture.text(title).to_owned()
     };
     assert_eq!(
         name("(White Aura) A myconoid shaman is here, chanting."),
@@ -187,7 +187,7 @@ fn a_zone_reads_as_its_area_and_level_range() {
     let captures = pattern.unwrap().captures(zone).unwrap();
     let text = |name: &str| {
         let capture = captures.iter().find(|capture| &*capture.name == name);
-        capture.map(|capture| &zone[capture.start as usize..capture.end as usize])
+        capture.map(|capture| capture.text(zone))
     };
     assert_eq!(text("name"), Some("Brothers Grimm"));
     assert_eq!((text("low"), text("high")), (Some("12"), Some("18")));

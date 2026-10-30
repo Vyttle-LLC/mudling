@@ -46,7 +46,7 @@ impl PluginRules {
         let captures = pattern.captures(zone)?;
         let text = |name: &str| {
             let capture = captures.iter().find(|capture| &*capture.name == name)?;
-            Some(&zone[capture.start as usize..capture.end as usize])
+            Some(capture.text(zone))
         };
         let levels = text("low").zip(text("high"));
         Some(AreaName {
@@ -70,7 +70,7 @@ fn room_titles(host: &PluginHost) -> Arc<[Pattern]> {
 fn named(pattern: &Pattern, title: &str) -> Option<String> {
     let captures = pattern.captures(title)?;
     let name = captures.iter().find(|capture| &*capture.name == "name")?;
-    Some(title[name.start as usize..name.end as usize].to_owned())
+    Some(name.text(title).to_owned())
 }
 
 impl MapRules for PluginRules {

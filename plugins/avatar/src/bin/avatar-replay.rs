@@ -146,7 +146,7 @@ impl Replay {
                 HookOutput::HookFailed(_) | HookOutput::PluginDisabled(_) => {
                     self.tally.hook_failures += 1
                 }
-                HookOutput::SendCommand(_) => {}
+                HookOutput::SendCommand(_) | HookOutput::RefreshInventory => {}
             }
         }
         if let Some(reader) = Reader::started_by(name) {

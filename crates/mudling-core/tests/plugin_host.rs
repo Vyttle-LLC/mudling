@@ -2,7 +2,6 @@
 //! `tests/fixtures/plugins`.
 
 use mudling_core::ansi::{Color, Span, Style};
-use mudling_core::defaults::commands::item_keyword;
 use mudling_core::line::{Encoding, Line, LinePipeline};
 use mudling_core::plugin::points::{Keywords, LoginReply, RoomIdentity};
 use mudling_core::plugin::{
@@ -806,9 +805,39 @@ fn a_line_ended_at_ga_ends_a_table_but_a_pager_prompt_does_not() {
     for line in &lines[..3] {
         host.read_line(line, &mut events);
     }
+    host.end_tables_at_signal(&lines[2], &mut events);
     assert!(host.table_open(), "{:?}", event_names(&events));
     host.read_line(&lines[3], &mut events);
+    assert!(
+        host.table_open(),
+        "reading a line ended by quiet ends nothing"
+    );
+    host.end_tables_at_signal(&lines[3], &mut events);
     assert_eq!(event_names(&events).last(), Some(&"stats.end"));
+}
+
+#[test]
+fn the_pager_s_own_line_is_no_gap_in_a_table() {
+    let mut host = tables();
+    let events = read_all(&mut host, &["Stats", "str: 1", "--more--", "chatter"]);
+    assert_eq!(
+        event_names(&events),
+        ["stats.start", "stats.row", "stats.gap"],
+        "the gap is the line after the pager's"
+    );
+    assert_eq!(events[2].line.plain(), "chatter");
+}
+
+#[test]
+fn a_recompile_cuts_open_tables_and_the_next_read_delivers_it() {
+    let mut host = tables();
+    read_all(&mut host, &["Stats", "str: 1"]);
+    host.add(defaults()).unwrap();
+    assert!(!host.table_open());
+    let events = read_all(&mut host, &["chatter"]);
+    assert_eq!(event_names(&events), ["stats.cut"]);
+    assert_eq!(events[0].line.plain(), "Stats");
+    assert!(read_all(&mut host, &["chatter"]).is_empty(), "told once");
 }
 
 #[test]
@@ -977,25 +1006,28 @@ fn a_link_naming_a_group_it_does_not_capture_is_rejected() {
 }
 
 #[test]
-fn the_highest_layer_s_keywords_and_area_pattern_apply() {
+fn the_highest_layer_s_area_pattern_applies() {
     let host = PluginHost::new([testland()]).unwrap();
     let area = host.settings().area_name.as_ref().unwrap();
     assert!(area.is_match("[1-2] The Moor"));
+}
 
+#[test]
+fn an_item_s_keyword_follows_its_rules() {
     let keywords = Keywords {
         skip: vec!["a".to_owned(), "the".to_owned()],
         phrase_ends: vec!["of".to_owned()],
         possessives: false,
     };
-    let word = |name: &str| item_keyword(name, &keywords);
-    assert_eq!(word("a pixie crossbow").as_deref(), Some("crossbow"));
-    assert_eq!(word("a sash of the guard").as_deref(), Some("sash"));
-    assert_eq!(word("the captain's sash").as_deref(), Some("sash"));
-    assert_eq!(word("the captain's").as_deref(), Some("captain"));
+    let word = |name: &str| keywords.word_for(name);
+    assert_eq!(word("a wooden shield").as_deref(), Some("shield"));
+    assert_eq!(word("a bottle of water").as_deref(), Some("bottle"));
+    assert_eq!(word("the miller's hat").as_deref(), Some("hat"));
+    assert_eq!(word("the miller's").as_deref(), Some("miller"));
     assert_eq!(word("the"), None);
     assert_eq!(
-        item_keyword("the captain's", &Keywords::default()).as_deref(),
-        Some("captain's"),
+        Keywords::default().word_for("the miller's").as_deref(),
+        Some("miller's"),
         "a game that takes possessives"
     );
 }
