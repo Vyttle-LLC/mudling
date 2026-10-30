@@ -11,11 +11,16 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Built from components, so paths compare equal on every OS.
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("plugins")
+}
+
 fn fixture(name: &str) -> Plugin {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/plugins")
-        .join(name);
-    Plugin::load(&dir).unwrap_or_else(|error| panic!("{error}"))
+    Plugin::load(fixtures_dir().join(name)).unwrap_or_else(|error| panic!("{error}"))
 }
 
 fn defaults() -> Plugin {
@@ -330,13 +335,10 @@ fn point_file_problems_name_the_file_and_line() {
 
 #[test]
 fn loading_from_a_folder_names_the_path() {
-    let error = Plugin::load("tests/fixtures/plugins/missing").unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .starts_with("tests/fixtures/plugins/missing/plugin.toml: couldn't read"),
-        "{error}"
-    );
+    let dir = fixtures_dir().join("missing");
+    let error = Plugin::load(&dir).unwrap_err();
+    let expected = format!("{}: couldn't read", dir.join("plugin.toml").display());
+    assert!(error.to_string().starts_with(&expected), "{error}");
 }
 
 #[test]
