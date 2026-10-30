@@ -26,7 +26,8 @@ const DENYLIST: &[&str] = &[
 #[test]
 fn mudling_core_holds_no_game_strings() {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let this_file = crate_dir.join(file!().trim_start_matches("crates/mudling-core/"));
+    // Built from components, so it compares equal on every OS.
+    let this_file = crate_dir.join("tests").join("no_game_strings.rs");
     let mut files = Vec::new();
     collect(&crate_dir, &mut files);
     assert!(files.len() > 5, "found only {files:?}");
