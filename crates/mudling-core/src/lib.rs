@@ -4,6 +4,8 @@
 pub mod ansi;
 pub mod defaults;
 pub mod line;
+pub mod map;
+pub mod persist;
 pub mod plugin;
 pub mod replay;
 pub mod scrollback;

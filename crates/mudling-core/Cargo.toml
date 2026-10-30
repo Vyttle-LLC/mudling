@@ -18,6 +18,12 @@ regex-syntax = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+rusqlite.workspace = true
+directories.workspace = true
+imbl = "7"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
