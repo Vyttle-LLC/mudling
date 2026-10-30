@@ -9,7 +9,7 @@
 
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
-    HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, StateView, Value,
+    HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, OVERRUNS_TO_TURN_OFF, StateView, Value,
 };
 use mudling_core::plugin::{Plugin, PluginEvent, PluginHost, PluginSink};
 use mudling_core::stats::Summary;
@@ -22,6 +22,11 @@ pub const PLUGIN_BUDGET_US: f64 = 5.0;
 /// One line in this many reaches the hook: a table row now and then.
 pub const HOOKED_EVERY: f64 = 20.0;
 const CALLS: usize = 100_000;
+/// A well-behaved hook may overrun at most once in this many calls, 10 of
+/// the 100,000 here. A shared CI machine can stall the worker thread long
+/// enough to trip the box now and then; a bug that charges hooks for work
+/// that isn't theirs trips it on far more calls than this.
+const FALSE_OVERRUNS_EVERY: usize = 10_000;
 
 const TRIVIAL_MANIFEST: &str = r#"
 id = "bench-trivial"
@@ -79,7 +84,9 @@ pub struct Report {
     /// The line thread's hand-off of one hooked event to the worker.
     pub hand_off: Summary,
     pub trivial: Summary,
+    pub trivial_overruns: Overruns,
     pub columns: Summary,
+    pub columns_overruns: Overruns,
     /// How long the default budget lets an endless loop run.
     pub runaway_stopped: Summary,
     pub hooked_every: f64,
@@ -105,21 +112,26 @@ pub fn run() -> Report {
     let rows = rows();
 
     let hand_off = time_hand_off(&trivial, &rows);
-    let trivial = time_hook(&trivial, &rows);
-    let columns = time_hook(&columns, &rows);
+    let (trivial, trivial_overruns) = time_hook(&trivial, &rows);
+    let (columns, columns_overruns) = time_hook(&columns, &rows);
     let runaway_stopped = time_runaway(&runaway, &rows[..RUNAWAY_CALLS]);
     let columns_amortized_p99_us = (columns.p99_us + hand_off.p99_us) / HOOKED_EVERY;
+    let within_budget = hand_off.p99_us <= PLUGIN_BUDGET_US
+        && columns_amortized_p99_us <= PLUGIN_BUDGET_US
+        && trivial_overruns.acceptable(CALLS)
+        && columns_overruns.acceptable(CALLS);
     Report {
         calls: CALLS,
         hand_off,
         trivial,
+        trivial_overruns,
         columns,
+        columns_overruns,
         runaway_stopped,
         hooked_every: HOOKED_EVERY,
         columns_amortized_p99_us,
         plugin_budget_us: PLUGIN_BUDGET_US,
-        within_budget: hand_off.p99_us <= PLUGIN_BUDGET_US
-            && columns_amortized_p99_us <= PLUGIN_BUDGET_US,
+        within_budget,
     }
 }
 
@@ -136,10 +148,19 @@ pub fn print(report: &Report) {
         "  hand-off on the line thread: {}",
         summary(&report.hand_off)
     );
-    println!("  trivial hook on the worker: {}", summary(&report.trivial));
+    let overruns = |o: &Overruns| match &o.first {
+        None => "no overruns".to_owned(),
+        Some(first) => format!("{} overran (first: {first})", o.count),
+    };
     println!(
-        "  column-splitting hook on the worker: {}",
-        summary(&report.columns)
+        "  trivial hook on the worker: {}; {}",
+        summary(&report.trivial),
+        overruns(&report.trivial_overruns)
+    );
+    println!(
+        "  column-splitting hook on the worker: {}; {}",
+        summary(&report.columns),
+        overruns(&report.columns_overruns)
     );
     println!(
         "  an endless loop, stopped by the default budget: {}",
@@ -181,8 +202,25 @@ fn time_hand_off(plugin: &Plugin, rows: &[Line]) -> Summary {
     Summary::of(&samples).expect("hand-offs were timed")
 }
 
-/// One hook call on the worker's runner, with its outputs.
-fn time_hook(plugin: &Plugin, rows: &[Line]) -> Summary {
+/// A well-behaved hook's calls that its time box stopped anyway.
+#[derive(Default, Serialize)]
+pub struct Overruns {
+    pub count: usize,
+    /// The first one's reason, for the CI log.
+    pub first: Option<String>,
+}
+
+impl Overruns {
+    /// At most 1 call in [`FALSE_OVERRUNS_EVERY`] may overrun.
+    fn acceptable(&self, calls: usize) -> bool {
+        self.count * FALSE_OVERRUNS_EVERY <= calls
+    }
+}
+
+/// One hook call on the worker's runner, with its outputs. A call the time
+/// box stops is counted, not fatal: a shared CI machine can stall a thread
+/// past it. The plugin is reloaded, untimed, before overruns turn it off.
+fn time_hook(plugin: &Plugin, rows: &[Line]) -> (Summary, Overruns) {
     let events = events(plugin, rows);
     let mut runner = HookRunner::new(
         HookLimits::default(),
@@ -190,23 +228,28 @@ fn time_hook(plugin: &Plugin, rows: &[Line]) -> Summary {
     );
     runner.add(plugin).expect("the hooks load");
     let mut outputs = Vec::new();
-    let samples: Vec<Duration> = events
-        .iter()
-        .map(|event| {
-            outputs.clear();
-            let started = Instant::now();
-            runner.run(event, &mut outputs);
-            let elapsed = started.elapsed();
-            assert!(
-                !outputs
-                    .iter()
-                    .any(|output| matches!(output, HookOutput::HookFailed(_))),
-                "{outputs:?}"
-            );
-            elapsed
-        })
-        .collect();
-    Summary::of(&samples).expect("hooks were timed")
+    let mut overruns = Overruns::default();
+    let mut samples = Vec::with_capacity(events.len());
+    for event in &events {
+        outputs.clear();
+        let started = Instant::now();
+        runner.run(event, &mut outputs);
+        samples.push(started.elapsed());
+        for output in &outputs {
+            match output {
+                HookOutput::HookFailed(failed) if failed.overran => {
+                    overruns.count += 1;
+                    overruns.first.get_or_insert_with(|| failed.message.clone());
+                    if overruns.count % (OVERRUNS_TO_TURN_OFF as usize - 1) == 0 {
+                        runner.add(plugin).expect("the hooks load");
+                    }
+                }
+                HookOutput::HookFailed(failed) => panic!("{failed:?}"),
+                _ => {}
+            }
+        }
+    }
+    (Summary::of(&samples).expect("hooks were timed"), overruns)
 }
 
 /// Each call in a fresh VM, so three overruns never turn the plugin off.

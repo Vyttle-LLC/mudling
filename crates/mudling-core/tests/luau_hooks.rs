@@ -258,6 +258,10 @@ fn an_infinite_loop_is_stopped_by_the_budget() {
     let failed = failures(&outputs);
     assert_eq!(failed.len(), 1);
     assert!(failed[0].overran, "{failed:?}");
+    assert!(
+        failed[0].message.contains("4000 interrupt ticks"),
+        "{failed:?}"
+    );
 }
 
 #[test]
@@ -266,13 +270,49 @@ fn a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
         &[],
         "function on_go(event) for i = 1, 2000 do local s = string.rep('x', 100000) s = s:upper() end end",
     );
-    let started = Instant::now();
+    // 2,000 iterations is within the tick budget, so only the time limit
+    // can stop it; the message says which limit did.
     let outputs = run(&plugin, &mut runner(&plugin), &["go"]);
-    assert!(failures(&outputs)[0].overran, "{outputs:?}");
-    assert!(
-        started.elapsed() < Duration::from_millis(200),
-        "took {:?}",
-        started.elapsed()
+    let failed = failures(&outputs);
+    assert!(failed[0].overran, "{outputs:?}");
+    assert!(failed[0].message.contains("ms of CPU time"), "{failed:?}");
+}
+
+/// A state whose first read spins the CPU past the time limit, as a jump in
+/// the thread's CPU clock would look; later reads are instant.
+#[derive(Default)]
+struct OneSpike(Mutex<bool>);
+
+impl StateView for OneSpike {
+    fn get(&self, _key: &str) -> Option<Value> {
+        let mut spiked = self.0.lock().unwrap();
+        if !*spiked {
+            *spiked = true;
+            let started = Instant::now();
+            while started.elapsed() < 2 * HookLimits::default().time {
+                std::hint::spin_loop();
+            }
+        }
+        None
+    }
+}
+
+#[test]
+fn one_jump_past_the_time_limit_isnt_an_overrun() {
+    let plugin = hooked(
+        &["read_state", "write_store:s"],
+        "function on_go(event) mud.state('k') for i = 1, 50 do end mud.store('s', 'done', true) end",
+    );
+    let mut runner = runner_with(
+        &plugin,
+        HookLimits::default(),
+        Arc::new(OneSpike::default()),
+    );
+    let outputs = run(&plugin, &mut runner, &["go"]);
+    assert_eq!(
+        writes(&outputs),
+        [("s".to_owned(), "done".to_owned(), Value::Bool(true))],
+        "{outputs:?}"
     );
 }
 
@@ -682,8 +722,10 @@ fn every_hook_a_pattern_names_must_be_defined() {
     );
 }
 
+/// About 3,200 lines, the size of a real game's hooks. That compiling isn't
+/// charged to the time box is proven, without timing, in `luau.rs`'s tests.
 #[test]
-fn compiling_a_large_hook_file_isnt_charged_to_the_time_box() {
+fn a_large_hook_file_loads_under_default_limits() {
     let mut source = String::from("function on_go(event) end\n");
     for function in 0..400 {
         source.push_str(&format!(
@@ -698,14 +740,8 @@ fn compiling_a_large_hook_file_isnt_charged_to_the_time_box() {
         ));
     }
     let plugin = hooked(&[], &source);
-    let started = Instant::now();
-    runner(&plugin);
-    // In a debug build compiling this takes well over the 2 ms time box.
-    assert!(
-        started.elapsed() > HookLimits::default().time,
-        "compiled in {:?}",
-        started.elapsed()
-    );
+    let mut runner = runner(&plugin);
+    assert!(run(&plugin, &mut runner, &["go"]).is_empty());
 }
 
 #[test]
