@@ -281,8 +281,12 @@ impl Tracker {
         } else if dark_walk.as_ref().is_some_and(|walk| walk.off_map) {
             // The rooms walked in the dark were never seen, so nothing
             // links to this one: it's placed where the moves lead.
-        } else if step_taken.is_some() {
-            step.direction = step_taken;
+        } else if let Some(direction) = step_taken
+            && !previous
+                .as_ref()
+                .is_some_and(|room| number_denies_move(room, &step, direction))
+        {
+            step.direction = Some(direction);
         } else if let Some(previous) = &previous
             && self.layout.matches_exactly(previous, &step)
         {
@@ -461,6 +465,27 @@ impl Tracker {
 /// expect it, a stretched path, is a bigger one (-2); an exit that led
 /// somewhere else before, or a way back that leads somewhere else, counts
 /// strongly against (-3), since only a maze or a wrong guess does that.
+/// Whether the game's room numbers say the player didn't make the move the
+/// map expected from `here`: the room is `here` again (the move was refused
+/// without a word), or the numbers already known say that way leads
+/// elsewhere. The arrival is then taken as unexplained, not linked.
+fn number_denies_move(here: &MapRoom, step: &Step, direction: Direction) -> bool {
+    let Some(number) = step.number else {
+        return false;
+    };
+    let back = direction.opposite();
+    number == here.id
+        || here
+            .links
+            .get_copied(direction)
+            .is_some_and(|to| to != number)
+        || match step.targets.get_copied(back) {
+            Some(to) => to != here.id,
+            // The way back is another way: the player came from elsewhere.
+            None => step.targets.values().any(|to| *to == here.id),
+        }
+}
+
 fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
     let layout = &guess.layout;
     let mut known = layout.candidates(step);

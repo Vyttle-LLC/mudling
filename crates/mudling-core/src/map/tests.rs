@@ -269,6 +269,46 @@ fn a_room_number_is_the_rooms_identity() {
 }
 
 #[test]
+fn a_silently_refused_move_does_not_link_a_numbered_room_to_itself() {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    let now = Timestamp(0);
+    map.room_info(
+        r#"{"num": 10, "name": "A road", "zone": "Z", "exits": {"n": 11}}"#,
+        now,
+    );
+    map.sent("n", now);
+    let road = r#"{"num": 11, "name": "A road", "zone": "Z", "exits": {"s": 10, "n": 12}}"#;
+    map.room_info(road, now);
+    // Refused with no message the rules know, then a look.
+    map.sent("n", now);
+    map.sent("look", now);
+    map.room_info(road, now);
+    let room = map.room(11).unwrap();
+    assert_eq!(room.links.get_copied(Direction::North), None);
+    assert!(!room.tangled);
+}
+
+#[test]
+fn a_numbered_room_reached_another_way_is_not_linked_the_expected_way() {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    let now = Timestamp(0);
+    map.room_info(
+        r#"{"num": 1, "name": "Square", "zone": "Z", "exits": {"n": 2, "e": 3}}"#,
+        now,
+    );
+    // North is refused silently; the player then goes east.
+    map.sent("n", now);
+    map.sent("e", now);
+    map.room_info(
+        r#"{"num": 3, "name": "Market", "zone": "Z", "exits": {"w": 1}}"#,
+        now,
+    );
+    let square = map.room(1).unwrap();
+    assert_eq!(square.links.get_copied(Direction::North), None);
+    assert!(map.rooms().all(|room| !room.tangled));
+}
+
+#[test]
 fn a_numbered_room_seen_without_a_move_is_found_by_number() {
     let mut map = numbered_map();
     let now = Timestamp(0);
