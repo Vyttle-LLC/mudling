@@ -1,9 +1,27 @@
 # Avatar's map. It sends GMCP Room.Info with no room number, so a room is
-# known by its name, exits and description. Its failed moves, darkness and
-# flees are text, read in text.toml.
+# known by its name, exits and description.
 room_identity = "description"
 
-# The maze is only the "Lost in the Dark Woods" rooms, which look the same
-# and whose paths don't add up. The Map point takes area names only, so the
-# whole area they're in is declared; the rest of it holds still.
-mazes = ["Brothers Grimm"]
+# Room.Info's zone, as the `area` fragment in plugin.toml reads it.
+area_name = '''^{area}$'''
+
+# Moves the game refuses without a Room.WrongDir.
+[[failed_move]]
+name = "map.failed_move"
+pattern = '''No way!\s+You are still fighting!|You are too exhausted'''
+
+# The room name of a room too dark to see; it looks like every other.
+[[darkness]]
+name = "map.darkness"
+pattern = '''^{prompt}?It is pitch black\.\.\.$'''
+
+# "You flee north! What a COWARD!": the way a flee went.
+[[flee]]
+name = "map.flee"
+pattern = '''You flee (?<dir>north|east|south|west|up|down)'''
+
+# These rooms look the same and their paths don't add up. The rest of the
+# area holds still.
+[[maze]]
+area = "Brothers Grimm"
+rooms = ["Lost in the Dark Woods"]

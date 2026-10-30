@@ -6,6 +6,15 @@
 //! [`PluginHost::read_pending`] to learn whether it's a prompt or a pager
 //! prompt.
 //!
+//! **Tables.** A plugin reads one [`TableReader`] table at a time. A start
+//! pattern opens it; row patterns run only then, in a matcher of their own,
+//! so they cost lines outside a table nothing. It ends at its `end` pattern,
+//! the plugin's next table or any prompt: one of the Text point's shapes, a
+//! line the server ended with GA or EOR, or one the caller recognized and
+//! reports with [`PluginHost::end_tables`]. Report a pager the client answers
+//! with [`PluginHost::pager_answered`]: a table that ends with its pager
+//! unanswered ends in `<reader>.cut`, not `<reader>.end`.
+//!
 //! **Run order** is layer order, defaults first, then game plugins, then
 //! overrides; within a layer, the order plugins were added. Where many
 //! values apply (patterns, coloring, readers), all run in that order, so a
@@ -18,9 +27,12 @@
 
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
-use super::points::{Capture, HookName, Pager, Pattern, Point, Points, RoomIdentity};
+use super::points::{
+    Capture, HookName, Keywords, MapSignal, Pager, Pattern, Point, Points, RoomIdentity,
+    TableReader,
+};
 use crate::ansi::{Span, Style};
-use crate::line::{Encoding, Line, Pending};
+use crate::line::{Encoding, Line, LineEnd, Link, Pending};
 use crate::stats::Summary;
 use std::ops::Range;
 use std::sync::Arc;
@@ -46,6 +58,8 @@ pub struct PluginEvent {
     /// point: the Luau host (VYT-197) is a sink that runs it on this event,
     /// off this thread, inside its time box.
     pub hook: Option<HookName>,
+    /// What the rule tells the automap, if it's one of the lists that do.
+    pub map_signal: Option<MapSignal>,
 }
 
 impl PluginEvent {
@@ -88,6 +102,8 @@ pub struct Settings {
     pub separator: Option<String>,
     pub room_identity: Option<RoomIdentity>,
     pub pager: Option<Pager>,
+    pub area_name: Option<Pattern>,
+    pub keywords: Option<Keywords>,
 }
 
 /// One plugin's cost per line, from sampled lines.
@@ -108,7 +124,36 @@ pub struct PluginHost {
     lines_read: u64,
     /// The pending text last read, and what it was.
     last_pending: Option<(Box<str>, Option<PendingKind>)>,
+    /// At most one table per plugin.
+    open: Vec<OpenTable>,
     matched: Vec<usize>,
+    matched_rows: Vec<usize>,
+}
+
+/// A table being read.
+struct OpenTable {
+    /// Into [`Compiled::tables`].
+    table: usize,
+    /// The line that started it.
+    first_line: Line,
+    has_rows: bool,
+    /// The last line was no row, and the hook has heard.
+    in_gap: bool,
+    /// A pager prompt is waiting for an answer.
+    paged: bool,
+    /// The pending line of the last pager prompt, counted once.
+    pager_line: Option<u64>,
+}
+
+impl OpenTable {
+    /// How the table ends if it ends now.
+    fn ending(&self) -> TableEvent {
+        if self.paged {
+            TableEvent::Cut
+        } else {
+            TableEvent::End
+        }
+    }
 }
 
 struct Installed {
@@ -142,7 +187,9 @@ impl PluginHost {
             cost_sampling: DEFAULT_COST_SAMPLING,
             lines_read: 0,
             last_pending: None,
+            open: Vec::new(),
             matched: Vec::new(),
+            matched_rows: Vec::new(),
         })
     }
 
@@ -235,49 +282,88 @@ impl PluginHost {
         self.generation
     }
 
-    /// Runs every enabled plugin's Text patterns over `line` in one pass,
-    /// sending each match to `sink` in run order. Returns the coloring for a
-    /// line the server sent without styles (empty otherwise, or when no rule
-    /// matched), as non-overlapping spans of its plain text.
+    /// Runs every enabled plugin's rules and open tables over `line` in one
+    /// pass, sending each match to `sink` in run order. Returns the coloring
+    /// for a line the server sent without styles (empty otherwise, or when
+    /// no rule matched), as non-overlapping spans of its plain text.
     pub fn read_line(&mut self, line: &Line, sink: &mut impl PluginSink) -> Vec<Span> {
-        let text = line.plain();
+        self.read_line_from(line, 0, sink)
+    }
+
+    /// [`PluginHost::read_line`], over the plain text from byte `start` on:
+    /// what follows a prompt the caller recognized. Captures and coloring
+    /// are still ranges of the whole line.
+    pub fn read_line_from(
+        &mut self,
+        line: &Line,
+        start: usize,
+        sink: &mut impl PluginSink,
+    ) -> Vec<Span> {
+        let text = &line.plain()[start..];
+        self.compiled
+            .lines
+            .matcher
+            .matching(text, &mut self.matched);
         let lines = &self.compiled.lines;
-        lines.matcher.matching(text, &mut self.matched);
+        let at_prompt = !self.open.is_empty()
+            && self
+                .matched
+                .iter()
+                .any(|&id| lines.rules[id].starts_with_prompt(text));
+        if at_prompt {
+            self.end_tables(line, sink);
+        }
+        self.read_tables(line, start, sink);
+
+        let lines = &self.compiled.lines;
         let mut coloring = Vec::new();
         for &id in &self.matched {
             let rule = &lines.rules[id];
             match &rule.action {
-                Action::Event { name, hook } => {
+                Action::Event {
+                    point,
+                    name,
+                    hook,
+                    map_signal,
+                } => {
                     let Some(captures) = rule.pattern.captures(text) else {
                         continue;
                     };
                     sink.event(PluginEvent {
                         plugin: rule.plugin.clone(),
-                        point: Point::Text,
+                        point: *point,
                         name: name.clone(),
-                        captures,
+                        captures: shifted(captures, start),
                         line: line.clone(),
                         hook: hook.clone(),
+                        map_signal: *map_signal,
                     });
                 }
                 Action::Color { style, group } if line.styled().is_empty() => {
-                    for (start, end) in rule
+                    for (from, to) in rule
                         .pattern
                         .spans(text, *group)
-                        .filter(|(start, end)| start < end)
+                        .filter(|(from, to)| from < to)
                     {
                         paint(
                             &mut coloring,
                             Span {
-                                start: start as u32,
-                                end: end as u32,
+                                start: (start + from) as u32,
+                                end: (start + to) as u32,
                                 style: *style,
                             },
                         );
                     }
                 }
-                Action::Color { .. } => {}
+                Action::Color { .. } | Action::Prompt | Action::TableStart { .. } => {}
             }
+        }
+        // A server that ends its pager prompt with GA hasn't ended the table.
+        if line.end() == LineEnd::PromptEnd
+            && !self.open.is_empty()
+            && !matches!(self.classify_pending(text), Some(PendingKind::Pager { .. }))
+        {
+            self.end_tables(line, sink);
         }
         self.lines_read += 1;
         if self.cost_sampling != 0 && self.lines_read.is_multiple_of(self.cost_sampling) {
@@ -286,24 +372,72 @@ impl PluginHost {
         coloring
     }
 
+    /// Whether a table is being read, so the pager should be answered.
+    pub fn table_open(&self) -> bool {
+        !self.open.is_empty()
+    }
+
+    /// `line` is a prompt: ends every open table on it. For a prompt only
+    /// the caller knows, such as a learned one; the ones the plugins declare
+    /// end tables by themselves.
+    pub fn end_tables(&mut self, line: &Line, sink: &mut impl PluginSink) {
+        for open in std::mem::take(&mut self.open) {
+            self.compiled.tables[open.table].send(open.ending(), line, Box::default(), sink);
+        }
+    }
+
+    /// The connection ended: no open table will get the rest of its rows.
+    pub fn cut_tables(&mut self, sink: &mut impl PluginSink) {
+        for open in std::mem::take(&mut self.open) {
+            let table = &self.compiled.tables[open.table];
+            table.send(TableEvent::Cut, &open.first_line, Box::default(), sink);
+        }
+    }
+
+    /// The client answered the pager prompt last read.
+    pub fn pager_answered(&mut self) {
+        for open in &mut self.open {
+            open.paged = false;
+        }
+    }
+
     /// Says whether the text the server hasn't ended is the pager's prompt
     /// or a prompt. The pager wins when both match. Asking again about the
     /// same text doesn't match again: the answer depends on the text alone,
     /// so it holds across pipelines, as after a reconnect.
     pub fn read_pending(&mut self, pending: &Pending<'_>) -> Option<PendingKind> {
-        if let Some((last, kind)) = &self.last_pending
-            && **last == *pending.plain
-        {
-            return kind.clone();
+        let cached = self
+            .last_pending
+            .as_ref()
+            .filter(|(last, _)| **last == *pending.plain)
+            .map(|(_, kind)| kind.clone());
+        let kind = cached.unwrap_or_else(|| {
+            let kind = self.classify_pending(pending.plain);
+            self.last_pending = Some((pending.plain.into(), kind.clone()));
+            kind
+        });
+        if matches!(kind, Some(PendingKind::Pager { .. })) {
+            for open in &mut self.open {
+                if open.pager_line != Some(pending.number) {
+                    open.pager_line = Some(pending.number);
+                    open.paged = true;
+                }
+            }
         }
-        let compiled = &self.compiled;
-        compiled.pending.matching(pending.plain, &mut self.matched);
-        let kind = self
-            .matched
-            .first()
-            .map(|&id| compiled.pending_kinds[id].clone());
-        self.last_pending = Some((pending.plain.into(), kind.clone()));
         kind
+    }
+
+    /// The links and actions the enabled plugins' Text rules find in `line`,
+    /// in run order, for a shell to offer. Asked for per line shown, not
+    /// per line read, so they cost the line thread nothing.
+    pub fn links(&self, line: &Line) -> Vec<Link> {
+        let mut links = Vec::new();
+        for (_, text) in self.declared(|points| points.text.as_ref()) {
+            for rule in &text.links {
+                rule.find(line.plain(), &mut links);
+            }
+        }
+        links
     }
 
     /// Each installed plugin's sampled cost per line, in the order added.
@@ -318,12 +452,116 @@ impl PluginHost {
             .collect()
     }
 
+    /// What `text`, unended, is: `self.matched` is overwritten. A prompt
+    /// hint must cover all of it, or the rest is output on its way.
+    fn classify_pending(&mut self, text: &str) -> Option<PendingKind> {
+        let compiled = &self.compiled;
+        compiled.pending.matching(text, &mut self.matched);
+        self.matched.iter().find_map(|&id| {
+            let (pattern, kind) = &compiled.pending_rules[id];
+            let whole = |(_, end): (usize, usize)| text[end..].trim().is_empty();
+            let fits =
+                matches!(kind, PendingKind::Pager { .. }) || pattern.spans(text, 0).any(whole);
+            fits.then(|| kind.clone())
+        })
+    }
+
+    /// Runs the open tables' row and end patterns over the line, then opens
+    /// what `self.matched` starts. A line that starts one of a plugin's
+    /// tables is no row of the one it has open.
+    fn read_tables(&mut self, line: &Line, start: usize, sink: &mut impl PluginSink) {
+        let Compiled {
+            lines,
+            tables,
+            rows,
+            row_rules,
+            ..
+        } = &self.compiled;
+        let text = &line.plain()[start..];
+        let starts: Vec<(usize, &LineRule)> = self
+            .matched
+            .iter()
+            .filter_map(|&id| match lines.rules[id].action {
+                Action::TableStart { table } => Some((table, &lines.rules[id])),
+                _ => None,
+            })
+            .collect();
+        let started = |slot: usize| starts.iter().any(|&(table, _)| tables[table].slot == slot);
+        if !self.open.is_empty() {
+            rows.matching(text, &mut self.matched_rows);
+            let matched_rows = &self.matched_rows;
+            self.open.retain_mut(|open| {
+                let table = &tables[open.table];
+                if started(table.slot) {
+                    return true;
+                }
+                let rule = matched_rows
+                    .iter()
+                    .map(|&id| &row_rules[id])
+                    .find(|rule| rule.table == open.table);
+                let Some(rule) = rule else {
+                    if !open.in_gap {
+                        open.in_gap = true;
+                        table.send(TableEvent::Gap, line, Box::default(), sink);
+                    }
+                    return true;
+                };
+                let captures = rule
+                    .pattern
+                    .captures(text)
+                    .map(|captures| shifted(captures, start))
+                    .unwrap_or_default();
+                if rule.ends {
+                    table.send(TableEvent::End, line, captures, sink);
+                    return false;
+                }
+                open.has_rows = true;
+                open.in_gap = false;
+                open.paged = false;
+                table.send(TableEvent::Row, line, captures, sink);
+                true
+            });
+        }
+        for (index, rule) in starts {
+            let table = &tables[index];
+            let open = self
+                .open
+                .iter()
+                .position(|open| tables[open.table].slot == table.slot);
+            let continues = open.is_some_and(|at| {
+                let open = &self.open[at];
+                open.table == index && !open.has_rows
+            });
+            if !continues {
+                if let Some(at) = open {
+                    let open = self.open.swap_remove(at);
+                    tables[open.table].send(open.ending(), line, Box::default(), sink);
+                }
+                self.open.push(OpenTable {
+                    table: index,
+                    first_line: line.clone(),
+                    has_rows: false,
+                    in_gap: false,
+                    paged: false,
+                    pager_line: None,
+                });
+            }
+            let captures = rule
+                .pattern
+                .captures(text)
+                .map(|captures| shifted(captures, start))
+                .unwrap_or_default();
+            table.send(TableEvent::Start, line, captures, sink);
+        }
+    }
+
     /// Times each enabled plugin's rules over `text`, one by one, but only
     /// those the merged matcher's prefilter lets through: the rules whose
     /// required literals `text` holds, and the plugin's unfiltered rules.
     /// Finding those rules takes one more prefilter scan of `text`, made
     /// once for all plugins and counted against none. That keeps no second
-    /// matcher per plugin, and stays close to the plugin's share.
+    /// matcher per plugin, and stays close to the plugin's share. Row
+    /// patterns aren't timed: they run only inside a table.
     fn sample_costs(&mut self, text: &str) {
         let lines = &self.compiled.lines;
         lines.matcher.candidates(text, &mut self.matched);
@@ -336,12 +574,13 @@ impl PluginHost {
                     continue;
                 }
                 match rule.action {
-                    Action::Event { .. } => {
+                    Action::Event { .. } | Action::TableStart { .. } => {
                         std::hint::black_box(rule.pattern.captures(text));
                     }
                     Action::Color { group, .. } => {
                         std::hint::black_box(rule.pattern.spans(text, group).count());
                     }
+                    Action::Prompt => {}
                 }
             }
             self.installed[index].cost.record(started.elapsed());
@@ -358,6 +597,9 @@ impl PluginHost {
         self.compiled = Compiled::build(&self.installed)?;
         self.generation += 1;
         self.last_pending = None;
+        // They index the old tables. A set of plugins changes as a
+        // connection starts, not in the middle of a table.
+        self.open.clear();
         Ok(())
     }
 }
@@ -375,10 +617,87 @@ struct Compiled {
     order: Vec<usize>,
     lines: LineRules,
     pending: Matcher,
-    pending_kinds: Vec<PendingKind>,
+    pending_rules: Vec<(Pattern, PendingKind)>,
     /// Each enabled plugin's rules in `lines`, in run order, for costs.
     plugin_rules: Vec<Range<usize>>,
+    tables: Vec<Table>,
+    /// Every table's end and row patterns, run only while a table is open.
+    rows: Matcher,
+    /// Each table's end pattern comes before its rows, so it wins.
+    row_rules: Vec<RowRule>,
     settings: Settings,
+}
+
+/// A [`TableReader`] as the host runs it.
+struct Table {
+    /// The plugin's place in run order.
+    slot: usize,
+    plugin: PluginId,
+    point: Point,
+    hook: Option<HookName>,
+    start: Arc<str>,
+    row: Arc<str>,
+    gap: Arc<str>,
+    end: Arc<str>,
+    cut: Arc<str>,
+}
+
+#[derive(Clone, Copy)]
+enum TableEvent {
+    Start,
+    Row,
+    Gap,
+    End,
+    Cut,
+}
+
+impl Table {
+    fn new(slot: usize, plugin: PluginId, point: Point, reader: &TableReader) -> Table {
+        let event = |suffix: &str| Arc::from(format!("{}.{suffix}", reader.name));
+        Table {
+            slot,
+            plugin,
+            point,
+            hook: reader.hook.clone(),
+            start: event("start"),
+            row: event("row"),
+            gap: event("gap"),
+            end: event("end"),
+            cut: event("cut"),
+        }
+    }
+
+    fn send(
+        &self,
+        event: TableEvent,
+        line: &Line,
+        captures: Box<[Capture]>,
+        sink: &mut impl PluginSink,
+    ) {
+        let name = match event {
+            TableEvent::Start => &self.start,
+            TableEvent::Row => &self.row,
+            TableEvent::Gap => &self.gap,
+            TableEvent::End => &self.end,
+            TableEvent::Cut => &self.cut,
+        };
+        sink.event(PluginEvent {
+            plugin: self.plugin.clone(),
+            point: self.point,
+            name: name.clone(),
+            captures,
+            line: line.clone(),
+            hook: self.hook.clone(),
+            map_signal: None,
+        });
+    }
+}
+
+struct RowRule {
+    /// Into [`Compiled::tables`].
+    table: usize,
+    pattern: Pattern,
+    ends: bool,
 }
 
 struct LineRules {
@@ -394,11 +713,41 @@ struct LineRule {
 
 enum Action {
     Event {
+        point: Point,
         name: Arc<str>,
         hook: Option<HookName>,
+        map_signal: Option<MapSignal>,
     },
     /// Colors `group` of each match; 0 is the whole match.
     Color { style: Style, group: usize },
+    /// The prompt's shape: ends open tables where it starts a line.
+    Prompt,
+    /// Opens [`Compiled::tables`]`[table]`.
+    TableStart { table: usize },
+}
+
+impl LineRule {
+    fn starts_with_prompt(&self, text: &str) -> bool {
+        matches!(self.action, Action::Prompt)
+            && self
+                .pattern
+                .spans(text, 0)
+                .next()
+                .is_some_and(|(at, _)| at == 0)
+    }
+}
+
+/// `captures` of a text that starts at byte `start` of the line.
+fn shifted(captures: Box<[Capture]>, start: usize) -> Box<[Capture]> {
+    let start = start as u32;
+    captures
+        .into_iter()
+        .map(|capture| Capture {
+            start: capture.start + start,
+            end: capture.end + start,
+            ..capture
+        })
+        .collect()
 }
 
 impl Compiled {
@@ -415,32 +764,53 @@ impl Compiled {
 
         let mut rules = Vec::new();
         let mut plugin_rules = Vec::with_capacity(plugins.len());
-        for plugin in &plugins {
+        let mut tables = Vec::new();
+        let mut row_rules = Vec::new();
+        for (slot, plugin) in plugins.iter().enumerate() {
             let first = rules.len();
             rules.extend(line_rules(plugin));
+            for (point, reader) in plugin.points.readers() {
+                let table = tables.len();
+                tables.push(Table::new(slot, plugin.id().clone(), point, reader));
+                let line_rule = |pattern: &Pattern| LineRule {
+                    plugin: plugin.id().clone(),
+                    pattern: pattern.clone(),
+                    action: Action::TableStart { table },
+                };
+                rules.extend(reader.start.iter().map(line_rule));
+                let row_rule = |pattern: &Pattern, ends| RowRule {
+                    table,
+                    pattern: pattern.clone(),
+                    ends,
+                };
+                row_rules.extend(reader.end.iter().map(|end| row_rule(end, true)));
+                row_rules.extend(reader.row.iter().map(|row| row_rule(row, false)));
+            }
             plugin_rules.push(first..rules.len());
         }
         let sources: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
         let lines = matcher(&sources, DfaCache::Large)?;
+        let sources: Vec<&str> = row_rules.iter().map(|rule| rule.pattern.as_str()).collect();
+        let rows = matcher(&sources, DfaCache::Default)?;
 
-        let mut pending_sources = Vec::new();
-        let mut pending_kinds = Vec::new();
+        let mut pending_rules = Vec::new();
         if let Some(pager) = &settings.pager {
-            pending_sources.push(pager.prompt.as_str());
-            pending_kinds.push(PendingKind::Pager {
-                key: pager.key.as_str().into(),
-            });
+            let key = pager.key.as_str().into();
+            pending_rules.push((pager.prompt.clone(), PendingKind::Pager { key }));
         }
         for text in plugins
             .iter()
             .filter_map(|plugin| plugin.points.text.as_ref())
         {
             for hint in &text.prompts {
-                pending_sources.push(hint.pattern.as_str());
-                pending_kinds.push(PendingKind::Prompt);
+                pending_rules.push((hint.pattern.clone(), PendingKind::Prompt));
             }
         }
-        let pending = matcher(&pending_sources, DfaCache::Default)?;
+        let sources: Vec<&str> = pending_rules
+            .iter()
+            .map(|(pattern, _)| pattern.as_str())
+            .collect();
+        let pending = matcher(&sources, DfaCache::Default)?;
 
         Ok(Compiled {
             order,
@@ -449,8 +819,11 @@ impl Compiled {
                 rules,
             },
             pending,
-            pending_kinds,
+            pending_rules,
             plugin_rules,
+            tables,
+            rows,
+            row_rules,
             settings,
         })
     }
@@ -463,26 +836,34 @@ fn matcher(sources: &[&str], cache: DfaCache) -> Result<Matcher, PluginError> {
     })
 }
 
-/// A plugin's Text patterns, then its color rules.
+/// A plugin's prompt shapes, its event rules, then its color rules.
 fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
-    let Some(text) = &plugin.points.text else {
-        return Vec::new();
-    };
     let rule = |pattern: &Pattern, action| LineRule {
         plugin: plugin.id().clone(),
         pattern: pattern.clone(),
         action,
     };
-    let events = text.patterns.iter().map(|event| {
-        rule(
-            &event.pattern,
-            Action::Event {
-                name: event.name.shared(),
-                hook: event.hook.clone(),
-            },
-        )
-    });
-    let colors = text.colors.iter().map(|color| {
+    let text = plugin.points.text.iter();
+    let prompts = text
+        .clone()
+        .flat_map(|text| &text.prompts)
+        .map(|hint| rule(&hint.pattern, Action::Prompt));
+    let events = plugin
+        .points
+        .event_rules()
+        .into_iter()
+        .map(|(point, event, map_signal)| {
+            rule(
+                &event.pattern,
+                Action::Event {
+                    point,
+                    name: event.name.shared(),
+                    hook: event.hook.clone(),
+                    map_signal,
+                },
+            )
+        });
+    let colors = text.flat_map(|text| &text.colors).map(|color| {
         let group = color
             .group
             .as_deref()
@@ -496,7 +877,7 @@ fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
             },
         )
     });
-    events.chain(colors).collect()
+    prompts.chain(events).chain(colors).collect()
 }
 
 /// The single values, each from the last plugin in run order that sets it.
@@ -511,6 +892,12 @@ fn settings(plugins: &[&Plugin]) -> Settings {
         }),
         room_identity: last(plugins, |plugin| plugin.points.map.as_ref()?.room_identity),
         pager: last(plugins, |plugin| plugin.points.text.as_ref()?.pager.clone()),
+        area_name: last(plugins, |plugin| {
+            plugin.points.map.as_ref()?.area_name.clone()
+        }),
+        keywords: last(plugins, |plugin| {
+            plugin.points.commands.as_ref()?.keywords.clone()
+        }),
     }
 }
 

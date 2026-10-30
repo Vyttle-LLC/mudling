@@ -3,13 +3,13 @@
 //! plugins are written" item 2).
 //!
 //! A plugin lists its Luau files under `[hooks]` and what they may do under
-//! `permissions`. A Text pattern or table reader names a hook, which the
-//! files must define; when it matches, the event goes to that global
-//! function, and to nothing else:
+//! `permissions`. A rule or table reader names a hook, which the files must
+//! define; when it matches, the event goes to that global function, and to
+//! nothing else:
 //!
 //! ```lua
 //! function read_row(event)
-//!     -- event.name, event.captures.<name>, event.plain, event.raw
+//!     -- event.name, event.point, event.captures.<name>, event.plain, event.raw
 //!     mud.store("skills", event.captures.skill, tonumber(event.captures.percent))
 //! end
 //! ```
@@ -21,10 +21,13 @@
 //!   named store (`write_store:<store>`), as a [`StoreWrite`];
 //! - `mud.send(command)` sends a command (`send_commands`), as a
 //!   [`SendCommand`] the shell shows in chat like the player's own. It's
-//!   rate-limited, and returns `false` when over the limit.
+//!   rate-limited, and returns `false` when over the limit;
+//! - `mud.keyword(name)` gives the word a command should use for an item,
+//!   by the plugin's own `[keywords]` rules, and needs no permission.
 //!
 //! Without its permission, each one raises an error. A hook's outputs go out
-//! only when it returns: one that fails or overruns sends nothing.
+//! only when it returns: one that fails or overruns sends nothing. What a
+//! hook file does at its top level, as it loads, goes nowhere.
 //!
 //! **Sandbox.** Each plugin has its own VM in Luau's sandbox mode, with
 //! read-only globals and only the `string`, `table`, `math`, `utf8` and
@@ -56,7 +59,8 @@
 
 use super::host::{PluginEvent, PluginHost, PluginSink};
 use super::manifest::{MANIFEST_FILE, Permission, Plugin, PluginError, PluginId, Problem};
-use super::points::{Character, EventRule, Gear, HookName, Map, Mobs, Points, TableReader, Text};
+use super::points::{HookName, Points};
+use crate::defaults::commands::item_keyword;
 use cpu_time::ThreadTime;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use std::cell::{Cell, RefCell};
@@ -288,7 +292,7 @@ impl Meter {
         self.cpu_start.set(ThreadTime::now());
         let now = Instant::now();
         self.started.set(now);
-        self.next_check.set(now + limits.time);
+        self.next_check.set(after(now, limits.time));
         self.overran.replace(None);
     }
 
@@ -324,15 +328,15 @@ impl Meter {
         let used = self.cpu_start.get().elapsed();
         let threshold = self.threshold.get();
         if used < threshold {
-            self.next_check.set(now + (threshold - used));
+            self.next_check.set(after(now, threshold - used));
             return None;
         }
         let limit = self.limit.get();
         if !self.suspect.get() {
             let confirm = limit / CONFIRM_DIVISOR;
             self.suspect.set(true);
-            self.threshold.set(used + confirm);
-            self.next_check.set(now + confirm);
+            self.threshold.set(used.saturating_add(confirm));
+            self.next_check.set(after(now, confirm));
             return None;
         }
         Some(format!(
@@ -342,6 +346,12 @@ impl Meter {
             limit.as_secs_f64() * 1e3,
         ))
     }
+}
+
+/// `wait` after `now`; `now` itself if that's past what an [`Instant`] holds,
+/// so a limit too big to reach just checks the CPU clock at every tick.
+fn after(now: Instant, wait: Duration) -> Instant {
+    now.checked_add(wait).unwrap_or(now)
 }
 
 impl HookRunner {
@@ -456,23 +466,20 @@ impl Vm {
             source: file.to_owned(),
             problem: Problem::Invalid(format!("the Luau hooks couldn't load: {error}")),
         };
-        let lua = sandbox(
-            &id,
-            &plugin.manifest.permissions,
-            limits,
-            &meter,
-            &outbox,
-            &rate_limit,
-            state,
-        )
-        .map_err(|error| PluginError {
-            source: id.to_string(),
-            problem: Problem::LuauSetup(error.to_string()),
-        })?;
+        let lua =
+            sandbox(plugin, limits, &meter, &outbox, &rate_limit, state).map_err(|error| {
+                PluginError {
+                    source: id.to_string(),
+                    problem: Problem::LuauSetup(error.to_string()),
+                }
+            })?;
         for script in &plugin.scripts {
             load_script(&lua, &meter, limits, script)
                 .map_err(|error| invalid(&script.file, error))?;
         }
+        // Loading isn't a hook call: nothing it did may go out with the first.
+        outbox.borrow_mut().clear();
+        rate_limit.recent.borrow_mut().clear();
         Ok(Vm {
             plugin: id,
             lua,
@@ -541,73 +548,20 @@ fn load_script(lua: &Lua, meter: &Meter, limits: HookLimits, script: &Script) ->
     chunk.call(())
 }
 
-/// Every hook a plugin's points name. The structs are taken apart field by
-/// field, so a new field that could name a hook fails to compile here.
+/// Every hook a plugin's points name.
 fn named_hooks(points: &Points) -> Vec<&HookName> {
-    let Points {
-        connection: _,
-        commands: _,
-        text,
-        hud: _,
-        map,
-        character,
-        gear,
-        mobs,
-        ui: _,
-    } = points;
-    let mut rules: Vec<&EventRule> = Vec::new();
-    let mut readers: Vec<&TableReader> = Vec::new();
-    if let Some(Text {
-        pager: _,
-        prompts: _,
-        patterns,
-        colors: _,
-    }) = text
-    {
-        rules.extend(patterns);
-    }
-    if let Some(Map {
-        room_identity: _,
-        areas: _,
-        exits,
-        failed_move,
-        darkness,
-        flee,
-        mazes: _,
-    }) = map
-    {
-        rules.extend(exits.iter().chain(failed_move).chain(darkness).chain(flee));
-    }
-    if let Some(Character {
-        commands: _,
-        readers: tables,
-        skill_improved,
-    }) = character
-    {
-        readers.extend(tables);
-        rules.extend(skill_improved);
-    }
-    if let Some(Gear {
-        identify,
-        examine,
-        equipment,
-        slots: _,
-        wear,
-        remove,
-        put,
-        containers: _,
-    }) = gear
-    {
-        readers.extend(identify.iter().chain(examine).chain(equipment));
-        rules.extend(wear.iter().chain(remove).chain(put));
-    }
-    if let Some(Mobs { aggro, room_title }) = mobs {
-        rules.extend(aggro.iter().chain(room_title));
-    }
+    let rules = points.event_rules();
+    let readers = points.readers();
+    let titles = points.mobs.iter().flat_map(|mobs| &mobs.room_title);
     let mut hooks: Vec<&HookName> = rules
         .iter()
-        .filter_map(|rule| rule.hook.as_ref())
-        .chain(readers.iter().filter_map(|reader| reader.hook.as_ref()))
+        .filter_map(|(_, rule, _)| rule.hook.as_ref())
+        .chain(titles.filter_map(|rule| rule.hook.as_ref()))
+        .chain(
+            readers
+                .iter()
+                .filter_map(|(_, reader)| reader.hook.as_ref()),
+        )
         .collect();
     hooks.sort_by_key(|hook| hook.as_str());
     hooks.dedup_by_key(|hook| hook.as_str());
@@ -616,14 +570,21 @@ fn named_hooks(points: &Points) -> Vec<&HookName> {
 
 /// A sandboxed VM for one plugin, with the `mud` API its permissions allow.
 fn sandbox(
-    plugin: &PluginId,
-    permissions: &[Permission],
+    plugin: &Plugin,
     limits: HookLimits,
     meter: &Rc<Meter>,
     outbox: &Rc<RefCell<Vec<HookOutput>>>,
     rate_limit: &Rc<RateLimit>,
     state: Arc<dyn StateView>,
 ) -> mlua::Result<Lua> {
+    let permissions = &plugin.manifest.permissions;
+    let keywords = plugin
+        .points
+        .commands
+        .as_ref()
+        .and_then(|commands| commands.keywords.clone())
+        .unwrap_or_default();
+    let plugin = plugin.id();
     let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::BIT;
     let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_memory_limit(limits.memory)?;
@@ -699,6 +660,11 @@ fn sandbox(
             Ok(true)
         })?,
     )?;
+
+    mud.set(
+        "keyword",
+        lua.create_function(move |_, name: String| Ok(item_keyword(&name, &keywords)))?,
+    )?;
     globals.set("mud", mud)?;
 
     let meter = meter.clone();
@@ -722,8 +688,9 @@ fn event_table(lua: &Lua, event: &PluginEvent) -> mlua::Result<Table> {
             &plain[capture.start as usize..capture.end as usize],
         )?;
     }
-    let table = lua.create_table_with_capacity(0, 4)?;
+    let table = lua.create_table_with_capacity(0, 5)?;
     table.raw_set("name", &*event.name)?;
+    table.raw_set("point", event.point.name())?;
     table.raw_set("captures", captures)?;
     table.raw_set("plain", plain)?;
     table.raw_set("raw", event.line.raw())?;
@@ -998,6 +965,16 @@ mod tests {
             file: "hooks.luau".into(),
             source: source.into(),
         }
+    }
+
+    #[test]
+    fn a_time_limit_past_what_an_instant_holds_is_no_limit() {
+        let meter = Meter::new();
+        meter.start(HookLimits {
+            time: Duration::MAX,
+            ..HookLimits::default()
+        });
+        assert!(matches!(meter.tick(), Ok(VmState::Continue)));
     }
 
     /// The box starts only once a file has compiled, however long that

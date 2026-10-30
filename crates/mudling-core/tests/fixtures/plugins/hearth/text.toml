@@ -13,14 +13,6 @@ name = "greeted"
 pattern = '''^(?<who>\w+) waves at you\.$'''
 hook = "on_wave"
 
-[[pattern]]
-name = "map.failed_move"
-pattern = '''^You can't go that way\.$'''
-
-[[pattern]]
-name = "mobs.aggro"
-pattern = '''^(?<name>.+) lunges at you!$'''
-
 [[color]]
 pattern = '''^(?<who>\w+) says '''
 group = "who"

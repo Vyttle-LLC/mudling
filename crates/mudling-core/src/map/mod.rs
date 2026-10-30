@@ -42,7 +42,7 @@ pub use buildings::MapDoor;
 pub use geometry::{DirMap, DirSet, Direction, GridPoint};
 pub use info::{ExitInfo, RoomInfo};
 pub use live::{Area, Building, Commit, Derived, LiveMap, MapChange, Whereabouts};
-pub use mobs::{Mark, MarkChange, MobMemory, mob_name};
+pub use mobs::{Mark, MarkChange, MobMemory, MobNamer, mob_name};
 pub use room::{ExitState, MapRoom, RoomId, feature};
 pub use route::WalkStep;
 pub use rules::{AreaName, MapRules, PlainRules, RoomIdentity};

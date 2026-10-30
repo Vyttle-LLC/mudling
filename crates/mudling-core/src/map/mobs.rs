@@ -6,6 +6,8 @@
 
 use crate::persist::MobMark;
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
 
 /// A mark on a mob, as persisted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -43,12 +45,45 @@ pub struct MarkChange {
     pub set: bool,
 }
 
+/// A game's reading of a room title, if it has one for that title.
+type TitleRule = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// Reads a game's room titles as mob names. A title the game's rule doesn't
+/// name, or a game with no rule, goes by [`mob_name`].
+#[derive(Clone, Default)]
+pub struct MobNamer(Option<Arc<TitleRule>>);
+
+impl MobNamer {
+    pub fn new(rule: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> MobNamer {
+        MobNamer(Some(Arc::new(rule)))
+    }
+
+    /// The mob's name, lowercase with its spaces collapsed, as marks hold it.
+    pub fn name(&self, title: &str) -> String {
+        let named = self.0.as_ref().and_then(|rule| rule(title));
+        named.map_or_else(
+            || mob_name(title),
+            |name| {
+                let words = name.to_lowercase();
+                words.split_whitespace().collect::<Vec<_>>().join(" ")
+            },
+        )
+    }
+}
+
+impl fmt::Debug for MobNamer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MobNamer")
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MobMemory {
     aggressive: BTreeSet<String>,
     gear: BTreeSet<String>,
     important: BTreeSet<String>,
     changes: Vec<MarkChange>,
+    namer: MobNamer,
 }
 
 impl MobMemory {
@@ -60,6 +95,15 @@ impl MobMemory {
             }
         }
         memory
+    }
+
+    pub(super) fn named_by(self, namer: MobNamer) -> MobMemory {
+        MobMemory { namer, ..self }
+    }
+
+    /// The mob a room title shows, by name.
+    pub fn name(&self, title: &str) -> String {
+        self.namer.name(title)
     }
 
     /// A mob attacked unprovoked: its kind is aggressive.
@@ -78,7 +122,7 @@ impl MobMemory {
     /// aggressive or not (undoing a wrong guess).
     pub fn set_aggressive(&mut self, title: &str, aggressive: bool) {
         if aggressive {
-            if let Some(noun) = noun(&mob_name(title)) {
+            if let Some(noun) = noun(&self.name(title)) {
                 self.set(Mark::Aggressive, noun, true);
             }
         } else {
@@ -91,11 +135,11 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, was marked for important gear.
     pub fn is_gear(&self, title: &str) -> bool {
-        self.gear.contains(&mob_name(title))
+        self.gear.contains(&self.name(title))
     }
 
     pub fn set_gear(&mut self, title: &str, gear: bool) {
-        let name = mob_name(title);
+        let name = self.name(title);
         if !name.is_empty() {
             self.set(Mark::Gear, name, gear);
         }
@@ -105,12 +149,12 @@ impl MobMemory {
     /// Their line changes with what they're doing, so a mark made on one
     /// reading covers the others.
     pub fn is_important(&self, title: &str) -> bool {
-        let name = mob_name(title);
+        let name = self.name(title);
         self.important.iter().any(|marked| same_mob(marked, &name))
     }
 
     pub fn set_important(&mut self, title: &str, important: bool) {
-        let name = mob_name(title);
+        let name = self.name(title);
         if name.is_empty() {
             return;
         }

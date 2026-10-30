@@ -31,3 +31,15 @@ mobs = "mobs.toml"
 [hooks]
 # readers.luau first: the others use the framing it defines.
 files = ["readers.luau", "character.luau", "gear.luau"]
+
+[fragments]
+# Avatar's prompts, "(110h-125m-120v-1062)(-/-)" and "(599hp 1173m 514v
+# 1046tnl)(-/-)", and a common custom one, two or more <...> groups with
+# numbers: "<46/46hp><116/116m><116/116mv>". Tags such as "(AFK) " and
+# effect marks such as "$*" may come in front.
+prompt = '''(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,})'''
+# The pager's line once answered: the next page follows on it.
+pager = '''.*\[C\]ontinue: ?'''
+# A zone, "{ 1   4} Crom    The Meadow": a level range, the builder, then
+# two or more spaces and the area's name.
+area = '''\{\s*(?<low>\d+)\s+(?<high>\d+)\s*\}\s*(?:.*\S {2,})?(?<name>\S.*?)\s*'''

@@ -1,6 +1,6 @@
 [[aggro]]
 name = "aggro"
-pattern = '''^(?<mob>.+) lunges at you!$'''
+pattern = '''^(?<name>.+) lunges at you!$'''
 
 [[room_title]]
 name = "mob.name"

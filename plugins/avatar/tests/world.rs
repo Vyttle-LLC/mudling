@@ -172,5 +172,23 @@ fn the_map_knows_rooms_by_description_and_its_maze() {
         map.room_identity,
         Some(mudling_core::plugin::points::RoomIdentity::Description)
     );
-    assert_eq!(map.mazes, ["Brothers Grimm"]);
+    let [maze] = map.mazes.as_slice() else {
+        panic!("{:?}", map.mazes);
+    };
+    assert_eq!(maze.area, "Brothers Grimm");
+    assert_eq!(maze.rooms, ["Lost in the Dark Woods"]);
+}
+
+#[test]
+fn a_zone_reads_as_its_area_and_level_range() {
+    let plugin = load();
+    let pattern = plugin.points.map.as_ref().unwrap().area_name.clone();
+    let zone = "{12  18} Crom    Brothers Grimm";
+    let captures = pattern.unwrap().captures(zone).unwrap();
+    let text = |name: &str| {
+        let capture = captures.iter().find(|capture| &*capture.name == name);
+        capture.map(|capture| &zone[capture.start as usize..capture.end as usize])
+    };
+    assert_eq!(text("name"), Some("Brothers Grimm"));
+    assert_eq!((text("low"), text("high")), (Some("12"), Some("18")));
 }

@@ -739,3 +739,126 @@ fn corrupt_compressed_data_is_an_error_to_close_on() {
     let result = driven.engine.receive(Bytes::from(bytes), Timestamp(0));
     assert!(result.is_err());
 }
+
+/// A game with no prompt it declares, a table, and a hook that writes when
+/// the table ends, and how.
+fn scribe() -> Plugin {
+    let manifest = "id = \"scribe\"\nname = \"Scribe\"\nversion = \"1.0.0\"\napi = 1\n\
+         license = \"MIT\"\nlayer = \"game\"\npermissions = [\"read_state\", \"write_store:seen\"]\n\
+         [servers]\nhosts = [\"mud.example.org\"]\n\
+         [points]\ntext = \"text.toml\"\ncharacter = \"character.toml\"\nmap = \"map.toml\"\n\
+         [hooks]\nfiles = [\"scribe.luau\"]\n";
+    let text = "[pager]\nprompt = '''--more--$'''\nkey = \"c\"\n";
+    let character = "[[reader]]\nname = \"bag\"\nstart = '''^Your bag:$'''\n\
+         row = '''^- (?<item>.+)$'''\nhook = \"on_bag\"\n";
+    let map = "[[exits]]\nname = \"exits\"\npattern = '''^Exits:'''\n\
+         [[flee]]\nname = \"fled\"\npattern = '''^You run (?<dir>north|south)'''\n\
+         [[darkness]]\nname = \"dark\"\npattern = '''^Pitch dark$'''\n";
+    let hooks = "function on_bag(event)\n\
+         local kind = string.match(event.name, '[^.]+$')\n\
+         if kind == 'end' or kind == 'cut' then\n\
+         mud.store('seen', kind, mud.state('inventory.count') or -1)\nend\nend";
+    Plugin::from_files(|file| {
+        Ok(match file {
+            "plugin.toml" => manifest,
+            "text.toml" => text,
+            "character.toml" => character,
+            "map.toml" => map,
+            "scribe.luau" => hooks,
+            _ => return Err(std::io::Error::other(file.to_owned())),
+        }
+        .to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+impl Driven {
+    fn scribe() -> Driven {
+        let plugin = scribe();
+        let mut driven = Driven::configured("mud.example.org", |config| {
+            config.enabled = vec![plugin.id().clone()];
+            config.plugins = vec![plugin];
+        });
+        driven.engine.start_connection().unwrap();
+        driven
+    }
+
+    fn seen(&mut self, key: &str) -> Option<Value> {
+        let key = format!("seen.{key}");
+        wait_for(&key.clone(), || {
+            self.engine.settle(Timestamp(0));
+            self.hub
+                .read(|stats: &Versioned<CharactersState>| stats.value().0.contains_key(&key))
+        });
+        self.hub
+            .read(|stats: &Versioned<CharactersState>| stats.value().0.get(&key).cloned())
+    }
+
+    fn learn_prompt(&mut self) {
+        self.gmcp(r#"Char.Vitals {"hp": 20}"#);
+        self.say(b"<20hp> ");
+        self.say(&[IAC, GA]);
+    }
+}
+
+#[test]
+fn a_learned_prompt_ends_a_table_and_what_follows_it_is_read() {
+    let mut driven = Driven::scribe();
+    driven.learn_prompt();
+    driven.say(b"Your bag:\r\n- rope\r\n");
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> Your bag:\r\n- lamp\r\n");
+    assert_eq!(driven.seen("end"), Some(Value::Number(-1.0)));
+}
+
+#[test]
+fn the_pager_is_answered_in_a_table_and_left_alone_outside_one() {
+    let mut driven = Driven::scribe();
+    driven.say(b"--more--");
+    assert!(!contains(&driven.engine.take_output(), b"c\r\n"));
+    driven.say(b"\r\nYour bag:\r\n- rope\r\n--more--");
+    assert!(contains(&driven.engine.take_output(), b"c\r\n"));
+    driven.say(b"\r\n\r\n");
+    driven.say(b"<20hp> ");
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.seen("end"), Some(Value::Number(-1.0)));
+}
+
+#[test]
+fn a_connection_ending_in_a_table_cuts_it() {
+    let mut driven = Driven::scribe();
+    driven.say(b"Your bag:\r\n- rope\r\n");
+    let now = Timestamp(0);
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, now);
+    let cut = driven
+        .hub
+        .read(|stats: &Versioned<CharactersState>| stats.value().0.get("seen.cut").cloned());
+    assert_eq!(cut, Some(Value::Number(-1.0)));
+}
+
+#[test]
+fn hooks_read_the_inventory_from_gmcp() {
+    let mut driven = Driven::scribe();
+    driven.gmcp(
+        r#"Char.Items.List {"location":"inv","items":[{"id":"1","name":"a rope"},{"id":"2","name":"a lamp"}]}"#,
+    );
+    driven.gmcp(r#"Char.Items.Add {"location":"room","item":{"id":"3","name":"a rock"}}"#);
+    driven.say(b"Your bag:\r\n- rope\r\n");
+    driven.learn_prompt();
+    assert_eq!(driven.seen("end"), Some(Value::Number(2.0)));
+}
+
+#[test]
+fn map_rules_reach_the_map_through_the_merged_matcher() {
+    let mut driven = Driven::scribe();
+    driven.gmcp(r#"Room.Info {"num":1,"name":"Hall","zone":"z","exits":{"n":2}}"#);
+    driven.engine.send("north", Timestamp(0));
+    driven.say(b"Yard\r\nExits: south\r\nA wide yard.\r\n");
+    driven.gmcp(r#"Room.Info {"num":2,"name":"Yard","zone":"z","exits":{"s":1}}"#);
+    let room = driven
+        .hub
+        .read(|room: &Versioned<RoomState>| room.value().room.clone());
+    assert_eq!(room.unwrap().description, "A wide yard.");
+}

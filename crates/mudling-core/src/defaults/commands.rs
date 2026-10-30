@@ -2,7 +2,7 @@
 //! `Speedwalk` did them, with the game's syntax from the Commands point.
 
 use crate::plugin::PluginHost;
-use crate::plugin::points::Speedwalk;
+use crate::plugin::points::{Keywords, Speedwalk};
 
 /// What the player types between chained commands: `n;n;open s`.
 pub const CHAIN_SEPARATOR: char = ';';
@@ -43,6 +43,32 @@ pub fn chain_lines(commands: &[impl AsRef<str>], separator: Option<&str>) -> Vec
         lines.push(line);
     }
     lines
+}
+
+/// The word a command should name an item by: the last word of the phrase
+/// its name starts with, by `rules`. "a pixie crossbow" gives "crossbow", and
+/// with "of" ending a phrase, "a sash of the guard" gives "sash". If the game
+/// takes no possessives and that's all there is, the name they're made of.
+pub fn item_keyword(name: &str, rules: &Keywords) -> Option<String> {
+    let lowercase = name.to_lowercase();
+    let mut words: Vec<&str> = Vec::new();
+    for word in lowercase
+        .split(|c: char| !c.is_alphabetic() && c != '\'')
+        .filter(|word| !word.is_empty())
+    {
+        if !words.is_empty() && rules.phrase_ends.iter().any(|end| end == word) {
+            break;
+        }
+        if !rules.skip.iter().any(|skipped| skipped == word) {
+            words.push(word);
+        }
+    }
+    let usable = |word: &&&str| rules.possessives || !word.contains('\'');
+    let keyword = words.iter().rev().find(usable).copied().or_else(|| {
+        let last = words.last()?;
+        Some(last.split('\'').next().unwrap_or(last))
+    });
+    keyword.map(str::to_owned)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

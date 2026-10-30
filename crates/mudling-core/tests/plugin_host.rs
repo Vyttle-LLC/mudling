@@ -2,10 +2,12 @@
 //! `tests/fixtures/plugins`.
 
 use mudling_core::ansi::{Color, Span, Style};
+use mudling_core::defaults::commands::item_keyword;
 use mudling_core::line::{Encoding, Line, LinePipeline};
-use mudling_core::plugin::points::{LoginReply, RoomIdentity};
+use mudling_core::plugin::points::{Keywords, LoginReply, RoomIdentity};
 use mudling_core::plugin::{
-    Layer, PendingKind, Plugin, PluginError, PluginEvent, PluginHost, PluginId, Problem, ServerInfo,
+    Layer, MapSignal, PendingKind, Plugin, PluginError, PluginEvent, PluginHost, PluginId, Point,
+    Problem, ServerInfo,
 };
 use std::io;
 use std::path::PathBuf;
@@ -107,7 +109,7 @@ fn a_plugin_declares_all_nine_points_as_typed_data() {
     assert_eq!(map.failed_move[0].name.as_str(), "blocked");
     let character = points.character.as_ref().unwrap();
     assert_eq!(
-        character.readers[0].row.as_str(),
+        character.readers[0].row[0].as_str(),
         r"^(?<stat>\w+): (?<value>\d+)$"
     );
     let gear = points.gear.as_ref().unwrap();
@@ -652,5 +654,348 @@ fn a_pathological_pattern_cannot_hang_the_host() {
         started.elapsed() < Duration::from_secs(1),
         "{:?}",
         started.elapsed()
+    );
+}
+
+fn with_points(points: &str) -> String {
+    format!("{MANIFEST}\n[points]\n{points}")
+}
+
+/// A plugin with a table: `start`, rows, `done` or a prompt to end it.
+fn tables() -> PluginHost {
+    let plugin = plugin(&[
+        (
+            "plugin.toml",
+            &with_points("text = \"text.toml\"\ncharacter = \"character.toml\"\n"),
+        ),
+        (
+            "text.toml",
+            "[[prompt]]\npattern = '''^<\\d+>'''\n\
+             [pager]\nprompt = '''--more--$'''\nkey = \"\"\n",
+        ),
+        (
+            "character.toml",
+            "[[reader]]\nname = \"stats\"\nstart = ['''^Stats$''', '''^Numbers$''']\n\
+             row = ['''^(?<stat>\\w+): (?<value>\\d+)$''', '''^(?<note>\\* .+)$''']\n\
+             end = '''^done$'''\n\
+             [[reader]]\nname = \"list\"\nstart = '''^(?:<\\d+> ?)?List$'''\nrow = '''^- (?<item>.+)$'''\n",
+        ),
+    ])
+    .unwrap_or_else(|error| panic!("{error}"));
+    PluginHost::new([plugin]).unwrap()
+}
+
+fn read_all(host: &mut PluginHost, text: &[&str]) -> Vec<PluginEvent> {
+    let mut events = Vec::new();
+    for text in text {
+        host.read_line(&line(text), &mut events);
+    }
+    events
+}
+
+fn event_names(events: &[PluginEvent]) -> Vec<&str> {
+    events.iter().map(|event| &*event.name).collect()
+}
+
+#[test]
+fn every_point_s_rules_run_and_say_which_point() {
+    let mut host = PluginHost::new([testland()]).unwrap();
+    let points = |host: &mut PluginHost, text: &str| -> Vec<(Point, String)> {
+        events(host, text)
+            .into_iter()
+            .map(|event| (event.point, event.name.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        points(&mut host, "You can't go that way."),
+        [(Point::Map, "blocked".to_owned())]
+    );
+    assert_eq!(
+        points(&mut host, "Your archery improves."),
+        [(Point::Character, "skill.improved".to_owned())]
+    );
+    assert_eq!(
+        points(&mut host, "You put on a cap."),
+        [(Point::Gear, "wear".to_owned())]
+    );
+    let aggro = events(&mut host, "A hedge wolf lunges at you!");
+    assert_eq!(aggro[0].point, Point::Mobs);
+    assert_eq!(aggro[0].map_signal, Some(MapSignal::Aggressor));
+    assert_eq!(aggro[0].capture("name"), Some("A hedge wolf"));
+    assert!(
+        events(&mut host, "The lair of Bob").is_empty(),
+        "a room title rule reads titles, not lines"
+    );
+}
+
+#[test]
+fn a_table_runs_start_rows_and_end_and_rows_need_it_open() {
+    let mut host = tables();
+    assert!(
+        read_all(&mut host, &["str: 10"]).is_empty(),
+        "no table open"
+    );
+    assert!(!host.table_open());
+
+    let events = read_all(
+        &mut host,
+        &[
+            "Stats",
+            "Numbers",
+            "str: 10",
+            "chatter",
+            "more chatter",
+            "* a note",
+            "done",
+            "dex: 1",
+        ],
+    );
+    assert_eq!(
+        event_names(&events),
+        [
+            "stats.start",
+            "stats.start",
+            "stats.row",
+            "stats.gap",
+            "stats.row",
+            "stats.end"
+        ],
+        "a second start with no rows is the same table, and a gap is told once"
+    );
+    assert_eq!(events[0].point, Point::Character);
+    assert_eq!(events[2].capture("value"), Some("10"));
+    assert_eq!(events[4].capture("note"), Some("* a note"));
+    assert!(!host.table_open());
+}
+
+#[test]
+fn a_prompt_or_the_next_table_ends_a_table_and_output_after_a_prompt_is_read() {
+    let mut host = tables();
+    let events = read_all(&mut host, &["Stats", "str: 1", "<5> List", "- rope", "<5>"]);
+    assert_eq!(
+        event_names(&events),
+        [
+            "stats.start",
+            "stats.row",
+            "stats.end",
+            "list.start",
+            "list.row",
+            "list.end"
+        ]
+    );
+
+    let events = read_all(&mut host, &["Stats", "str: 1", "List"]);
+    assert_eq!(
+        event_names(&events)[2..],
+        ["stats.end", "list.start"],
+        "a plugin reads one table at a time"
+    );
+    host.cut_tables(&mut Vec::new());
+}
+
+#[test]
+fn a_line_ended_at_ga_ends_a_table_but_a_pager_prompt_does_not() {
+    let mut host = tables();
+    let mut pipeline = LinePipeline::default();
+    let mut lines = Vec::new();
+    pipeline.push(b"Stats\r\nstr: 1\r\n--more--", &mut lines);
+    lines.extend(pipeline.prompt_end());
+    pipeline.push(b"hp> ", &mut lines);
+    lines.extend(pipeline.prompt_end());
+    let mut events = Vec::new();
+    for line in &lines[..3] {
+        host.read_line(line, &mut events);
+    }
+    assert!(host.table_open(), "{:?}", event_names(&events));
+    host.read_line(&lines[3], &mut events);
+    assert_eq!(event_names(&events).last(), Some(&"stats.end"));
+}
+
+#[test]
+fn a_table_left_at_its_pager_is_cut_and_an_answered_one_ends() {
+    let pending = |host: &mut PluginHost| {
+        let mut pipeline = LinePipeline::default();
+        pipeline.push(b"--more--", &mut Vec::new());
+        assert!(host.read_pending(&pipeline.pending().unwrap()).is_some());
+    };
+
+    let mut host = tables();
+    read_all(&mut host, &["Stats", "str: 1"]);
+    pending(&mut host);
+    let events = read_all(&mut host, &["", "<5>"]);
+    assert_eq!(event_names(&events), ["stats.gap", "stats.cut"]);
+
+    let mut host = tables();
+    read_all(&mut host, &["Stats", "str: 1"]);
+    pending(&mut host);
+    host.pager_answered();
+    // Asked again about the same pending line, as the next GMCP message does.
+    pending(&mut host);
+    let events = read_all(&mut host, &["", "<5>"]);
+    assert_eq!(event_names(&events), ["stats.gap", "stats.end"]);
+
+    let mut host = tables();
+    read_all(&mut host, &["Stats", "str: 1"]);
+    let mut events = Vec::new();
+    host.cut_tables(&mut events);
+    assert_eq!(event_names(&events), ["stats.cut"]);
+    assert_eq!(events[0].line.plain(), "Stats");
+    assert!(!host.table_open());
+}
+
+#[test]
+fn a_prompt_shape_must_be_all_of_the_pending_text() {
+    let mut host = tables();
+    let mut pending = |text: &[u8]| {
+        let mut pipeline = LinePipeline::default();
+        pipeline.push(text, &mut Vec::new());
+        host.read_pending(&pipeline.pending().unwrap())
+    };
+    assert_eq!(pending(b"<5> "), Some(PendingKind::Prompt));
+    assert_eq!(pending(b"<5> You are"), None, "output on its way");
+}
+
+#[test]
+fn read_line_from_reads_what_follows_and_ranges_stay_the_whole_lines() {
+    let mut host = PluginHost::new([testland()]).unwrap();
+    let mut events = Vec::new();
+    let glued = line("hp> Ana says 'hi'");
+    let coloring = host.read_line_from(&glued, 4, &mut events);
+    assert_eq!(events[0].capture("speaker"), Some("Ana"));
+    assert_eq!(
+        &glued.plain()[coloring[0].start as usize..coloring[0].end as usize],
+        "Ana"
+    );
+}
+
+#[test]
+fn fragments_are_shared_by_every_point_file() {
+    let manifest = format!(
+        "{}\n[points]\ntext = \"text.toml\"\nmobs = \"mobs.toml\"\n\
+         [fragments]\ntag = '''\\[\\w+\\] |<\\w+> '''\n",
+        MANIFEST
+    );
+    let plugin = plugin(&[
+        ("plugin.toml", &manifest),
+        (
+            "text.toml",
+            "[[pattern]]\nname = \"hi\"\npattern = '''^{tag}?hi{2}$'''\n",
+        ),
+        (
+            "mobs.toml",
+            "[[aggro]]\nname = \"aggro\"\npattern = '''^{tag}(?<name>\\w+) bites!$'''\n",
+        ),
+    ])
+    .unwrap_or_else(|error| panic!("{error}"));
+    let mut host = PluginHost::new([plugin]).unwrap();
+    assert_eq!(events(&mut host, "hii").len(), 1);
+    assert_eq!(events(&mut host, "<x> hii").len(), 1);
+    assert_eq!(
+        events(&mut host, "[x] Rat bites!")[0].capture("name"),
+        Some("Rat")
+    );
+}
+
+#[test]
+fn a_bad_or_unknown_fragment_is_rejected_at_load() {
+    let text = "[[pattern]]\nname = \"x\"\npattern = '''^{nope}$'''\n";
+    let manifest = with_points("text = \"text.toml\"\n");
+    let error = plugin(&[("plugin.toml", &manifest), ("text.toml", text)]).unwrap_err();
+    assert_eq!(error.source, "text.toml", "{error}");
+    assert!(error.to_string().contains("doesn't compile"), "{error}");
+
+    let error = rejection(&format!("{MANIFEST}\n[fragments]\nbad = '''('''\n"), &[]);
+    assert!(
+        error.to_string().contains("`bad` doesn't compile"),
+        "{error}"
+    );
+    let error = rejection(&format!("{MANIFEST}\n[fragments]\n2 = '''a'''\n"), &[]);
+    assert!(
+        error.to_string().contains("isn't a fragment name"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_background_command_may_name_a_gear_table() {
+    let manifest = with_points("character = \"character.toml\"\ngear = \"gear.toml\"\n");
+    let plugin = plugin(&[
+        ("plugin.toml", &manifest),
+        (
+            "character.toml",
+            "[[command]]\ncommand = \"eq\"\nreader = \"worn\"\n",
+        ),
+        (
+            "gear.toml",
+            "[equipment]\nname = \"worn\"\nstart = '''^Worn$'''\nrow = '''^x$'''\n",
+        ),
+    ]);
+    plugin.unwrap_or_else(|error| panic!("{error}"));
+
+    let error = rejection(
+        &with_points("character = \"character.toml\"\n"),
+        &[(
+            "character.toml",
+            "[[command]]\ncommand = \"eq\"\nreader = \"worn\"\n",
+        )],
+    );
+    assert_eq!(error.source, "character.toml");
+    assert!(error.to_string().contains("isn't declared"), "{error}");
+}
+
+#[test]
+fn link_rules_find_links_in_a_line_by_request() {
+    let plugin = plugin(&[
+        ("plugin.toml", &with_points("text = \"text.toml\"\n")),
+        (
+            "text.toml",
+            "[[link]]\npattern = '''^You see (?<item>\\w+)\\.$'''\n\
+             action = \"get {item}\"\ngroup = \"item\"\n",
+        ),
+    ])
+    .unwrap_or_else(|error| panic!("{error}"));
+    let host = PluginHost::new([plugin]).unwrap();
+    let links = host.links(&line("You see gold."));
+    assert_eq!((links[0].start, links[0].end), (8, 12));
+    assert_eq!(&*links[0].action, "get gold");
+    assert!(host.links(&line("Nothing here.")).is_empty());
+}
+
+#[test]
+fn a_link_naming_a_group_it_does_not_capture_is_rejected() {
+    let error = rejection(
+        &with_points("text = \"text.toml\"\n"),
+        &[(
+            "text.toml",
+            "[[link]]\npattern = '''x'''\naction = \"y\"\ngroup = \"nope\"\n",
+        )],
+    );
+    assert!(
+        error.to_string().contains("names the group `nope`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_highest_layer_s_keywords_and_area_pattern_apply() {
+    let host = PluginHost::new([testland()]).unwrap();
+    let area = host.settings().area_name.as_ref().unwrap();
+    assert!(area.is_match("[1-2] The Moor"));
+
+    let keywords = Keywords {
+        skip: vec!["a".to_owned(), "the".to_owned()],
+        phrase_ends: vec!["of".to_owned()],
+        possessives: false,
+    };
+    let word = |name: &str| item_keyword(name, &keywords);
+    assert_eq!(word("a pixie crossbow").as_deref(), Some("crossbow"));
+    assert_eq!(word("a sash of the guard").as_deref(), Some("sash"));
+    assert_eq!(word("the captain's sash").as_deref(), Some("sash"));
+    assert_eq!(word("the captain's").as_deref(), Some("captain"));
+    assert_eq!(word("the"), None);
+    assert_eq!(
+        item_keyword("the captain's", &Keywords::default()).as_deref(),
+        Some("captain's"),
+        "a game that takes possessives"
     );
 }

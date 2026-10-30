@@ -27,6 +27,7 @@
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 
 mod engine;
+mod inventory;
 mod login;
 mod map_rules;
 mod values;

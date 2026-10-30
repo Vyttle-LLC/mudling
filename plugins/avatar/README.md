@@ -11,84 +11,71 @@ VYT-235): each file says what it reads, and each regex has a comment.
 
 | File | What it declares |
 | --- | --- |
-| `plugin.toml` | The manifest: Avatar's hosts and MSSP name, its points, the stores its hooks write. |
-| `text.toml` | Everything read line by line: the prompt and pager, each table's start and rows, and the game's messages. |
-| `readers.luau` | Framing for tables: a start opens a reader, rows add writes, the next prompt sends them. |
+| `plugin.toml` | The manifest: Avatar's hosts and MSSP name, its points, the stores its hooks write, and the regex fragments its patterns share. |
+| `text.toml` | The prompt and pager, and the lines no other point reads. |
+| `readers.luau` | What the table hooks share: rows add writes, and the table's end sends them. |
 | `character.luau` | `score`, `practice`, `slist` and `aff`. |
-| `gear.luau` | `equipment`, where items go, identify, examine, and the word a command uses for an item. |
-| `commands.toml` | Verbs and door commands. No separator and no speedwalk: one command a line. |
-| `character.toml` | The background commands and the table that answers each. |
-| `gear.toml` | The 15 slots in the game's order. |
-| `map.toml` | Rooms known by description; the maze. |
-| `mobs.toml` | A mob's name from its room title. |
-
-Only the Text point runs per line today, so every line reader is a Text
-pattern; `character.toml`'s readers repeat the same patterns, and a test
-keeps them identical.
+| `gear.luau` | `equipment`, where items go, identify and examine. |
+| `commands.toml` | Verbs, door commands and the rules for an item's keyword. No separator and no speedwalk: one command a line. |
+| `character.toml` | The background commands, the character's tables, and the messages about skills. |
+| `gear.toml` | The 15 slots in the game's order, the gear tables, and the wear, remove and put messages. |
+| `map.toml` | Rooms known by description, the zone's format, failed moves, darkness, flees and the maze. |
+| `mobs.toml` | Aggression, and a mob's name from its room title. |
 
 ## How a table is read
 
-Avatar sends no GA or EOR, so its prompt is known by its shape
-(`[[prompt]]` in `text.toml`). The client ends a line there; in a session
-log the next output is glued after it, so the patterns for a table's first
-line allow a prompt in front.
+Avatar sends no GA or EOR, so its prompt is known by its shape, the
+`prompt` fragment. The client ends a line there; in a session log the next
+output is glued after it, so the patterns for a table's first line allow a
+prompt in front.
 
-A table's start pattern opens a reader, its row patterns add writes, and
-the next prompt (or the next table's start, for a prompt the plugin doesn't
-know) sends them all at once, ending with the table's `read` or `count`
-key. A table left at an unanswered pager (`[C]ontinue:` followed straight
-by a prompt, with no row, blank or rule line between) was cut short and
-sends nothing; a last page with no rows still counts as answered. The client
-answers the pager with `c` while a table is open.
+The host frames each table. A start pattern opens it, and row patterns run
+only while it's open. The hook collects rows as writes and sends them at
+the table's end, the next prompt or the next table, ending with its `read`
+or `count` key. The client answers the pager with `c` while a table is open.
+A table that ends with its pager unanswered, or with the connection, is cut
+short and sends nothing; a last page with no rows was still answered.
 
 ## Events
 
-Each Text pattern's match is a `PluginEvent` named below, its named
-captures as data. Hooks run on the ones marked †; the rest are for stores
-to consume.
+Each match is a `PluginEvent` named below, its named captures as data. Hooks
+run on the ones marked †; the rest are for stores to consume.
 
-| Event | Captures | Line |
-| --- | --- | --- |
-| `prompt` † | | A prompt, bare or with output after it. Ends the open table. |
-| `pager` † | | The pager's prompt, once answered. |
-| `blank` † | | A line of only spaces or dashes: shows the pager was answered, and ends a run of wrapped slist rows |
-| `character.score.start` † | `name`, `title` | `You are Tamsin the Quiet Attendant` |
-| `character.score.row` † | | `Level 12 Harpy Monk …`, `Str : 15 (18) …`, `Gold : …` |
-| `character.practice.start` † | `sessions` | `You have 12 practice sessions left.`, the header |
-| `character.practice.row` † | | `dodge  95  4  -  0  kick  90  7  -  0` |
-| `character.slist.start` † | | `Spells and skills learnable by your class …` |
-| `character.slist.row` † | | `  3:       fast healing        meditation`, wrapped rows |
-| `character.affects.start` † | | `You are affected by:` |
-| `character.affects.none` † | | `You are not under the affects of any spells` |
-| `character.affects.row` † | `name`, `detail` | `Spell: 'bless'.` |
-| `character.skill_practiced` † | `skill`, `learned` | `You practice dodge with Ulric. Your current skill level is now 45.` |
-| `character.skill_improved` | | `You have become better at …` (ROM wording) |
-| `character.affects_changed` | | `You feel …`, `… wears off` |
-| `gear.equipment.start` † | | `You are using:` |
-| `gear.equipment.row` † | `slot`, `item` | `<worn on finger>    a pink ice ring` |
-| `gear.wore` † | `item`; `on`, `part` for wear | `You wear …`, `You hold …`, `You light … and hold it.`, `You wield …` |
-| `gear.removed` | `item` | `You stop using a round shield.` |
-| `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
-| `gear.did_not_fit` | | `It won't fit.` |
-| `gear.not_carried` | | `You do not have that item.` |
-| `gear.identify.named` † | `item` | `Ulric looks closely at your bear skin bracelet.` |
-| `gear.identify.object` † | `keywords`, `type`, `flags` | `Object 'black bear bracelet' type armor, extra flags none.` |
-| `gear.identify.level` † | `level` | `Weight 3, value 40, level 8.` |
-| `gear.identify.quality` † | `quality` | `Object Quality (100 / 100 hps)` |
-| `gear.identify.armor` † | `armor` | `Armor class is 2.` |
-| `gear.identify.base` † | `stat`, `amount` | ` Modifies strength by  1 continuous` |
-| `gear.identify.added` † | `spell`, `stat`, `amount` | `'enchant armor  '  modifies armor class by  -4 continuous` |
-| `gear.examine.item` † | `item` | `You look at a linen robe in your inventory...` |
-| `gear.examine.slot` † | `meant` | `This item appears meant to be worn about the body.` |
-| `map.area` | `low`, `high`, `name` | `{10  15} Dev     Sarphyre's Court` |
-| `map.failed_move` | | `No way!  You are still fighting!`, `You are too exhausted.` |
-| `map.darkness` | | `It is pitch black...` |
-| `map.flee` | `dir` | `You flee north! What a COWARD! …` |
-| `mobs.aggro` | `name`, `noun` | `The nanny GLARES at you and SNARLS!` |
+Each table sends its hook `<reader>.start`, `.row`, `.gap` (the first line
+that's no row), and `.end` or `.cut`:
+
+| Reader | Hook | Start captures | Row captures | Lines |
+| --- | --- | --- | --- | --- |
+| `score` | `read_score` | `name`, `title` | | `You are Tamsin the Quiet Attendant`; `Level 12 Harpy Monk …`, `Str : 15 (18) …`, `Gold : …` |
+| `practice` | `read_practice` | `sessions` | | `You have 12 practice sessions left.`, the header; `dodge  95  4  -  0  kick  90  7  -  0` |
+| `slist` | `read_slist` | | | `Spells and skills learnable by your class …`; `  3:       fast healing        meditation`, wrapped rows |
+| `affects` | `read_affects` | | `name`, `detail` | `You are affected by:`; `Spell: 'bless'.` |
+| `equipment` | `read_equipment` | | `slot`, `item` | `You are using:`; `<worn on finger>    a pink ice ring` |
+| `identify` | `read_identify` | `item`, or `keywords`, `type`, `flags` | `level`, `quality`, `armor`, or `stat`, `amount` and perhaps `spell` | `Ulric looks closely at your bear skin bracelet.`, `Object 'black bear bracelet' type armor, extra flags none.`; `Weight 3, value 40, level 8.`, ` Modifies strength by  1 continuous`, `'enchant armor  '  modifies armor class by  -4 continuous` |
+| `examine` | `read_examine` | `item` | `meant` | `You look at a linen robe in your inventory...`; `This item appears meant to be worn about the body.` |
+
+The rest are single lines:
+
+| Point | Event | Captures | Line |
+| --- | --- | --- | --- |
+| Text | `character.affects.none` † | | `You are not under the affects of any spells` |
+| Text | `character.affects_changed` | | `You feel …`, `… wears off` |
+| Text | `map.area` | `low`, `high`, `name` | `{10  15} Dev     Sarphyre's Court` |
+| Character | `character.skill_practiced` † | `skill`, `learned` | `You practice dodge with Ulric. Your current skill level is now 45.` |
+| Character | `character.skill_improved` | | `You have become better at …` (ROM wording) |
+| Gear | `gear.wore` † | `item`; `on`, `part` for wear | `You wear …`, `You hold …`, `You light … and hold it.`, `You wield …` |
+| Gear | `gear.removed` | `item` | `You stop using a round shield.` |
+| Gear | `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
+| Gear | `gear.did_not_fit` | | `It won't fit.` |
+| Gear | `gear.not_carried` | | `You do not have that item.` |
+| Map | `map.failed_move` | | `No way!  You are still fighting!`, `You are too exhausted.` |
+| Map | `map.darkness` | | `It is pitch black...` |
+| Map | `map.flee` | `dir` | `You flee north! What a COWARD! …` |
+| Mobs | `mobs.aggro` | `name`, `noun` | `The nanny GLARES at you and SNARLS!` |
 
 `mobs.toml`'s `mobs.name` rule is applied to a mob's room title, not to
 lines: `(White Aura) A myconoid shaman is here, chanting.` gives `name` =
-`A myconoid shaman`. Compare names ignoring case.
+`A myconoid shaman`, which the map keeps in lowercase for its mob marks.
 
 ## Stores
 
@@ -160,10 +147,9 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 
 - **`worth`**: neither the prototype nor the session logs have a `worth`
   table, so there's nothing to port.
-- **Area names over GMCP**: Avatar's Room.Info `zone` uses the format
-  `map.area` reads, but plugins can't declare patterns over GMCP values yet.
-- **Which copy a spell's identify was about**: that needs the inventory,
-  which no state view offers yet.
+- **Which copy a spell's identify was about**: hooks can read the inventory
+  (`inventory.count`, `inventory.<n>.name`), with `read_state`, but working
+  out the copy isn't written yet.
 
 ## Tests
 

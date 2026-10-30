@@ -108,17 +108,29 @@ fn practice_reads_on_past_the_pager() {
 }
 
 #[test]
-fn practice_left_at_its_pager_is_not_sent() {
-    let transcript = read(include_str!("fixtures/practice-cut.txt"));
-    let skills = transcript.store("skills");
+fn practice_left_at_its_pager_is_cut_and_not_sent() {
+    let fixture = include_str!("fixtures/practice-cut.txt");
+    let cut = Transcript::unanswered(fixture);
+    assert!(cut.problems().is_empty(), "{:?}", cut.problems());
+    assert_eq!(cut.events("practice.cut", &[]).len(), 1);
+    assert_eq!(cut.events("practice.end", &[]).len(), 0);
+    let skills = cut.store("skills");
     assert!(
         skills.is_empty(),
         "a table cut short sends nothing: {skills:?}"
     );
     assert_eq!(
-        transcript.events("gear.equipment.start", &[]).len(),
+        cut.events("equipment.start", &[]).len(),
         1,
         "the next table still starts"
+    );
+
+    // The same lines with the pager answered: its last page held no rows.
+    let complete = read(fixture);
+    assert_eq!(complete.events("practice.end", &[]).len(), 1);
+    assert_eq!(
+        get(&complete.store("skills"), "practice.read"),
+        &number(4.0)
     );
 }
 
@@ -186,6 +198,20 @@ fn slist_cuts_fixed_columns_and_reads_wrapped_rows() {
         "room text isn't a skill: {skills:?}"
     );
     assert_eq!(get(&skills, "slist.read"), &number(17.0));
+}
+
+#[test]
+fn a_line_that_is_no_row_ends_the_wrapped_rows() {
+    let skills = read(
+        "Spells and skills learnable by your class at the lower levels.\n \
+         50: mongoose technique            gurney\nYou are hungry.\n    \
+         {ALIGNED}\n(1h-1m-1v-1)(-/-)"
+            .replace("{ALIGNED}", &format!("{:>19}{:>18}", "Ancient", "Ruin"))
+            .as_str(),
+    )
+    .store("skills");
+    assert!(!skills.contains_key("Ancient.level"), "{skills:?}");
+    assert_eq!(get(&skills, "slist.read"), &number(2.0));
 }
 
 #[test]

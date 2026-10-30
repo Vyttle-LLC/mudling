@@ -26,7 +26,9 @@ pub struct Session {
     pipeline: LinePipeline,
     host: PluginHost,
     hooks: HookRunner,
-    /// Pager prompts seen, each one the client would answer.
+    /// Answers the pager while a table is open, as the client does.
+    answers_pager: bool,
+    /// Pager prompts seen.
     pub pager_prompts: usize,
 }
 
@@ -47,7 +49,16 @@ impl Session {
             pipeline: LinePipeline::default(),
             host,
             hooks,
+            answers_pager: true,
             pager_prompts: 0,
+        }
+    }
+
+    /// A session that leaves every pager prompt unanswered.
+    pub fn not_answering_the_pager() -> Session {
+        Session {
+            answers_pager: false,
+            ..Session::new()
         }
     }
 
@@ -67,6 +78,9 @@ impl Session {
             Some(PendingKind::Prompt) => lines.extend(self.pipeline.prompt_end()),
             Some(PendingKind::Pager { .. }) => {
                 self.pager_prompts += 1;
+                if self.answers_pager {
+                    self.host.pager_answered();
+                }
                 self.pipeline.push(b"\n", &mut lines);
             }
             None => self.pipeline.push(b"\n", &mut lines),
@@ -99,7 +113,15 @@ pub struct Transcript {
 impl Transcript {
     /// Reads `text`, one server line per line, through a new session.
     pub fn of(text: &str) -> Transcript {
-        let mut session = Session::new();
+        Transcript::read(text, Session::new())
+    }
+
+    /// Reads `text` with no one answering the pager.
+    pub fn unanswered(text: &str) -> Transcript {
+        Transcript::read(text, Session::not_answering_the_pager())
+    }
+
+    fn read(text: &str, mut session: Session) -> Transcript {
         let mut transcript = Transcript::default();
         for line in text.lines() {
             session.read_line(line, &mut |event, outputs| {
