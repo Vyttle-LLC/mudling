@@ -98,6 +98,11 @@ impl HudFields {
         self.learned = Some(learned);
     }
 
+    /// Whether a `Char.Vitals` has come, so the HUD has numbers to show.
+    pub fn has_learned(&self) -> bool {
+        self.learned.is_some()
+    }
+
     /// The learned fields, with every enabled plugin's HUD vitals over them
     /// in run order, so the highest layer wins.
     pub fn fields(&self, host: &PluginHost) -> FieldMap {

@@ -24,7 +24,7 @@ mod stores;
 
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::stats::Summary;
-use mudling_core::{AnsiParser, Scrollback};
+use mudling_core::{Line, LinePipeline, Scrollback};
 use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
@@ -216,12 +216,15 @@ fn run(
     luau_hooks: luau_hooks::Report,
     game_plugins: Vec<game_plugin::Report>,
 ) -> Report {
-    let mut parser = AnsiParser::default();
+    let mut pipeline = LinePipeline::default();
+    let mut parsed: Vec<Line> = Vec::with_capacity(1);
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
     let fill_started = Instant::now();
     let mut scrollback = Scrollback::with_capacity(SCROLLBACK_LINES);
     for _ in 0..SCROLLBACK_LINES {
-        scrollback.push(parser.parse_line(feed.next_line()));
+        pipeline.push(feed.next_line().as_bytes(), &mut parsed);
+        pipeline.push(b"\n", &mut parsed);
+        parsed.drain(..).for_each(|line| scrollback.push(line));
     }
     let fill = fill_started.elapsed();
     let scrollback_heap = HEAP_BYTES.load(Ordering::Relaxed) - heap_before;
@@ -230,7 +233,9 @@ fn run(
     for _ in 0..TIMED_APPENDS {
         let raw = feed.next_line();
         let started = Instant::now();
-        scrollback.push(parser.parse_line(raw));
+        pipeline.push(raw.as_bytes(), &mut parsed);
+        pipeline.push(b"\n", &mut parsed);
+        parsed.drain(..).for_each(|line| scrollback.push(line));
         appends.push(started.elapsed());
     }
 

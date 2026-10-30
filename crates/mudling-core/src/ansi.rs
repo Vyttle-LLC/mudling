@@ -5,8 +5,7 @@
 //!
 //! The parser streams: [`AnsiParser::feed`] takes a line in as many pieces as
 //! it arrives in, and an escape sequence may be split between pieces. The
-//! line pipeline ([`crate::line`]) feeds it each byte of a line exactly once;
-//! [`AnsiParser::parse_line`] is the same pass over a whole line.
+//! line pipeline ([`crate::line`]) feeds it each byte of a line exactly once.
 
 /// A palette index: 0–15 are the basic and bright colors, 16–255 the
 /// 256-color cube and grays. The shell maps indexes to its theme.
@@ -32,34 +31,6 @@ pub struct Span {
     pub start: u32,
     pub end: u32,
     pub style: Style,
-}
-
-/// Who a line came from, so the chat can tell them apart by color.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LineKind {
-    #[default]
-    Server,
-    /// A command the player sent, echoed into the chat.
-    Command,
-}
-
-/// One chat line: its plain text (what readers, find and screen readers
-/// see) and the spans that style it. Unstyled text has no spans.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Line {
-    pub text: Box<str>,
-    pub spans: Box<[Span]>,
-    pub kind: LineKind,
-}
-
-impl Line {
-    pub fn command(text: &str) -> Self {
-        Line {
-            text: text.into(),
-            spans: Box::default(),
-            kind: LineKind::Command,
-        }
-    }
 }
 
 const ESC: u8 = 0x1b;
@@ -101,18 +72,6 @@ pub struct AnsiParser {
 }
 
 impl AnsiParser {
-    pub fn parse_line(&mut self, raw: &str) -> Line {
-        let mut text = String::with_capacity(raw.len());
-        let mut spans = Vec::new();
-        self.feed(raw, &mut text, &mut spans);
-        self.end_line();
-        Line {
-            text: text.into_boxed_str(),
-            spans: spans.into_boxed_slice(),
-            kind: LineKind::Server,
-        }
-    }
-
     /// Parses the next piece of the current line, appending its plain text
     /// to `plain` and its styled runs to `spans` (ranges of `plain`).
     pub fn feed(&mut self, piece: &str, plain: &mut String, spans: &mut Vec<Span>) {
@@ -284,7 +243,21 @@ impl AnsiParser {
 mod tests {
     use super::*;
 
-    fn parse(raw: &str) -> Line {
+    struct Parsed {
+        text: String,
+        spans: Vec<Span>,
+    }
+
+    impl AnsiParser {
+        fn parse_line(&mut self, raw: &str) -> Parsed {
+            let (mut text, mut spans) = (String::new(), Vec::new());
+            self.feed(raw, &mut text, &mut spans);
+            self.end_line();
+            Parsed { text, spans }
+        }
+    }
+
+    fn parse(raw: &str) -> Parsed {
         AnsiParser::default().parse_line(raw)
     }
 

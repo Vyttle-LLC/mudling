@@ -46,6 +46,15 @@ pub enum LineEnd {
     Cut,
 }
 
+/// Who a line came from, so the chat can tell them apart by color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineKind {
+    #[default]
+    Server,
+    /// A command the player sent, echoed into the chat.
+    Command,
+}
+
 /// A link or action over a byte range of a line's plain text. Nothing
 /// produces these yet; MXP and plugins will.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,10 +79,41 @@ struct LineData {
     styled: Box<[Span]>,
     links: Box<[Link]>,
     end: LineEnd,
+    kind: LineKind,
 }
 
 impl Line {
-    fn new(raw: &str, plain: &str, styled: &[Span], end: LineEnd) -> Self {
+    /// A command the player sent, as the chat echoes it.
+    pub fn command(text: &str) -> Self {
+        Line::build(text, text, &[], LineEnd::Newline, LineKind::Command)
+    }
+
+    /// This line with `styled` as its styles, for coloring a plugin gives a
+    /// line the server sent without any.
+    pub fn colored(&self, styled: &[Span]) -> Self {
+        Line::build(self.raw(), self.plain(), styled, self.end(), self.kind())
+    }
+
+    /// This line from byte `at` of its plain text on, for showing what
+    /// follows a prompt. Escape codes aren't kept: the raw text is the plain
+    /// text that's left.
+    pub fn from_plain_offset(&self, at: usize) -> Self {
+        let offset = at as u32;
+        let styled: Vec<Span> = self
+            .styled()
+            .iter()
+            .filter(|span| span.end > offset)
+            .map(|span| Span {
+                start: span.start.max(offset) - offset,
+                end: span.end - offset,
+                style: span.style,
+            })
+            .collect();
+        let plain = &self.plain()[at..];
+        Line::build(plain, plain, &styled, self.end(), self.kind())
+    }
+
+    fn build(raw: &str, plain: &str, styled: &[Span], end: LineEnd, kind: LineKind) -> Self {
         let (text, plain_start) = if raw == plain {
             (Box::from(raw), 0)
         } else {
@@ -89,6 +129,7 @@ impl Line {
             styled: styled.into(),
             links: Box::default(),
             end,
+            kind,
         }))
     }
 
@@ -115,6 +156,10 @@ impl Line {
 
     pub fn end(&self) -> LineEnd {
         self.0.end
+    }
+
+    pub fn kind(&self) -> LineKind {
+        self.0.kind
     }
 }
 
@@ -195,9 +240,11 @@ impl LinePipeline {
 
     /// The text received since the last line ended, if any. It may be a
     /// prompt, or only the first part of a line or prompt the network split:
-    /// it can still grow, and it isn't a [`Line`] until it ends.
+    /// it can still grow, and it isn't a [`Line`] until it ends. A UTF-8 code
+    /// point still waiting for its end counts, with no text yet: this is
+    /// `Some` exactly when [`LinePipeline::prompt_end`] would end a line.
     pub fn pending(&self) -> Option<Pending<'_>> {
-        (!self.raw.is_empty()).then_some(Pending {
+        (!self.raw.is_empty() || !self.utf8_tail.is_empty()).then_some(Pending {
             raw: &self.raw,
             plain: &self.plain,
             styled: &self.styled,
@@ -299,7 +346,7 @@ impl LinePipeline {
         if end != LineEnd::Cut {
             self.ansi.end_line();
         }
-        let line = Line::new(&self.raw, &self.plain, &self.styled, end);
+        let line = Line::build(&self.raw, &self.plain, &self.styled, end, LineKind::Server);
         self.raw.clear();
         self.plain.clear();
         self.styled.clear();
@@ -538,6 +585,24 @@ mod tests {
     #[test]
     fn a_code_point_cut_off_by_a_line_end_is_replaced() {
         assert_eq!(plain_lines(&[b"a\xe4\xb8", b"\nb"]).0, ["a\u{FFFD}"]);
+    }
+
+    #[test]
+    fn pending_and_prompt_end_agree_while_a_code_point_is_held() {
+        let mut pipeline = LinePipeline::default();
+        pipeline.push(b"\xe4", &mut Vec::new());
+        assert_eq!(pipeline.pending().map(|pending| pending.raw), Some(""));
+        assert_eq!(pipeline.prompt_end().unwrap().plain(), "\u{FFFD}");
+        assert_eq!(pipeline.pending(), None);
+        assert_eq!(pipeline.prompt_end(), None);
+    }
+
+    #[test]
+    fn a_line_from_a_plain_offset_keeps_only_what_follows() {
+        let (lines, _) = lines_and_pending(&[b"<1hp> \x1b[31mred\x1b[0m rest\n"]);
+        let rest = lines[0].from_plain_offset("<1hp> ".len());
+        assert_eq!((rest.raw(), rest.plain()), ("red rest", "red rest"));
+        assert_eq!((rest.styled()[0].start, rest.styled()[0].end), (0, 3));
     }
 
     #[test]

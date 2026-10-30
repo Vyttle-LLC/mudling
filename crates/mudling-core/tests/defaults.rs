@@ -92,6 +92,13 @@ impl Session {
             .gmcp_arrived("Char.Vitals", r#"{"hp": "20", "maxhp": "30"}"#);
     }
 
+    /// A prompt signal that ends the pending text: GA, or the connection
+    /// going quiet.
+    fn prompt_end(&mut self) {
+        self.lines.extend(self.pipeline.prompt_end());
+        self.read_lines();
+    }
+
     /// Another GMCP message, after which the shell looks at the pending
     /// text again: a prompt learned from it ends.
     fn gmcp(&mut self, package: &str) {
@@ -175,72 +182,136 @@ fn text_pending_before_vitals_isnt_the_prompt() {
 /// arrived first is never learned, however the rest arrives.
 #[test]
 fn a_prompt_split_across_reads_never_learns_the_half() {
-    let prompt = "(110h 125m 120v 1062)> ";
+    let prompt = "<20hp 30mp 40mv 500xp> ";
     for at in 1..prompt.len() {
         let (first, rest) = prompt.split_at(at);
-        let endings: [&[&str]; 4] = [
-            // The rest, then a GMCP message.
-            &[rest, ""],
-            // The rest, then output glued on.
-            &[rest, "You rest.\n\r"],
-            // The rest and output in one read.
-            &[&format!("{rest}You rest.\n\r")],
-            // The rest, then the next line.
-            &[&format!("{rest}\n\r")],
-        ];
-        for ending in endings {
-            let mut session = Session::new(Vec::new());
-            for _ in 0..3 {
-                session.vitals();
-                session.push("\n\r");
-                session.push(first);
-                for read in ending {
-                    session.push(read);
-                }
-                session.gmcp("Char.Status");
-            }
-            let shapes = session.shapes();
-            assert!(
-                !shapes.is_empty(),
-                "split at {at}, {ending:?}: nothing learned"
-            );
-            for shape in &shapes {
-                assert!(
-                    shape.starts_with("(#h #m #v #)> "),
-                    "split at {at}, {ending:?}: learned {shape:?}"
-                );
-            }
+        let mut session = Session::new(Vec::new());
+        for _ in 0..3 {
+            session.vitals();
+            session.push("\n\r");
+            session.push(first);
+            session.push(rest);
+            session.gmcp("Char.Status");
         }
+        assert_eq!(session.shapes(), ["<#hp #mp #mv #xp> "], "split at {at}");
     }
 }
 
-/// From the prototype: learned once with output glued on, the prompt still
-/// leaves that output to be read once the bare prompt is seen.
+/// Output glued on with no signal between, a line ended by a newline: the
+/// learner waits for the next signal rather than learn a line of output.
+#[test]
+fn a_line_with_no_prompt_signal_is_never_learned() {
+    for ending in ["You rest.\n\r", "\n\r"] {
+        let mut session = Session::new(Vec::new());
+        session.vitals();
+        session.push("<20hp 30mv> ");
+        session.push(ending);
+        session.gmcp("Char.Status");
+        assert!(session.shapes().is_empty(), "{ending:?}");
+
+        session.push("<21hp 30mv> ");
+        session.gmcp("Char.Status");
+        assert_eq!(session.shapes(), ["<#hp #mv> "], "{ending:?}");
+    }
+}
+
+/// Text was pending as `Char.Vitals` arrived, and the prompt came glued onto
+/// it: the prompt is what followed, and the next line stays output.
+#[test]
+fn a_prompt_glued_onto_pending_text_is_learned_from_what_followed() {
+    let mut session = Session::new(Vec::new());
+    session.push("You feel hungry.");
+    session.vitals();
+    session.push("<20hp 30mv> ");
+    session.prompt_end();
+    session.push("The rain stops.\n\r");
+    assert_eq!(session.shapes(), ["<#hp #mv> "]);
+    assert_eq!(session.read.last().unwrap().1, None);
+}
+
+#[test]
+fn a_line_ended_by_a_signal_is_learned_whole() {
+    let mut session = Session::new(Vec::new());
+    session.vitals();
+    session.push("<20hp 30mv> ");
+    session.prompt_end();
+    assert_eq!(session.shapes(), ["<#hp #mv> "]);
+}
+
+/// No GA and no GMCP: a prompt is a line the connection's quiet ended, and
+/// its shape coming twice running shows it wasn't a line that stalled.
+#[test]
+fn with_no_gmcp_a_shape_ended_twice_running_is_learned() {
+    let mut session = Session::new(Vec::new());
+    session.push("<20hp 30mv> ");
+    session.prompt_end();
+    assert!(session.shapes().is_empty());
+
+    session.push("It costs 12 gold");
+    session.prompt_end();
+    session.push("<19hp 30mv> ");
+    session.prompt_end();
+    assert!(session.shapes().is_empty());
+
+    session.push("<18hp 30mv> ");
+    session.prompt_end();
+    assert_eq!(session.shapes(), ["<#hp #mv> "]);
+
+    session.push("<17hp 30mv> ");
+    assert_eq!(
+        session.read.last().unwrap(),
+        &("<17hp 30mv> ".to_owned(), Some(12)),
+        "the learned prompt ends itself"
+    );
+}
+
+#[test]
+fn text_with_no_number_is_never_learned_without_vitals() {
+    let mut session = Session::new(Vec::new());
+    for _ in 0..3 {
+        session.push("Password: ");
+        session.prompt_end();
+    }
+    assert!(session.shapes().is_empty());
+}
+
+/// The prompt changed and grew: both shapes are known, and a read that stops
+/// where the old one ended isn't taken for the old one.
+#[test]
+fn a_read_ending_at_a_shorter_shape_waits_for_the_longer_one() {
+    let mut session = Session::new(Vec::new());
+    session.defaults.prompt = PromptLearner::learning(["<20hp> ", "<20hp> <30mv> "]);
+    session.push("<9hp> ");
+    assert!(session.read.is_empty(), "ended at the shorter shape");
+    session.push("<1mv> ");
+    assert_eq!(
+        session.read.last().unwrap(),
+        &("<9hp> <1mv> ".to_owned(), Some("<9hp> <1mv> ".len()))
+    );
+}
+
+/// Learned once with output glued on, the prompt still leaves that output to
+/// be read once the bare prompt is seen.
 #[test]
 fn a_bare_prompt_wins_over_one_learned_with_output_glued() {
     let mut session = Session::new(Vec::new());
-    session.defaults.prompt = PromptLearner::learning(["(110h-125m-170v-568)> You are carrying:"]);
+    session.defaults.prompt = PromptLearner::learning(["<20hp 30mv> You are carrying:"]);
     session.vitals();
-    session.push("(110h-125m-170v-568)> ");
+    session.push("<20hp 30mv> ");
     session.gmcp("Char.Status");
     assert_eq!(
         session
             .defaults
             .prompt
-            .prefix_len("(9h-1m-1v-1)> You are carrying:"),
-        Some("(9h-1m-1v-1)> ".len())
+            .prefix_len("<9hp 1mv> You are carrying:"),
+        Some("<9hp 1mv> ".len())
     );
 }
 
 #[test]
 fn leaves_other_text_alone() {
-    let learner =
-        PromptLearner::learning(["(110h-125m-120v-1062)> ", "(AFK) (110h-125m-170v-568)> "]);
-    for line in [
-        "(Humming) a wooden staff",
-        "(Glowing) a ring",
-        "You are carrying:",
-    ] {
+    let learner = PromptLearner::learning(["<20hp 30mv> ", "(AFK) <20hp 30mv> "]);
+    for line in ["(Humming) a staff", "(Glowing) a ring", "You are carrying:"] {
         assert_eq!(learner.prefix_len(line), None, "{line}");
     }
 }

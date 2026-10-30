@@ -5,18 +5,25 @@
 //! [`Shape`] with a slot for each number, and later prompts match it
 //! whatever their numbers. Ported from the prototype's `GamePrompt`.
 //!
-//! What follows a `Char.Vitals` isn't always a whole, bare prompt:
+//! A prompt is learned only at a **prompt signal**, which shows the server
+//! finished writing it: its line ended by GA or EOR, by the connection going
+//! quiet, or the next GMCP message arriving. So:
 //!
 //! - **The network can split a prompt across reads.** The half that came
-//!   first is pending text that later grows with the same line number. It
-//!   is never learned: a prompt is learned only once it's known to be
-//!   whole, when its line ends, or when a GA or the next GMCP message
-//!   shows the server finished writing it.
-//! - **Output can be glued onto a prompt** on servers that send no GA.
-//!   Such a line is learned whole, but each shape is counted, the most seen
-//!   is tried first, and ties go to the shortest, so a bare prompt wins.
-//!   When the store is full, the rarest shape goes, ties going to the
-//!   longest, so a stream of glued lines can't push out a real prompt.
+//!   first is only pending text, and it's never learned.
+//! - **Output can be glued onto a prompt** on servers that send no GA, with
+//!   no signal between them. That line ends at a newline, so it's never
+//!   learned: the learner waits for the next signal.
+//! - **Text already pending when `Char.Vitals` arrives** came before it, so
+//!   only what follows it on that line is the prompt.
+//!
+//! A game with no GMCP sends no `Char.Vitals`. A line ended at a signal is
+//! learned there if it holds a number and its shape comes twice running, so
+//! a line that merely stalled isn't taken for a prompt.
+//!
+//! Each shape is counted and the most seen is tried first, ties going to the
+//! shortest. When the store is full, the rarest shape goes, ties going to
+//! the longest.
 
 use crate::line::{Line, LineEnd, Pending};
 
@@ -27,23 +34,22 @@ const MOST_SHAPES: usize = 20;
 pub struct PromptLearner {
     /// Most seen first; ties shortest first.
     shapes: Vec<Shape>,
-    awaiting: Awaiting,
-    /// Lines read: the number of the line in progress.
-    lines_read: u64,
-    /// The line in progress has pending text that isn't blank.
-    pending_seen: bool,
+    /// Set from a `Char.Vitals` until the prompt after it is learned.
+    awaited: Option<AwaitedPrompt>,
+    /// The pending text's length, as of the last read.
+    pending_len: usize,
+    /// The shape of the last line ended at a signal with no `Char.Vitals`
+    /// before it.
+    last_signaled: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default)]
-enum Awaiting {
-    #[default]
-    Nothing,
-    /// A `Char.Vitals` arrived: the next text is a prompt, on the line with
-    /// this number or a later one. Text already pending when it arrived
-    /// came before it, so it isn't the prompt.
-    Prompt { from: u64 },
-    /// The prompt is pending, this much of it so far. It may still grow.
-    Pending { text: String },
+/// What's known of the prompt a `Char.Vitals` announced.
+#[derive(Debug)]
+struct AwaitedPrompt {
+    /// Bytes of the line in progress that came before the `Char.Vitals`.
+    before: usize,
+    /// What's pending after them, so far. It may still grow.
+    text: String,
 }
 
 impl PromptLearner {
@@ -59,16 +65,22 @@ impl PromptLearner {
     /// A `Char.Vitals` arrived: the next text is a prompt.
     pub fn vitals_arrived(&mut self) {
         self.gmcp_arrived();
-        self.awaiting = Awaiting::Prompt {
-            from: self.lines_read + u64::from(self.pending_seen),
-        };
+        self.awaited = Some(AwaitedPrompt {
+            before: self.pending_len,
+            text: String::new(),
+        });
     }
 
     /// Any GMCP message arrived. The server writes in order, so a prompt
     /// still pending is whole.
     pub fn gmcp_arrived(&mut self) {
-        if let Awaiting::Pending { text } = std::mem::take(&mut self.awaiting) {
-            self.learn(&text);
+        if self
+            .awaited
+            .as_ref()
+            .is_some_and(|awaited| !awaited.text.is_empty())
+            && let Some(awaited) = self.awaited.take()
+        {
+            self.learn(&awaited.text);
         }
     }
 
@@ -76,39 +88,37 @@ impl PromptLearner {
     /// whether it is a prompt already learned, which the caller ends with
     /// `LinePipeline::prompt_end`.
     pub fn read_pending(&mut self, pending: &Pending<'_>) -> bool {
-        self.pending_seen = !is_blank(pending.plain);
-        let awaiting = match self.awaiting {
-            Awaiting::Nothing => false,
-            Awaiting::Prompt { from } => pending.number >= from,
-            Awaiting::Pending { .. } => true,
-        };
-        if awaiting && !is_blank(pending.plain) {
-            self.awaiting = Awaiting::Pending {
-                text: pending.plain.to_owned(),
-            };
+        self.pending_len = pending.plain.len();
+        if let Some(awaited) = &mut self.awaited
+            && let Some(prompt) = pending.plain.get(awaited.before..)
+            && !is_blank(prompt)
+        {
+            prompt.clone_into(&mut awaited.text);
         }
         self.is_whole_prompt(pending.plain)
     }
 
-    /// A finished line; read every one, in order. Learns it if it's the
-    /// prompt being awaited (a pending prompt that grew into this line
-    /// included), and returns how many bytes of its plain text a prompt
-    /// takes up at its start.
+    /// A finished line; read every one, in order. Learns it if it ended at
+    /// a prompt signal, and returns how many bytes of its plain text a
+    /// prompt takes up at its start.
     pub fn read_line(&mut self, line: &Line) -> Option<usize> {
-        let number = self.lines_read;
-        self.lines_read += 1;
-        self.pending_seen = false;
+        self.pending_len = 0;
         let text = line.plain();
-        if !is_blank(text) {
-            match std::mem::take(&mut self.awaiting) {
-                Awaiting::Nothing => {}
-                Awaiting::Prompt { from } if number < from => {
-                    self.awaiting = Awaiting::Prompt { from }
-                }
-                Awaiting::Prompt { .. } | Awaiting::Pending { .. } => {
-                    self.learn_line(text, line.end())
+        let at_signal = line.end() == LineEnd::PromptEnd;
+        match self.awaited.take() {
+            Some(awaited) => {
+                let prompt = text.get(awaited.before..).unwrap_or_default();
+                if at_signal && !is_blank(prompt) {
+                    self.learn(prompt);
+                } else {
+                    self.awaited = Some(AwaitedPrompt {
+                        before: 0,
+                        text: String::new(),
+                    });
                 }
             }
+            None if at_signal => self.learn_if_repeated(text),
+            None => {}
         }
         self.prefix_len(text)
     }
@@ -127,27 +137,28 @@ impl PromptLearner {
     }
 
     /// Whether `text` is all prompt. A prompt that ends in a number isn't
-    /// trusted here: the network may have cut that number short.
+    /// trusted here: the network may have cut that number short. Nor is a
+    /// shorter prompt while a longer one could still grow from `text`.
     fn is_whole_prompt(&self, text: &str) -> bool {
         self.shapes.iter().any(|shape| {
             shape.pieces.last().is_some_and(|last| !last.is_empty())
                 && shape.prefix_len(text) == Some(text.len())
-        })
+        }) && !self.shapes.iter().any(|shape| shape.could_grow_from(text))
     }
 
-    /// A line ended by GA is a whole prompt. A line ended by a newline may
-    /// have output glued on: if a known prompt opens it, that one is seen
-    /// again, and otherwise the line is learned whole.
-    fn learn_line(&mut self, text: &str, end: LineEnd) {
-        let known = (end != LineEnd::PromptEnd).then(|| {
-            self.shapes
-                .iter()
-                .position(|shape| shape.prefix_len(text).is_some())
-        });
-        match known.flatten() {
-            Some(index) => self.seen_again(index),
-            None => self.learn(text),
+    /// Learns a line that ended at a signal on a server sending no
+    /// `Char.Vitals`, once its shape comes twice running. It must hold a
+    /// number: "Password: " is no prompt to learn.
+    fn learn_if_repeated(&mut self, text: &str) {
+        let pieces = Shape::new(text).pieces;
+        if pieces.len() < 2 {
+            return;
         }
+        let known = self.shapes.iter().any(|shape| shape.pieces == pieces);
+        if known || self.last_signaled.as_ref() == Some(&pieces) {
+            self.learn(text);
+        }
+        self.last_signaled = Some(pieces);
     }
 
     fn learn(&mut self, prompt: &str) {
@@ -234,6 +245,25 @@ impl Shape {
         }
         Some(at)
     }
+
+    /// Whether `text` is this prompt's start, with more of it to come.
+    fn could_grow_from(&self, text: &str) -> bool {
+        let mut rest = text;
+        for (index, piece) in self.pieces.iter().enumerate() {
+            if index > 0 {
+                rest = &rest[number_len(rest).unwrap_or(0)..];
+                if rest.is_empty() {
+                    return true;
+                }
+            }
+            match rest.strip_prefix(piece.as_str()) {
+                Some("") => return index + 1 < self.pieces.len(),
+                Some(after) => rest = after,
+                None => return piece.starts_with(rest),
+            }
+        }
+        false
+    }
 }
 
 /// The first number in `text`, `-?[0-9]+`, as a byte range.
@@ -264,13 +294,26 @@ mod tests {
 
     #[test]
     fn a_shape_has_a_slot_for_each_number() {
-        let shape = Shape::new("(110h-125m-120v-1062)");
+        let shape = Shape::new("(20h-30m-40v-500)");
         assert_eq!(shape.pieces, ["(", "h", "m", "v", ")"]);
         assert_eq!(
             shape.prefix_len("(-9h-2m-0v-1)rest"),
             Some("(-9h-2m-0v-1)".len())
         );
         assert_eq!(shape.prefix_len("(9h-m-0v-1)"), None);
+    }
+
+    #[test]
+    fn a_shape_can_tell_what_could_still_grow_into_it() {
+        let shape = Shape::new("(1h) (2m) ");
+        for start in [
+            "", "(", "(1", "(1h", "(1h) ", "(1h) (", "(1h) (2", "(1h) (2m",
+        ] {
+            assert!(shape.could_grow_from(start), "{start:?}");
+        }
+        for other in ["(1h) (2m) ", "(1h) (2m) x", "(1x", "x"] {
+            assert!(!shape.could_grow_from(other), "{other:?}");
+        }
     }
 
     #[test]

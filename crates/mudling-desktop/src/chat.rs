@@ -15,7 +15,7 @@ use gpui::{
     StyledText, UniformListScrollHandle, Window, div, point, prelude::*, px, uniform_list,
 };
 use mudling_core::replay::ReplayFeed;
-use mudling_core::{AnsiParser, Line, LineKind, Scrollback};
+use mudling_core::{Line, LineKind, LinePipeline, Scrollback};
 use std::ops::Range;
 
 const LINE_HEIGHT: Pixels = px(20.);
@@ -36,7 +36,7 @@ const ANNOUNCED_LINES: usize = 5;
 
 pub struct Chat {
     scrollback: Scrollback,
-    parser: AnsiParser,
+    pipeline: LinePipeline,
     scroll: UniformListScrollHandle,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
@@ -46,7 +46,7 @@ impl Chat {
     pub fn new(capacity: usize) -> Chat {
         Chat {
             scrollback: Scrollback::with_capacity(capacity),
-            parser: AnsiParser::default(),
+            pipeline: LinePipeline::default(),
             scroll: UniformListScrollHandle::new(),
             unannounced: Vec::new(),
             announcement: None,
@@ -56,20 +56,30 @@ impl Chat {
     /// Loads history without announcing it, as on reconnecting to a session.
     pub fn load_history(&mut self, feed: &mut ReplayFeed, lines: usize) {
         for _ in 0..lines {
-            let line = self.parser.parse_line(feed.next_line());
-            self.scrollback.push(line);
+            for line in self.finish_line(feed.next_line()) {
+                self.scrollback.push(line);
+            }
         }
     }
 
     /// Appends a server line and queues it for the live region.
     pub fn push_server_line(&mut self, raw: &str, cx: &mut Context<Chat>) {
-        let line = self.parser.parse_line(raw);
-        if self.unannounced.len() == ANNOUNCED_LINES {
-            self.unannounced.remove(0);
+        for line in self.finish_line(raw) {
+            if self.unannounced.len() == ANNOUNCED_LINES {
+                self.unannounced.remove(0);
+            }
+            self.unannounced
+                .push(SharedString::from(line.plain().to_owned()));
+            self.push(line, cx);
         }
-        self.unannounced
-            .push(SharedString::from(line.text.to_string()));
-        self.push(line, cx);
+    }
+
+    /// `raw` as finished lines: one, or more if it passed the pipeline's cap.
+    fn finish_line(&mut self, raw: &str) -> Vec<Line> {
+        let mut lines = Vec::new();
+        self.pipeline.push(raw.as_bytes(), &mut lines);
+        self.pipeline.push(b"\n", &mut lines);
+        lines
     }
 
     /// Echoes a command the player sent. It isn't announced: the player
@@ -87,7 +97,7 @@ impl Chat {
         let newest = self.scrollback.len().checked_sub(1)?;
         self.scrollback
             .get(newest)
-            .map(|line| line.text.to_string())
+            .map(|line| line.plain().to_owned())
     }
 
     fn push(&mut self, line: Line, cx: &mut Context<Chat>) {
@@ -149,8 +159,8 @@ impl Chat {
 }
 
 fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
-    let text = SharedString::from(line.text.to_string());
-    let highlights = line.spans.iter().map(|span| {
+    let text = SharedString::from(line.plain().to_owned());
+    let highlights = line.styled().iter().map(|span| {
         let style = HighlightStyle {
             color: span.style.fg.map(|c| theme.ansi(c)),
             background_color: span.style.bg.map(|c| theme.ansi(c)),
@@ -168,7 +178,7 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
         .w_full()
         .overflow_hidden()
         .whitespace_nowrap()
-        .when(line.kind == LineKind::Command, |line| {
+        .when(line.kind() == LineKind::Command, |line| {
             line.text_color(theme.command)
         })
         .child(styled)
@@ -259,7 +269,7 @@ mod tests {
     fn top_line(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> String {
         chat.read_with(cx, |chat, _| {
             let top = (-chat.scroll_offset().y / LINE_HEIGHT).round() as usize;
-            chat.scrollback.get(top).unwrap().text.to_string()
+            chat.scrollback.get(top).unwrap().plain().to_owned()
         })
     }
 
@@ -308,7 +318,7 @@ mod tests {
         let reading = chat.update(cx, |chat, cx| {
             chat.scroll_back(LINE_HEIGHT * 200., cx);
             let top = (-chat.scroll_offset().y / LINE_HEIGHT).round() as usize;
-            let reading = chat.scrollback.get(top).unwrap().text.to_string();
+            let reading = chat.scrollback.get(top).unwrap().plain().to_owned();
             // No frame runs between the scroll and these lines.
             (0..10).for_each(|n| chat.push_server_line(&format!("new {n}"), cx));
             reading
