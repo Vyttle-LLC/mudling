@@ -35,6 +35,7 @@ pub(super) struct Worker {
     pub key: Option<VaultKey>,
     pub idle_deadline: Option<SystemTime>,
     pub state: watch::Sender<VaultState>,
+    pub now: fn() -> SystemTime,
 }
 
 impl Worker {
@@ -46,23 +47,34 @@ impl Worker {
     }
 
     /// Waits for a job, locking the vault first if the idle timer runs out.
-    fn next_job(&mut self, jobs: &Receiver<Job>) -> Option<Job> {
+    /// A job can end the wait before the clock check does, so an expired
+    /// vault is locked again here, or the job would renew its timer.
+    pub(super) fn next_job(&mut self, jobs: &Receiver<Job>) -> Option<Job> {
         loop {
+            self.lock_if_expired();
             let Some(deadline) = self.idle_deadline else {
                 return jobs.recv().ok();
             };
             let remaining = deadline
-                .duration_since(SystemTime::now())
+                .duration_since((self.now)())
                 .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                self.lock();
-                continue;
-            }
             match jobs.recv_timeout(remaining.min(CLOCK_CHECK)) {
-                Ok(job) => return Some(job),
+                Ok(job) => {
+                    self.lock_if_expired();
+                    return Some(job);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return None,
             }
+        }
+    }
+
+    fn lock_if_expired(&mut self) {
+        if self
+            .idle_deadline
+            .is_some_and(|deadline| (self.now)() >= deadline)
+        {
+            self.lock();
         }
     }
 
@@ -96,10 +108,7 @@ impl Worker {
     }
 
     fn restart_idle_timer(&mut self) {
-        self.idle_deadline = self
-            .auto_lock
-            .duration()
-            .map(|idle| SystemTime::now() + idle);
+        self.idle_deadline = self.auto_lock.duration().map(|idle| (self.now)() + idle);
     }
 
     fn read(&self) -> Result<VaultFile, Error> {

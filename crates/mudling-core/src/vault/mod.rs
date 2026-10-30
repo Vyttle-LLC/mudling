@@ -59,7 +59,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{oneshot, watch};
 use worker::{Job, Worker};
 
@@ -164,6 +164,7 @@ impl Vault {
             key: None,
             idle_deadline: None,
             state: state_sender,
+            now: SystemTime::now,
         };
         thread::Builder::new()
             .name("mudling-vault".into())

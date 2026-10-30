@@ -661,6 +661,40 @@ async fn time_asleep_counts_towards_the_idle_timer() {
     assert_eq!(vault.state(), VaultState::Locked);
 }
 
+/// The machine sleeps while the thread waits: the deadline is still ahead when
+/// the wait starts, and has passed by the time a job wakes it.
+#[tokio::test]
+async fn a_job_that_wakes_the_thread_after_sleep_finds_the_vault_locked() {
+    static CLOCK_READS: AtomicUsize = AtomicUsize::new(0);
+    fn clock_jumping_after_first_read() -> SystemTime {
+        match CLOCK_READS.fetch_add(1, Ordering::Relaxed) {
+            0 => UNIX_EPOCH,
+            _ => UNIX_EPOCH + Duration::from_secs(8 * 60 * 60),
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.created().await;
+    let (state, _watching) = watch::channel(VaultState::Unlocked);
+    let mut worker = Worker {
+        path: fixture.path.clone(),
+        key_store: fixture.key_store.clone(),
+        kdf: CHEAP_KDF,
+        auto_lock: AutoLock::FIVE_MINUTES,
+        key: Some(VaultKey::generate()),
+        idle_deadline: Some(UNIX_EPOCH + Duration::from_secs(5 * 60)),
+        state,
+        now: clock_jumping_after_first_read,
+    };
+    let (jobs, inbox) = mpsc::channel::<Job>();
+    jobs.send(Box::new(|_| {})).unwrap();
+
+    assert!(worker.next_job(&inbox).is_some());
+
+    assert!(worker.key.is_none());
+    assert_eq!(*worker.state.borrow(), VaultState::Locked);
+}
+
 #[test]
 fn auto_lock_offers_the_four_choices() {
     let choices = [
