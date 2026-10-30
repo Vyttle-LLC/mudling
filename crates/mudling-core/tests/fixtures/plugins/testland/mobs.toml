@@ -1,0 +1,7 @@
+[[aggro]]
+name = "aggro"
+pattern = '''^(?<mob>.+) lunges at you!$'''
+
+[[room_title]]
+name = "mob.name"
+pattern = '''^The lair of (?<name>.+)$'''

@@ -1,0 +1,13 @@
+[pager]
+prompt = '''--More--$'''
+
+[[prompt]]
+pattern = '''^<\d+hp> $'''
+
+[[pattern]]
+name = "say"
+pattern = '''^(?<who>\w+) says '(?<message>.*)'$'''
+
+[[color]]
+pattern = '''^Exits: .*$'''
+fg = 6

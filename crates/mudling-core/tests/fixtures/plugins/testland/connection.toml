@@ -1,0 +1,9 @@
+gmcp = ["Char 1", "Room 1"]
+
+[[login]]
+pattern = '''^What is your name\?'''
+send = "name"
+
+[[login]]
+pattern = '''^Password:'''
+send = "password"

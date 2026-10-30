@@ -1,0 +1,11 @@
+[pager]
+prompt = '''^\[Space for more\]$'''
+key = "c"
+
+[[pattern]]
+name = "friend.speaks"
+pattern = '''^Ana says '''
+
+[[color]]
+pattern = '''^\w+ says '''
+fg = 2

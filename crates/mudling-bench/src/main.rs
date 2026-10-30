@@ -10,9 +10,11 @@
 //! one parses a raw line and evicts the oldest), and finds over the full
 //! buffer: every match (the budget), and the first page of matches.
 //! `--check` exits non-zero when a budget is missed.
-//! It also times the line pipeline per line over the same text.
+//! It also times the line pipeline per line over the same text, and the
+//! plugin host with a synthetic set of 300 patterns.
 
 mod line_pipeline;
+mod plugin_host;
 
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::stats::Summary;
@@ -84,6 +86,7 @@ struct Report {
     append_within_budget: bool,
     find_within_budget: bool,
     line_pipeline: line_pipeline::Report,
+    plugin_host: plugin_host::Report,
 }
 
 fn main() -> ExitCode {
@@ -116,9 +119,11 @@ fn main() -> ExitCode {
     };
 
     let line_pipeline = line_pipeline::run(&lines);
-    let report = run(source, ReplayFeed::new(lines), line_pipeline);
+    let plugin_host = plugin_host::run(&lines);
+    let report = run(source, ReplayFeed::new(lines), line_pipeline, plugin_host);
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
+    plugin_host::print(&report.plugin_host);
     if let Some(path) = &options.json {
         let json = serde_json::to_string_pretty(&report).expect("the report serializes");
         if let Err(error) = std::fs::write(path, json) {
@@ -129,7 +134,8 @@ fn main() -> ExitCode {
     if options.check
         && !(report.append_within_budget
             && report.find_within_budget
-            && report.line_pipeline.within_budget)
+            && report.line_pipeline.within_budget
+            && report.plugin_host.within_budget)
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
@@ -155,7 +161,12 @@ fn parse_options() -> Result<Options, String> {
     Ok(options)
 }
 
-fn run(source: String, mut feed: ReplayFeed, line_pipeline: line_pipeline::Report) -> Report {
+fn run(
+    source: String,
+    mut feed: ReplayFeed,
+    line_pipeline: line_pipeline::Report,
+    plugin_host: plugin_host::Report,
+) -> Report {
     let mut parser = AnsiParser::default();
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
     let fill_started = Instant::now();
@@ -208,6 +219,7 @@ fn run(source: String, mut feed: ReplayFeed, line_pipeline: line_pipeline::Repor
         append_budget_us: APPEND_BUDGET_US,
         find_budget_us: FIND_BUDGET_US,
         line_pipeline,
+        plugin_host,
     }
 }
 

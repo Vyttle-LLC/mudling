@@ -1,0 +1,15 @@
+# A synthetic player override for one Testland server.
+id = "local-override"
+name = "My Testland tweaks"
+version = "0.0.1"
+api = 1
+license = "MIT"
+layer = "override"
+encoding = "utf-8"
+
+[servers]
+hosts = ["mud.testland.example"]
+
+[points]
+commands = "commands.toml"
+text = "text.toml"

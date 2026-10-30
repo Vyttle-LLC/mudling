@@ -10,7 +10,11 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "1.1"
 memchr = "2.7"
+regex = "1.12"
+regex-automata = "0.4"
+regex-syntax = "0.8"
 serde.workspace = true
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 
 [lints]
 workspace = true

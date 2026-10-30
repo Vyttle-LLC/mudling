@@ -1,0 +1,11 @@
+# A synthetic default plugin: on for every server.
+id = "synthetic-defaults"
+name = "Synthetic defaults"
+version = "0.1.0"
+api = 1
+license = "MIT"
+layer = "default"
+
+[points]
+text = "text.toml"
+map = "map.toml"

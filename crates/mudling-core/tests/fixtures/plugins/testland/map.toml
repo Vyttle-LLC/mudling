@@ -1,0 +1,9 @@
+room_identity = "gmcp"
+mazes = ["The Hedge"]
+
+[areas]
+"7" = "The Hedge"
+
+[[failed_move]]
+name = "blocked"
+pattern = '''^You can't go that way\.$'''
