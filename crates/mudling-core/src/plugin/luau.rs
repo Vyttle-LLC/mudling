@@ -32,9 +32,11 @@
 //! `print`, so no file or network access. Its memory is capped.
 //!
 //! **Time boxes.** Every hook call gets an instruction budget, counted by
-//! Luau's interrupt (about one tick per loop iteration or function call),
-//! and a limit on the CPU time its thread spends, for hooks whose ticks are
-//! slow (big string work, say). CPU time, not wall-clock time, so a hook
+//! Luau's interrupt: about one tick per loop iteration or function call, and
+//! one per step of a `string` pattern match (`match`, `find`, `gmatch`,
+//! `gsub`), so a long match spends ticks too. There's also a limit on the
+//! CPU time its thread spends, for hooks whose ticks are slow (big string
+//! work, say). CPU time, not wall-clock time, so a hook
 //! isn't charged while its thread is preempted, the app is suspended, or a
 //! [`StateView`] read blocks. A hook past either, or its memory cap, is
 //! stopped; a plugin whose hooks overrun [`OVERRUNS_TO_TURN_OFF`] times in a
@@ -468,16 +470,8 @@ impl Vm {
             problem: Problem::LuauSetup(error.to_string()),
         })?;
         for script in &plugin.scripts {
-            // Compiling isn't the plugin's code running, so only running counts.
-            let chunk = lua
-                .load(&*script.source)
-                .set_name(format!("={}", script.file))
-                .into_function();
-            let ran = chunk.and_then(|chunk| {
-                meter.start(limits);
-                chunk.call::<()>(())
-            });
-            ran.map_err(|error| invalid(&script.file, error))?;
+            load_script(&lua, &meter, limits, script)
+                .map_err(|error| invalid(&script.file, error))?;
         }
         Ok(Vm {
             plugin: id,
@@ -534,6 +528,17 @@ impl Vm {
             (overran, error.to_string())
         })
     }
+}
+
+/// Compiles a hook file, then runs it inside the time box. Compiling isn't
+/// the plugin's code running, so the box starts only once it's done.
+fn load_script(lua: &Lua, meter: &Meter, limits: HookLimits, script: &Script) -> mlua::Result<()> {
+    let chunk = lua
+        .load(&*script.source)
+        .set_name(format!("={}", script.file))
+        .into_function()?;
+    meter.start(limits);
+    chunk.call(())
 }
 
 /// Every hook a plugin's points name. The structs are taken apart field by
@@ -981,5 +986,32 @@ impl<S: HookSink> HookSink for TurnOff<S> {
             let _ = self.turned_off.send(disabled.plugin.clone());
         }
         self.sink.output(output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn script(source: &str) -> Script {
+        Script {
+            file: "hooks.luau".into(),
+            source: source.into(),
+        }
+    }
+
+    /// The box starts only once a file has compiled, however long that
+    /// took: a file that doesn't compile never starts it.
+    #[test]
+    fn compiling_a_hook_file_isnt_charged_to_its_time_box() {
+        let lua = Lua::new();
+        let meter = Meter::new();
+        let limits = HookLimits::default();
+
+        assert!(load_script(&lua, &meter, limits, &script("function (")).is_err());
+        assert_eq!(meter.left.get(), 0, "the box started before compiling");
+
+        load_script(&lua, &meter, limits, &script("loaded = true")).unwrap();
+        assert!(meter.left.get() > 0, "the box never started");
     }
 }
