@@ -110,14 +110,24 @@ impl Pattern {
         let regex = meta::Regex::builder()
             .configure(meta::Config::new().onepass(false))
             .build(source)
-            .map_err(|error| PatternError(error.syntax_error().map_or_else(|| error.to_string(), ToString::to_string)))?;
+            .map_err(|error| {
+                PatternError(
+                    error
+                        .syntax_error()
+                        .map_or_else(|| error.to_string(), ToString::to_string),
+                )
+            })?;
         let names = regex
             .group_info()
             .pattern_names(PatternID::ZERO)
             .enumerate()
             .filter_map(|(group, name)| Some((Arc::from(name?), group)))
             .collect();
-        Ok(Pattern { source: source.into(), regex, names })
+        Ok(Pattern {
+            source: source.into(),
+            regex,
+            names,
+        })
     }
 
     pub fn as_str(&self) -> &str {
@@ -138,7 +148,11 @@ impl Pattern {
                 .iter()
                 .filter_map(|(name, group)| {
                     let span = found.get_group(*group)?;
-                    Some(Capture { name: name.clone(), start: span.start as u32, end: span.end as u32 })
+                    Some(Capture {
+                        name: name.clone(),
+                        start: span.start as u32,
+                        end: span.end as u32,
+                    })
                 })
                 .collect()
         })
@@ -146,12 +160,19 @@ impl Pattern {
 
     /// The index of the named group.
     pub(crate) fn group(&self, name: &str) -> Option<usize> {
-        self.names.iter().find(|(group, _)| &**group == name).map(|(_, index)| *index)
+        self.names
+            .iter()
+            .find(|(group, _)| &**group == name)
+            .map(|(_, index)| *index)
     }
 
     /// The byte range of `group` (0 is the whole match) in every match in
     /// `text`, skipping matches it took no part in.
-    pub(crate) fn spans<'a>(&'a self, text: &'a str, group: usize) -> impl Iterator<Item = (usize, usize)> + 'a {
+    pub(crate) fn spans<'a>(
+        &'a self,
+        text: &'a str,
+        group: usize,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
         self.regex
             .captures_iter(text)
             .filter_map(move |found| found.get_group(group).map(|span| (span.start, span.end)))
@@ -192,11 +213,15 @@ impl TryFrom<String> for EventName {
 
     fn try_from(name: String) -> Result<EventName, String> {
         let valid = !name.is_empty()
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
         if valid {
             Ok(EventName(name.into()))
         } else {
-            Err(format!("`{name}` isn't an event name: use letters, digits, `_`, `.` and `-`"))
+            Err(format!(
+                "`{name}` isn't an event name: use letters, digits, `_`, `.` and `-`"
+            ))
         }
     }
 }
@@ -218,7 +243,9 @@ impl TryFrom<String> for HookName {
 
     fn try_from(name: String) -> Result<HookName, String> {
         let mut chars = name.chars();
-        let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
         if valid {
             Ok(HookName(name.into()))
@@ -364,7 +391,11 @@ pub struct ColorRule {
 
 impl ColorRule {
     pub fn style(&self) -> Style {
-        Style { fg: self.fg.map(Color), bg: self.bg.map(Color), bold: self.bold }
+        Style {
+            fg: self.fg.map(Color),
+            bg: self.bg.map(Color),
+            bold: self.bold,
+        }
     }
 }
 
@@ -372,7 +403,10 @@ impl Text {
     pub(crate) fn validate(&self) -> Result<(), String> {
         for color in &self.colors {
             if color.style().is_plain() {
-                return Err(format!("the color rule `{}` sets no fg, bg or bold", color.pattern.as_str()));
+                return Err(format!(
+                    "the color rule `{}` sets no fg, bg or bold",
+                    color.pattern.as_str()
+                ));
             }
             if let Some(group) = &color.group
                 && color.pattern.group(group).is_none()
@@ -458,7 +492,11 @@ pub struct BackgroundCommand {
 impl Character {
     pub(crate) fn validate(&self) -> Result<(), String> {
         for command in &self.commands {
-            if !self.readers.iter().any(|reader| reader.name == command.reader) {
+            if !self
+                .readers
+                .iter()
+                .any(|reader| reader.name == command.reader)
+            {
                 return Err(format!(
                     "the command `{}` names the reader `{}`, which isn't declared",
                     command.command, command.reader
@@ -521,24 +559,46 @@ mod tests {
     use super::*;
 
     fn named(captures: &[Capture]) -> Vec<(&str, u32, u32)> {
-        captures.iter().map(|capture| (&*capture.name, capture.start, capture.end)).collect()
+        captures
+            .iter()
+            .map(|capture| (&*capture.name, capture.start, capture.end))
+            .collect()
     }
 
     #[test]
     fn captures_are_the_named_groups_that_took_part() {
-        let pattern = Pattern::new(r"^(?<who>\w+) (?:says|asks)(?<loud>!)? '(?<what>.*)'$").unwrap();
-        assert_eq!(named(&pattern.captures("Ana says 'hi'").unwrap()), [("who", 0, 3), ("what", 10, 12)]);
-        assert_eq!(named(&pattern.captures("Bo asks! 'why'").unwrap())[1], ("loud", 7, 8));
+        let pattern =
+            Pattern::new(r"^(?<who>\w+) (?:says|asks)(?<loud>!)? '(?<what>.*)'$").unwrap();
+        assert_eq!(
+            named(&pattern.captures("Ana says 'hi'").unwrap()),
+            [("who", 0, 3), ("what", 10, 12)]
+        );
+        assert_eq!(
+            named(&pattern.captures("Bo asks! 'why'").unwrap())[1],
+            ("loud", 7, 8)
+        );
         assert_eq!(pattern.captures("nothing"), None);
-        assert_eq!(Pattern::new("plain").unwrap().captures("a plain line").as_deref(), Some(&[][..]));
+        assert_eq!(
+            Pattern::new("plain")
+                .unwrap()
+                .captures("a plain line")
+                .as_deref(),
+            Some(&[][..])
+        );
     }
 
     #[test]
     fn spans_cover_every_match_of_a_group() {
         let pattern = Pattern::new(r"(?<n>\d+)(?<unit>h)?").unwrap();
         let unit = pattern.group("unit").unwrap();
-        assert_eq!(pattern.spans("10h 20m 30h", 0).collect::<Vec<_>>(), [(0, 3), (4, 6), (8, 11)]);
-        assert_eq!(pattern.spans("10h 20m 30h", unit).collect::<Vec<_>>(), [(2, 3), (10, 11)]);
+        assert_eq!(
+            pattern.spans("10h 20m 30h", 0).collect::<Vec<_>>(),
+            [(0, 3), (4, 6), (8, 11)]
+        );
+        assert_eq!(
+            pattern.spans("10h 20m 30h", unit).collect::<Vec<_>>(),
+            [(2, 3), (10, 11)]
+        );
         assert_eq!(pattern.group("missing"), None);
     }
 

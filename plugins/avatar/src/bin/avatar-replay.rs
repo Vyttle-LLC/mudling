@@ -15,8 +15,15 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const READERS: [Reader; 7] =
-    [Reader::Score, Reader::Practice, Reader::Slist, Reader::Affects, Reader::Equipment, Reader::Identify, Reader::Examine];
+const READERS: [Reader; 7] = [
+    Reader::Score,
+    Reader::Practice,
+    Reader::Slist,
+    Reader::Affects,
+    Reader::Equipment,
+    Reader::Identify,
+    Reader::Examine,
+];
 /// Unfinished reads quoted per log.
 const QUOTED: usize = 3;
 const QUOTE_CHARS: usize = 60;
@@ -78,7 +85,11 @@ impl Reader {
     /// another: practice's sessions line then its header; a shop's name
     /// line then its object.
     fn continues(self, event: &str) -> bool {
-        matches!((self, event), (Reader::Practice, "character.practice.start") | (Reader::Identify, "gear.identify.object"))
+        matches!(
+            (self, event),
+            (Reader::Practice, "character.practice.start")
+                | (Reader::Identify, "gear.identify.object")
+        )
     }
 }
 
@@ -114,7 +125,8 @@ impl Tally {
         self.unfinished[Tally::index(open.reader)] += 1;
         if self.quoted.len() < QUOTED {
             let line: String = open.first_line.chars().take(QUOTE_CHARS).collect();
-            self.quoted.push(format!("{} ({why}): {line}", open.reader.name()));
+            self.quoted
+                .push(format!("{} ({why}): {line}", open.reader.name()));
         }
     }
 }
@@ -132,7 +144,9 @@ impl Replay {
         for output in outputs {
             match output {
                 HookOutput::StoreWrite(write) => {
-                    let Some(reader) = Reader::finished_by(write) else { continue };
+                    let Some(reader) = Reader::finished_by(write) else {
+                        continue;
+                    };
                     let was_open = self.open.as_ref().is_some_and(|open| open.reader == reader);
                     // Other reads note slots too; only an open examine ends by one.
                     if reader != Reader::Examine || was_open {
@@ -142,17 +156,28 @@ impl Replay {
                         self.open = None;
                     }
                 }
-                HookOutput::HookFailed(_) | HookOutput::PluginDisabled(_) => self.tally.hook_failures += 1,
+                HookOutput::HookFailed(_) | HookOutput::PluginDisabled(_) => {
+                    self.tally.hook_failures += 1
+                }
                 HookOutput::SendCommand(_) => {}
             }
         }
         if let Some(reader) = Reader::started_by(name) {
-            let continuing = self.open.as_ref().is_some_and(|open| open.reader == reader && reader.continues(name));
+            let continuing = self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.reader == reader && reader.continues(name));
             if !continuing {
                 if let Some(open) = self.open.take() {
-                    self.tally.unfinished(open, &format!("interrupted by {}", reader.name()));
+                    self.tally
+                        .unfinished(open, &format!("interrupted by {}", reader.name()));
                 }
-                self.open = Some(Open { reader, first_line: event.line.plain().to_owned(), rows: false, paged: false });
+                self.open = Some(Open {
+                    reader,
+                    first_line: event.line.plain().to_owned(),
+                    rows: false,
+                    paged: false,
+                });
             }
         }
         match name {
@@ -161,7 +186,9 @@ impl Replay {
                     open.paged = true;
                 }
             }
-            name if Reader::started_by(name).is_none() && (name.ends_with(".row") || name.starts_with("gear.identify.")) => {
+            name if Reader::started_by(name).is_none()
+                && (name.ends_with(".row") || name.starts_with("gear.identify.")) =>
+            {
                 if let Some(open) = &mut self.open {
                     open.rows = true;
                     open.paged = false;
@@ -172,7 +199,11 @@ impl Replay {
         if name == "prompt"
             && let Some(open) = self.open.take()
         {
-            let why = if open.paged { "pager not answered" } else { "not finished by the prompt" };
+            let why = if open.paged {
+                "pager not answered"
+            } else {
+                "not finished by the prompt"
+            };
             self.tally.unfinished(open, why);
         }
     }
@@ -180,7 +211,10 @@ impl Replay {
 
 fn replay(log: &str) -> Tally {
     let mut session = Session::new();
-    let mut replay = Replay { tally: Tally::default(), open: None };
+    let mut replay = Replay {
+        tally: Tally::default(),
+        open: None,
+    };
     for line in replay::server_lines(log) {
         replay.tally.lines += 1;
         session.read_line(line, &mut |event, outputs| replay.observe(event, outputs));
@@ -214,12 +248,18 @@ fn main() -> ExitCode {
             }
         };
         let tally = replay(&String::from_utf8_lossy(&bytes));
-        let name = Path::new(path).file_name().map_or(path.clone(), |name| name.to_string_lossy().into_owned());
+        let name = Path::new(path)
+            .file_name()
+            .map_or(path.clone(), |name| name.to_string_lossy().into_owned());
         let mut row = format!("{name:<28} {:>7}", tally.lines);
         for count in tally.completed {
             write!(row, " {count:>8}").unwrap();
         }
-        println!("{row} {:>10} {:>6}", tally.unfinished.iter().sum::<usize>(), tally.hook_failures);
+        println!(
+            "{row} {:>10} {:>6}",
+            tally.unfinished.iter().sum::<usize>(),
+            tally.hook_failures
+        );
         for quoted in &tally.quoted {
             println!("    unfinished {quoted}");
         }
@@ -235,14 +275,25 @@ fn main() -> ExitCode {
     for count in total.completed {
         write!(row, " {count:>8}").unwrap();
     }
-    println!("{row} {:>10} {:>6}", total.unfinished.iter().sum::<usize>(), total.hook_failures);
+    println!(
+        "{row} {:>10} {:>6}",
+        total.unfinished.iter().sum::<usize>(),
+        total.hook_failures
+    );
     let unfinished: Vec<String> = READERS
         .iter()
         .zip(total.unfinished)
         .filter(|(_, count)| *count > 0)
         .map(|(reader, count)| format!("{} {count}", reader.name()))
         .collect();
-    println!("unfinished by table: {}", if unfinished.is_empty() { "none".to_owned() } else { unfinished.join(", ") });
+    println!(
+        "unfinished by table: {}",
+        if unfinished.is_empty() {
+            "none".to_owned()
+        } else {
+            unfinished.join(", ")
+        }
+    );
     println!(
         "pager prompts recognized: {}; {} logs in {:.1} s",
         total.pager_prompts,

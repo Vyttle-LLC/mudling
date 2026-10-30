@@ -8,7 +8,11 @@ use std::collections::BTreeMap;
 
 fn read(fixture: &str) -> Transcript {
     let transcript = Transcript::of(fixture);
-    assert!(transcript.problems().is_empty(), "{:?}", transcript.problems());
+    assert!(
+        transcript.problems().is_empty(),
+        "{:?}",
+        transcript.problems()
+    );
     transcript
 }
 
@@ -29,10 +33,20 @@ fn a_whole_prompt_is_recognized_and_half_of_one_is_not() {
         "(AFK) (110h-125m-120v-1062)(-/-)",
         "<46/46hp><116/116m><116/116mv>",
     ] {
-        assert_eq!(pending(&mut host, prompt), Some(PendingKind::Prompt), "{prompt}");
+        assert_eq!(
+            pending(&mut host, prompt),
+            Some(PendingKind::Prompt),
+            "{prompt}"
+        );
     }
     // A network read can split a prompt; the half isn't one.
-    for half in ["(271h-17", "(271h-170m-90v-1000)", "<46/46hp>", "(Magical) a ring", "<worn on finger>"] {
+    for half in [
+        "(271h-17",
+        "(271h-170m-90v-1000)",
+        "<46/46hp>",
+        "(Magical) a ring",
+        "<worn on finger>",
+    ] {
         assert_eq!(pending(&mut host, half), None, "{half}");
     }
 }
@@ -49,7 +63,13 @@ fn the_pager_continues_with_c() {
 fn area_names_drop_the_level_range_and_builder() {
     let transcript = read(include_str!("fixtures/map.txt"));
     let areas = transcript.events("map.area", &["low", "high", "name"]);
-    let area = |low: &str, high: &str, name: &str| vec![Some(low.to_owned()), Some(high.to_owned()), Some(name.to_owned())];
+    let area = |low: &str, high: &str, name: &str| {
+        vec![
+            Some(low.to_owned()),
+            Some(high.to_owned()),
+            Some(name.to_owned()),
+        ]
+    };
     assert_eq!(
         areas,
         [
@@ -64,8 +84,15 @@ fn area_names_drop_the_level_range_and_builder() {
 #[test]
 fn failed_moves_darkness_and_flees_are_map_events() {
     let transcript = read(include_str!("fixtures/map.txt"));
-    assert_eq!(transcript.events("map.flee", &["dir"]), [[Some("north".to_owned())]]);
-    assert_eq!(transcript.events("map.failed_move", &[]).len(), 2, "still fighting, and too exhausted");
+    assert_eq!(
+        transcript.events("map.flee", &["dir"]),
+        [[Some("north".to_owned())]]
+    );
+    assert_eq!(
+        transcript.events("map.failed_move", &[]).len(),
+        2,
+        "still fighting, and too exhausted"
+    );
     assert_eq!(transcript.events("map.darkness", &[]).len(), 1);
 }
 
@@ -85,12 +112,24 @@ fn a_room_title_gives_the_mob_name() {
     let plugin = load();
     let rule = &plugin.points.mobs.as_ref().unwrap().room_title[0];
     let name = |title: &str| {
-        let captures = rule.pattern.captures(title).unwrap_or_else(|| panic!("{title}"));
-        let capture = captures.iter().find(|capture| &*capture.name == "name").unwrap();
+        let captures = rule
+            .pattern
+            .captures(title)
+            .unwrap_or_else(|| panic!("{title}"));
+        let capture = captures
+            .iter()
+            .find(|capture| &*capture.name == "name")
+            .unwrap();
         title[capture.start as usize..capture.end as usize].to_owned()
     };
-    assert_eq!(name("(White Aura) A myconoid shaman is here, chanting."), "A myconoid shaman");
-    assert_eq!(name("(Flying) A pitch black wasp buzzes through the air, seeking new victims."), "A pitch black wasp buzzes through the air, seeking new victims");
+    assert_eq!(
+        name("(White Aura) A myconoid shaman is here, chanting."),
+        "A myconoid shaman"
+    );
+    assert_eq!(
+        name("(Flying) A pitch black wasp buzzes through the air, seeking new victims."),
+        "A pitch black wasp buzzes through the air, seeking new victims"
+    );
     assert_eq!(name("Sol the Healer is sleeping here."), "Sol the Healer");
     assert_eq!(name("Two guards are standing here."), "Two guards");
 }
@@ -98,21 +137,40 @@ fn a_room_title_gives_the_mob_name() {
 #[test]
 fn commands_go_one_per_line_with_the_games_verbs_and_doors() {
     let host = PluginHost::new([load()]).unwrap();
-    assert_eq!(host.settings().separator, None, "no separator: one command a line");
-    let (_, commands) = host.declared(|points| points.commands.as_ref()).next().unwrap();
-    let verbs: BTreeMap<&str, &str> = commands.verbs.iter().map(|(verb, word)| (verb.as_str(), word.as_str())).collect();
-    for verb in ["wear", "wield", "hold", "remove", "get", "put", "look", "examine", "kill", "flee", "cast"] {
+    assert_eq!(
+        host.settings().separator,
+        None,
+        "no separator: one command a line"
+    );
+    let (_, commands) = host
+        .declared(|points| points.commands.as_ref())
+        .next()
+        .unwrap();
+    let verbs: BTreeMap<&str, &str> = commands
+        .verbs
+        .iter()
+        .map(|(verb, word)| (verb.as_str(), word.as_str()))
+        .collect();
+    for verb in [
+        "wear", "wield", "hold", "remove", "get", "put", "look", "examine", "kill", "flee", "cast",
+    ] {
         assert_eq!(verbs.get(verb), Some(&verb), "{verb}");
     }
     assert_eq!(commands.doors["open"], "open {dir}");
     assert_eq!(commands.doors["unlock"], "unlock {dir}");
-    assert!(commands.speedwalk.is_none(), "the game has none; the client expands shorthand");
+    assert!(
+        commands.speedwalk.is_none(),
+        "the game has none; the client expands shorthand"
+    );
 }
 
 #[test]
 fn the_map_knows_rooms_by_description_and_its_maze() {
     let plugin = load();
     let map = plugin.points.map.as_ref().unwrap();
-    assert_eq!(map.room_identity, Some(mudling_core::plugin::points::RoomIdentity::Description));
+    assert_eq!(
+        map.room_identity,
+        Some(mudling_core::plugin::points::RoomIdentity::Description)
+    );
     assert_eq!(map.mazes, ["Brothers Grimm"]);
 }

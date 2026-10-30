@@ -7,7 +7,11 @@ use std::collections::HashMap;
 
 fn read(fixture: &str) -> Transcript {
     let transcript = Transcript::of(fixture);
-    assert!(transcript.problems().is_empty(), "{:?}", transcript.problems());
+    assert!(
+        transcript.problems().is_empty(),
+        "{:?}",
+        transcript.problems()
+    );
     transcript
 }
 
@@ -16,7 +20,9 @@ fn text(value: &str) -> Value {
 }
 
 fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
-    store.get(key).unwrap_or_else(|| panic!("no `{key}` in {store:?}"))
+    store
+        .get(key)
+        .unwrap_or_else(|| panic!("no `{key}` in {store:?}"))
 }
 
 #[test]
@@ -26,8 +32,8 @@ fn the_slots_are_the_games_fifteen_in_its_order() {
     assert_eq!(
         slots,
         &[
-            "light", "finger", "neck", "body", "head", "legs", "feet", "hands", "arms", "offhand", "about", "waist",
-            "wrist", "wield", "held"
+            "light", "finger", "neck", "body", "head", "legs", "feet", "hands", "arms", "offhand",
+            "about", "waist", "wrist", "wield", "held"
         ]
     );
 }
@@ -50,12 +56,15 @@ fn equipment_lists_every_row_in_order_empty_slots_included() {
     assert_eq!(
         slots,
         [
-            "light", "finger", "neck", "neck", "body", "head", "legs", "feet", "hands", "arms", "offhand", "about",
-            "waist", "wrist", "wrist", "wield", "held"
+            "light", "finger", "neck", "neck", "body", "head", "legs", "feet", "hands", "arms",
+            "offhand", "about", "waist", "wrist", "wrist", "wield", "held"
         ]
     );
     assert_eq!(rows[0].1, "", "an empty slot");
-    assert_eq!(rows[3].1, "(Glowing) a small necklace", "the item as the game shows it");
+    assert_eq!(
+        rows[3].1, "(Glowing) a small necklace",
+        "the item as the game shows it"
+    );
     assert_eq!(rows[10].1, "");
 
     // Each worn item's slot and command word, by its plain name.
@@ -64,25 +73,40 @@ fn equipment_lists_every_row_in_order_empty_slots_included() {
     assert_eq!(get(&gear, "slot.the red-eyed jewel"), &text("held"));
     assert_eq!(get(&gear, "keyword.an amulet of gorn"), &text("amulet"));
     assert_eq!(get(&gear, "keyword.the red-eyed jewel"), &text("jewel"));
-    assert_eq!(get(&gear, "keyword.the captain's silver sash"), &text("sash"), "never the possessive");
+    assert_eq!(
+        get(&gear, "keyword.the captain's silver sash"),
+        &text("sash"),
+        "never the possessive"
+    );
 
     // A gear message glued after the table's prompt is still read.
-    assert_eq!(transcript.events("gear.removed", &["item"]), [[Some("a pink ice ring".to_owned())]]);
+    assert_eq!(
+        transcript.events("gear.removed", &["item"]),
+        [[Some("a pink ice ring".to_owned())]]
+    );
 }
 
 #[test]
 fn a_possessive_is_the_command_word_only_when_nothing_else_is() {
-    let transcript = read("You are using:\n<worn about waist>  the captain's\n<held>  Nom's Crystal Lantern\n(1h-1m-1v-1)(-/-)");
+    let transcript = read(
+        "You are using:\n<worn about waist>  the captain's\n<held>  Nom's Crystal Lantern\n(1h-1m-1v-1)(-/-)",
+    );
     let gear = transcript.store("gear");
     assert_eq!(get(&gear, "keyword.the captain's"), &text("captain"));
-    assert_eq!(get(&gear, "keyword.nom's crystal lantern"), &text("lantern"));
+    assert_eq!(
+        get(&gear, "keyword.nom's crystal lantern"),
+        &text("lantern")
+    );
 }
 
 #[test]
 fn wear_remove_and_put_are_events_and_wearing_notes_the_slot() {
     let transcript = read(include_str!("fixtures/gear-messages.txt"));
-    let worn: Vec<String> =
-        transcript.events("gear.wore", &["item"]).into_iter().map(|captures| captures[0].clone().unwrap()).collect();
+    let worn: Vec<String> = transcript
+        .events("gear.wore", &["item"])
+        .into_iter()
+        .map(|captures| captures[0].clone().unwrap())
+        .collect();
     assert_eq!(
         worn,
         [
@@ -109,7 +133,10 @@ fn wear_remove_and_put_are_events_and_wearing_notes_the_slot() {
     ] {
         assert_eq!(get(&gear, &format!("slot.{item}")), &text(slot), "{item}");
     }
-    assert_eq!(transcript.events("gear.removed", &["item"]), [[Some("a round shield".to_owned())]]);
+    assert_eq!(
+        transcript.events("gear.removed", &["item"]),
+        [[Some("a round shield".to_owned())]]
+    );
     assert_eq!(
         transcript.events("gear.put", &["item", "container"]),
         [[Some("a rope belt".to_owned()), Some("a satchel".to_owned())]]
@@ -142,7 +169,10 @@ fn identify_splits_base_from_enchant() {
     assert_eq!(bracelet("base.ac"), Value::Number(-2.0));
     assert_eq!(bracelet("base.con"), Value::Number(1.0));
     assert_eq!(bracelet("base.str"), Value::Number(1.0));
-    assert_eq!(get(&transcript.store("gear"), "keywords.bear skin bracelet"), &text("black bear bracelet"));
+    assert_eq!(
+        get(&transcript.store("gear"), "keywords.bear skin bracelet"),
+        &text("black bear bracelet")
+    );
 
     // The spell's, glued to a prompt, doesn't; its enchant is apart.
     let amulet = |key: &str| identify.get(&format!("gorn amulet newbie.{key}")).cloned();

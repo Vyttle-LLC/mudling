@@ -8,7 +8,8 @@
 //! With logs, it replays their server text; without, it uses synthetic lines.
 //! It fills a 100,000-line scrollback, then times 100,000 more appends (each
 //! one parses a raw line and evicts the oldest), and finds over the full
-//! buffer. `--check` exits non-zero when a budget is missed.
+//! buffer: every match (the budget), and the first page of matches.
+//! `--check` exits non-zero when a budget is missed.
 //! It also times the line pipeline per line over the same text, and the
 //! plugin host with a synthetic set of 300 patterns, and Luau hook calls.
 //! Each `--plugin` folder is timed as one more plugin in the host.
@@ -34,7 +35,9 @@ const APPEND_BUDGET_US: f64 = 200.0;
 const FIND_BUDGET_US: f64 = 50_000.0;
 /// Common words, a phrase, and a word that never matches (a full scan).
 const FIND_NEEDLES: [&str; 4] = ["you", "north", "the guard", "xyzzy-absent"];
-const FIND_ROUNDS: usize = 10;
+const FIND_ROUNDS: usize = 25;
+/// What a Find panel shows first.
+const FIND_PAGE: usize = 500;
 
 /// Counts live heap bytes, so the report can say what 100,000 lines cost.
 struct CountingAllocator;
@@ -81,6 +84,7 @@ struct Report {
     scrollback_heap_mb: f64,
     append: Summary,
     find: Summary,
+    find_first_page: Summary,
     find_matches: Vec<(String, usize)>,
     append_budget_us: f64,
     find_budget_us: f64,
@@ -103,7 +107,10 @@ fn main() -> ExitCode {
         }
     };
     let (source, lines) = if options.logs.is_empty() {
-        ("synthetic".to_owned(), replay::synthetic_lines(SCROLLBACK_LINES + TIMED_APPENDS))
+        (
+            "synthetic".to_owned(),
+            replay::synthetic_lines(SCROLLBACK_LINES + TIMED_APPENDS),
+        )
     } else {
         match replay::load_logs(&options.logs) {
             Ok(lines) if !lines.is_empty() => (format!("{} log(s)", options.logs.len()), lines),
@@ -131,7 +138,14 @@ fn main() -> ExitCode {
             }
         }
     }
-    let report = run(source, ReplayFeed::new(lines), line_pipeline, plugin_host, luau_hooks, game_plugins);
+    let report = run(
+        source,
+        ReplayFeed::new(lines),
+        line_pipeline,
+        plugin_host,
+        luau_hooks,
+        game_plugins,
+    );
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
     plugin_host::print(&report.plugin_host);
@@ -145,10 +159,15 @@ fn main() -> ExitCode {
         }
     }
     if options.check
-        && !(report.append_within_budget && report.find_within_budget && report.line_pipeline.within_budget
+        && !(report.append_within_budget
+            && report.find_within_budget
+            && report.line_pipeline.within_budget
             && report.plugin_host.within_budget
             && report.luau_hooks.within_budget
-            && report.game_plugins.iter().all(|plugin| plugin.within_budget))
+            && report
+                .game_plugins
+                .iter()
+                .all(|plugin| plugin.within_budget))
     {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
@@ -157,13 +176,20 @@ fn main() -> ExitCode {
 }
 
 fn parse_options() -> Result<Options, String> {
-    let mut options = Options { check: false, json: None, logs: Vec::new(), plugins: Vec::new() };
+    let mut options = Options {
+        check: false,
+        json: None,
+        logs: Vec::new(),
+        plugins: Vec::new(),
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" => options.check = true,
             "--json" => options.json = Some(args.next().ok_or("--json needs a path")?),
-            "--plugin" => options.plugins.push(args.next().ok_or("--plugin needs a folder")?),
+            "--plugin" => options
+                .plugins
+                .push(args.next().ok_or("--plugin needs a folder")?),
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             _ => options.logs.push(arg),
         }
@@ -198,19 +224,24 @@ fn run(
     }
 
     let mut finds = Vec::with_capacity(FIND_NEEDLES.len() * FIND_ROUNDS);
+    let mut first_pages = Vec::with_capacity(FIND_NEEDLES.len() * FIND_ROUNDS);
     let mut find_matches = Vec::new();
     for needle in FIND_NEEDLES {
         let mut matches = 0;
         for _ in 0..FIND_ROUNDS {
             let started = Instant::now();
-            matches = std::hint::black_box(scrollback.find(needle)).len();
+            matches = std::hint::black_box(scrollback.find(needle, usize::MAX)).len();
             finds.push(started.elapsed());
+            let started = Instant::now();
+            std::hint::black_box(scrollback.find(needle, FIND_PAGE));
+            first_pages.push(started.elapsed());
         }
         find_matches.push((needle.to_owned(), matches));
     }
 
     let append = Summary::of(&appends).expect("appends were timed");
     let find = Summary::of(&finds).expect("finds were timed");
+    let find_first_page = Summary::of(&first_pages).expect("finds were timed");
     Report {
         source,
         source_lines: feed.source_len(),
@@ -221,6 +252,7 @@ fn run(
         find_within_budget: find.p99_us <= FIND_BUDGET_US,
         append,
         find,
+        find_first_page,
         find_matches,
         append_budget_us: APPEND_BUDGET_US,
         find_budget_us: FIND_BUDGET_US,
@@ -241,7 +273,10 @@ fn print_report(report: &Report) {
         "source: {} ({} lines); scrollback: {} lines",
         report.source, report.source_lines, report.scrollback_lines
     );
-    println!("fill: {:.1} ms; scrollback heap: {:.1} MB", report.fill_ms, report.scrollback_heap_mb);
+    println!(
+        "fill: {:.1} ms; scrollback heap: {:.1} MB",
+        report.fill_ms, report.scrollback_heap_mb
+    );
     println!(
         "append (parse + push + evict): p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",
         report.append.p50_us,
@@ -258,5 +293,10 @@ fn print_report(report: &Report) {
         report.find.max_us / 1e3,
         report.find_budget_us / 1e3,
         verdict(report.find_within_budget)
+    );
+    println!(
+        "find, first {FIND_PAGE} matches: p50 {:.2} ms, p99 {:.2} ms",
+        report.find_first_page.p50_us / 1e3,
+        report.find_first_page.p99_us / 1e3
     );
 }

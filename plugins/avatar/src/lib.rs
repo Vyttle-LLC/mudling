@@ -4,7 +4,9 @@
 //! hooks. The fixture tests and the log replay share it.
 
 use mudling_core::line::{Line, LinePipeline};
-use mudling_core::plugin::luau::{HookLimits, HookOutput, HookRunner, StateView, StoreWrite, Value};
+use mudling_core::plugin::luau::{
+    HookLimits, HookOutput, HookRunner, StateView, StoreWrite, Value,
+};
 use mudling_core::plugin::{PendingKind, Plugin, PluginEvent, PluginHost};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,7 +43,12 @@ impl Session {
         let mut hooks = HookRunner::new(HookLimits::default(), state);
         hooks.add(&plugin).unwrap_or_else(|error| panic!("{error}"));
         let host = PluginHost::new([plugin]).unwrap_or_else(|error| panic!("{error}"));
-        Session { pipeline: LinePipeline::default(), host, hooks, pager_prompts: 0 }
+        Session {
+            pipeline: LinePipeline::default(),
+            host,
+            hooks,
+            pager_prompts: 0,
+        }
     }
 
     /// Reads one line the server sent. As Avatar sends no GA, a line that
@@ -52,7 +59,11 @@ impl Session {
     pub fn read_line(&mut self, text: &str, observe: &mut impl FnMut(&PluginEvent, &[HookOutput])) {
         let mut lines = Vec::new();
         self.pipeline.push(text.as_bytes(), &mut lines);
-        match self.pipeline.pending().and_then(|pending| self.host.read_pending(&pending)) {
+        match self
+            .pipeline
+            .pending()
+            .and_then(|pending| self.host.read_pending(&pending))
+        {
             Some(PendingKind::Prompt) => lines.extend(self.pipeline.prompt_end()),
             Some(PendingKind::Pager { .. }) => {
                 self.pager_prompts += 1;
@@ -110,12 +121,18 @@ impl Transcript {
 
     /// Each key of `store` and the value it was last written.
     pub fn store(&self, store: &str) -> HashMap<String, Value> {
-        self.writes().filter(|write| write.store == store).map(|write| (write.key.clone(), write.value.clone())).collect()
+        self.writes()
+            .filter(|write| write.store == store)
+            .map(|write| (write.key.clone(), write.value.clone()))
+            .collect()
     }
 
     /// Every output that isn't a store write, such as a failed hook.
     pub fn problems(&self) -> Vec<&HookOutput> {
-        self.outputs.iter().filter(|output| !matches!(output, HookOutput::StoreWrite(_))).collect()
+        self.outputs
+            .iter()
+            .filter(|output| !matches!(output, HookOutput::StoreWrite(_)))
+            .collect()
     }
 
     /// The events named `name`, as the text of each of their `captures`.
@@ -123,7 +140,12 @@ impl Transcript {
         self.events
             .iter()
             .filter(|event| &*event.name == name)
-            .map(|event| captures.iter().map(|capture| event.capture(capture).map(str::to_owned)).collect())
+            .map(|event| {
+                captures
+                    .iter()
+                    .map(|capture| event.capture(capture).map(str::to_owned))
+                    .collect()
+            })
             .collect()
     }
 }

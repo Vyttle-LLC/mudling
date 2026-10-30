@@ -151,7 +151,10 @@ pub struct LinePipeline {
 
 impl LinePipeline {
     pub fn new(encoding: Encoding) -> Self {
-        LinePipeline { encoding, ..LinePipeline::default() }
+        LinePipeline {
+            encoding,
+            ..LinePipeline::default()
+        }
     }
 
     /// Changes the encoding from the next byte on. A UTF-8 code point still
@@ -254,7 +257,8 @@ impl LinePipeline {
             }
             Encoding::Latin1 => self.raw.extend(bytes.iter().map(|&byte| char::from(byte))),
         }
-        self.ansi.feed(&self.raw[start..], &mut self.plain, &mut self.styled);
+        self.ansi
+            .feed(&self.raw[start..], &mut self.plain, &mut self.styled);
     }
 
     /// Decodes as `String::from_utf8_lossy` does, except that a code point
@@ -285,7 +289,8 @@ impl LinePipeline {
         self.utf8_tail.clear();
         let start = self.raw.len();
         self.raw.push(char::REPLACEMENT_CHARACTER);
-        self.ansi.feed(&self.raw[start..], &mut self.plain, &mut self.styled);
+        self.ansi
+            .feed(&self.raw[start..], &mut self.plain, &mut self.styled);
     }
 
     fn finish(&mut self, end: LineEnd) -> Line {
@@ -317,7 +322,10 @@ mod tests {
             pipeline.push(chunk, &mut lines);
         }
         let plain = lines.iter().map(|line| line.plain().to_owned()).collect();
-        (plain, pipeline.pending().map(|pending| pending.plain.to_owned()))
+        (
+            plain,
+            pipeline.pending().map(|pending| pending.plain.to_owned()),
+        )
     }
 
     fn plain_lines(chunks: &[&[u8]]) -> (Vec<String>, Option<String>) {
@@ -334,7 +342,10 @@ mod tests {
     #[test]
     fn a_lone_carriage_return_is_dropped() {
         let (lines, _) = lines_and_pending(&[b"a\rb\r\n"]);
-        assert_eq!((lines.len(), lines[0].raw(), lines[0].plain()), (1, "ab", "ab"));
+        assert_eq!(
+            (lines.len(), lines[0].raw(), lines[0].plain()),
+            (1, "ab", "ab")
+        );
     }
 
     #[test]
@@ -381,7 +392,10 @@ mod tests {
                 "",
             ]
         );
-        assert_eq!(lines[0].raw(), "\x1b[1;31mWelcome\x1b(B\x1b[0m to Testland.");
+        assert_eq!(
+            lines[0].raw(),
+            "\x1b[1;31mWelcome\x1b(B\x1b[0m to Testland."
+        );
         assert_eq!(pending.unwrap().plain(), "(10h 20m) prompt");
     }
 
@@ -390,7 +404,11 @@ mod tests {
         let whole = lines_and_pending(&[STREAM]);
         for split in 0..=STREAM.len() {
             let (head, tail) = STREAM.split_at(split);
-            assert_eq!(lines_and_pending(&[head, tail]), whole, "split at byte {split}");
+            assert_eq!(
+                lines_and_pending(&[head, tail]),
+                whole,
+                "split at byte {split}"
+            );
         }
         let bytes: Vec<&[u8]> = STREAM.chunks(1).collect();
         assert_eq!(lines_and_pending(&bytes), whole, "one byte at a time");
@@ -399,12 +417,33 @@ mod tests {
     #[test]
     fn styles_are_spans_of_the_plain_text() {
         let (lines, pending) = lines_and_pending(&[STREAM]);
-        let bold_red = Style { fg: Some(Color(1)), bg: None, bold: true };
-        assert_eq!(lines[0].styled(), [Span { start: 0, end: 7, style: bold_red }]);
+        let bold_red = Style {
+            fg: Some(Color(1)),
+            bg: None,
+            bold: true,
+        };
+        assert_eq!(
+            lines[0].styled(),
+            [Span {
+                start: 0,
+                end: 7,
+                style: bold_red
+            }]
+        );
         assert!(lines[1].styled().is_empty());
         assert!(lines[0].links().is_empty());
-        let green = Style { fg: Some(Color(2)), ..Style::default() };
-        assert_eq!(pending.unwrap().styled(), [Span { start: 10, end: 16, style: green }]);
+        let green = Style {
+            fg: Some(Color(2)),
+            ..Style::default()
+        };
+        assert_eq!(
+            pending.unwrap().styled(),
+            [Span {
+                start: 10,
+                end: 16,
+                style: green
+            }]
+        );
     }
 
     #[test]
@@ -444,7 +483,10 @@ mod tests {
         let mut lines = Vec::new();
         pipeline.push(b"\x1b[32m(10h)\x1b[0m ", &mut lines);
         let prompt = pipeline.prompt_end().unwrap();
-        assert_eq!((prompt.plain(), prompt.end()), ("(10h) ", LineEnd::PromptEnd));
+        assert_eq!(
+            (prompt.plain(), prompt.end()),
+            ("(10h) ", LineEnd::PromptEnd)
+        );
         assert_eq!(pipeline.pending(), None);
         assert_eq!(pipeline.prompt_end(), None);
     }
@@ -473,8 +515,14 @@ mod tests {
     #[test]
     fn latin1_maps_each_byte_to_one_character() {
         let bytes: &[u8] = b"Caf\xe9 \xa9 \xc3\xa9\n";
-        assert_eq!(run(&mut LinePipeline::new(Encoding::Latin1), &[bytes]).0, ["Café © Ã©"]);
-        assert_eq!(run(&mut LinePipeline::new(Encoding::Utf8), &[bytes]).0, ["Caf\u{FFFD} \u{FFFD} é"]);
+        assert_eq!(
+            run(&mut LinePipeline::new(Encoding::Latin1), &[bytes]).0,
+            ["Café © Ã©"]
+        );
+        assert_eq!(
+            run(&mut LinePipeline::new(Encoding::Utf8), &[bytes]).0,
+            ["Caf\u{FFFD} \u{FFFD} é"]
+        );
     }
 
     #[test]
@@ -498,12 +546,25 @@ mod tests {
         let mut lines = Vec::new();
         for _ in 0..200 {
             pipeline.push(&[b'x'; 1000], &mut lines);
-            assert!(pipeline.pending().is_none_or(|p| p.raw.len() <= MAX_LINE_BYTES));
+            assert!(
+                pipeline
+                    .pending()
+                    .is_none_or(|p| p.raw.len() <= MAX_LINE_BYTES)
+            );
         }
         pipeline.push(b"\n", &mut lines);
-        let lengths: Vec<(usize, LineEnd)> = lines.iter().map(|l| (l.raw().len(), l.end())).collect();
+        let lengths: Vec<(usize, LineEnd)> =
+            lines.iter().map(|l| (l.raw().len(), l.end())).collect();
         let full = (MAX_LINE_BYTES, LineEnd::Cut);
-        assert_eq!(lengths, [full, full, full, (200_000 - 3 * MAX_LINE_BYTES, LineEnd::Newline)]);
+        assert_eq!(
+            lengths,
+            [
+                full,
+                full,
+                full,
+                (200_000 - 3 * MAX_LINE_BYTES, LineEnd::Newline)
+            ]
+        );
     }
 
     #[test]
@@ -513,7 +574,12 @@ mod tests {
         bytes.extend("é".repeat(MAX_LINE_BYTES).as_bytes());
         let (lines, pending) = lines_and_pending(&[&bytes]);
         assert_eq!(lines[0].raw().len(), MAX_LINE_BYTES - 1);
-        assert!(lines.iter().chain(&pending).all(|line| !line.raw().contains('\u{FFFD}')));
+        assert!(
+            lines
+                .iter()
+                .chain(&pending)
+                .all(|line| !line.raw().contains('\u{FFFD}'))
+        );
         let text: String = lines.iter().chain(&pending).map(Line::raw).collect();
         assert_eq!(text.as_bytes(), bytes);
     }
@@ -525,8 +591,21 @@ mod tests {
         let (lines, _) = lines_and_pending(&[&bytes]);
         assert_eq!(lines[0].end(), LineEnd::Cut);
         assert_eq!(lines[0].plain(), "a".repeat(MAX_LINE_BYTES - 3));
-        let red = Style { fg: Some(Color(1)), ..Style::default() };
-        assert_eq!((lines[1].plain(), lines[1].styled()), ("red", &[Span { start: 0, end: 3, style: red }][..]));
+        let red = Style {
+            fg: Some(Color(1)),
+            ..Style::default()
+        };
+        assert_eq!(
+            (lines[1].plain(), lines[1].styled()),
+            (
+                "red",
+                &[Span {
+                    start: 0,
+                    end: 3,
+                    style: red
+                }][..]
+            )
+        );
     }
 
     #[test]
@@ -540,7 +619,11 @@ mod tests {
             tail.push(b'b');
             let (lines, pending) = lines_and_pending(&[&head, &tail]);
             assert_eq!(lines.len(), 1, "{character}");
-            assert_eq!(lines[0].raw(), "a".repeat(MAX_LINE_BYTES - 1), "{character}");
+            assert_eq!(
+                lines[0].raw(),
+                "a".repeat(MAX_LINE_BYTES - 1),
+                "{character}"
+            );
             assert_eq!(pending.unwrap().raw(), format!("{character}b"));
         }
     }

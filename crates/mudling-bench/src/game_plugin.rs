@@ -32,15 +32,27 @@ pub struct Report {
 pub fn run(dir: &Path, source: &[String]) -> Result<Report, String> {
     let plugin = Plugin::load(dir).map_err(|error| error.to_string())?;
     let id = plugin.id().clone();
-    let patterns = plugin.points.text.as_ref().map_or(0, |text| text.patterns.len());
-    let compile = |plugins: Vec<Plugin>| PluginHost::new(plugins).map_err(|error| error.to_string());
+    let patterns = plugin
+        .points
+        .text
+        .as_ref()
+        .map_or(0, |text| text.patterns.len());
+    let compile =
+        |plugins: Vec<Plugin>| PluginHost::new(plugins).map_err(|error| error.to_string());
     // A server runs one game plugin: this one takes the synthetic game's place.
-    let others = || realistic_plugins().into_iter().filter(|other| other.id().as_str() != "bench-game");
+    let others = || {
+        realistic_plugins()
+            .into_iter()
+            .filter(|other| other.id().as_str() != "bench-game")
+    };
     let mut without = compile(others().collect())?;
     let mut with = compile(others().chain([plugin.clone()]).collect())?;
 
     let lines = split(source, source.len());
-    let (mut without_samples, mut with_samples) = (Vec::with_capacity(lines.len()), Vec::with_capacity(lines.len()));
+    let (mut without_samples, mut with_samples) = (
+        Vec::with_capacity(lines.len()),
+        Vec::with_capacity(lines.len()),
+    );
     let mut sink = Counter::default();
     let mut ignored = Counter::default();
     for (index, line) in lines.iter().enumerate() {
@@ -60,7 +72,9 @@ pub fn run(dir: &Path, source: &[String]) -> Result<Report, String> {
     let mut sampled = compile(others().chain([plugin]).collect())?;
     sampled.set_cost_sampling(1);
     let mut uncounted = Counter::default();
-    lines.iter().for_each(|line| drop(sampled.read_line(line, &mut uncounted)));
+    lines
+        .iter()
+        .for_each(|line| drop(sampled.read_line(line, &mut uncounted)));
     let alone_p99_us = sampled
         .costs()
         .into_iter()

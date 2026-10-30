@@ -92,7 +92,11 @@ pub struct Script {
 /// Checks that a hook file compiles, without running it.
 pub(super) fn check_syntax(file: &str, source: &str) -> Result<(), String> {
     Lua::new_with(StdLib::NONE, LuaOptions::default())
-        .and_then(|lua| lua.load(source).set_name(format!("={file}")).into_function())
+        .and_then(|lua| {
+            lua.load(source)
+                .set_name(format!("={file}"))
+                .into_function()
+        })
         .map(drop)
         .map_err(|error| format!("the Luau doesn't compile: {error}"))
 }
@@ -220,6 +224,7 @@ struct Vm {
     lua: Lua,
     meter: Rc<Meter>,
     outbox: Rc<RefCell<Vec<HookOutput>>>,
+    rate_limit: Rc<RateLimit>,
     needs_approval: bool,
     approved: bool,
     overruns: u32,
@@ -289,7 +294,11 @@ impl Meter {
 
 impl HookRunner {
     pub fn new(limits: HookLimits, state: Arc<dyn StateView>) -> HookRunner {
-        HookRunner { limits, state, vms: Vec::new() }
+        HookRunner {
+            limits,
+            state,
+            vms: Vec::new(),
+        }
     }
 
     /// Loads `plugin`'s hook files into a fresh VM, replacing any it had,
@@ -304,8 +313,14 @@ impl HookRunner {
         let vm = Vm::new(plugin, self.limits, self.state.clone())?;
         if let Some(missing) = named.into_iter().find(|hook| !vm.defines(hook)) {
             let files = plugin.manifest.hooks.files.join(", ");
-            let problem = format!("`hook = \"{}\"` names a function the hook files ({files}) don't define", missing.as_str());
-            return Err(PluginError { source: MANIFEST_FILE.into(), problem: Problem::Invalid(problem) });
+            let problem = format!(
+                "`hook = \"{}\"` names a function the hook files ({files}) don't define",
+                missing.as_str()
+            );
+            return Err(PluginError {
+                source: MANIFEST_FILE.into(),
+                problem: Problem::Invalid(problem),
+            });
         }
         self.vms.push(vm);
         Ok(())
@@ -322,18 +337,32 @@ impl HookRunner {
     /// Whether `plugin` has hooks that would run now: loaded, approved if
     /// it must be, and not turned off for overrunning.
     pub fn is_active(&self, plugin: &PluginId) -> bool {
-        self.vms.iter().any(|vm| vm.plugin == *plugin && vm.is_active())
+        self.vms
+            .iter()
+            .any(|vm| vm.plugin == *plugin && vm.is_active())
     }
 
     /// Runs the hook `event` names, if any, and sends its outputs to `sink`.
     pub fn run(&mut self, event: &PluginEvent, sink: &mut impl HookSink) {
         let Some(hook) = &event.hook else { return };
         let limits = self.limits;
-        let Some(vm) = self.vm(&event.plugin).filter(|vm| vm.is_active()) else { return };
+        let Some(vm) = self.vm(&event.plugin).filter(|vm| vm.is_active()) else {
+            return;
+        };
         match vm.call(hook, event, limits) {
-            Ok(()) => vm.outbox.borrow_mut().drain(..).for_each(|output| sink.output(output)),
+            Ok(()) => vm
+                .outbox
+                .borrow_mut()
+                .drain(..)
+                .for_each(|output| sink.output(output)),
             Err((overran, message)) => {
-                vm.outbox.borrow_mut().clear();
+                let unsent = vm
+                    .outbox
+                    .borrow_mut()
+                    .drain(..)
+                    .filter(|output| matches!(output, HookOutput::SendCommand(_)))
+                    .count();
+                vm.rate_limit.refund(unsent);
                 let plugin = vm.plugin.clone();
                 sink.output(HookOutput::HookFailed(HookFailed {
                     plugin: plugin.clone(),
@@ -346,7 +375,10 @@ impl HookRunner {
                     if vm.overruns == OVERRUNS_TO_TURN_OFF {
                         vm.disabled = true;
                         let reason = DisabledReason::Overran(vm.overruns);
-                        sink.output(HookOutput::PluginDisabled(PluginDisabled { plugin, reason }));
+                        sink.output(HookOutput::PluginDisabled(PluginDisabled {
+                            plugin,
+                            reason,
+                        }));
                     }
                 }
             }
@@ -359,19 +391,38 @@ impl HookRunner {
 }
 
 impl Vm {
-    fn new(plugin: &Plugin, limits: HookLimits, state: Arc<dyn StateView>) -> Result<Vm, PluginError> {
+    fn new(
+        plugin: &Plugin,
+        limits: HookLimits,
+        state: Arc<dyn StateView>,
+    ) -> Result<Vm, PluginError> {
         let id = plugin.id().clone();
         let meter = Rc::new(Meter::new());
         let outbox = Rc::new(RefCell::new(Vec::new()));
+        let rate_limit = Rc::new(RateLimit::new(limits.commands_per_second));
         let invalid = |file: &str, error: mlua::Error| PluginError {
             source: file.to_owned(),
             problem: Problem::Invalid(format!("the Luau hooks couldn't load: {error}")),
         };
-        let lua = sandbox(&id, &plugin.manifest.permissions, limits, &meter, &outbox, state)
-            .map_err(|error| invalid("plugin.toml", error))?;
+        let lua = sandbox(
+            &id,
+            &plugin.manifest.permissions,
+            limits,
+            &meter,
+            &outbox,
+            &rate_limit,
+            state,
+        )
+        .map_err(|error| PluginError {
+            source: id.to_string(),
+            problem: Problem::LuauSetup(error.to_string()),
+        })?;
         for script in &plugin.scripts {
             // Compiling isn't the plugin's code running, so only running counts.
-            let chunk = lua.load(&*script.source).set_name(format!("={}", script.file)).into_function();
+            let chunk = lua
+                .load(&*script.source)
+                .set_name(format!("={}", script.file))
+                .into_function();
             let ran = chunk.and_then(|chunk| {
                 meter.start(limits);
                 chunk.call::<()>(())
@@ -383,7 +434,11 @@ impl Vm {
             lua,
             meter,
             outbox,
-            needs_approval: plugin.manifest.permissions.contains(&Permission::SendCommands),
+            rate_limit,
+            needs_approval: plugin
+                .manifest
+                .permissions
+                .contains(&Permission::SendCommands),
             approved: false,
             overruns: 0,
             disabled: false,
@@ -395,15 +450,28 @@ impl Vm {
     }
 
     fn defines(&self, hook: &HookName) -> bool {
-        matches!(self.lua.globals().get(hook.as_str()), Ok(mlua::Value::Function(_)))
+        matches!(
+            self.lua.globals().get(hook.as_str()),
+            Ok(mlua::Value::Function(_))
+        )
     }
 
     /// Calls `hook` on `event` inside its time box. An error says whether
     /// the hook overran, and why it stopped.
-    fn call(&self, hook: &HookName, event: &PluginEvent, limits: HookLimits) -> Result<(), (bool, String)> {
+    fn call(
+        &self,
+        hook: &HookName,
+        event: &PluginEvent,
+        limits: HookLimits,
+    ) -> Result<(), (bool, String)> {
         let function: Function = match self.lua.globals().get(hook.as_str()) {
             Ok(mlua::Value::Function(function)) => function,
-            _ => return Err((false, format!("the plugin has no function `{}`", hook.as_str()))),
+            _ => {
+                return Err((
+                    false,
+                    format!("the plugin has no function `{}`", hook.as_str()),
+                ));
+            }
         };
         self.meter.start(limits);
         let result = event_table(&self.lua, event).and_then(|table| function.call::<()>(table));
@@ -417,20 +485,60 @@ impl Vm {
 /// Every hook a plugin's points name. The structs are taken apart field by
 /// field, so a new field that could name a hook fails to compile here.
 fn named_hooks(points: &Points) -> Vec<&HookName> {
-    let Points { connection: _, commands: _, text, hud: _, map, character, gear, mobs, ui: _ } = points;
+    let Points {
+        connection: _,
+        commands: _,
+        text,
+        hud: _,
+        map,
+        character,
+        gear,
+        mobs,
+        ui: _,
+    } = points;
     let mut rules: Vec<&EventRule> = Vec::new();
     let mut readers: Vec<&TableReader> = Vec::new();
-    if let Some(Text { pager: _, prompts: _, patterns, colors: _ }) = text {
+    if let Some(Text {
+        pager: _,
+        prompts: _,
+        patterns,
+        colors: _,
+    }) = text
+    {
         rules.extend(patterns);
     }
-    if let Some(Map { room_identity: _, areas: _, exits, failed_move, darkness, flee, mazes: _ }) = map {
+    if let Some(Map {
+        room_identity: _,
+        areas: _,
+        exits,
+        failed_move,
+        darkness,
+        flee,
+        mazes: _,
+    }) = map
+    {
         rules.extend(exits.iter().chain(failed_move).chain(darkness).chain(flee));
     }
-    if let Some(Character { commands: _, readers: tables, skill_improved }) = character {
+    if let Some(Character {
+        commands: _,
+        readers: tables,
+        skill_improved,
+    }) = character
+    {
         readers.extend(tables);
         rules.extend(skill_improved);
     }
-    if let Some(Gear { identify, examine, equipment, slots: _, wear, remove, put, containers: _ }) = gear {
+    if let Some(Gear {
+        identify,
+        examine,
+        equipment,
+        slots: _,
+        wear,
+        remove,
+        put,
+        containers: _,
+    }) = gear
+    {
         readers.extend(identify.iter().chain(examine).chain(equipment));
         rules.extend(wear.iter().chain(remove).chain(put));
     }
@@ -454,13 +562,21 @@ fn sandbox(
     limits: HookLimits,
     meter: &Rc<Meter>,
     outbox: &Rc<RefCell<Vec<HookOutput>>>,
+    rate_limit: &Rc<RateLimit>,
     state: Arc<dyn StateView>,
 ) -> mlua::Result<Lua> {
     let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::BIT;
     let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_memory_limit(limits.memory)?;
     let globals = lua.globals();
-    for name in ["require", "loadstring", "getfenv", "setfenv", "collectgarbage", "print"] {
+    for name in [
+        "require",
+        "loadstring",
+        "getfenv",
+        "setfenv",
+        "collectgarbage",
+        "print",
+    ] {
         globals.raw_set(name, mlua::Nil)?;
     }
 
@@ -486,18 +602,25 @@ fn sandbox(
     let (id, writes) = (plugin.clone(), outbox.clone());
     mud.set(
         "store",
-        lua.create_function(move |_, (store, key, value): (String, String, mlua::Value)| {
-            if !stores.contains(&store) {
-                return Err(missing(&format!("write_store:{store}")));
-            }
-            let value = from_lua(value)?;
-            writes.borrow_mut().push(HookOutput::StoreWrite(StoreWrite { plugin: id.clone(), store, key, value }));
-            Ok(())
-        })?,
+        lua.create_function(
+            move |_, (store, key, value): (String, String, mlua::Value)| {
+                if !stores.contains(&store) {
+                    return Err(missing(&format!("write_store:{store}")));
+                }
+                let value = from_lua(value)?;
+                writes.borrow_mut().push(HookOutput::StoreWrite(StoreWrite {
+                    plugin: id.clone(),
+                    store,
+                    key,
+                    value,
+                }));
+                Ok(())
+            },
+        )?,
     )?;
 
     let send_commands = permissions.contains(&Permission::SendCommands);
-    let limit = RateLimit::new(limits.commands_per_second);
+    let limit = rate_limit.clone();
     let (id, sends) = (plugin.clone(), outbox.clone());
     mud.set(
         "send",
@@ -508,7 +631,12 @@ fn sandbox(
             if !limit.allow(Instant::now()) {
                 return Ok(false);
             }
-            sends.borrow_mut().push(HookOutput::SendCommand(SendCommand { plugin: id.clone(), command }));
+            sends
+                .borrow_mut()
+                .push(HookOutput::SendCommand(SendCommand {
+                    plugin: id.clone(),
+                    command,
+                }));
             Ok(true)
         })?,
     )?;
@@ -521,14 +649,19 @@ fn sandbox(
 }
 
 fn missing(permission: &str) -> mlua::Error {
-    mlua::Error::runtime(format!("this plugin didn't ask for the `{permission}` permission"))
+    mlua::Error::runtime(format!(
+        "this plugin didn't ask for the `{permission}` permission"
+    ))
 }
 
 fn event_table(lua: &Lua, event: &PluginEvent) -> mlua::Result<Table> {
     let captures = lua.create_table_with_capacity(0, event.captures.len())?;
     let plain = event.line.plain();
     for capture in &event.captures {
-        captures.raw_set(&*capture.name, &plain[capture.start as usize..capture.end as usize])?;
+        captures.raw_set(
+            &*capture.name,
+            &plain[capture.start as usize..capture.end as usize],
+        )?;
     }
     let table = lua.create_table_with_capacity(0, 4)?;
     table.raw_set("name", &*event.name)?;
@@ -552,7 +685,10 @@ fn from_lua(value: mlua::Value) -> mlua::Result<Value> {
         mlua::Value::Integer(value) => Ok(Value::Number(value as f64)),
         mlua::Value::Number(value) => Ok(Value::Number(value)),
         mlua::Value::String(value) => Ok(Value::Text(value.to_str()?.to_owned())),
-        other => Err(mlua::Error::runtime(format!("a store holds booleans, numbers and strings, not a {}", other.type_name()))),
+        other => Err(mlua::Error::runtime(format!(
+            "a store holds booleans, numbers and strings, not a {}",
+            other.type_name()
+        ))),
     }
 }
 
@@ -572,12 +708,18 @@ struct RateLimit {
 
 impl RateLimit {
     fn new(per_second: u32) -> RateLimit {
-        RateLimit { per_second: per_second as usize, recent: RefCell::default() }
+        RateLimit {
+            per_second: per_second as usize,
+            recent: RefCell::default(),
+        }
     }
 
     fn allow(&self, now: Instant) -> bool {
         let mut recent = self.recent.borrow_mut();
-        while recent.front().is_some_and(|&sent| now.duration_since(sent) >= Duration::from_secs(1)) {
+        while recent
+            .front()
+            .is_some_and(|&sent| now.duration_since(sent) >= Duration::from_secs(1))
+        {
             recent.pop_front();
         }
         let allowed = recent.len() < self.per_second;
@@ -585,6 +727,14 @@ impl RateLimit {
             recent.push_back(now);
         }
         allowed
+    }
+
+    /// Gives back the newest `sends` slots: the sends of a hook that failed,
+    /// which never went out.
+    fn refund(&self, sends: usize) {
+        let mut recent = self.recent.borrow_mut();
+        let kept = recent.len().saturating_sub(sends);
+        recent.truncate(kept);
     }
 }
 
@@ -626,16 +776,33 @@ impl LuauHooks {
         let (loaded_tx, loaded) = mpsc::sync_channel(1);
         let queued = Arc::new(AtomicUsize::new(0));
         let taken = queued.clone();
-        let worker = thread::Builder::new().name("mudling-luau".into()).spawn(move || {
-            let mut runner = HookRunner::new(limits, state);
-            let failed: Vec<(PluginId, PluginError)> = plugins
-                .iter()
-                .filter_map(|plugin| runner.add(plugin).err().map(|error| (plugin.id().clone(), error)))
-                .collect();
-            let _ = loaded_tx.send(failed);
-            work(runner, inbox, &taken, TurnOff { sink, turned_off: turned_off_tx });
-        })?;
-        let failed_to_load = loaded.recv().expect("the hook worker reports which plugins loaded");
+        let worker = thread::Builder::new()
+            .name("mudling-luau".into())
+            .spawn(move || {
+                let mut runner = HookRunner::new(limits, state);
+                let failed: Vec<(PluginId, PluginError)> = plugins
+                    .iter()
+                    .filter_map(|plugin| {
+                        runner
+                            .add(plugin)
+                            .err()
+                            .map(|error| (plugin.id().clone(), error))
+                    })
+                    .collect();
+                let _ = loaded_tx.send(failed);
+                work(
+                    runner,
+                    inbox,
+                    &taken,
+                    TurnOff {
+                        sink,
+                        turned_off: turned_off_tx,
+                    },
+                );
+            })?;
+        let failed_to_load = loaded
+            .recv()
+            .expect("the hook worker reports which plugins loaded");
         Ok(LuauHooks {
             jobs: Some(jobs),
             queued,
@@ -669,7 +836,10 @@ impl LuauHooks {
     /// overrunning since the last call. Returns each one, with whether the
     /// host could; one failing doesn't stop the rest. Call it after
     /// [`PluginHost::read_line`].
-    pub fn turn_off_overrunning(&mut self, host: &mut PluginHost) -> Vec<(PluginId, Result<(), PluginError>)> {
+    pub fn turn_off_overrunning(
+        &mut self,
+        host: &mut PluginHost,
+    ) -> Vec<(PluginId, Result<(), PluginError>)> {
         self.turned_off
             .try_iter()
             .map(|plugin| {
@@ -725,7 +895,12 @@ impl Drop for LuauHooks {
     }
 }
 
-fn work(mut runner: HookRunner, inbox: Receiver<Job>, queued: &AtomicUsize, mut sink: TurnOff<impl HookSink>) {
+fn work(
+    mut runner: HookRunner,
+    inbox: Receiver<Job>,
+    queued: &AtomicUsize,
+    mut sink: TurnOff<impl HookSink>,
+) {
     for job in inbox {
         match job {
             Job::Event(event) => {

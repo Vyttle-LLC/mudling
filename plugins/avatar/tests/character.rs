@@ -7,7 +7,11 @@ use std::collections::HashMap;
 
 fn read(fixture: &str) -> Transcript {
     let transcript = Transcript::of(fixture);
-    assert!(transcript.problems().is_empty(), "{:?}", transcript.problems());
+    assert!(
+        transcript.problems().is_empty(),
+        "{:?}",
+        transcript.problems()
+    );
     transcript
 }
 
@@ -20,7 +24,9 @@ fn text(value: &str) -> Value {
 }
 
 fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
-    store.get(key).unwrap_or_else(|| panic!("no `{key}` in {store:?}"))
+    store
+        .get(key)
+        .unwrap_or_else(|| panic!("no `{key}` in {store:?}"))
 }
 
 #[test]
@@ -61,10 +67,17 @@ fn a_score_line_outside_score_writes_nothing() {
 fn practice_reads_on_past_the_pager() {
     let transcript = read(include_str!("fixtures/practice-long.txt"));
     // The second arrives with the next page glued on, as in a log.
-    assert_eq!(transcript.pager_prompts, 1, "the pager prompt recognized, for the client to answer");
+    assert_eq!(
+        transcript.pager_prompts, 1,
+        "the pager prompt recognized, for the client to answer"
+    );
     let skills = transcript.store("skills");
     assert_eq!(get(&skills, "practice.sessions"), &number(12.0));
-    assert_eq!(get(&skills, "practice.read"), &number(16.0), "every cell, both pages");
+    assert_eq!(
+        get(&skills, "practice.read"),
+        &number(16.0),
+        "every cell, both pages"
+    );
     for (skill, learned, level, mana) in [
         ("anticipate", 0.0, 51.0, 15.0),
         ("armor lore", 0.0, 5.0, 0.0),
@@ -76,9 +89,21 @@ fn practice_reads_on_past_the_pager() {
         ("weaken", 0.0, 51.0, 20.0),
         ("weapon lore", 90.0, 35.0, 0.0),
     ] {
-        assert_eq!(get(&skills, &format!("{skill}.learned")), &number(learned), "{skill}");
-        assert_eq!(get(&skills, &format!("{skill}.level")), &number(level), "{skill}");
-        assert_eq!(get(&skills, &format!("{skill}.mana")), &number(mana), "{skill}");
+        assert_eq!(
+            get(&skills, &format!("{skill}.learned")),
+            &number(learned),
+            "{skill}"
+        );
+        assert_eq!(
+            get(&skills, &format!("{skill}.level")),
+            &number(level),
+            "{skill}"
+        );
+        assert_eq!(
+            get(&skills, &format!("{skill}.mana")),
+            &number(mana),
+            "{skill}"
+        );
     }
 }
 
@@ -86,8 +111,15 @@ fn practice_reads_on_past_the_pager() {
 fn practice_left_at_its_pager_is_not_sent() {
     let transcript = read(include_str!("fixtures/practice-cut.txt"));
     let skills = transcript.store("skills");
-    assert!(skills.is_empty(), "a table cut short sends nothing: {skills:?}");
-    assert_eq!(transcript.events("gear.equipment.start", &[]).len(), 1, "the next table still starts");
+    assert!(
+        skills.is_empty(),
+        "a table cut short sends nothing: {skills:?}"
+    );
+    assert_eq!(
+        transcript.events("gear.equipment.start", &[]).len(),
+        1,
+        "the next table still starts"
+    );
 }
 
 #[test]
@@ -97,13 +129,19 @@ fn the_next_table_ends_one_whose_prompt_is_unknown() {
          You have 1 practice sessions left.\ndodge               95   4   -    0\nhp:46 >",
     );
     assert_eq!(get(&transcript.store("equipment"), "count"), &number(1.0));
-    assert!(transcript.store("skills").is_empty(), "the last waits for a prompt or the next table");
+    assert!(
+        transcript.store("skills").is_empty(),
+        "the last waits for a prompt or the next table"
+    );
 }
 
 #[test]
 fn practicing_at_a_trainer_sets_the_skill() {
     let transcript = read("You practice dodge with Ulric. Your current skill level is now 45.");
-    assert_eq!(get(&transcript.store("skills"), "dodge.learned"), &number(45.0));
+    assert_eq!(
+        get(&transcript.store("skills"), "dodge.learned"),
+        &number(45.0)
+    );
 }
 
 #[test]
@@ -128,7 +166,10 @@ fn slist_cuts_fixed_columns_and_reads_wrapped_rows() {
     ] {
         assert_eq!(level(skill), number(expected), "{skill}");
     }
-    assert!(!skills.keys().any(|key| key.contains("path")), "room text isn't a skill: {skills:?}");
+    assert!(
+        !skills.keys().any(|key| key.contains("path")),
+        "room text isn't a skill: {skills:?}"
+    );
     assert_eq!(get(&skills, "slist.read"), &number(17.0));
 }
 
@@ -136,8 +177,15 @@ fn slist_cuts_fixed_columns_and_reads_wrapped_rows() {
 fn a_blank_line_ends_the_wrapped_rows() {
     let fixture = include_str!("fixtures/slist-blank.txt");
     let skills = read(fixture).store("skills");
-    assert_eq!(get(&skills, "transmogrify.level"), &number(50.0), "the wrapped row before the blank");
-    assert!(!skills.contains_key("Ancient Ruin.level"), "column-aligned room text after a blank: {skills:?}");
+    assert_eq!(
+        get(&skills, "transmogrify.level"),
+        &number(50.0),
+        "the wrapped row before the blank"
+    );
+    assert!(
+        !skills.contains_key("Ancient Ruin.level"),
+        "column-aligned room text after a blank: {skills:?}"
+    );
     assert_eq!(get(&skills, "slist.read"), &number(4.0));
 
     // The same text with no blank line before it is a wrapped row.
@@ -152,21 +200,33 @@ fn affects_lists_each_spell_once() {
     assert_eq!(get(&affects, "1.name"), &text("armor"));
     assert_eq!(get(&affects, "2.name"), &text("bless"));
     assert_eq!(get(&affects, "3.name"), &text("sanctuary"));
-    assert_eq!(get(&affects, "3.detail"), &text("modifies none by 0 for 4 hours"));
+    assert_eq!(
+        get(&affects, "3.detail"),
+        &text("modifies none by 0 for 4 hours")
+    );
     assert!(!affects.contains_key("1.detail"));
 }
 
 #[test]
 fn affects_with_nothing_on_is_an_empty_list() {
-    for none in ["(53h-114m-102v-1448)(-/-)You are not under the affects of any spells", "You are not affected by any spells."] {
+    for none in [
+        "(53h-114m-102v-1448)(-/-)You are not under the affects of any spells",
+        "You are not affected by any spells.",
+    ] {
         let affects = read(none).store("affects");
-        assert_eq!(affects, HashMap::from([("count".to_owned(), number(0.0))]), "{none}");
+        assert_eq!(
+            affects,
+            HashMap::from([("count".to_owned(), number(0.0))]),
+            "{none}"
+        );
     }
 }
 
 #[test]
 fn messages_about_skills_and_affects_are_events() {
-    let transcript = read("You have become better at kick!\n(1h-1m-1v-1)(-/-)You feel more frail.\nYour armor spell wears off.");
+    let transcript = read(
+        "You have become better at kick!\n(1h-1m-1v-1)(-/-)You feel more frail.\nYour armor spell wears off.",
+    );
     assert_eq!(transcript.events("character.skill_improved", &[]).len(), 1);
     assert_eq!(transcript.events("character.affects_changed", &[]).len(), 2);
 }

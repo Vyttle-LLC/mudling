@@ -33,13 +33,25 @@ fn mudling_core_holds_no_game_strings() {
 
     let mut found = Vec::new();
     for file in files.iter().filter(|file| **file != this_file) {
-        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
         let text = text.to_lowercase();
-        for word in DENYLIST.iter().filter(|word| text.contains(&word.to_lowercase())) {
-            found.push(format!("{}: {word:?}", file.strip_prefix(&crate_dir).unwrap().display()));
+        for word in DENYLIST
+            .iter()
+            .filter(|word| text.contains(&word.to_lowercase()))
+        {
+            found.push(format!(
+                "{}: {word:?}",
+                file.strip_prefix(&crate_dir).unwrap().display()
+            ));
         }
     }
-    assert!(found.is_empty(), "game strings in mudling-core:\n{}", found.join("\n"));
+    assert!(
+        found.is_empty(),
+        "game strings in mudling-core:\n{}",
+        found.join("\n")
+    );
 }
 
 fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
