@@ -3,7 +3,6 @@ use crate::map::ISLANDS;
 use crate::persist::*;
 use crate::repo::Error;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -579,6 +578,52 @@ fn only_the_documented_files_reach_the_repo() {
 }
 
 #[test]
+fn exporting_one_server_keeps_the_others_listed() {
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    let (first_folder, second_folder) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let (first, second) = (seeded(&first_folder), open(&second_folder));
+    let mut batch = Batch::new();
+    batch.upsert(server("other.example.org"));
+    batch.upsert(room(1, "A far road", "The Far Hills"));
+    commit(&second, batch);
+    let readers = [first.reader().unwrap(), second.reader().unwrap()];
+    repo.export(&settings(), &readers).unwrap();
+    let before = tree(root.path());
+
+    let exported = export(&repo, &first);
+
+    assert!(exported.written.is_empty(), "{:?}", exported.written);
+    assert_eq!(tree(root.path()), before);
+    let fresh_folder = TempDir::new().unwrap();
+    let fresh = Database::open(fresh_folder.path(), "fresh").unwrap();
+    let imported = repo
+        .import("other.example.org", &fresh.reader().unwrap())
+        .unwrap();
+    commit(&fresh, imported.batch);
+    assert_eq!(fresh.reader().unwrap().map().unwrap().rooms.len(), 1);
+}
+
+#[test]
+fn a_stray_json_file_in_a_folder_mudling_owns_is_removed() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+    let stray = root.path().join(SERVER).join("map").join("custom.json");
+    fs::write(&stray, "{}").unwrap();
+
+    let exported = export(&repo, &database);
+
+    assert_eq!(
+        exported.removed,
+        vec![Path::new(SERVER).join("map").join("custom.json")]
+    );
+    assert!(!stray.exists());
+}
+
+#[test]
 fn secrets_plugins_and_foreign_files_are_left_alone() {
     let folder = TempDir::new().unwrap();
     let database = seeded(&folder);
@@ -744,21 +789,18 @@ fn the_game_keeps_writing_while_the_sync_thread_exports() {
     let folder = TempDir::new().unwrap();
     let database = seeded(&folder);
     let writer = database.writer().unwrap();
-    let done = AtomicBool::new(false);
+    let first_id = 100;
 
-    std::thread::scope(|scope| {
-        let sync_database = database.clone();
-        let done = &done;
-        let sync = scope.spawn(move || {
+    let last_id = std::thread::scope(|scope| {
+        let sync = scope.spawn(|| {
             let root = TempDir::new().unwrap();
             let repo = Repo::new(root.path());
-            for _ in 0..5 {
-                export(&repo, &sync_database);
+            for _ in 0..20 {
+                export(&repo, &database);
             }
-            done.store(true, Ordering::Relaxed);
         });
-        let mut id = 100;
-        while !done.load(Ordering::Relaxed) {
+        let mut id = first_id;
+        while !sync.is_finished() {
             let mut batch = Batch::new();
             batch.upsert(room(id, "A new room", MEADOW));
             writer.submit(batch).unwrap();
@@ -766,11 +808,14 @@ fn the_game_keeps_writing_while_the_sync_thread_exports() {
             id += 1;
         }
         sync.join().unwrap();
+        id
     });
+
+    assert!(last_id > first_id, "no write finished during the exports");
 }
 
-/// Costs for the ticket, on this machine:
-/// `cargo test --release -p mudling-core repo::tests::cost -- --ignored --nocapture`
+/// Run with
+/// `cargo test --release -p mudling-core repo::tests::cost -- --ignored --nocapture`.
 #[test]
 #[ignore = "a measurement, not a check"]
 fn cost_of_exporting_ten_thousand_rooms() {

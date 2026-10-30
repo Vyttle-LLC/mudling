@@ -43,7 +43,7 @@ pub use format::AppSettings;
 use crate::persist::{self, Batch, Reader};
 use format::{
     CHARACTERS_FOLDER, FORMAT_VERSION, GEAR_FOLDER, MANIFEST, MAP_FOLDER, Manifest, NOTES, SERVERS,
-    SETTINGS, ServerEntry, ServerList, ServerRows, json, parsed,
+    SETTINGS, ServerEntry, ServerList, ServerRows, json, parse,
 };
 use names::Names;
 use std::collections::BTreeMap;
@@ -80,39 +80,46 @@ impl Repo {
     }
 
     /// Brings the repo's files up to date with `readers`, one per server's
-    /// database, and leaves everything else in the folder alone. A repo in a
-    /// newer format is refused untouched.
+    /// database. Servers the repo lists but `readers` doesn't hold stay as
+    /// they are. The `map` and `characters` folders of an exported server are
+    /// MUDling's: any `.json` file in them with no records behind it is
+    /// deleted, whoever wrote it. Everything else in the repo is left alone.
+    /// A repo in a newer format is refused untouched.
     pub fn export(&self, settings: &AppSettings, readers: &[Reader]) -> Result<Exported, Error> {
-        self.check_format()?;
-        let mut servers = Vec::with_capacity(readers.len());
+        let mut list = self.server_list()?;
+        let mut exported = BTreeMap::new();
         for reader in readers {
             let rows = ServerRows::load(reader)?;
             let [server] = rows.servers.as_slice() else {
                 return Err(Error::NotOneServer(rows.servers.len()));
             };
-            servers.push((rows.entry(server), rows));
+            let id = server.id.clone();
+            let entry = rows.entry(server);
+            list.servers.retain(|listed| listed.server.id != id);
+            list.servers.push(entry);
+            exported.insert(id, rows);
         }
-        servers.sort_by(|(a, _), (b, _)| a.server.id.cmp(&b.server.id));
+        list.sort();
 
         let mut files = BTreeMap::new();
         let manifest = Manifest {
             format: FORMAT_VERSION,
         };
-        files.insert(PathBuf::from(MANIFEST), json(&manifest)?);
-        files.insert(PathBuf::from(SETTINGS), json(settings)?);
-        let list = ServerList {
-            servers: servers.iter().map(|(entry, _)| entry.clone()).collect(),
-        };
-        files.insert(PathBuf::from(SERVERS), json(&list)?);
+        files.insert(PathBuf::from(MANIFEST), json(&manifest));
+        files.insert(PathBuf::from(SETTINGS), json(settings));
+        files.insert(PathBuf::from(SERVERS), json(&list));
 
         let mut folders = Names::default();
-        let mut server_folders = Vec::with_capacity(servers.len());
-        for (entry, rows) in &servers {
+        let mut server_folders = Vec::with_capacity(exported.len());
+        for entry in &list.servers {
+            // Every listed server claims its name, so folders never shift.
             let folder = PathBuf::from(folders.folder(&entry.server.id));
-            for (path, bytes) in rows.files()? {
-                files.insert(folder.join(path), bytes);
+            if let Some(rows) = exported.get(&entry.server.id) {
+                for (path, bytes) in rows.files() {
+                    files.insert(folder.join(path), bytes);
+                }
+                server_folders.push(folder);
             }
-            server_folders.push(folder);
         }
 
         let written = write::write_changed(&self.root, &files)?;
@@ -148,7 +155,7 @@ impl Repo {
     /// The settings the repo holds, or the defaults if it holds none yet.
     pub fn settings(&self) -> Result<AppSettings, Error> {
         match self.read_if_present(Path::new(SETTINGS))? {
-            Some(bytes) => parsed(Path::new(SETTINGS), &bytes),
+            Some(bytes) => parse(Path::new(SETTINGS), &bytes),
             None => Ok(AppSettings::default()),
         }
     }
@@ -167,7 +174,7 @@ impl Repo {
             .ok_or_else(|| Error::UnknownServer(server_id.to_owned()))?;
 
         let rows = ServerRows::load(reader)?;
-        let local = rows.files()?;
+        let local = rows.files();
         let mut batch = Batch::new();
         let mut read = Vec::new();
         if local_entry(&rows, server_id).as_ref() != Some(listed) {
@@ -191,7 +198,7 @@ impl Repo {
         let Some(bytes) = self.read_if_present(Path::new(MANIFEST))? else {
             return Ok(());
         };
-        let Manifest { format } = parsed(Path::new(MANIFEST), &bytes)?;
+        let Manifest { format } = parse(Path::new(MANIFEST), &bytes)?;
         if format > FORMAT_VERSION {
             return Err(Error::NewerFormat(format));
         }
@@ -205,9 +212,8 @@ impl Repo {
                 servers: Vec::new(),
             });
         };
-        let mut list: ServerList = parsed(Path::new(SERVERS), &bytes)?;
-        // Folder names are claimed in this order, as export claims them.
-        list.servers.sort_by(|a, b| a.server.id.cmp(&b.server.id));
+        let mut list: ServerList = parse(Path::new(SERVERS), &bytes)?;
+        list.sort();
         Ok(list)
     }
 
@@ -215,11 +221,8 @@ impl Repo {
     fn server_files(&self, folder: &Path) -> Result<Vec<PathBuf>, Error> {
         let folder = self.root.join(folder);
         let mut files = Vec::new();
-        for inner in [Path::new(""), Path::new(GEAR_FOLDER)]
-            .into_iter()
-            .chain([Path::new(MAP_FOLDER), Path::new(CHARACTERS_FOLDER)])
-        {
-            for path in write::listed(&folder.join(inner))? {
+        for inner in ["", GEAR_FOLDER, MAP_FOLDER, CHARACTERS_FOLDER].map(Path::new) {
+            for path in write::list_files(&folder.join(inner))? {
                 let Some(name) = path.file_name() else {
                     continue;
                 };

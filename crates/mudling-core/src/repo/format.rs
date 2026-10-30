@@ -1,8 +1,8 @@
 //! What each file in the repo holds, and how a server's rows become files.
 //!
-//! Each file is pretty JSON, so one changed field is one changed line. Keys
-//! keep the order the structs declare, maps sort theirs, and records keep the
-//! key order the reader returns them in.
+//! Each JSON file is pretty-printed, so one changed field is one changed
+//! line. Keys keep the order the structs declare, maps sort theirs, and
+//! records keep the key order the reader returns them in.
 
 use super::Error;
 use super::names::Names;
@@ -51,6 +51,13 @@ pub struct AppSettings {
 #[derive(Serialize, Deserialize)]
 pub(super) struct ServerList {
     pub servers: Vec<ServerEntry>,
+}
+
+impl ServerList {
+    /// Puts the servers in id order, the order folder names are claimed in.
+    pub(super) fn sort(&mut self) {
+        self.servers.sort_by(|a, b| a.server.id.cmp(&b.server.id));
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -145,26 +152,20 @@ impl ServerRows {
                 .filter(|meta| SYNCED_META.contains(&meta.key.as_str()))
                 .cloned()
                 .collect(),
-            characters: self
-                .characters
-                .characters
-                .iter()
-                .filter(|character| character.server_id == server.id)
-                .cloned()
-                .collect(),
+            characters: self.characters.characters.clone(),
         }
     }
 
     /// The server's files, by path inside its folder.
-    pub(super) fn files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, Error> {
+    pub(super) fn files(&self) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
         for (zone, file) in self.zones() {
             let path = Path::new(MAP_FOLDER).join(zone);
-            files.insert(path, json(&file)?);
+            files.insert(path, json(&file));
         }
         for (name, file) in self.character_files() {
             let path = Path::new(CHARACTERS_FOLDER).join(name);
-            files.insert(path, json(&file)?);
+            files.insert(path, json(&file));
         }
         let mobs = MobsFile {
             marks: self.marks.clone(),
@@ -183,13 +184,13 @@ impl ServerRows {
         let aliases = AliasesFile {
             aliases: self.aliases.clone(),
         };
-        files.insert(MOBS.into(), json(&mobs)?);
-        files.insert(Path::new(GEAR_FOLDER).join(ITEMS), json(&items)?);
-        files.insert(Path::new(GEAR_FOLDER).join(COPIES), json(&copies)?);
-        files.insert(TRIGGERS.into(), json(&triggers)?);
-        files.insert(ALIASES.into(), json(&aliases)?);
+        files.insert(MOBS.into(), json(&mobs));
+        files.insert(Path::new(GEAR_FOLDER).join(ITEMS), json(&items));
+        files.insert(Path::new(GEAR_FOLDER).join(COPIES), json(&copies));
+        files.insert(TRIGGERS.into(), json(&triggers));
+        files.insert(ALIASES.into(), json(&aliases));
         files.insert(NOTES.into(), self.notepad());
-        Ok(files)
+        files
     }
 
     /// One file per zone, by file name. The zones sort, so their names are
@@ -210,31 +211,25 @@ impl ServerRows {
             });
             zone.rooms.push(room.clone());
         }
-        // A foreign key keeps every row's room in the same read of the map.
-        let zone = |room_id: &i64| zone_of[room_id];
         for exit in &self.map.exits {
-            let file = zones.get_mut(zone(&exit.room_id));
-            file.expect("its room's zone").exits.push(exit.clone());
+            let file = file_of(&mut zones, &zone_of, exit.room_id);
+            file.exits.push(exit.clone());
         }
         for link in &self.map.links {
-            let file = zones.get_mut(zone(&link.room_id));
-            file.expect("its room's zone").links.push(link.clone());
+            let file = file_of(&mut zones, &zone_of, link.room_id);
+            file.links.push(link.clone());
         }
         for doorway in &self.map.doorways {
-            let file = zones.get_mut(zone(&doorway.room_id));
-            file.expect("its room's zone")
-                .doorways
-                .push(doorway.clone());
+            let file = file_of(&mut zones, &zone_of, doorway.room_id);
+            file.doorways.push(doorway.clone());
         }
         for note in &self.map.notes {
-            let file = zones.get_mut(zone(&note.room_id));
-            file.expect("its room's zone").notes.push(note.clone());
+            let file = file_of(&mut zones, &zone_of, note.room_id);
+            file.notes.push(note.clone());
         }
         for feature in &self.map.features {
-            let file = zones.get_mut(zone(&feature.room_id));
-            file.expect("its room's zone")
-                .features
-                .push(feature.clone());
+            let file = file_of(&mut zones, &zone_of, feature.room_id);
+            file.features.push(feature.clone());
         }
         let mut names = Names::default();
         zones
@@ -274,6 +269,16 @@ impl ServerRows {
     }
 }
 
+/// The file of a room's zone. A foreign key keeps every row's room in the
+/// same read of the map.
+fn file_of<'a>(
+    zones: &'a mut BTreeMap<&str, ZoneFile>,
+    zone_of: &HashMap<i64, &str>,
+    room_id: i64,
+) -> &'a mut ZoneFile {
+    zones.get_mut(zone_of[&room_id]).expect("its room's zone")
+}
+
 fn of_character<T: Clone>(rows: &[T], id: &str, owner: impl Fn(&T) -> &String) -> Vec<T> {
     rows.iter()
         .filter(|row| owner(row) == id)
@@ -299,23 +304,23 @@ pub(super) fn read_file(path: &Path, bytes: &[u8], batch: &mut Batch) -> Result<
         .and_then(Path::file_name)
         .and_then(|name| name.to_str());
     match (parent, name) {
-        (Some(MAP_FOLDER), _) => read_zone(parsed(path, bytes)?, batch),
-        (Some(CHARACTERS_FOLDER), _) => read_character(parsed(path, bytes)?, batch),
+        (Some(MAP_FOLDER), _) => read_zone(parse(path, bytes)?, batch),
+        (Some(CHARACTERS_FOLDER), _) => read_character(parse(path, bytes)?, batch),
         (Some(GEAR_FOLDER), Some(ITEMS)) => {
-            let file: ItemsFile = parsed(path, bytes)?;
+            let file: ItemsFile = parse(path, bytes)?;
             upsert_all(batch, file.facts);
             upsert_all(batch, file.identifications);
         }
         (Some(GEAR_FOLDER), Some(COPIES)) => {
-            upsert_all(batch, parsed::<CopiesFile>(path, bytes)?.copies);
+            upsert_all(batch, parse::<CopiesFile>(path, bytes)?.copies);
         }
         (_, Some(MOBS)) => {
-            let file: MobsFile = parsed(path, bytes)?;
+            let file: MobsFile = parse(path, bytes)?;
             upsert_all(batch, file.marks);
             upsert_all(batch, file.sightings);
         }
-        (_, Some(TRIGGERS)) => upsert_all(batch, parsed::<TriggersFile>(path, bytes)?.triggers),
-        (_, Some(ALIASES)) => upsert_all(batch, parsed::<AliasesFile>(path, bytes)?.aliases),
+        (_, Some(TRIGGERS)) => upsert_all(batch, parse::<TriggersFile>(path, bytes)?.triggers),
+        (_, Some(ALIASES)) => upsert_all(batch, parse::<AliasesFile>(path, bytes)?.aliases),
         (_, Some(NOTES)) => {
             let value = String::from_utf8(bytes.to_vec()).map_err(|error| Error::Format {
                 path: path.to_owned(),
@@ -357,16 +362,13 @@ fn upsert_all(batch: &mut Batch, records: Vec<impl Into<Record>>) {
 }
 
 /// A file's bytes: pretty JSON, LF endings, a final newline.
-pub(super) fn json(value: &impl Serialize) -> Result<Vec<u8>, Error> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| Error::Format {
-        path: PathBuf::new(),
-        detail: error.to_string(),
-    })?;
+pub(super) fn json(value: &impl Serialize) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(value).expect("plain records serialize");
     bytes.push(b'\n');
-    Ok(bytes)
+    bytes
 }
 
-pub(super) fn parsed<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T, Error> {
+pub(super) fn parse<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|error| Error::Format {
         path: path.to_owned(),
         detail: error.to_string(),

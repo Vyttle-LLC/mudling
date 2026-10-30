@@ -43,16 +43,17 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temporary, path)
 }
 
-/// Removes files in `folder` that no longer stand for anything: a zone with
-/// no rooms left, a renamed character. Returns their paths, relative to
-/// `root`. Files MUDling didn't write stay.
+/// Removes `.json` files in `folder` that no longer stand for anything: a
+/// zone with no rooms left, a renamed character. The folder is MUDling's, so
+/// a `.json` file someone else put there goes too; other kinds of file stay.
+/// Returns the paths removed, relative to `root`.
 pub(super) fn remove_stale(
     root: &Path,
     folder: &Path,
     files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<Vec<PathBuf>, Error> {
     let mut removed = Vec::new();
-    for path in listed(&root.join(folder))? {
+    for path in list_files(&root.join(folder))? {
         let Some(name) = path.file_name() else {
             continue;
         };
@@ -67,7 +68,7 @@ pub(super) fn remove_stale(
 
 /// Removes what a crash left mid-write in `folder`.
 pub(super) fn sweep_temporaries(folder: &Path) -> Result<(), Error> {
-    for path in listed(folder)? {
+    for path in list_files(folder)? {
         let is_temporary = path
             .to_str()
             .is_some_and(|path| path.ends_with(TEMP_SUFFIX));
@@ -79,7 +80,7 @@ pub(super) fn sweep_temporaries(folder: &Path) -> Result<(), Error> {
 }
 
 /// The files in `folder`, sorted; none if it doesn't exist.
-pub(super) fn listed(folder: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(super) fn list_files(folder: &Path) -> Result<Vec<PathBuf>, Error> {
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
