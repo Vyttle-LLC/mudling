@@ -189,7 +189,9 @@ fn a_blank_line_ends_the_wrapped_rows() {
     assert_eq!(get(&skills, "slist.read"), &number(4.0));
 
     // The same text with no blank line before it is a wrapped row.
-    let skills = read(&fixture.replacen("\n\n", "\n", 1)).store("skills");
+    // By lines, so a checkout with CRLF endings reads the same.
+    let without_blank: Vec<&str> = fixture.lines().filter(|line| !line.is_empty()).collect();
+    let skills = read(&without_blank.join("\n")).store("skills");
     assert_eq!(get(&skills, "Ancient Ruin.level"), &number(50.0));
 }
 
