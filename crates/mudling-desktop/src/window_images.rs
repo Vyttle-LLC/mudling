@@ -1,0 +1,155 @@
+//! Renders the real window to PNG files with gpui's headless renderer, so the
+//! layout can be looked at without a display. It needs a GPU, so it's macOS
+//! only for now and ignored by default:
+//!
+//! ```text
+//! cargo test -p mudling-desktop window_images -- --ignored
+//! ```
+//!
+//! The images land in `target/window-images`, or in `$MUDLING_WINDOW_IMAGES`.
+//! The chat text is made up for this file: it comes from no real session.
+
+use crate::assets::{Assets, load_fonts};
+use crate::dock::{DockState, Side};
+use crate::shell::Shell;
+use crate::theme::Theme;
+use futures::channel::mpsc::unbounded;
+use gpui::{
+    AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
+};
+use mudling_core::LinePipeline;
+use mudling_core::defaults::hud::Vital;
+use mudling_core::store::{Diff, Revision, TerminalChange, VitalsState};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+const WIDE: Size<Pixels> = size(px(1434.), px(897.));
+const NARROW: Size<Pixels> = size(px(760.), px(640.));
+
+const SAMPLE_CHAT: [&str; 11] = [
+    "\x1b[36mYou are carrying:\x1b[0m",
+    "",
+    "     \x1b[33m(Glowing) (Humming)\x1b[0m a copper bracelet",
+    "     \x1b[33m(Glowing)\x1b[0m a small necklace",
+    "     a small boat",
+    "     \x1b[33m(Glowing)\x1b[0m an alligator tooth",
+    "     \x1b[33m(Glowing)\x1b[0m orb of knowledge",
+    "( 5) a bright ball of light",
+    "",
+    "\x1b[32mYou get 20 standard bolts.\x1b[0m",
+    "\x1b[32mYou donate 50 standard bolts.\x1b[0m",
+];
+
+fn images_folder() -> PathBuf {
+    std::env::var_os("MUDLING_WINDOW_IMAGES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-images"),
+        PathBuf::from,
+    )
+}
+
+fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
+    let mut pipeline = LinePipeline::default();
+    let mut lines = Vec::new();
+    for line in SAMPLE_CHAT {
+        pipeline.push(format!("{line}\n").as_bytes(), &mut lines);
+    }
+    let diff = Diff {
+        revision: Revision::default(),
+        change: TerminalChange::Append(lines),
+    };
+    shell.chat().update(cx, |chat, cx| {
+        chat.apply(&diff, cx);
+        chat.echo_unsent("get bracelet", cx);
+    });
+    let vitals = VitalsState(BTreeMap::from([
+        (Vital::Hp, 30),
+        (Vital::MaxHp, 42),
+        (Vital::Mana, 110),
+        (Vital::MaxMana, 115),
+        (Vital::Moves, 110),
+        (Vital::MaxMoves, 110),
+    ]));
+    shell.show_sample_status("Connected to mud.example", &vitals, cx);
+}
+
+/// Opens the window at `window_size`, lets `arrange` set it up, and saves what
+/// it draws as `<name>.png`.
+fn render(
+    name: &str,
+    appearance: WindowAppearance,
+    window_size: Size<Pixels>,
+    arrange: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+) {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_apple::AppleTextSystem::new()),
+        Arc::new(Assets),
+        gpui_platform::current_headless_renderer,
+    );
+    cx.update(|cx| {
+        load_fonts(cx);
+        crate::input::bind_keys(cx);
+        cx.set_reduce_motion(true);
+    });
+    let (_waker, woken) = unbounded();
+    let window = cx
+        .open_window(window_size, |window, cx| {
+            cx.new(|cx| Shell::new(None, woken, window, cx))
+        })
+        .expect("the window opens");
+    window
+        .update(&mut cx, |shell, window, cx| {
+            cx.set_global(Theme::for_appearance(appearance));
+            fill_with_sample(shell, cx);
+            arrange(shell, window, cx);
+            window.refresh();
+        })
+        .expect("the window is open");
+    cx.run_until_parked();
+
+    let image = cx
+        .capture_screenshot(window.into())
+        .expect("the frame renders");
+    let folder = images_folder();
+    std::fs::create_dir_all(&folder).expect("the folder can be made");
+    let path = folder.join(format!("{name}.png"));
+    image.save(&path).expect("the image can be written");
+    println!("{}", path.display());
+}
+
+#[test]
+#[ignore = "needs a GPU; writes image files"]
+fn window_images() {
+    use WindowAppearance::{Dark, Light};
+    render("main-dark", Dark, WIDE, |_, _, _| {});
+    render("main-light", Light, WIDE, |_, _, _| {});
+    render("panels-open-dark", Dark, WIDE, |shell, _, cx| {
+        shell.open_panels(cx);
+    });
+    render("panels-open-light", Light, WIDE, |shell, _, cx| {
+        shell.open_panels(cx);
+    });
+    render("rails-dark", Dark, WIDE, |shell, _, cx| {
+        for side in [Side::Left, Side::Right] {
+            shell
+                .dock(side)
+                .update(cx, |dock, cx| dock.move_to(DockState::Rail, cx));
+        }
+    });
+    render("narrow-overlay-dark", Dark, NARROW, |shell, _, cx| {
+        shell
+            .dock(Side::Right)
+            .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+    });
+    render("multi-line-dark", Dark, WIDE, |shell, window, cx| {
+        shell.type_sample(
+            "look\nget all corpse\na line long enough to wrap around the end of the field, \
+             because players paste long aliases and expect to see all of what they pasted",
+            window,
+            cx,
+        );
+    });
+    render("speedwalk-dark", Dark, WIDE, |shell, window, cx| {
+        shell.type_sample("3n2e", window, cx);
+    });
+}

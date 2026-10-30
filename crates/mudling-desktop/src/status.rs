@@ -1,11 +1,12 @@
-//! Plain lines about the session, under the chat: connection and vitals,
-//! the game detection's suggestion, and the newest notice. No HUD design yet.
+//! Quiet lines above the command bar: the game detection's suggestion and the
+//! newest notice. The connection's words live on the HUD row.
 
+use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{Context, Pixels, Role, SharedString, Window, div, prelude::*, px};
 use mudling_core::defaults::detect::Source;
 use mudling_core::plugin::PluginId;
-use mudling_core::store::{ConnectionStatus, SettingsState, VitalsState};
+use mudling_core::store::{ConnectionStatus, SettingsState};
 
 const FONT_SIZE: Pixels = px(12.);
 
@@ -21,29 +22,10 @@ impl StatusLines {
             cx.notify();
         }
     }
-
-    #[cfg(test)]
-    pub fn lines(&self) -> &[SharedString] {
-        &self.lines
-    }
 }
 
-/// What the lines say. `replaying` says so in place of the connection: a
-/// paced replay opens and closes one every few frames.
-pub fn lines_for(
-    settings: &SettingsState,
-    vitals: &VitalsState,
-    enabled: &[PluginId],
-    replaying: bool,
-) -> Vec<SharedString> {
-    let mut status = if replaying {
-        "Replaying a recording".to_owned()
-    } else {
-        connection_text(settings)
-    };
-    for (vital, value) in &vitals.0 {
-        status.push_str(&format!("  {} {value}", vital.name()));
-    }
+/// What the lines say.
+pub fn lines_for(settings: &SettingsState, enabled: &[PluginId]) -> Vec<SharedString> {
     let suggestion = settings
         .suggestion
         .as_ref()
@@ -59,14 +41,19 @@ pub fn lines_for(
                 suggestion.plugin
             )
         });
-    std::iter::once(status)
-        .chain(suggestion)
+    suggestion
+        .into_iter()
         .chain(settings.notices.last().cloned())
         .map(SharedString::from)
         .collect()
 }
 
-fn connection_text(settings: &SettingsState) -> String {
+/// How the connection stands. `replaying` says so instead: a paced replay
+/// opens and closes one every few frames.
+pub fn connection_text(settings: &SettingsState, replaying: bool) -> String {
+    if replaying {
+        return "Replaying a recording".to_owned();
+    }
     let server = settings.server.as_deref().unwrap_or("the server");
     match &settings.connection {
         ConnectionStatus::Idle => format!("Not connected to {server}"),
@@ -81,13 +68,15 @@ impl Render for StatusLines {
         let theme = cx.global::<Theme>();
         div()
             .w_full()
+            .font_family(UI_FONT)
             .text_size(FONT_SIZE)
-            .text_color(theme.placeholder)
+            .text_color(theme.text_muted)
             .children(self.lines.iter().enumerate().map(|(number, line)| {
                 div()
                     .id(("status-line", number))
                     .role(Role::Label)
                     .aria_value(line.clone())
+                    .pb_1()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(line.clone())
@@ -99,7 +88,6 @@ impl Render for StatusLines {
 mod tests {
     use super::*;
     use mudling_core::defaults::detect::Suggestion;
-    use mudling_core::defaults::hud::Vital;
     use mudling_core::net::DisconnectReason;
 
     fn avatar() -> PluginId {
@@ -107,17 +95,17 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_says_how_the_connection_stands_and_the_vitals() {
+    fn the_connection_text_says_how_the_connection_stands() {
         let settings = SettingsState {
             server: Some("mud.example".to_owned()),
             connection: ConnectionStatus::Closed(DisconnectReason::ClosedByServer),
             ..SettingsState::default()
         };
-        let vitals = VitalsState([(Vital::Hp, 11), (Vital::MaxHp, 30)].into());
         assert_eq!(
-            lines_for(&settings, &vitals, &[], false),
-            ["Disconnected from mud.example: closed by server  hp 11  maxhp 30"]
+            connection_text(&settings, false),
+            "Disconnected from mud.example: closed by server"
         );
+        assert_eq!(connection_text(&settings, true), "Replaying a recording");
     }
 
     #[test]
@@ -129,10 +117,7 @@ mod tests {
             }),
             ..SettingsState::default()
         };
-        let vitals = VitalsState::default();
-        let lines = lines_for(&settings, &vitals, &[], true);
-        assert_eq!(lines[0], "Replaying a recording");
-        assert!(lines[1].contains("--enable avatar"));
-        assert_eq!(lines_for(&settings, &vitals, &[avatar()], true).len(), 1);
+        assert!(lines_for(&settings, &[])[0].contains("--enable avatar"));
+        assert!(lines_for(&settings, &[avatar()]).is_empty());
     }
 }

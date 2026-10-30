@@ -1,8 +1,8 @@
-//! `--ax-check` (macOS): reads the window's accessibility tree from inside
-//! the app, through the same `NSAccessibility` methods the system calls for
-//! VoiceOver, and checks the chat, the input and the live region. Reading
-//! another app's tree with `AXUIElement` needs the Accessibility permission;
-//! this needs none.
+//! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
+//! window's accessibility tree from inside the app, through the same
+//! `NSAccessibility` methods the system calls for VoiceOver, and checks the
+//! chat, the input and the live region. Reading another app's tree with
+//! `AXUIElement` needs the Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
@@ -12,7 +12,7 @@ use crate::stream;
 use gpui::{App, Entity};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{MainThreadMarker, Message, msg_send, sel};
+use objc2::{MainThreadMarker, Message, class, msg_send, sel};
 use objc2_app_kit::NSApplication;
 use objc2_foundation::{NSArray, NSString};
 use serde::Serialize;
@@ -116,6 +116,17 @@ fn focused_element() -> Option<AxElement> {
     let focused: Option<Retained<AnyObject>> =
         unsafe { getter(&view, sel!(accessibilityFocusedUIElement)) };
     focused.map(|element| AxElement::read(&element))
+}
+
+/// Whether the player turned on Reduce Motion in System Settings.
+#[cfg_attr(test, allow(dead_code))]
+pub fn reduce_motion() -> bool {
+    // SAFETY: both are NSWorkspace's own methods: the shared instance, and a
+    // BOOL property on it.
+    unsafe {
+        let workspace: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        msg_send![&workspace, accessibilityDisplayShouldReduceMotion]
+    }
 }
 
 #[derive(Serialize)]

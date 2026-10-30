@@ -2375,6 +2375,7 @@ dependencies = [
  "gpui-pre-linux",
  "gpui-pre-macos",
  "gpui-pre-web",
+ "gpui-pre-wgpu",
  "gpui-pre-windows",
 ]
 
@@ -2481,6 +2482,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-util",
+ "image",
  "itertools",
  "log",
  "parking_lot",
@@ -3457,7 +3459,9 @@ dependencies = [
  "directories",
  "futures",
  "gpui-pre",
+ "gpui-pre-apple",
  "gpui-pre-platform",
+ "image",
  "memory-stats",
  "mudling-core",
  "objc2 0.6.5",

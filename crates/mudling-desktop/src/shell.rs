@@ -1,22 +1,42 @@
-//! The window's root view: a centered column with the chat above the status
-//! lines and the command input, a thin shell over a [`Session`].
+//! The window's root view, a thin shell over a [`Session`]: a centered chat
+//! column with the floating command bar at its foot, between two [`Dock`]s.
+//!
+//! The bar looks like it floats, but the chat ends where it begins, so
+//! however tall the bar grows it can't cover the newest line.
 //!
 //! The UI thread only subscribes, applies and draws. The session's waker
 //! comes from a core thread; each wake asks for the next frame, and that
 //! frame drains the stores once, so updates apply at most once per frame.
 
-use crate::chat::{COLUMN_WIDTH, Chat, MONO_FONT};
-use crate::input::{CommandInput, Submitted};
-use crate::status::{StatusLines, lines_for};
+use crate::assets::UI_FONT;
+use crate::chat::{COLUMN_WIDTH, Chat};
+use crate::dock::{Dock, DockState, Side, Slot};
+use crate::hud::Hud;
+use crate::input::{CommandInput, InputEvent};
+use crate::status::{StatusLines, connection_text, lines_for};
 use crate::theme::Theme;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use gpui::{Context, Entity, Focusable, Subscription, Task, Window, div, prelude::*};
+use gpui::{
+    AnyView, App, Context, Entity, Focusable, KeyBinding, Subscription, Task, Window, actions, div,
+    prelude::*,
+};
+use mudling_core::completion::Completion;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{ConnectionStatus, SettingsState, Versioned, VitalsState};
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
+
+actions!(shell, [ToggleLeftPanel, ToggleRightPanel, FocusCommandBar]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
+        KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
+        KeyBinding::new(secondary!("l"), FocusCommandBar, None),
+    ]);
+}
 
 /// What the window runs on. Without one the window only echoes what's typed.
 pub struct Game {
@@ -39,7 +59,10 @@ pub struct Shell {
     left: bool,
     chat: Entity<Chat>,
     status: Entity<StatusLines>,
+    hud: Entity<Hud>,
     input: Entity<CommandInput>,
+    left_dock: Entity<Dock>,
+    right_dock: Entity<Dock>,
     _subscriptions: [Subscription; 3],
     _woken: Task<()>,
 }
@@ -62,8 +85,8 @@ impl Shell {
         };
         let chat = cx.new(|_| Chat::new(terminal));
         let input = cx.new(CommandInput::new);
-        let submitted = cx.subscribe(&input, |shell, _, Submitted(command), cx| {
-            shell.submit(command, cx);
+        let typing = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
+            shell.on_typing(event, window, cx);
         });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             cx.set_global(Theme::for_appearance(window.appearance()));
@@ -87,8 +110,11 @@ impl Shell {
             left: false,
             chat,
             status: cx.new(|_| StatusLines::default()),
+            hud: cx.new(|_| Hud::default()),
             input,
-            _subscriptions: [submitted, appearance, quitting],
+            left_dock: cx.new(|_| Dock::new(Side::Left)),
+            right_dock: cx.new(|_| Dock::new(Side::Right)),
+            _subscriptions: [typing, appearance, quitting],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
         shell.show_status(cx);
@@ -139,27 +165,101 @@ impl Shell {
 
     fn show_status(&mut self, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
-        let lines = lines_for(
-            self.copies.settings.value(),
-            self.copies.vitals.value(),
-            &game.enabled,
-            game.replay_folder.is_some(),
-        );
+        let settings = self.copies.settings.value();
+        let lines = lines_for(settings, &game.enabled);
+        let connection = connection_text(settings, game.replay_folder.is_some()).into();
         self.status.update(cx, |status, cx| status.show(lines, cx));
+        self.hud.update(cx, |hud, cx| {
+            hud.show(connection, self.copies.vitals.value(), cx);
+        });
     }
 
-    /// Sends what was typed; the session echoes it, unless it's a password.
-    /// With no server connected it goes nowhere, so the chat shows it here.
-    fn submit(&mut self, command: &str, cx: &mut Context<Shell>) {
+    fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
+        if let InputEvent::Submitted(command) = event {
+            self.submit(command, cx);
+            return;
+        }
+        let Some(game) = &self.game else { return };
+        let at_the_end = |line: String| Completion {
+            cursor: line.len(),
+            line,
+        };
+        let shown = match event {
+            InputEvent::Submitted(_) => None,
+            InputEvent::Older { line, prefix } => game.session.older(line, prefix).map(at_the_end),
+            InputEvent::Newer { line } => game.session.newer(line).map(at_the_end),
+            InputEvent::Complete { line, cursor } => game.session.complete(line, *cursor),
+        };
+        if let Some(Completion { line, cursor }) = shown {
+            self.input
+                .update(cx, |input, cx| input.show(line, cursor, window, cx));
+        }
+    }
+
+    /// Sends what was typed, a command to each line; the session echoes them,
+    /// unless it's a password. With no server connected they go nowhere, so
+    /// the chat shows them here.
+    fn submit(&mut self, typed: &str, cx: &mut Context<Shell>) {
         let settings = self.copies.settings.value();
         let connected = settings.connection == ConnectionStatus::Connected;
-        match &self.game {
-            Some(game) if connected && game.replay_folder.is_none() => game.session.send(command),
-            _ if settings.echo_off => {}
-            _ => self
-                .chat
-                .update(cx, |chat, cx| chat.echo_unsent(command, cx)),
+        for command in typed.split('\n') {
+            match &self.game {
+                Some(game) if connected && game.replay_folder.is_none() => {
+                    game.session.send(command);
+                }
+                _ if settings.echo_off => {}
+                _ => self
+                    .chat
+                    .update(cx, |chat, cx| chat.echo_unsent(command, cx)),
+            }
         }
+    }
+
+    /// Puts `view` in a panel slot: how later tickets fill the panels.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn mount(&self, slot: Slot, view: impl Into<AnyView>, cx: &mut Context<Shell>) {
+        let view = view.into();
+        self.dock(slot.side())
+            .update(cx, |dock, cx| dock.mount(slot, view, cx));
+    }
+
+    /// The dock on `side`, for what opens and closes it, such as the title
+    /// bar's toggles.
+    pub fn dock(&self, side: Side) -> &Entity<Dock> {
+        match side {
+            Side::Left => &self.left_dock,
+            Side::Right => &self.right_dock,
+        }
+    }
+
+    /// Opens both panels: the frame budget holds with everything open.
+    pub fn open_panels(&self, cx: &mut Context<Shell>) {
+        for side in [Side::Left, Side::Right] {
+            self.dock(side)
+                .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+        }
+    }
+
+    fn toggle_dock(&self, side: Side, cx: &mut Context<Shell>) {
+        self.dock(side).update(cx, |dock, cx| dock.toggle(cx));
+    }
+
+    #[cfg(test)]
+    pub fn show_sample_status(
+        &self,
+        connection: &'static str,
+        vitals: &VitalsState,
+        cx: &mut Context<Shell>,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.show(connection.into(), vitals, cx));
+    }
+
+    #[cfg(test)]
+    pub fn type_sample(&self, text: &str, window: &mut Window, cx: &mut Context<Shell>) {
+        self.input.update(cx, |input, cx| {
+            input.show(text.to_owned(), text.len(), window, cx)
+        });
     }
 
     /// Feeds a recording through the session, as one connection.
@@ -200,22 +300,31 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Shell>) -> impl IntoElement {
-        let theme = cx.global::<Theme>();
-        div()
-            .size_full()
+        let theme = *cx.global::<Theme>();
+        let command_bar = div()
+            .debug_selector(|| "command-bar".to_owned())
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .shadow(theme.floating_shadow())
+            .child(self.hud.clone())
+            .child(self.input.clone());
+        let column = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_col()
             .items_center()
-            .bg(theme.background)
-            .text_color(theme.text)
-            .font_family(MONO_FONT)
             .child(
                 div()
+                    .debug_selector(|| "chat-area".to_owned())
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .max_w(COLUMN_WIDTH)
-                    .px_4()
+                    .px_8()
                     .pt_4()
                     .child(self.chat.clone()),
             )
@@ -224,22 +333,37 @@ impl Render for Shell {
                     .w_full()
                     .max_w(COLUMN_WIDTH)
                     .px_4()
-                    .pt_2()
-                    .child(self.status.clone()),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(COLUMN_WIDTH)
-                    .p_4()
-                    .child(self.input.clone()),
-            )
+                    .pt_3()
+                    .pb_4()
+                    .child(self.status.clone())
+                    .child(command_bar),
+            );
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .bg(theme.background)
+            .text_color(theme.text)
+            .font_family(UI_FONT)
+            .on_action(cx.listener(|shell, _: &ToggleLeftPanel, _, cx| {
+                shell.toggle_dock(Side::Left, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &ToggleRightPanel, _, cx| {
+                shell.toggle_dock(Side::Right, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
+                window.focus(&shell.input.focus_handle(cx), cx);
+            }))
+            .child(self.left_dock.clone())
+            .child(column)
+            .child(self.right_dock.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::LINE_HEIGHT;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{TestAppContext, VisualTestContext, px};
     use mudling_core::session::SessionConfig;
@@ -423,13 +547,148 @@ mod tests {
         played.say(br#"Char.Vitals {"hp":11,"maxhp":30}"#);
         played.say(&[IAC, SE]);
         played.frames_until("the vitals", |shell, cx| {
-            shell
-                .status
-                .read(cx)
-                .lines()
-                .first()
-                .is_some_and(|line| line == "Connected to 127.0.0.1  hp 11  maxhp 30")
+            let hud = shell.hud.read(cx);
+            hud.connection() == "Connected to 127.0.0.1" && hud.values() == ["11/30"]
         });
+    }
+
+    #[gpui::test]
+    fn up_recalls_a_sent_command_and_tab_completes_a_word(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.cx.simulate_input("get lantern");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard(), "get lantern");
+        let typed = |played: &mut Played| {
+            played.shell.read_with(played.cx, |shell, cx| {
+                shell.input.read(cx).text().to_owned()
+            })
+        };
+
+        played.cx.simulate_keystrokes("up");
+        assert_eq!(typed(&mut played), "get lantern");
+        played.cx.simulate_keystrokes("down");
+        assert_eq!(typed(&mut played), "");
+
+        played.cx.simulate_input("drop la");
+        played.cx.simulate_keystrokes("tab");
+        assert_eq!(typed(&mut played), "drop lantern");
+    }
+
+    #[gpui::test]
+    fn each_line_of_a_multi_line_input_goes_out_as_a_command(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.cx.simulate_input("look");
+        played.cx.simulate_keystrokes("shift-enter");
+        played.cx.simulate_input("inv");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard(), "look");
+        assert_eq!(played.heard(), "inv");
+    }
+
+    #[gpui::test]
+    fn history_and_completion_stay_out_of_a_password(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.cx.simulate_input("look");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard(), "look");
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("echo off", |shell, _| {
+            shell.copies.settings.value().echo_off
+        });
+
+        played.cx.simulate_keystrokes("up");
+        played.cx.simulate_input("lo");
+        played.cx.simulate_keystrokes("tab shift-enter");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).text(), "lo");
+        });
+    }
+
+    #[gpui::test]
+    fn panel_shortcuts_toggle_the_docks_and_leave_typing_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::input::bind_keys(cx);
+            bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_waker, woken) = unbounded();
+        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx));
+        let state = |shell: &Entity<Shell>, side, cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| shell.dock(side).read(cx).state())
+        };
+
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-1"
+        } else {
+            "ctrl-1"
+        });
+        assert_eq!(state(&shell, Side::Left, cx), DockState::Open);
+        assert_eq!(state(&shell, Side::Right, cx), DockState::Hidden);
+
+        cx.simulate_input("look");
+        cx.simulate_keystrokes("enter");
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.newest_text()).as_deref(),
+            Some("look")
+        );
+    }
+
+    #[gpui::test]
+    fn the_chat_stops_above_the_command_bar_as_it_grows(cx: &mut TestAppContext) {
+        cx.update(crate::input::bind_keys);
+        let (_waker, woken) = unbounded();
+        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx));
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        chat.update(cx, |chat, cx| {
+            (0..200).for_each(|_| chat.echo_unsent("a line", cx));
+        });
+        cx.run_until_parked();
+
+        cx.simulate_input("one");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("two");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("three");
+        cx.run_until_parked();
+
+        let chat_bottom = cx.debug_bounds("chat-area").unwrap().bottom();
+        let bar = cx.debug_bounds("command-bar").unwrap();
+        assert!(chat_bottom <= bar.top(), "{chat_bottom:?} over {bar:?}");
+        assert!(
+            bar.size.height >= LINE_HEIGHT * 3.,
+            "the bar grows: {:?}",
+            bar.size
+        );
+        assert!(
+            chat.read_with(cx, |chat, _| chat.follows_newest()),
+            "the newest line stays in view as the bar grows"
+        );
+    }
+
+    #[gpui::test]
+    fn a_later_ticket_fills_a_slot_through_the_shell(cx: &mut TestAppContext) {
+        struct Filled;
+        impl Render for Filled {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .debug_selector(|| "filled-slot".to_owned())
+                    .child("filled")
+            }
+        }
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_waker, woken) = unbounded();
+        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx));
+        shell.update(cx, |shell, cx| {
+            let filled = cx.new(|_| Filled);
+            shell.mount(Slot::Room, filled, cx);
+            shell.open_panels(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("filled-slot").is_some());
     }
 
     #[gpui::test]

@@ -18,10 +18,11 @@ use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
 use mudling_core::{Line, LineKind, Scrollback};
 use std::ops::Range;
 
-const LINE_HEIGHT: Pixels = px(20.);
-const FONT_SIZE: Pixels = px(14.);
-/// A comfortable reading width: about 100 columns of the chat font.
-pub const COLUMN_WIDTH: Pixels = px(860.);
+pub const LINE_HEIGHT: Pixels = px(20.);
+pub const FONT_SIZE: Pixels = px(14.);
+/// A comfortable reading width: about 90 columns of the chat font, however
+/// wide the window is.
+pub const COLUMN_WIDTH: Pixels = px(800.);
 
 #[cfg(target_os = "macos")]
 pub const MONO_FONT: &str = "Menlo";
@@ -110,7 +111,7 @@ impl Chat {
     /// Whether the view follows the newest line, read from the list's real
     /// offset, so a scroll since the last frame counts at once. Scrolling up
     /// stops following; scrolling back to the bottom follows again.
-    fn follows_newest(&self) -> bool {
+    pub fn follows_newest(&self) -> bool {
         self.scroll.is_scrolled_to_end().unwrap_or(true)
     }
 
@@ -180,7 +181,9 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
         .overflow_hidden()
         .whitespace_nowrap()
         .when(line.kind() == LineKind::Command, |line| {
-            line.text_color(theme.command)
+            line.flex()
+                .gap_2()
+                .child(div().text_color(theme.command).child("›"))
         })
         .child(styled)
 }

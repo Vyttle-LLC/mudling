@@ -28,7 +28,10 @@ macro_rules! secondary {
     };
 }
 
+mod assets;
 mod chat;
+mod dock;
+mod hud;
 mod input;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -37,6 +40,8 @@ mod shell;
 mod status;
 mod stream;
 mod theme;
+#[cfg(all(test, target_os = "macos"))]
+mod window_images;
 
 use directories::ProjectDirs;
 use futures::channel::mpsc;
@@ -133,8 +138,11 @@ fn main() -> ExitCode {
         measure::mark(&format!("info source_lines={}", feed.source_len()));
     }
 
-    gpui_platform::application().run(move |cx: &mut App| {
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    application.run(move |cx: &mut App| {
+        assets::load_fonts(cx);
         input::bind_keys(cx);
+        shell::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(800.)), cx);
@@ -144,6 +152,7 @@ fn main() -> ExitCode {
                 ..TitlebarOptions::default()
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(480.), px(400.))),
             // A measured run draws every frame even if another app has focus.
             inactive_frame_interval: if options.measured_run {
                 None

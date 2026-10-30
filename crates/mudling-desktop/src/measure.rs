@@ -160,6 +160,7 @@ pub fn drive(
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
     };
+    pacer.shell.update(cx, |shell, cx| shell.open_panels(cx));
     mark(&format!(
         "info window_active={}",
         u8::from(cx.active_window().is_some())
@@ -256,7 +257,7 @@ pub fn run_parent(
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat, status lines and command input; no panels or split yet",
+        scope: "chat, command bar and both side panels open, their slots empty; no split yet",
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
