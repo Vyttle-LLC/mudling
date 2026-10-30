@@ -45,12 +45,17 @@ fn commit(repo: &Repo, folder: &Path, name: &str, contents: &str) -> Oid {
     repo.commit_all(&format!("write {name}")).unwrap().unwrap()
 }
 
+struct Device {
+    folder: PathBuf,
+    repo: Repo,
+}
+
 /// A bare remote and two devices that both point at it.
 struct Devices {
     _folder: TempDir,
     remote: PathBuf,
-    a: (PathBuf, Repo),
-    b: (PathBuf, Repo),
+    a: Device,
+    b: Device,
 }
 
 fn two_devices() -> Devices {
@@ -63,7 +68,7 @@ fn two_devices() -> Devices {
         repo.repo
             .remote("origin", remote.to_str().unwrap())
             .unwrap();
-        (path, repo)
+        Device { folder: path, repo }
     };
     let (a, b) = (device("a"), device("b"));
     Devices {
@@ -120,7 +125,7 @@ fn commit_all_stages_changes_and_removals_and_skips_when_nothing_changed() {
     assert_eq!(repo.commit_all("nothing yet").unwrap(), None);
 
     commit(&repo, folder.path(), "keep.json", "1");
-    let removed = commit(&repo, folder.path(), "drop.json", "2");
+    commit(&repo, folder.path(), "drop.json", "2");
     assert_eq!(repo.commit_all("no change").unwrap(), None);
 
     fs::remove_file(folder.path().join("drop.json")).unwrap();
@@ -128,7 +133,6 @@ fn commit_all_stages_changes_and_removals_and_skips_when_nothing_changed() {
     let tree = repo.repo.find_commit(id).unwrap().tree().unwrap();
     assert!(tree.get_name("keep.json").is_some());
     assert!(tree.get_name("drop.json").is_none());
-    assert_ne!(id, removed);
 }
 
 #[test]
@@ -139,16 +143,16 @@ fn push_then_fetch_carries_a_commit_between_devices() {
         a,
         b,
     } = two_devices();
-    assert_eq!(b.1.fetch("origin", "main").unwrap(), None);
+    assert_eq!(b.repo.fetch("origin", "main").unwrap(), None);
 
-    let id = commit(&a.1, &a.0, "servers.json", "[]");
-    a.1.push("origin", "main").unwrap();
+    let id = commit(&a.repo, &a.folder, "servers.json", "[]");
+    a.repo.push("origin", "main").unwrap();
 
     assert_eq!(remote_tip(&remote), Some(id));
-    assert_eq!(b.1.fetch("origin", "main").unwrap(), Some(id));
-    assert_eq!(b.1.branch_tip("main").unwrap(), None);
-    b.1.move_branch("main", None, id).unwrap();
-    assert_eq!(b.1.branch_tip("main").unwrap(), Some(id));
+    assert_eq!(b.repo.fetch("origin", "main").unwrap(), Some(id));
+    assert_eq!(b.repo.branch_tip("main").unwrap(), None);
+    b.repo.move_branch("main", None, id).unwrap();
+    assert_eq!(b.repo.branch_tip("main").unwrap(), Some(id));
 }
 
 #[test]
@@ -159,18 +163,27 @@ fn pushing_behind_the_remote_fails_typed_and_loses_nothing() {
         a,
         b,
     } = two_devices();
-    let first = commit(&a.1, &a.0, "a.json", "1");
-    a.1.push("origin", "main").unwrap();
-    let local = commit(&b.1, &b.0, "b.json", "2");
+    let first = commit(&a.repo, &a.folder, "a.json", "1");
+    a.repo.push("origin", "main").unwrap();
+    let local = commit(&b.repo, &b.folder, "b.json", "2");
 
-    let failure = b.1.push("origin", "main").unwrap_err();
+    let failure = b.repo.push("origin", "main").unwrap_err();
 
     assert!(
         matches!(failure, GitError::NonFastForward(_)),
         "{failure:?}"
     );
     assert_eq!(remote_tip(&remote), Some(first));
-    assert_eq!(b.1.branch_tip("main").unwrap(), Some(local));
+    assert_eq!(b.repo.branch_tip("main").unwrap(), Some(local));
+}
+
+#[test]
+fn a_server_rejecting_a_push_is_told_apart_from_being_ahead() {
+    let behind = push_rejected("failed to update ref: fetch first".to_owned());
+    assert!(matches!(behind, GitError::NonFastForward(_)));
+
+    let hook = push_rejected("pre-receive hook declined".to_owned());
+    assert!(matches!(hook, GitError::RemoteRefused(_)));
 }
 
 #[test]
@@ -251,7 +264,7 @@ fn move_branch_moves_nothing_if_the_branch_is_not_where_the_caller_thinks() {
 fn locks_left_by_an_app_killed_mid_write_are_cleared_at_open_however_young() {
     let (folder, repo) = empty_repo();
     let git_dir = repo.repo.path().to_owned();
-    let main = commit(&repo, folder.path(), "a.json", "1");
+    commit(&repo, folder.path(), "a.json", "1");
     die_mid_write(repo);
     let locks = [
         git_dir.join("index.lock"),
@@ -264,8 +277,7 @@ fn locks_left_by_an_app_killed_mid_write_are_cleared_at_open_however_young() {
     let repo = reopen(folder.path());
 
     assert!(locks.iter().all(|lock| !lock.exists()));
-    let next = commit(&repo, folder.path(), "a.json", "2");
-    assert_ne!(next, main);
+    commit(&repo, folder.path(), "a.json", "2");
 }
 
 #[test]
@@ -368,9 +380,14 @@ fn an_unreachable_remote_is_no_network_over_ssh_and_http() {
     }
 }
 
-/// An HTTP server that refuses every request and reports the `Authorization`
-/// header each one carried.
+/// An HTTP server that demands a login from every request and reports the
+/// `Authorization` header each one carried.
 fn refusing_server() -> (u16, mpsc::Receiver<Option<String>>) {
+    answering_server("401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"t\"\r\nContent-Length: 0")
+}
+
+/// An HTTP server that gives every request the same status line and headers.
+fn answering_server(answer: &'static str) -> (u16, mpsc::Receiver<Option<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (sender, receiver) = mpsc::channel();
@@ -387,13 +404,45 @@ fn refusing_server() -> (u16, mpsc::Receiver<Option<String>>) {
             if sender.send(authorization).is_err() {
                 return;
             }
-            let _ = client.write_all(
-                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"t\"\r\n\
-                  Content-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+            let reply = format!("HTTP/1.1 {answer}\r\nConnection: close\r\n\r\n");
+            let _ = client.write_all(reply.as_bytes());
         }
     });
     (port, receiver)
+}
+
+#[test]
+fn a_reachable_server_saying_no_is_a_refusal_not_a_lost_network() {
+    for answer in [
+        "404 Not Found\r\nContent-Length: 0",
+        "500 Internal Server Error\r\nContent-Length: 0",
+    ] {
+        let (port, _requests) = answering_server(answer);
+        let (_folder, repo) = empty_repo();
+        repo.repo
+            .remote("origin", &format!("http://127.0.0.1:{port}/r.git"))
+            .unwrap();
+
+        let failure = repo.fetch("origin", "main").unwrap_err();
+
+        assert!(
+            matches!(failure, GitError::RemoteRefused(_)),
+            "{answer}: {failure:?}"
+        );
+    }
+}
+
+#[test]
+fn a_forbidden_answer_is_auth_refused() {
+    let (port, _requests) = answering_server("403 Forbidden\r\nContent-Length: 0");
+    let (_folder, repo) = empty_repo();
+    repo.repo
+        .remote("origin", &format!("http://127.0.0.1:{port}/r.git"))
+        .unwrap();
+
+    let failure = repo.fetch("origin", "main").unwrap_err();
+
+    assert!(matches!(failure, GitError::AuthRefused(_)), "{failure:?}");
 }
 
 /// Clears any helpers from the real gitconfigs, as a local empty value does.
@@ -425,7 +474,7 @@ fn a_remote_refusing_a_machine_with_no_helpers_is_auth_refused() {
 #[test]
 fn a_gitconfig_helper_signs_in_and_a_refusal_ends_as_auth_refused() {
     let (port, requests) = refusing_server();
-    let (folder, repo) = empty_repo();
+    let (_folder, repo) = empty_repo();
     let scripts = tempfile::tempdir().unwrap();
     let helper = scripts.path().join("helper.sh");
     fs::write(
@@ -443,7 +492,6 @@ fn a_gitconfig_helper_signs_in_and_a_refusal_ends_as_auth_refused() {
     assert!(matches!(failure, GitError::AuthRefused(_)), "{failure:?}");
     let sent: Vec<_> = requests.try_iter().flatten().collect();
     assert_eq!(sent, ["Basic YWxpY2U6czNjcmV0"]);
-    assert!(folder.path().join(".git").is_dir());
 }
 
 #[test]

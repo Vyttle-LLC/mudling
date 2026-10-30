@@ -30,12 +30,12 @@ pub(super) fn select() {
     }
 }
 
-/// Runs only while signing in over SSH, and only if the agent changed, so it
-/// is rare; a C `getenv` on another thread at that instant is the one exposure.
 #[allow(unsafe_code)]
 fn point_libssh2_at(agent: &Path) {
-    // SAFETY: see above. git2 offers no way to hand libssh2 a socket path, and
-    // the variable is the only input libssh2 reads.
+    // SAFETY: not proven. A C `getenv` on another thread at this instant would
+    // race. That risk is accepted because this runs only while signing in over
+    // SSH and only when the agent changed, and the variable is the only way to
+    // give libssh2 a socket through git2.
     unsafe { env::set_var(AUTH_SOCK, agent) };
 }
 

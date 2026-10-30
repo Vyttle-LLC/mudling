@@ -4,9 +4,14 @@
 //! own answer that. A running MUDling holds an OS lock on [`OWNER_FILE`], which
 //! the OS drops the moment the process dies. [`WRITE_MARKER`] exists only while
 //! MUDling writes. So at open, a free owner file with a marker still there means
-//! a MUDling died mid-write, and the locks made since the marker are its own.
-//! Every other lock belongs to some other git, however old, and stays: the
-//! operation that needs it fails as [`GitError::Locked`] until that git is done.
+//! a MUDling died mid-write, and the locks made since the marker are taken as
+//! its own. Every other lock belongs to some other git, however old, and stays:
+//! the operation that needs it fails as [`GitError::Locked`] until that git is
+//! done.
+//!
+//! One gap remains, because a marker has no end time and git's locks name no
+//! holder. After a kill, a lock taken by a live git before the next launch
+//! counts as MUDling's and is cleared, which fails that git.
 
 use super::{GitError, Result};
 use std::fs::{self, File, TryLockError};

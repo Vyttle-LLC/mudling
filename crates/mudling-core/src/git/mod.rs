@@ -3,8 +3,8 @@
 //!
 //! [`Repo`] offers what sync needs and no more. It holds the repo for its
 //! whole life, so one sync thread should own it. Every step is safe to repeat:
-//! a failure is a typed [`GitError`] and leaves the repo as it was, and a crash
-//! between steps leaves it valid.
+//! a failure is a typed [`GitError`] and loses nothing, and a crash between
+//! steps leaves the repo valid.
 
 mod credentials;
 mod error;
@@ -19,8 +19,7 @@ pub use error::GitError;
 pub use git2::Oid;
 
 use git2::{
-    Commit, FetchOptions, IndexAddOption, PushOptions, Remote, Repository, RepositoryInitOptions,
-    Signature,
+    Commit, FetchOptions, IndexAddOption, PushOptions, Repository, RepositoryInitOptions, Signature,
 };
 use std::fs::{self, File};
 use std::path::Path;
@@ -110,7 +109,8 @@ impl Repo {
         let refspec = format!("+{}:{tracking}", local_ref(branch));
         let mut options = FetchOptions::new();
         options.remote_callbacks(credentials::machine_callbacks(self.repo.config()?));
-        self.find_remote(remote)?
+        self.repo
+            .find_remote(remote)?
             .fetch(&[refspec], Some(&mut options), None)?;
         self.tip(&tracking)
     }
@@ -128,14 +128,11 @@ impl Repo {
         });
         let mut options = PushOptions::new();
         options.remote_callbacks(callbacks);
-        self.find_remote(remote)?
+        self.repo
+            .find_remote(remote)?
             .push(&[format!("{name}:{name}")], Some(&mut options))?;
         drop(options);
-        match rejection {
-            None => Ok(()),
-            Some(reason) if is_behind(&reason) => Err(GitError::NonFastForward(reason)),
-            Some(reason) => Err(GitError::Failed(reason)),
-        }
+        rejection.map_or(Ok(()), |reason| Err(push_rejected(reason)))
     }
 
     /// Replaces the commits on `branch` after `onto` with one commit holding
@@ -183,10 +180,6 @@ impl Repo {
 
     fn mark_write(&self) -> Result<locks::WriteMarker> {
         locks::WriteMarker::set(self.repo.commondir())
-    }
-
-    fn find_remote(&self, name: &str) -> Result<Remote<'_>> {
-        Ok(self.repo.find_remote(name)?)
     }
 
     fn head_commit(&self) -> Result<Option<Commit<'_>>> {
@@ -247,7 +240,11 @@ fn tracking_ref(remote: &str, branch: &str) -> String {
     format!("refs/remotes/{remote}/{branch}")
 }
 
-/// Whether a server's push rejection means it has commits this side lacks.
-fn is_behind(reason: &str) -> bool {
-    reason.contains("non-fast-forward") || reason.contains("fetch first")
+/// A server's reason for rejecting a pushed branch.
+fn push_rejected(reason: String) -> GitError {
+    if reason.contains("non-fast-forward") || reason.contains("fetch first") {
+        GitError::NonFastForward(reason)
+    } else {
+        GitError::RemoteRefused(reason)
+    }
 }
