@@ -1,0 +1,8 @@
+# Turns a mob's room title into its name, without the tags in front or
+# what it's doing, which change from visit to visit: "(White Aura) A
+# myconoid shaman is here, chanting." gives "A myconoid shaman". Compare
+# names ignoring case. Applied to titles (GMCP Room.Players fullname), not
+# to every line; aggression is a message, read in text.toml.
+[[room_title]]
+name = "mobs.name"
+pattern = '''^(?:\([^)]*\)\s*)*(?<name>.+?)(?: (?:is|are) .*)?[\s.!,]*$'''

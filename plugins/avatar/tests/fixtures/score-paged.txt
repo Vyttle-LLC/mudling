@@ -1,0 +1,22 @@
+(120h-130m-104v-1210)(-/-)You are Tamsin the Quiet Attendant
+Level 12 Harpy Monk    Exp/TNL:      21400/1210  .
+You are 19 years old (5 real life hours) .
+-----------------------------------------------------------------------------
+Str    :    15 (18)     You have 120/120 hps.
+Int    :    17 (20)     You have 130/130 mana.
+Wis    :    16 (18)     You have 104/180 moves.
+Dex    :    22 (24)     You are carrying 31/421 items.
+Con    :    19 (21)     You are carrying 150/350 lbs.
+-----------------------------------------------------------------------------
+Gold   :        262     Gold Weight :          2     In Bank     :        500
+Killed :         95     Died        :          3     Arrests     :          0
+Wimpy  :     0 hits     Practices   :          4     Incarnation :          1
+You are almost armored.
+You are saintly.
+[B]ack,[H]elp,[R]efresh, or [C]ontinue:
+HDL    :   mauling      You are standing.
+Character created on:   2026/10/01
+Autoexit: Yes  Autoloot: Yes   Autosac: Yes  Autogold: Yes  Autosplit: Yes
+Autopull: Yes  Demonbank: No   Earplug: None         Page Pause: 15 lines
+
+(120h-130m-104v-1210)(-/-)
