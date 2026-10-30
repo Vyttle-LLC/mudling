@@ -3,8 +3,8 @@
 //! [`Parser`] turns server bytes, in any chunking, into [`Event`]s and the
 //! negotiation replies to send back. It slices server text between IAC bytes
 //! with `memchr`, so text reaches the line pipeline as zero-copy [`Bytes`]
-//! slices of the chunk it arrived in. A replay can drive it as well as a
-//! socket; [`crate::net`] wraps it around TCP.
+//! slices of the chunk it arrived in. It reads what [`crate::net`] received,
+//! or a recording of it.
 //!
 //! The server may enable ECHO, EOR, GMCP, MSSP and MCCP2 (compression).
 //! Every other option, NAWS included, is refused, and the client enables no
@@ -48,11 +48,9 @@ const MSSP_VAL: u8 = 2;
 /// map data. A longer one is dropped, so a broken server can't grow memory.
 const MAX_SUBNEGOTIATION: usize = 8 * 1024 * 1024;
 
-/// What happened on a connection.
+/// What the server said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The TCP connection is open.
-    Connected,
     /// Server text, a slice of the received (or decompressed) chunk.
     Data(Bytes),
     /// The server marked the end of a prompt with GA or EOR.
@@ -68,25 +66,6 @@ pub enum Event {
     Mssp(String),
     /// A subnegotiation for `option` passed the size cap and was dropped.
     SubnegotiationDropped { option: u8 },
-    /// The connection closed.
-    Disconnected(DisconnectReason),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DisconnectReason {
-    ClosedByClient,
-    ClosedByServer,
-    Failed(String),
-}
-
-impl fmt::Display for DisconnectReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DisconnectReason::ClosedByClient => f.write_str("closed by client"),
-            DisconnectReason::ClosedByServer => f.write_str("closed by server"),
-            DisconnectReason::Failed(message) => write!(f, "failed: {message}"),
-        }
-    }
 }
 
 /// The compressed stream is corrupt. Nothing after it can be read, so the

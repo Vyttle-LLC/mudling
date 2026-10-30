@@ -1,11 +1,12 @@
-//! Connects to a server and prints its events; lines typed on stdin are sent.
+//! Connects to a server and prints what it says; lines typed on stdin are
+//! sent.
 //!
 //! ```text
 //! cargo run -p mudling-core --example connect -- <host>:<port>
 //! ```
 
-use mudling_core::net::{self, ConnectOptions};
-use mudling_core::telnet::Event;
+use mudling_core::net::{self, ConnectOptions, Event};
+use mudling_core::telnet;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -25,32 +26,39 @@ fn main() -> ExitCode {
             host,
             port,
             connect_timeout: net::DEFAULT_CONNECT_TIMEOUT,
-            client_name: "MUDling".to_owned(),
-            client_version: env!("CARGO_PKG_VERSION").to_owned(),
-            gmcp_supports: vec![
-                "Core 1".to_owned(),
-                "Char 1".to_owned(),
-                "Room 1".to_owned(),
-            ],
-            login: None,
         },
     );
 
+    let typed = connection.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            connection.send_line(line);
+            let mut encoded = Vec::new();
+            telnet::encode_line(line.as_bytes(), &mut encoded);
+            typed.write(encoded);
         }
-        connection.close();
+        typed.close();
     });
 
+    let mut parser = telnet::Parser::new();
+    let mut parsed = Vec::new();
     while let Some(event) = events.blocking_recv() {
-        match event {
-            Event::Data(text) => {
-                print!("{}", String::from_utf8_lossy(&text));
-                // Prompts often arrive without a newline.
-                let _ = std::io::stdout().flush();
+        let Event::Received(bytes) = event else {
+            println!("\n[{event:?}]");
+            continue;
+        };
+        if let Err(error) = parser.feed(bytes, &mut parsed) {
+            println!("\n[{error}]");
+        }
+        connection.write(parser.take_output());
+        for event in parsed.drain(..) {
+            match event {
+                telnet::Event::Data(text) => {
+                    print!("{}", String::from_utf8_lossy(&text));
+                    // Prompts often arrive without a newline.
+                    let _ = std::io::stdout().flush();
+                }
+                event => println!("\n[{event:?}]"),
             }
-            event => println!("\n[{event:?}]"),
         }
     }
     ExitCode::SUCCESS
