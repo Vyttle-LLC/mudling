@@ -219,10 +219,13 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-/// Whether text after a prompt is more prompt, not output: a number, as in
-/// `<5mv> `, or no words at all, as in `[-|-]`.
+/// Whether text after a prompt is more prompt, not output. Output reads as
+/// prose: it opens with a word and goes on to another, as `You rest.` does.
+/// Prompt parts are marked off, as `<5mv> ` and `[Fighting] ` are, or stand
+/// alone.
 fn reads_as_prompt(text: &str) -> bool {
-    text.bytes().any(|byte| byte.is_ascii_digit()) || !text.chars().any(char::is_alphabetic)
+    let text = text.trim();
+    !text.starts_with(char::is_alphabetic) || text.split_whitespace().nth(1).is_none()
 }
 
 /// A prompt with a slot for each number: `(#h-#m-#v-#)`.

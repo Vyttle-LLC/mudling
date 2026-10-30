@@ -298,10 +298,16 @@ fn the_longest_matching_shape_opens_a_line() {
     assert_eq!(learner.prefix_len("<5hp> <6mv> "), Some(12));
     assert_eq!(learner.prefix_len("<5hp> <6mv> You rest."), Some(12));
     assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+
+    for tail in ["[Fighting] ", "[In Combat] ", "Fighting> "] {
+        let line = format!("<1hp> {tail}");
+        let learner = PromptLearner::learning(["<1hp> ", "<1hp> ", "<1hp> ", &line]);
+        assert_eq!(learner.prefix_len(&line), Some(line.len()), "{tail:?}");
+    }
 }
 
 /// Output learned glued to a prompt stays output, however often it's seen.
-/// What a prompt adds has a number, or no words.
+/// It reads as prose; what a prompt adds doesn't.
 #[test]
 fn a_shape_with_output_glued_never_hides_the_output() {
     let learner = PromptLearner::learning([
@@ -314,6 +320,9 @@ fn a_shape_with_output_glued_never_hides_the_output() {
         "<1hp> You rest.",
     ]);
     assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+
+    let with_a_number = PromptLearner::learning(["<1hp> ", "<1hp> You have 5 gold."]);
+    assert_eq!(with_a_number.prefix_len("<5hp> You have 9 gold."), Some(6));
 
     let suffixed = PromptLearner::learning(["<1hp>", "<1hp>", "<1hp>[-|-]"]);
     assert_eq!(suffixed.prefix_len("<5hp>[-|-]"), Some(10));

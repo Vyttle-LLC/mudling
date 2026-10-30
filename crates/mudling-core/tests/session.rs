@@ -816,6 +816,11 @@ fn a_grown_prompt_is_hidden_whole() {
         driven.say(format!("<{hp}hp> <{hp}mv> ").as_bytes());
         driven.say(&[IAC, GA]);
     }
+    for hp in 0..4 {
+        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
+        driven.say(format!("<{hp}hp> [Fighting] ").as_bytes());
+        driven.say(&[IAC, GA]);
+    }
     assert_eq!(driven.terminal(), [] as [&str; 0]);
 }
 
