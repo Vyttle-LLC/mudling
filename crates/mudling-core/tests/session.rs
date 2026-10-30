@@ -801,27 +801,49 @@ fn a_move_in_flight_doesnt_cross_a_reconnect() {
     assert_eq!(links, [] as [i64; 0]);
 }
 
-/// A prompt that grows, with its old shape seen more: no part of it shows.
-#[test]
-fn a_grown_prompt_is_hidden_whole() {
-    let mut driven = Driven::new(Vec::new(), "mud.example.org");
-    driven.engine.start_connection().unwrap();
-    for hp in 0..5 {
-        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
-        driven.say(format!("<{hp}hp> ").as_bytes());
-        driven.say(&[IAC, GA]);
-    }
+/// Three prompts of each shape, each with `Char.Vitals` and GA. `{}` is the
+/// number that changes.
+fn prompts(driven: &mut Driven, shape: &str) {
     for hp in 0..3 {
         driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
-        driven.say(format!("<{hp}hp> <{hp}mv> ").as_bytes());
+        driven.say(shape.replace("{}", &hp.to_string()).as_bytes());
         driven.say(&[IAC, GA]);
     }
-    for hp in 0..4 {
-        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
-        driven.say(format!("<{hp}hp> [Fighting] ").as_bytes());
-        driven.say(&[IAC, GA]);
+}
+
+/// A prompt that grows, with its old shape seen as much: ended at a signal,
+/// no part of it shows, whatever the part looks like.
+#[test]
+fn a_grown_prompt_is_hidden_whole() {
+    let cases = [
+        ("<{}hp> ", "<{}hp> <{}mv> "),
+        ("<{}hp> ", "<{}hp> [Fighting] "),
+        ("<{}hp> ", "<{}hp> [In Combat] "),
+        ("<{}hp> ", "<{}hp> Tnl 500> "),
+        ("<{}hp> ", "<{}hp> Tank healthy> "),
+        ("HP {} MP 2 ", "HP {} MP 2 MV 3 "),
+    ];
+    for (bare, grown) in cases {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, bare);
+        prompts(&mut driven, grown);
+        assert_eq!(driven.terminal(), [] as [&str; 0], "{grown:?}");
     }
-    assert_eq!(driven.terminal(), [] as [&str; 0]);
+}
+
+/// Ended by a newline, output after a prompt shows, even with a shape learned
+/// from that same text at a signal.
+#[test]
+fn newline_ended_output_after_a_prompt_stays_visible() {
+    for output in ["You rest.", "You are carrying:", "You have 5 gold."] {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, "<{}hp> ");
+        prompts(&mut driven, &format!("<{{}}hp> {output}"));
+        driven.say(format!("<7hp> {output}\r\n").as_bytes());
+        assert_eq!(driven.terminal(), [output], "{output:?}");
+    }
 }
 
 #[test]

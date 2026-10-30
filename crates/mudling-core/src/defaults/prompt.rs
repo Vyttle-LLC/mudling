@@ -22,8 +22,17 @@
 //! a line that merely stalled isn't taken for a prompt.
 //!
 //! Each shape is counted. When the store is full, the rarest shape goes, ties
-//! going to the longest. Which shape opens a line doesn't depend on the
-//! counts: see [`PromptLearner::prefix_len`].
+//! going to the longest.
+//!
+//! How a line ended says how much of it is prompt, whatever the counts. No
+//! reading of the words could: `Tnl 500> ` and `You have 5 gold.` look alike.
+//!
+//! - **A line ended at a prompt signal** that a learned shape matches whole
+//!   is all prompt, so a prompt that grew is never cut at its old shape. The
+//!   accepted cost: output that stalled unended on a prompt's line, and was
+//!   learned at a signal, is hidden with it.
+//! - **A line ended by a newline** has its prompt found by
+//!   [`PromptLearner::prefix_len`], so output glued after a prompt is shown.
 
 use crate::line::{Line, LineEnd, Pending};
 
@@ -120,13 +129,22 @@ impl PromptLearner {
             None if at_signal => self.learn_if_repeated(text),
             None => {}
         }
+        if at_signal
+            && self
+                .shapes
+                .iter()
+                .any(|shape| shape.prefix_len(text) == Some(text.len()))
+        {
+            return Some(text.len());
+        }
         self.prefix_len(text)
     }
 
-    /// How many bytes a prompt takes up at the start of `text`, if one opens
-    /// it. A longer matching shape wins over a shorter one only if what it
-    /// adds reads as prompt, so a prompt that grew isn't cut at its old shape
-    /// and output learned glued to a prompt is still shown.
+    /// How many bytes a prompt takes up at the start of `text`, a line with
+    /// no prompt signal to say where its prompt stops. A longer matching
+    /// shape wins over a shorter one only if what it adds reads as prompt, so
+    /// a prompt that grew isn't cut at its old shape and output learned glued
+    /// to a prompt is still shown.
     pub fn prefix_len(&self, text: &str) -> Option<usize> {
         let mut ends: Vec<usize> = self
             .shapes
@@ -219,13 +237,10 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-/// Whether text after a prompt is more prompt, not output. Output reads as
-/// prose: it opens with a word and goes on to another, as `You rest.` does.
-/// Prompt parts are marked off, as `<5mv> ` and `[Fighting] ` are, or stand
-/// alone.
+/// Whether text after a prompt is more prompt, not output: output opens with
+/// a word, as `You rest.` does.
 fn reads_as_prompt(text: &str) -> bool {
-    let text = text.trim();
-    !text.starts_with(char::is_alphabetic) || text.split_whitespace().nth(1).is_none()
+    !text.trim_start().starts_with(char::is_alphabetic)
 }
 
 /// A prompt with a slot for each number: `(#h-#m-#v-#)`.

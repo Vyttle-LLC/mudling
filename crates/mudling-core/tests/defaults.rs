@@ -299,15 +299,15 @@ fn the_longest_matching_shape_opens_a_line() {
     assert_eq!(learner.prefix_len("<5hp> <6mv> You rest."), Some(12));
     assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
 
-    for tail in ["[Fighting] ", "[In Combat] ", "Fighting> "] {
+    for tail in ["[Fighting] ", "[In Combat] "] {
         let line = format!("<1hp> {tail}");
         let learner = PromptLearner::learning(["<1hp> ", "<1hp> ", "<1hp> ", &line]);
         assert_eq!(learner.prefix_len(&line), Some(line.len()), "{tail:?}");
     }
 }
 
-/// Output learned glued to a prompt stays output, however often it's seen.
-/// It reads as prose; what a prompt adds doesn't.
+/// Output learned glued to a prompt stays output on a newline-ended line,
+/// however often it's seen.
 #[test]
 fn a_shape_with_output_glued_never_hides_the_output() {
     let learner = PromptLearner::learning([
