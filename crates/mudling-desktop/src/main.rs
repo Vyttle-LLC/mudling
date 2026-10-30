@@ -9,6 +9,7 @@
 //! lines arrive at `--rate` (50 a second by default; 0 turns it off).
 //! `--measure` records frame times and writes a JSON report (see `measure`).
 //! `--ax-check` (macOS) checks the accessibility tree and exits (see `macos`).
+//! `--map-harness` shows the map alone (see `map_view::harness`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
@@ -25,6 +26,7 @@ mod chat;
 mod input;
 #[cfg(target_os = "macos")]
 mod macos;
+mod map_view;
 mod measure;
 mod shell;
 mod stream;
@@ -62,6 +64,9 @@ struct Options {
 fn main() -> ExitCode {
     let launched = Instant::now();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--map-harness") {
+        return map_view::harness::run(&args);
+    }
     let options = match parse_options(&args) {
         Ok(options) => options,
         Err(message) => {

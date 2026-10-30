@@ -9,7 +9,7 @@ use super::StoreState;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::line::Line;
-use crate::map::{MapChange, MapRoom, Mark, MarkChange, RoomId, Whereabouts};
+use crate::map::{Derived, MapChange, MapRoom, Mark, MarkChange, RoomId, WalkStep, Whereabouts};
 use crate::net::DisconnectReason;
 use crate::plugin::luau::Value;
 use crate::scrollback::Scrollback;
@@ -82,6 +82,7 @@ pub struct MapState {
     rooms: imbl::OrdMap<RoomId, Arc<MapRoom>>,
     whereabouts: Whereabouts,
     revision: u64,
+    derived: Option<Arc<Derived>>,
 }
 
 impl MapState {
@@ -97,9 +98,20 @@ impl MapState {
         self.whereabouts
     }
 
-    /// The core map's revision: what [`crate::map::Derived`] is computed at.
+    /// The core map's revision.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Areas and buildings, as of the last change to the rooms.
+    pub fn derived(&self) -> Option<&Arc<Derived>> {
+        self.derived.as_ref()
+    }
+
+    /// The fewest moves between two rooms. A search can cross the whole map,
+    /// so a view runs it off the UI thread, on a clone of this state.
+    pub fn route(&self, start: RoomId, goal: RoomId) -> Option<Vec<WalkStep>> {
+        crate::map::route(|id| self.room(id).map(|room| &**room), start, goal)
     }
 }
 
@@ -115,6 +127,9 @@ impl StoreState for MapState {
         }
         self.whereabouts = change.whereabouts.unwrap_or(self.whereabouts);
         self.revision = change.revision;
+        if let Some(derived) = &change.derived {
+            self.derived = Some(Arc::clone(derived));
+        }
         !change.rooms.is_empty() || !change.removed.is_empty() || change.whereabouts.is_some()
     }
 
@@ -130,6 +145,7 @@ impl StoreState for MapState {
         earlier.whereabouts = later.whereabouts.or(earlier.whereabouts);
         earlier.marks.extend(later.marks);
         earlier.revision = later.revision;
+        earlier.derived = later.derived.or(earlier.derived.take());
     }
 }
 
@@ -329,6 +345,27 @@ mod tests {
         applied_once.apply(&coalesced);
         assert_eq!(applied_once, in_order);
         assert_eq!(in_order.rooms().len(), 1);
+    }
+
+    #[test]
+    fn the_store_carries_derived_data_and_walks_a_route() {
+        let mut map = LiveMap::new(Box::new(PlainRules));
+        let mut store = MapState::default();
+        store.apply(&walk(
+            &mut map,
+            r#"{"num": 1, "name": "A road", "zone": "Fields", "exits": {"n": 2}}"#,
+        ));
+        map.sent("north", Timestamp(0));
+        store.apply(&walk(
+            &mut map,
+            r#"{"num": 2, "name": "A gate", "zone": "Fields", "exits": {"s": 1}}"#,
+        ));
+
+        let derived = store.derived().expect("rooms changed");
+        assert_eq!(derived.area("Fields").map(|area| area.rooms), Some(2));
+        let steps = store.route(2, 1).expect("the rooms are linked");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(store.route(2, 1), map.route_to(1));
     }
 
     #[test]

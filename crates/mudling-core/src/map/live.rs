@@ -39,7 +39,7 @@ pub struct LiveMap {
     committed: Layout,
     committed_whereabouts: Whereabouts,
     revision: u64,
-    derived: Option<Derived>,
+    derived: Option<Arc<Derived>>,
     area_names: HashMap<String, AreaName>,
     /// How many times derived data was computed, for tests.
     #[cfg(test)]
@@ -69,6 +69,8 @@ pub struct MapChange {
     /// Set when where the player is changed.
     pub whereabouts: Option<Whereabouts>,
     pub marks: Vec<MarkChange>,
+    /// Set when rooms changed, so a view never scans them for this.
+    pub derived: Option<Arc<Derived>>,
 }
 
 /// One commit: the change for views and the rows for the writer.
@@ -86,6 +88,25 @@ pub struct Derived {
     /// Every area, by zone.
     pub areas: Vec<Area>,
     pub buildings: Vec<Building>,
+}
+
+impl Derived {
+    /// An area, by its zone.
+    pub fn area(&self, zone: &str) -> Option<&Area> {
+        let index = self
+            .areas
+            .binary_search_by(|area| area.zone.as_str().cmp(zone))
+            .ok()?;
+        self.areas.get(index)
+    }
+
+    pub fn building(&self, id: RoomId) -> Option<&Building> {
+        let index = self
+            .buildings
+            .binary_search_by_key(&id, |building| building.id)
+            .ok()?;
+        self.buildings.get(index)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -383,7 +404,8 @@ impl LiveMap {
     }
 
     /// The whole map, as one change: what a view starts from.
-    pub fn snapshot(&self) -> MapChange {
+    pub fn snapshot(&mut self) -> MapChange {
+        let derived = self.shared_derived();
         let layout = &self.tracker.layout;
         MapChange {
             revision: self.revision,
@@ -392,6 +414,7 @@ impl LiveMap {
                 .filter_map(|room| layout.shared_room(room.id).cloned())
                 .collect(),
             whereabouts: Some(self.whereabouts()),
+            derived: Some(derived),
             ..MapChange::default()
         }
     }
@@ -421,7 +444,8 @@ impl LiveMap {
     /// The moves from the player's room to `goal`, opening doors known to
     /// be closed; `None` when no explored path leads there.
     pub fn route_to(&self, goal: RoomId) -> Option<Vec<WalkStep>> {
-        route(&self.tracker.layout, self.tracker.layout.current?, goal)
+        let layout = &self.tracker.layout;
+        route(|id| layout.room(id), layout.current?, goal)
     }
 
     /// Areas and buildings, computed from the rooms once per revision.
@@ -432,9 +456,14 @@ impl LiveMap {
             .is_none_or(|derived| derived.revision != self.revision);
         if stale {
             let derived = self.derive();
-            self.derived = Some(derived);
+            self.derived = Some(Arc::new(derived));
         }
         self.derived.as_ref().expect("just derived")
+    }
+
+    fn shared_derived(&mut self) -> Arc<Derived> {
+        self.derived();
+        Arc::clone(self.derived.as_ref().expect("just derived"))
     }
 
     fn derive(&mut self) -> Derived {
@@ -565,6 +594,9 @@ impl LiveMap {
             self.revision += 1;
         }
         change.revision = self.revision;
+        if !change.rooms.is_empty() || !change.removed.is_empty() {
+            change.derived = Some(self.shared_derived());
+        }
         Some(Commit { change, batch })
     }
 

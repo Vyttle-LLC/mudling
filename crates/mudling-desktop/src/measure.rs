@@ -39,6 +39,17 @@ pub fn mark(message: &str) {
     eprintln!("{MARKER}{message}");
 }
 
+/// A marker the child printed, for a parent reading its stderr.
+pub fn marker(line: &str) -> Option<&str> {
+    line.strip_prefix(MARKER)
+}
+
+/// A frame time gpui printed.
+pub fn frame_duration(line: &str) -> Option<Duration> {
+    line.strip_prefix(FRAME_PREFIX)
+        .and_then(parse_debug_duration)
+}
+
 pub fn mark_rss(label: &str) {
     if let Some(stats) = memory_stats::memory_stats() {
         mark(&format!(
@@ -278,7 +289,7 @@ fn print_report(report: &FrameReport) {
 }
 
 /// The one-minute load average, where the OS reports one without privileges.
-fn load_average() -> Option<f64> {
+pub fn load_average() -> Option<f64> {
     let text = if cfg!(target_os = "linux") {
         std::fs::read_to_string("/proc/loadavg").ok()?
     } else if cfg!(target_os = "macos") {

@@ -44,7 +44,7 @@ pub use info::{ExitInfo, RoomInfo};
 pub use live::{Area, Building, Commit, Derived, LiveMap, MapChange, Whereabouts};
 pub use mobs::{Mark, MarkChange, MobMemory, mob_name};
 pub use room::{ExitState, MapRoom, RoomId, feature};
-pub use route::WalkStep;
+pub use route::{WalkStep, route};
 pub use rules::{AreaName, MapRules, PlainRules, RoomIdentity};
 pub use tracker::Arrived;
 
