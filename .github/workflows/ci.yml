@@ -46,9 +46,10 @@ jobs:
         run: ./target/release/mudling-desktop --synthetic --ax-check
       # Synthetic lines only: session logs hold other players' chat and are
       # never committed. Shared runners aren't the reference hardware, so this
-      # records the numbers without gating on them (add --check to gate).
-      - name: Headless benchmark (append and find)
-        run: cargo run --release -p mudling-bench -- --json bench-report.json
+      # only records most numbers (add --check to gate on them). The budgets
+      # measured through the session gate: they have room to spare on a runner.
+      - name: Headless benchmark (gates the session's budgets)
+        run: cargo run --release -p mudling-bench -- --check-session --json bench-report.json
       - uses: actions/upload-artifact@v4
         with:
           name: bench-report-${{ matrix.os }}

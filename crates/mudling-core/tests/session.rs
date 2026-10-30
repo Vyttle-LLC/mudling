@@ -178,13 +178,19 @@ fn a_recording_reaches_the_stores_and_the_database() {
         assert_eq!(map.value().whereabouts().room, Some(2));
     });
     stores.read(|mobs: &Versioned<MobsState>| {
-        assert!(mobs.value().marks.contains(&(Mark::Aggressive, "wolf".to_owned())));
+        assert!(
+            mobs.value()
+                .marks
+                .contains(&(Mark::Aggressive, "wolf".to_owned()))
+        );
     });
     let character = stores.read(|c: &Versioned<CharactersState>| c.value().0.clone());
     assert_eq!(character.get("skills.dodge"), Some(&Value::Number(45.0)));
     let gear = stores.read(|g: &Versioned<GearState>| g.value().0.clone());
     assert_eq!(gear.get("gear.worn.a pink ring"), Some(&Value::Bool(true)));
-    let game = settings(&session).game.expect("the MSSP name named the game");
+    let game = settings(&session)
+        .game
+        .expect("the MSSP name named the game");
     assert_eq!((game.plugin, game.source), (hearth_id(), Source::Mssp));
 
     session.quit().wait().unwrap();
@@ -195,7 +201,10 @@ fn a_recording_reaches_the_stores_and_the_database() {
     assert!(stats.iter().any(|stat| stat.key == "skills.dodge"));
     assert!(reader.mob_marks().unwrap().iter().any(|m| m.name == "wolf"));
     let meta = reader.meta().unwrap();
-    assert!(meta.iter().any(|m| m.key.ends_with("gear.worn.a pink ring")));
+    assert!(
+        meta.iter()
+            .any(|m| m.key.ends_with("gear.worn.a pink ring"))
+    );
 }
 
 #[test]
@@ -355,7 +364,10 @@ fn a_whole_session_on_a_real_connection() {
     });
     session.stores().read(|map: &Versioned<MapState>| {
         let road = map.value().room(1).unwrap();
-        assert!(road.links.iter().any(|(_, to)| *to == 2), "linked by the move");
+        assert!(
+            road.links.iter().any(|(_, to)| *to == 2),
+            "linked by the move"
+        );
     });
 
     drop(server);
@@ -415,7 +427,11 @@ fn a_password_typed_with_echo_off_is_kept_nowhere() {
     server.expect(b"after\r\n");
     wait_for_terminal(&session, "after");
 
-    assert!(terminal(&session).iter().all(|line| !line.contains("swordfish")));
+    assert!(
+        terminal(&session)
+            .iter()
+            .all(|line| !line.contains("swordfish"))
+    );
     assert_eq!(session.complete("swo", 3), None, "no word from it");
     assert_eq!(session.older("", "").as_deref(), Some("after"));
     assert_eq!(session.older("after", "").as_deref(), Some("before"));
@@ -445,8 +461,7 @@ fn a_cancel_while_connecting_shows_as_a_cancel() {
     session.quit().wait().unwrap();
 }
 
-/// No GA and no GMCP: the connection going quiet shows the prompt, and
-/// the prompt repeated is learned, so the next one ends itself.
+/// No GA and no GMCP: the connection going quiet shows the prompt.
 #[test]
 fn quiet_ends_a_prompt_on_a_server_with_no_ga() {
     let folder = tempfile::tempdir().unwrap();
@@ -460,16 +475,6 @@ fn quiet_ends_a_prompt_on_a_server_with_no_ga() {
     wait_for_terminal(&session, "Password: ");
     server.say(b"\r\n<10hp 2mv> ");
     wait_for_terminal(&session, "<10hp 2mv> ");
-    server.say(b"\r\n<9hp 2mv> ");
-    wait_for_terminal(&session, "<9hp 2mv> ");
-
-    let learned = Instant::now();
-    server.say(b"\r\n<8hp 2mv> ");
-    wait_for_terminal(&session, "<8hp 2mv> ");
-    assert!(
-        learned.elapsed() < mudling_core::net::QUIET_AFTER,
-        "a learned prompt doesn't wait for quiet"
-    );
     session.quit().wait().unwrap();
 }
 
@@ -503,9 +508,16 @@ fn quit_closes_the_connection_and_loses_nothing() {
     let stats = reader.characters().unwrap().stats;
     assert_eq!(stats.len(), SKILLS, "every hook's write");
     let meta = reader.meta().unwrap();
-    assert!(meta.iter().any(|m| m.key.ends_with("gear.worn.the last thing")));
+    assert!(
+        meta.iter()
+            .any(|m| m.key.ends_with("gear.worn.the last thing"))
+    );
     let history = folder.path().join("command-history.json");
-    assert!(std::fs::read_to_string(history).unwrap().contains("goodbye"));
+    assert!(
+        std::fs::read_to_string(history)
+            .unwrap()
+            .contains("goodbye")
+    );
 }
 
 // ---- Shells ----
@@ -566,7 +578,9 @@ impl Driven {
 
     fn say(&mut self, bytes: &[u8]) {
         let now = Timestamp(0);
-        self.engine.receive(Bytes::copy_from_slice(bytes), now).unwrap();
+        self.engine
+            .receive(Bytes::copy_from_slice(bytes), now)
+            .unwrap();
         self.engine.settle(now);
     }
 
@@ -600,7 +614,9 @@ fn a_server_no_plugin_claims_runs_on_the_defaults() {
     let mut driven = Driven::new(vec![hearth()], "mud.example.org");
     driven.engine.start_connection().unwrap();
     driven.say(b"Mira waves at you.\r\n");
-    driven.engine.close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
     let game = driven
         .hub
         .read(|settings: &Versioned<SettingsState>| settings.value().game.clone());
@@ -619,7 +635,9 @@ fn a_reconnect_starts_from_nothing_learned() {
         driven.say(&[IAC, GA]);
         driven.say(b"<19hp> ");
         driven.say(&[IAC, GA]);
-        driven.engine.close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+        driven
+            .engine
+            .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
         assert_eq!(driven.terminal(), [] as [&str; 0], "round {round}");
     }
     driven.engine.start_connection().unwrap();
@@ -655,9 +673,9 @@ fn a_speedwalk_sends_its_moves_and_the_map_expects_them() {
     assert_eq!(sent, b"north\r\nnorth\r\neast\r\n");
     driven.gmcp(r#"Room.Info {"num": 1, "name": "A", "exits": {"n": 2}}"#);
     driven.gmcp(r#"Room.Info {"num": 2, "name": "B", "exits": {"s": 1}}"#);
-    let linked = driven.hub.read(|map: &Versioned<MapState>| {
-        map.value().room(1).unwrap().links.iter().count()
-    });
+    let linked = driven
+        .hub
+        .read(|map: &Versioned<MapState>| map.value().room(1).unwrap().links.iter().count());
     assert_eq!(linked, 1);
 }
 

@@ -65,9 +65,9 @@ impl StateView for HubView {
             _ if is_gear_store(store) => self
                 .0
                 .read(|gear: &Versioned<GearState>| gear.value().0.get(key).cloned()),
-            _ => self
-                .0
-                .read(|character: &Versioned<CharactersState>| character.value().0.get(key).cloned()),
+            _ => self.0.read(|character: &Versioned<CharactersState>| {
+                character.value().0.get(key).cloned()
+            }),
         }
     }
 }

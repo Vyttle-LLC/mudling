@@ -377,7 +377,9 @@ impl LiveMap {
     /// The player's room, shared with the map.
     pub fn shared_current_room(&self) -> Option<Arc<MapRoom>> {
         let layout = &self.tracker.layout;
-        layout.current.and_then(|id| layout.shared_room(id).cloned())
+        layout
+            .current
+            .and_then(|id| layout.shared_room(id).cloned())
     }
 
     /// The whole map, as one change: what a view starts from.

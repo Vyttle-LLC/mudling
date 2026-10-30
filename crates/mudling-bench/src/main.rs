@@ -2,17 +2,18 @@
 //! headless and repeatably.
 //!
 //! ```text
-//! mudling-bench [--check] [--json <report.json>] [--plugin <dir>…] [<session.log>…]
+//! mudling-bench [--check] [--check-session] [--json <report.json>] [--plugin <dir>…] [<session.log>…]
 //! ```
 //!
 //! With logs, it replays their server text; without, it uses synthetic lines.
 //! It fills a 100,000-line scrollback, then times 100,000 more appends (each
 //! one parses a raw line and evicts the oldest), and finds over the full
 //! buffer: every match (the budget), and the first page of matches.
-//! `--check` exits non-zero when a budget is missed.
+//! `--check` exits non-zero when a budget is missed; `--check-session` when
+//! one of the §6 budgets measured through the whole session is.
 //! It also times the line pipeline per line over the same text, and the
 //! plugin host with a synthetic set of 300 patterns, the default plugins,
-//! which replay the logs' GMCP too, and Luau hook calls.
+//! which replay the logs' GMCP too, Luau hook calls, and the session.
 //! Each `--plugin` folder is timed as one more plugin in the host.
 
 mod defaults;
@@ -20,6 +21,7 @@ mod game_plugin;
 mod line_pipeline;
 mod luau_hooks;
 mod plugin_host;
+mod session;
 mod stores;
 
 use mudling_core::replay::{self, ReplayFeed};
@@ -73,6 +75,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 struct Options {
     check: bool,
+    check_session: bool,
     json: Option<String>,
     logs: Vec<String>,
     plugins: Vec<String>,
@@ -99,6 +102,7 @@ struct Report {
     luau_hooks: luau_hooks::Report,
     game_plugins: Vec<game_plugin::Report>,
     stores: stores::Report,
+    session: session::Report,
 }
 
 fn main() -> ExitCode {
@@ -106,7 +110,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(message) => {
             eprintln!(
-                "{message}\nusage: mudling-bench [--check] [--json <report.json>] [--plugin <dir>…] [<session.log>…]"
+                "{message}\nusage: mudling-bench [--check] [--check-session] [--json <report.json>] [--plugin <dir>…] [<session.log>…]"
             );
             return ExitCode::from(2);
         }
@@ -134,6 +138,7 @@ fn main() -> ExitCode {
     let plugin_host = plugin_host::run(&lines);
     let defaults = defaults::run(&options.logs);
     let luau_hooks = luau_hooks::run();
+    let session = session::run(&lines);
     let mut game_plugins = Vec::new();
     for dir in &options.plugins {
         match game_plugin::run(Path::new(dir), &lines) {
@@ -144,21 +149,22 @@ fn main() -> ExitCode {
             }
         }
     }
-    let report = run(
-        source,
-        ReplayFeed::new(lines),
+    let measured = Measured {
         line_pipeline,
         plugin_host,
         defaults,
         luau_hooks,
         game_plugins,
-    );
+        session,
+    };
+    let report = run(source, ReplayFeed::new(lines), measured);
     print_report(&report);
     line_pipeline::print(&report.line_pipeline);
     plugin_host::print(&report.plugin_host);
     defaults::print(&report.defaults);
     luau_hooks::print(&report.luau_hooks);
     report.game_plugins.iter().for_each(game_plugin::print);
+    session::print(&report.session);
     if let Some(path) = &options.json {
         let json = serde_json::to_string_pretty(&report).expect("the report serializes");
         if let Err(error) = std::fs::write(path, json) {
@@ -182,12 +188,17 @@ fn main() -> ExitCode {
         eprintln!("a budget was missed");
         return ExitCode::FAILURE;
     }
+    if (options.check || options.check_session) && !report.session.within_budget {
+        eprintln!("a session budget was missed");
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 
 fn parse_options() -> Result<Options, String> {
     let mut options = Options {
         check: false,
+        check_session: false,
         json: None,
         logs: Vec::new(),
         plugins: Vec::new(),
@@ -196,6 +207,7 @@ fn parse_options() -> Result<Options, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" => options.check = true,
+            "--check-session" => options.check_session = true,
             "--json" => options.json = Some(args.next().ok_or("--json needs a path")?),
             "--plugin" => options
                 .plugins
@@ -207,15 +219,25 @@ fn parse_options() -> Result<Options, String> {
     Ok(options)
 }
 
-fn run(
-    source: String,
-    mut feed: ReplayFeed,
+/// What's measured from the lines before they go into the feed.
+struct Measured {
     line_pipeline: line_pipeline::Report,
     plugin_host: plugin_host::Report,
     defaults: defaults::Report,
     luau_hooks: luau_hooks::Report,
     game_plugins: Vec<game_plugin::Report>,
-) -> Report {
+    session: session::Report,
+}
+
+fn run(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
+    let Measured {
+        line_pipeline,
+        plugin_host,
+        defaults,
+        luau_hooks,
+        game_plugins,
+        session,
+    } = measured;
     let mut pipeline = LinePipeline::default();
     let mut parsed: Vec<Line> = Vec::with_capacity(1);
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
@@ -278,6 +300,7 @@ fn run(
         luau_hooks,
         game_plugins,
         stores: stores::run(),
+        session,
     }
 }
 

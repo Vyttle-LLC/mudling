@@ -62,9 +62,9 @@ impl HookSink for HookOutputs {
     }
 }
 
-/// One server's session. Every method keeps to memory except [`Engine::open`],
-/// [`Engine::start_connection`], [`Engine::close_connection`] and
-/// [`Engine::finish`], and queues disk writes on the writer threads.
+/// One server's session, for a core thread. Lines and moves keep to memory
+/// and queue their disk writes on the writer threads; opening, finishing, and
+/// a game plugin turning on (which reloads the map) wait on the disk.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -518,7 +518,9 @@ impl Engine {
             .iter()
             .filter(|plugin| match plugin.layer() {
                 Layer::Override => plugin.manifest.matches_server(server),
-                _ => game.as_ref().is_some_and(|game| game.plugin == *plugin.id()),
+                _ => game
+                    .as_ref()
+                    .is_some_and(|game| game.plugin == *plugin.id()),
             })
             .filter(|plugin| self.plugins.is_enabled(plugin.id()).is_none())
             .cloned()
@@ -564,8 +566,7 @@ impl Engine {
         let mut mobs = MobsState::default();
         for mark in Mark::ALL {
             let names = self.map.mobs().marks(mark).iter();
-            mobs.marks
-                .extend(names.map(|name| (mark, name.clone())));
+            mobs.marks.extend(names.map(|name| (mark, name.clone())));
         }
         self.hub.write::<MobsState>(mobs);
         let character = stats
@@ -573,7 +574,8 @@ impl Engine {
             .filter(|stat| stat.character_id == self.character_id)
             .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
             .collect();
-        self.hub.write::<CharactersState>(CharactersState(character));
+        self.hub
+            .write::<CharactersState>(CharactersState(character));
         let gear = meta
             .iter()
             .filter_map(|entry| {

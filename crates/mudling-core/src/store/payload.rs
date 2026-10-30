@@ -276,10 +276,7 @@ mod tests {
         let held = terminal.lines();
         assert_eq!(held.len(), TERMINAL_CAPACITY);
         assert_eq!(held.get(0).unwrap().plain(), "4");
-        assert_eq!(
-            held.get(TERMINAL_CAPACITY - 1).unwrap().plain(),
-            "newest"
-        );
+        assert_eq!(held.get(TERMINAL_CAPACITY - 1).unwrap().plain(), "newest");
     }
 
     #[test]
@@ -308,9 +305,15 @@ mod tests {
     #[test]
     fn a_coalesced_map_change_equals_the_changes_in_order() {
         let mut map = LiveMap::new(Box::new(PlainRules));
-        let first = walk(&mut map, r#"{"num": 1, "name": "A road", "exits": {"n": 2}}"#);
+        let first = walk(
+            &mut map,
+            r#"{"num": 1, "name": "A road", "exits": {"n": 2}}"#,
+        );
         map.sent("north", Timestamp(0));
-        let second = walk(&mut map, r#"{"num": 2, "name": "A gate", "exits": {"s": 1}}"#);
+        let second = walk(
+            &mut map,
+            r#"{"num": 2, "name": "A gate", "exits": {"s": 1}}"#,
+        );
         map.forget(&[1]);
         let third = map.commit(Timestamp(0)).expect("a room left").change;
 
