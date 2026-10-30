@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// A half-written file. A crash can leave one behind; the next export
 /// sweeps it away.
-const TEMP_SUFFIX: &str = ".mudling-tmp";
+pub(super) const TEMP_SUFFIX: &str = ".mudling-tmp";
 
 /// Writes each file whose bytes differ from the disk, returning those paths.
 pub(super) fn write_changed(

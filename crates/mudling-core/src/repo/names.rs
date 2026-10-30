@@ -9,6 +9,7 @@
 //! the disk, because some file systems rewrite other text. The files keep
 //! the real names inside, and import reads those.
 
+use super::write::TEMP_SUFFIX;
 use std::collections::HashSet;
 
 /// Longest name before the hash, well inside every file system's limit.
@@ -65,12 +66,15 @@ impl Names {
 }
 
 /// Lower case only, as host names are, so `plugins` and the like are the
-/// only ones to rule out.
+/// only ones to rule out, along with the temporary name of a root file.
 fn is_bare_folder(id: &str) -> bool {
     let allowed = |c: char| {
         c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ' ' | '-' | '_' | '.')
     };
-    is_safe(id) && id.chars().all(allowed) && !ROOT_ENTRIES.contains(&id)
+    is_safe(id)
+        && id.chars().all(allowed)
+        && !ROOT_ENTRIES.contains(&id)
+        && !id.ends_with(TEMP_SUFFIX)
 }
 
 /// Capitalized words, the one spelling of a name that goes without a hash.

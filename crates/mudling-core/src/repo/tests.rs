@@ -673,6 +673,45 @@ fn a_newer_format_is_refused() {
 }
 
 #[test]
+fn a_newer_format_is_not_exported_over() {
+    let folder = TempDir::new().unwrap();
+    let database = seeded(&folder);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    fs::write(root.path().join("mudling.json"), r#"{"format": 999}"#).unwrap();
+    let before = tree(root.path());
+
+    let error = repo
+        .export(&settings(), &[database.reader().unwrap()])
+        .unwrap_err();
+
+    assert!(matches!(error, Error::NewerFormat(999)));
+    assert_eq!(tree(root.path()), before);
+}
+
+#[test]
+fn a_server_named_like_a_temporary_file_does_not_block_the_write() {
+    let folder = TempDir::new().unwrap();
+    let database = open(&folder);
+    let mut batch = Batch::new();
+    batch.upsert(server("settings.json.mudling-tmp"));
+    commit(&database, batch);
+    let root = TempDir::new().unwrap();
+    let repo = Repo::new(root.path());
+    export(&repo, &database);
+
+    let changed = AppSettings {
+        theme: "light".to_owned(),
+        ..settings()
+    };
+    let exported = repo
+        .export(&changed, &[database.reader().unwrap()])
+        .unwrap();
+
+    assert_eq!(exported.written, vec![PathBuf::from("settings.json")]);
+}
+
+#[test]
 fn a_broken_file_fails_the_import_and_names_itself() {
     let folder = TempDir::new().unwrap();
     let database = seeded(&folder);

@@ -80,8 +80,10 @@ impl Repo {
     }
 
     /// Brings the repo's files up to date with `readers`, one per server's
-    /// database, and leaves everything else in the folder alone.
+    /// database, and leaves everything else in the folder alone. A repo in a
+    /// newer format is refused untouched.
     pub fn export(&self, settings: &AppSettings, readers: &[Reader]) -> Result<Exported, Error> {
+        self.check_format()?;
         let mut servers = Vec::with_capacity(readers.len());
         for reader in readers {
             let rows = ServerRows::load(reader)?;
@@ -183,13 +185,21 @@ impl Repo {
         Ok(Imported { batch, read })
     }
 
-    fn server_list(&self) -> Result<ServerList, Error> {
-        let manifest = fs::read(self.root.join(MANIFEST))
-            .map_err(|error| Error::io(&self.root.join(MANIFEST), error))?;
-        let Manifest { format } = parsed(Path::new(MANIFEST), &manifest)?;
+    /// Refuses a repo a newer MUDling wrote. A repo with no manifest yet has
+    /// nothing to protect.
+    fn check_format(&self) -> Result<(), Error> {
+        let Some(bytes) = self.read_if_present(Path::new(MANIFEST))? else {
+            return Ok(());
+        };
+        let Manifest { format } = parsed(Path::new(MANIFEST), &bytes)?;
         if format > FORMAT_VERSION {
             return Err(Error::NewerFormat(format));
         }
+        Ok(())
+    }
+
+    fn server_list(&self) -> Result<ServerList, Error> {
+        self.check_format()?;
         let Some(bytes) = self.read_if_present(Path::new(SERVERS))? else {
             return Ok(ServerList {
                 servers: Vec::new(),
