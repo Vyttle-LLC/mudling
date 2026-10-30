@@ -7,7 +7,8 @@
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
-use crate::chat::Chat;
+use crate::shell::Shell;
+use crate::stream;
 use gpui::{App, Entity};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -131,9 +132,13 @@ const PROBE_LINES: [&str; 2] = [
 ];
 
 /// Runs the checks, prints a JSON report and exits: 0 if all passed.
-pub fn run_ax_check(chat: Entity<Chat>, cx: &mut App) {
+pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
+    let chat = shell.read(cx).chat();
     cx.spawn(async move |cx| {
         let pause = Duration::from_millis(500);
+        while !shell.read_with(cx, |shell, _| shell.replay_finished()) {
+            cx.background_executor().timer(pause).await;
+        }
         // The first query switches AccessKit on; gpui sends the full tree with
         // the next frame.
         window_tree();
@@ -173,11 +178,7 @@ pub fn run_ax_check(chat: Entity<Chat>, cx: &mut App) {
             detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
         });
 
-        chat.update(cx, |chat, cx| {
-            for line in PROBE_LINES {
-                chat.push_server_line(line, cx);
-            }
-        });
+        shell.update(cx, |shell, _| shell.replay(stream::reads(&PROBE_LINES)));
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
         let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {

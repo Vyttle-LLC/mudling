@@ -1,14 +1,21 @@
-//! `mudling-desktop`: the Phase 0 spike of MUDling's gpui shell.
+//! `mudling-desktop`: MUDling's gpui shell, a thin window over a `Session`.
 //!
 //! ```text
-//! mudling-desktop [--replay <session.log>… | --synthetic] [--rate <lines/s>]
-//!                 [--measure [--seconds <n>] [--report <path>]] [--ax-check]
+//! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
+//!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
+//!                 [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>]]
+//!                 [--ax-check]
 //! ```
 //!
-//! With a replay, the chat starts with 100,000 lines of history, then new
-//! lines arrive at `--rate` (50 a second by default; 0 turns it off).
-//! `--measure` records frame times and writes a JSON report (see `measure`).
-//! `--ax-check` (macOS) checks the accessibility tree and exits (see `macos`).
+//! `--host` and `--port` connect to a server. `--plugin` installs a plugin
+//! from its folder, off, so game detection can suggest it; `--enable` turns
+//! one on and lets it send commands.
+//!
+//! A replay runs the same window through `Session::replay`: 100,000 lines of
+//! history, then new lines at `--rate` (50 a second by default; 0 turns it
+//! off), with its data in a throwaway folder. `--measure` records frame times
+//! and writes a JSON report (see `measure`). `--ax-check` (macOS) checks the
+//! accessibility tree and exits (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
@@ -27,27 +34,44 @@ mod input;
 mod macos;
 mod measure;
 mod shell;
+mod status;
 mod stream;
 mod theme;
 
-use chat::Chat;
+use directories::ProjectDirs;
+use futures::channel::mpsc;
+use futures::future::{self, Either};
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, px,
-    size,
+    App, AppContext, Bounds, Entity, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions,
+    actions, px, size,
 };
+use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
-use shell::Shell;
+use mudling_core::session::{Session, SessionConfig};
+use shell::{Game, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 const SCROLLBACK_LINES: usize = 100_000;
-const USAGE: &str = "usage: mudling-desktop [--replay <session.log>… | --synthetic] [--rate <lines/s>] \
+/// A replay has no server; its data folder holds this one's database.
+const REPLAY_HOST: &str = "replay";
+/// How long a closed window waits for the session to reach the disk. A stuck
+/// hook or disk can lose what's unsaved, but can't keep the app from quitting.
+const QUIT_WAIT: Duration = Duration::from_secs(5);
+const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
+                     [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--rate <lines/s>] \
                      [--measure [--seconds <n>] [--report <path>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
 struct Options {
+    host: Option<String>,
+    port: Option<u16>,
+    plugins: Vec<PathBuf>,
+    enable: Vec<String>,
+    data: Option<PathBuf>,
     replay: Vec<PathBuf>,
     synthetic: bool,
     lines_per_second: f64,
@@ -83,37 +107,36 @@ fn main() -> ExitCode {
         );
     }
 
-    let mut chat = Chat::new(SCROLLBACK_LINES);
-    let feed = match load_feed(&options) {
-        Ok(feed) => feed,
+    // Everything that reads the disk happens here, before the app starts:
+    // from `run` on, this is the UI thread.
+    let (wake, woken) = mpsc::unbounded();
+    let opened = load_feed(&options).and_then(|feed| {
+        let game = open_game(&options, feed.is_some(), move || {
+            let _ = wake.unbounded_send(());
+        })?;
+        Ok((feed, game))
+    });
+    let (feed, game) = match opened {
+        Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::from(2);
         }
     };
     let feed = feed.map(|mut feed| {
-        chat.load_history(&mut feed, SCROLLBACK_LINES);
-        feed
+        let history = stream::next_reads(&mut feed, SCROLLBACK_LINES as u64);
+        (feed, history)
     });
-    if options.measured_run {
-        measure::mark(&format!(
-            "info load_ms={:.1}",
-            launched.elapsed().as_secs_f64() * 1e3
-        ));
-        measure::mark(&format!("info scrollback_lines={}", chat.len()));
-        if let Some(feed) = &feed {
-            measure::mark(&format!("info source_lines={}", feed.source_len()));
-        }
-        measure::mark_rss("rss_mb_after_load");
+    if options.measured_run
+        && let Some((feed, _)) = &feed
+    {
+        measure::mark(&format!("info source_lines={}", feed.source_len()));
     }
 
     gpui_platform::application().run(move |cx: &mut App| {
         input::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx, _| cx.quit()).detach();
 
-        let chat = cx.new(|_| chat);
         let bounds = Bounds::centered(None, size(px(1100.), px(800.)), cx);
         let options_for_window = WindowOptions {
             titlebar: Some(TitlebarOptions {
@@ -129,9 +152,8 @@ fn main() -> ExitCode {
             },
             ..WindowOptions::default()
         };
-        let shell_chat = chat.clone();
         let window = match cx.open_window(options_for_window, |window, cx| {
-            cx.new(|cx| Shell::new(shell_chat, window, cx))
+            cx.new(|cx| Shell::new(game, woken, window, cx))
         }) {
             Ok(window) => window,
             Err(error) => {
@@ -140,23 +162,36 @@ fn main() -> ExitCode {
                 return;
             }
         };
+        let shell = window.entity(cx).expect("the window was opened just now");
+        cx.on_action({
+            let shell = shell.clone();
+            move |_: &Quit, cx| shut_down(&shell, cx)
+        });
+        cx.on_window_closed({
+            let shell = shell.clone();
+            move |cx, _| shut_down(&shell, cx)
+        })
+        .detach();
         cx.activate(true);
 
+        let Some((feed, history)) = feed else { return };
+        shell.read(cx).replay(history);
         match feed {
             #[cfg(target_os = "macos")]
-            _ if options.ax_check => macos::run_ax_check(chat, cx),
-            Some(feed) if options.measured_run => {
+            _ if options.ax_check => macos::run_ax_check(shell, cx),
+            feed if options.measured_run => {
                 measure::drive(
                     window.into(),
-                    chat,
+                    shell,
+                    launched,
                     feed,
                     options.lines_per_second,
                     options.stream_for,
                     cx,
                 );
             }
-            Some(feed) if options.lines_per_second > 0.0 => {
-                stream::stream(chat, feed, options.lines_per_second, cx).detach();
+            feed if options.lines_per_second > 0.0 => {
+                stream::stream(shell, feed, options.lines_per_second, cx).detach();
             }
             _ => {}
         }
@@ -164,8 +199,89 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Ends the session, then the app, without holding up the UI thread.
+fn shut_down(shell: &Entity<Shell>, cx: &mut App) {
+    let Some(saved) = shell.update(cx, |shell, cx| shell.leave(cx)) else {
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let timeout = cx.background_executor().timer(QUIT_WAIT);
+        if let Either::Right(_) = future::select(saved, timeout).await {
+            eprintln!("the session didn't finish saving in time");
+        }
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
+/// The session the options ask for. `None` with neither a server nor a
+/// recording.
+fn open_game(
+    options: &Options,
+    replaying: bool,
+    waker: impl Fn() + Send + Sync + 'static,
+) -> Result<Option<Game>, String> {
+    let replay_folder = replaying
+        .then(TempDir::new)
+        .transpose()
+        .map_err(|error| format!("couldn't make a folder for the replay: {error}"))?;
+    let (host, port, data_folder) = match (&options.host, options.port, &replay_folder) {
+        (_, _, Some(folder)) => (REPLAY_HOST, 0, folder.path().to_owned()),
+        (Some(host), Some(port), None) => (host.as_str(), port, data_folder(options)?),
+        _ => return Ok(None),
+    };
+    let plugins = options
+        .plugins
+        .iter()
+        .map(Plugin::load)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let enabled = enabled_plugins(&plugins, &options.enable)?;
+    let config = SessionConfig {
+        plugins,
+        enabled: enabled.clone(),
+        approved: enabled.clone(),
+        ..SessionConfig::new(data_folder, host, port)
+    };
+    let session = Session::open(config, waker)
+        .map_err(|error| format!("couldn't start the session: {error}"))?;
+    Ok(Some(Game {
+        session,
+        replay_folder,
+        enabled,
+    }))
+}
+
+fn data_folder(options: &Options) -> Result<PathBuf, String> {
+    options
+        .data
+        .clone()
+        .or_else(|| ProjectDirs::from("", "", "MUDling").map(|dirs| dirs.data_dir().to_owned()))
+        .ok_or_else(|| "no home folder; pass --data <folder>".to_owned())
+}
+
+/// The ids `--enable` named, each checked against what's installed.
+fn enabled_plugins(plugins: &[Plugin], enable: &[String]) -> Result<Vec<PluginId>, String> {
+    enable
+        .iter()
+        .map(|id| {
+            plugins
+                .iter()
+                .map(Plugin::id)
+                .find(|plugin| plugin.as_str() == id)
+                .cloned()
+                .ok_or_else(|| format!("--enable {id}: no --plugin folder installs that id"))
+        })
+        .collect()
+}
+
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
+        host: None,
+        port: None,
+        plugins: Vec::new(),
+        enable: Vec::new(),
+        data: None,
         replay: Vec::new(),
         synthetic: false,
         lines_per_second: 50.0,
@@ -179,6 +295,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
+            "--host" => options.host = Some(value()?.clone()),
+            "--port" => {
+                options.port = Some(value()?.parse().map_err(|_| "--port needs a port number")?)
+            }
+            "--plugin" => options.plugins.push(PathBuf::from(value()?)),
+            "--enable" => options.enable.push(value()?.clone()),
+            "--data" => options.data = Some(PathBuf::from(value()?)),
             "--replay" => {}
             "--synthetic" => options.synthetic = true,
             "--rate" => {
@@ -201,6 +324,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     }
     if options.synthetic && !options.replay.is_empty() {
         return Err("use either --replay or --synthetic".into());
+    }
+    let replaying = options.synthetic || !options.replay.is_empty();
+    if options.host.is_some() != options.port.is_some() {
+        return Err("--host and --port go together".into());
+    }
+    if options.host.is_some() && replaying {
+        return Err("use either --host or a replay".into());
     }
     if (options.measure || options.measured_run) && options.replay.is_empty() && !options.synthetic
     {

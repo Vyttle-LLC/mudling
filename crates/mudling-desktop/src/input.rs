@@ -4,6 +4,10 @@
 //! The platform talks in UTF-16 offsets (`NSTextInputClient` on macOS, TSF on
 //! Windows, text-input on Wayland); the content is stored as UTF-8. Adapted
 //! from gpui's `input` example, without mouse selection for now.
+//!
+//! While the server has echo off the content is a password: the field draws a
+//! mask, tells the platform and accessibility tools only the mask, and can't
+//! be copied.
 
 use crate::theme::Theme;
 use gpui::{
@@ -23,6 +27,8 @@ actions!(
 );
 
 const CONTEXT: &str = "CommandInput";
+/// Drawn for each character of a password.
+const MASK: &str = "•";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -44,6 +50,7 @@ pub struct Submitted(pub String);
 pub struct CommandInput {
     focus_handle: FocusHandle,
     content: String,
+    masked: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -64,11 +71,58 @@ impl CommandInput {
         CommandInput {
             focus_handle: cx.focus_handle(),
             content: String::new(),
+            masked: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+        }
+    }
+
+    /// Follows the server's echo. What's in the field is thrown away when the
+    /// mask changes either way: a password must never show, and a half-typed
+    /// command must never go out as a password.
+    pub fn set_masked(&mut self, masked: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if masked == self.masked {
+            return;
+        }
+        self.masked = masked;
+        self.content.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        window.notify_text_input_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// The text on screen.
+    fn shown(&self) -> SharedString {
+        if self.masked {
+            MASK.repeat(self.content.chars().count()).into()
+        } else {
+            self.content.clone().into()
+        }
+    }
+
+    /// Where a content offset falls in [`Self::shown`].
+    fn shown_offset(&self, offset: usize) -> usize {
+        if self.masked {
+            self.content[..offset].chars().count() * MASK.len()
+        } else {
+            offset
+        }
+    }
+
+    /// Where an offset in [`Self::shown`] falls in the content.
+    fn content_offset(&self, shown: usize) -> usize {
+        if self.masked {
+            self.content
+                .char_indices()
+                .nth(shown / MASK.len())
+                .map_or(self.content.len(), |(index, _)| index)
+        } else {
+            shown.min(self.content.len())
         }
     }
 
@@ -133,7 +187,7 @@ impl CommandInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.masked {
             let selected = self.content[self.selected_range.clone()].to_string();
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
         }
@@ -210,6 +264,9 @@ impl EntityInputHandler for CommandInput {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
+        if self.masked {
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
         Some(self.content[range].to_string())
@@ -311,7 +368,7 @@ impl EntityInputHandler for CommandInput {
         let x = |offset: usize| {
             self.last_layout
                 .as_ref()
-                .map_or(px(0.), |line| line.x_for_index(offset))
+                .map_or(px(0.), |line| line.x_for_index(self.shown_offset(offset)))
         };
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
@@ -328,7 +385,7 @@ impl EntityInputHandler for CommandInput {
     ) -> Option<usize> {
         let local = self.last_bounds?.localize(&point)?;
         let index = self.last_layout.as_ref()?.closest_index_for_x(local.x);
-        Some(self.offset_to_utf16(index.min(self.content.len())))
+        Some(self.offset_to_utf16(self.content_offset(index)))
     }
 }
 
@@ -337,9 +394,13 @@ impl Render for CommandInput {
         let theme = cx.global::<Theme>();
         div()
             .id("command-input")
-            .role(Role::TextInput)
+            .role(if self.masked {
+                Role::PasswordInput
+            } else {
+                Role::TextInput
+            })
             .aria_label("Command")
-            .aria_value(SharedString::from(self.content.clone()))
+            .aria_value(self.shown())
             .aria_placeholder("Type a command")
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
@@ -426,7 +487,7 @@ impl Element for InputText {
         let (text, color) = if input.content.is_empty() {
             (SharedString::from("Type a command"), theme.placeholder)
         } else {
-            (SharedString::from(input.content.clone()), style.color)
+            (input.shown(), style.color)
         };
         let run = TextRun {
             len: text.len(),
@@ -438,28 +499,31 @@ impl Element for InputText {
         };
         // The composition is underlined, as native fields show it.
         let runs = match &input.marked_range {
-            Some(marked) => [
-                TextRun {
-                    len: marked.start,
-                    ..run.clone()
-                },
-                TextRun {
-                    len: marked.end - marked.start,
-                    underline: Some(UnderlineStyle {
-                        color: Some(color),
-                        thickness: px(1.),
-                        wavy: false,
-                    }),
-                    ..run.clone()
-                },
-                TextRun {
-                    len: text.len() - marked.end,
-                    ..run
-                },
-            ]
-            .into_iter()
-            .filter(|run| run.len > 0)
-            .collect(),
+            Some(marked) => {
+                let marked = input.shown_offset(marked.start)..input.shown_offset(marked.end);
+                [
+                    TextRun {
+                        len: marked.start,
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: marked.end - marked.start,
+                        underline: Some(UnderlineStyle {
+                            color: Some(color),
+                            thickness: px(1.),
+                            wavy: false,
+                        }),
+                        ..run.clone()
+                    },
+                    TextRun {
+                        len: text.len() - marked.end,
+                        ..run
+                    },
+                ]
+                .into_iter()
+                .filter(|run| run.len > 0)
+                .collect()
+            }
             None => vec![run],
         };
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -469,12 +533,12 @@ impl Element for InputText {
 
         let x = |offset: usize| bounds.left() + line.x_for_index(offset);
         let (cursor, selection) = if input.selected_range.is_empty() {
-            let at = x(input.cursor_offset());
+            let at = x(input.shown_offset(input.cursor_offset()));
             let caret = Bounds::new(point(at, bounds.top()), size(px(2.), bounds.size.height));
             (Some(fill(caret, theme.accent)), None)
         } else {
-            let start = x(input.selected_range.start);
-            let end = x(input.selected_range.end);
+            let start = x(input.shown_offset(input.selected_range.start));
+            let end = x(input.shown_offset(input.selected_range.end));
             let highlight =
                 Bounds::from_corners(point(start, bounds.top()), point(end, bounds.bottom()));
             (None, Some(fill(highlight, theme.accent.opacity(0.3))))
@@ -568,6 +632,38 @@ mod tests {
             input.replace_and_mark_text_in_range(None, "にほん", None, window, cx);
             input.submit(&Submit, window, cx);
             assert_eq!(input.content, "にほん");
+        });
+    }
+
+    #[gpui::test]
+    fn a_password_stays_off_the_screen_and_away_from_the_platform(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.set_masked(true, window, cx);
+            input.replace_text_in_range(None, "pä🙂", window, cx);
+            assert_eq!(input.shown(), MASK.repeat(3));
+            assert_eq!(input.shown_offset(input.content.len()), 3 * MASK.len());
+            assert_eq!(input.content_offset(2 * MASK.len()), "pä".len());
+            assert_eq!(input.text_for_range(0..1, &mut None, window, cx), None);
+
+            input.selected_range = 0..input.content.len();
+            input.copy(&Copy, window, cx);
+        });
+        assert_eq!(cx.read_from_clipboard(), None);
+    }
+
+    #[gpui::test]
+    fn the_field_empties_when_the_mask_changes(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "half a comma", window, cx);
+            input.set_masked(true, window, cx);
+            assert_eq!(input.content, "");
+
+            input.replace_text_in_range(None, "secret", window, cx);
+            input.set_masked(false, window, cx);
+            assert_eq!(input.content, "");
+            assert_eq!(input.selected_range, 0..0);
         });
     }
 

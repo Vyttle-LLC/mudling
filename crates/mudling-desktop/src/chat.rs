@@ -1,4 +1,4 @@
-//! The chat: a virtualized view onto the core's scrollback.
+//! The chat: a virtualized view onto the shell's copy of the terminal store.
 //!
 //! Every line has the same height, so `uniform_list` lays out only the lines
 //! in view, however long the scrollback is. Trimming the oldest line never
@@ -14,8 +14,8 @@ use gpui::{
     Context, ElementId, FontWeight, HighlightStyle, Pixels, Role, ScrollStrategy, SharedString,
     StyledText, UniformListScrollHandle, Window, div, point, prelude::*, px, uniform_list,
 };
-use mudling_core::replay::ReplayFeed;
-use mudling_core::{Line, LineKind, LinePipeline, Scrollback};
+use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
+use mudling_core::{Line, LineKind, Scrollback};
 use std::ops::Range;
 
 const LINE_HEIGHT: Pixels = px(20.);
@@ -35,76 +35,72 @@ pub const MONO_FONT: &str = "DejaVu Sans Mono";
 const ANNOUNCED_LINES: usize = 5;
 
 pub struct Chat {
-    scrollback: Scrollback,
-    pipeline: LinePipeline,
+    terminal: Versioned<TerminalState>,
     scroll: UniformListScrollHandle,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
 }
 
 impl Chat {
-    pub fn new(capacity: usize) -> Chat {
+    pub fn new(terminal: Versioned<TerminalState>) -> Chat {
         Chat {
-            scrollback: Scrollback::with_capacity(capacity),
-            pipeline: LinePipeline::default(),
+            terminal,
             scroll: UniformListScrollHandle::new(),
             unannounced: Vec::new(),
             announcement: None,
         }
     }
 
-    /// Loads history without announcing it, as on reconnecting to a session.
-    pub fn load_history(&mut self, feed: &mut ReplayFeed, lines: usize) {
-        for _ in 0..lines {
-            for line in self.finish_line(feed.next_line()) {
-                self.scrollback.push(line);
-            }
-        }
-    }
-
-    /// Appends a server line and queues it for the live region.
-    pub fn push_server_line(&mut self, raw: &str, cx: &mut Context<Chat>) {
-        for line in self.finish_line(raw) {
+    /// Applies a frame's new lines and queues the server's for the live
+    /// region.
+    pub fn apply(&mut self, diff: &Diff<TerminalState>, cx: &mut Context<Chat>) {
+        let TerminalChange::Append(lines) = &diff.change;
+        let server_lines = lines.iter().filter(|l| l.kind() == LineKind::Server);
+        let announced: Vec<&Line> = server_lines.rev().take(ANNOUNCED_LINES).collect();
+        for line in announced.into_iter().rev() {
             if self.unannounced.len() == ANNOUNCED_LINES {
                 self.unannounced.remove(0);
             }
             self.unannounced
                 .push(SharedString::from(line.plain().to_owned()));
-            self.push(line, cx);
         }
+        self.keeping_position(cx, |terminal| terminal.apply_diff(diff));
     }
 
-    /// `raw` as finished lines: one, or more if it passed the pipeline's cap.
-    fn finish_line(&mut self, raw: &str) -> Vec<Line> {
-        let mut lines = Vec::new();
-        self.pipeline.push(raw.as_bytes(), &mut lines);
-        self.pipeline.push(b"\n", &mut lines);
-        lines
-    }
-
-    /// Echoes a command the player sent. It isn't announced: the player
-    /// just typed it.
-    pub fn push_command(&mut self, command: &str, cx: &mut Context<Chat>) {
-        self.push(Line::command(command), cx);
+    /// Shows a command that went nowhere, because no server is connected. It
+    /// isn't announced: the player just typed it.
+    pub fn echo_unsent(&mut self, command: &str, cx: &mut Context<Chat>) {
+        let echo = TerminalChange::Append(vec![Line::command(command)]);
+        self.keeping_position(cx, |terminal| {
+            terminal.write(&echo);
+        });
     }
 
     pub fn len(&self) -> usize {
-        self.scrollback.len()
+        self.lines().len()
+    }
+
+    fn lines(&self) -> &Scrollback {
+        self.terminal.value().lines()
     }
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn newest_text(&self) -> Option<String> {
-        let newest = self.scrollback.len().checked_sub(1)?;
-        self.scrollback
-            .get(newest)
-            .map(|line| line.plain().to_owned())
+        let newest = self.len().checked_sub(1)?;
+        self.lines().get(newest).map(|line| line.plain().to_owned())
     }
 
-    fn push(&mut self, line: Line, cx: &mut Context<Chat>) {
+    /// Changes the terminal, holding a scrolled-back view on the same text
+    /// when the oldest lines are trimmed.
+    fn keeping_position(
+        &mut self,
+        cx: &mut Context<Chat>,
+        change: impl FnOnce(&mut Versioned<TerminalState>),
+    ) {
         let following = self.follows_newest();
-        let evicted_before = self.scrollback.evicted();
-        self.scrollback.push(line);
-        let evicted = self.scrollback.evicted() - evicted_before;
+        let evicted_before = self.lines().evicted();
+        change(&mut self.terminal);
+        let evicted = self.lines().evicted() - evicted_before;
         if evicted > 0 && !following {
             self.keep_reading_position(evicted);
         }
@@ -122,6 +118,11 @@ impl Chat {
     pub fn scroll_back(&mut self, distance: Pixels, cx: &mut Context<Chat>) {
         self.shift_view_up(distance);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn line_text(&self, index: usize) -> Option<String> {
+        self.lines().get(index).map(|line| line.plain().to_owned())
     }
 
     #[cfg(test)]
@@ -147,10 +148,10 @@ impl Chat {
         cx: &mut Context<Chat>,
     ) -> Vec<gpui::AnyElement> {
         let theme = cx.global::<Theme>();
-        let first_number = self.scrollback.evicted();
+        let first_number = self.lines().evicted();
         range
             .filter_map(|index| {
-                let line = self.scrollback.get(index)?;
+                let line = self.lines().get(index)?;
                 let number = first_number + index as u64;
                 Some(render_line(line, number, theme).into_any_element())
             })
@@ -198,7 +199,7 @@ impl Render for Chat {
 
         let lines = uniform_list(
             "chat-lines",
-            self.scrollback.len(),
+            self.len(),
             cx.processor(|chat, range, _, cx| chat.render_lines(range, cx)),
         )
         .track_scroll(&self.scroll)
@@ -248,43 +249,54 @@ fn live_region(batch: u64, text: SharedString) -> impl IntoElement {
 mod tests {
     use super::*;
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowAppearance};
+    use mudling_core::LinePipeline;
+    use mudling_core::store::{Revision, TERMINAL_CAPACITY};
+
+    fn server_lines(texts: impl IntoIterator<Item = String>) -> Diff<TerminalState> {
+        let mut pipeline = LinePipeline::default();
+        let mut lines = Vec::new();
+        for text in texts {
+            pipeline.push(format!("{text}\n").as_bytes(), &mut lines);
+        }
+        Diff {
+            revision: Revision::default(),
+            change: TerminalChange::Append(lines),
+        }
+    }
 
     fn chat_window(
         cx: &mut TestAppContext,
-        capacity: usize,
         history: usize,
     ) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
-        let lines = (0..history.max(1))
-            .map(|n| format!("history line {n}"))
-            .collect();
-        let mut feed = ReplayFeed::new(lines);
-        cx.add_window_view(|_, _| {
-            let mut chat = Chat::new(capacity);
-            chat.load_history(&mut feed, history);
-            chat
-        })
+        let mut terminal = Versioned::default();
+        terminal.apply_diff(&server_lines(
+            (0..history).map(|n| format!("history line {n}")),
+        ));
+        cx.add_window_view(|_, _| Chat::new(terminal))
+    }
+
+    fn push(chat: &mut Chat, count: usize, cx: &mut Context<Chat>) {
+        chat.apply(&server_lines((0..count).map(|n| format!("new {n}"))), cx);
     }
 
     fn top_line(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> String {
         chat.read_with(cx, |chat, _| {
             let top = (-chat.scroll_offset().y / LINE_HEIGHT).round() as usize;
-            chat.scrollback.get(top).unwrap().plain().to_owned()
+            chat.lines().get(top).unwrap().plain().to_owned()
         })
     }
 
     #[gpui::test]
     fn follows_the_newest_line_while_pinned(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_window(cx, 1_000, 1_000);
+        let (chat, cx) = chat_window(cx, 1_000);
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.scroll.is_scrolled_to_end()),
             Some(true)
         );
         let before = top_line(&chat, cx);
 
-        chat.update(cx, |chat, cx| {
-            (0..5).for_each(|n| chat.push_server_line(&format!("new {n}"), cx))
-        });
+        chat.update(cx, |chat, cx| push(chat, 5, cx));
         cx.run_until_parked();
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.scroll.is_scrolled_to_end()),
@@ -295,15 +307,13 @@ mod tests {
 
     #[gpui::test]
     fn scrolled_back_view_holds_still_while_lines_are_trimmed(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_window(cx, 1_000, 1_000);
+        let (chat, cx) = chat_window(cx, TERMINAL_CAPACITY);
         chat.update(cx, |chat, cx| chat.scroll_back(LINE_HEIGHT * 200., cx));
         cx.run_until_parked();
         let reading = top_line(&chat, cx);
 
         // Each new line evicts the oldest, shifting every index by one.
-        chat.update(cx, |chat, cx| {
-            (0..10).for_each(|n| chat.push_server_line(&format!("new {n}"), cx))
-        });
+        chat.update(cx, |chat, cx| push(chat, 10, cx));
         cx.run_until_parked();
         assert_eq!(top_line(&chat, cx), reading);
         assert_eq!(
@@ -314,13 +324,13 @@ mod tests {
 
     #[gpui::test]
     fn lines_arriving_before_the_next_frame_keep_a_fresh_scroll_still(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_window(cx, 1_000, 1_000);
+        let (chat, cx) = chat_window(cx, TERMINAL_CAPACITY);
         let reading = chat.update(cx, |chat, cx| {
             chat.scroll_back(LINE_HEIGHT * 200., cx);
             let top = (-chat.scroll_offset().y / LINE_HEIGHT).round() as usize;
-            let reading = chat.scrollback.get(top).unwrap().plain().to_owned();
+            let reading = chat.lines().get(top).unwrap().plain().to_owned();
             // No frame runs between the scroll and these lines.
-            (0..10).for_each(|n| chat.push_server_line(&format!("new {n}"), cx));
+            push(chat, 10, cx);
             reading
         });
         cx.run_until_parked();
@@ -329,10 +339,17 @@ mod tests {
 
     #[gpui::test]
     fn only_server_lines_are_announced(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_window(cx, 1_000, 10);
+        let (chat, cx) = chat_window(cx, 10);
         chat.update(cx, |chat, cx| {
-            chat.push_command("look", cx);
-            chat.push_server_line("You see a path.", cx);
+            let command = TerminalChange::Append(vec![Line::command("look")]);
+            chat.apply(
+                &Diff {
+                    revision: Revision::default(),
+                    change: command,
+                },
+                cx,
+            );
+            chat.apply(&server_lines(["You see a path.".to_owned()]), cx);
         });
         cx.run_until_parked();
         let announced = chat.read_with(cx, |chat, _| {

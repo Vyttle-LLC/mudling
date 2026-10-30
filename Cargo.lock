@@ -3454,6 +3454,8 @@ dependencies = [
 name = "mudling-desktop"
 version = "0.0.0"
 dependencies = [
+ "directories",
+ "futures",
  "gpui-pre",
  "gpui-pre-platform",
  "memory-stats",
@@ -3463,6 +3465,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
+ "tempfile",
  "unicode-segmentation",
 ]
 

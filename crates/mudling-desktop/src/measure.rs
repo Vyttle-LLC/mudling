@@ -6,7 +6,8 @@
 //! the phases below in the child, and sorts the child's frame times by the
 //! phase markers it prints on the same stream, so their order is exact:
 //!
-//! 1. `startup`: the window opens on the full scrollback, then settles.
+//! 1. `startup`: the window opens, the session replays the full scrollback
+//!    into it, then it settles.
 //! 2. `stream`: lines arrive at the replay pace, pinned to the newest line.
 //! 3. `scroll`: the view scrolls back through history while lines still
 //!    arrive, so every frame lays out lines it hasn't shown before.
@@ -14,8 +15,13 @@
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
 //! Lines are due by the clock, so the pace stays exact either way.
+//!
+//! Lines go through `Session::replay` on the core thread, and reach the chat
+//! the way a server's do: as a store diff, applied on a later frame.
 
 use crate::chat::Chat;
+use crate::shell::Shell;
+use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
 use mudling_core::replay::ReplayFeed;
 use mudling_core::stats::Summary;
@@ -50,13 +56,16 @@ pub fn mark_rss(label: &str) {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
+    Load,
     Settle,
     Stream,
     Scroll,
 }
 
 struct Pacer {
+    shell: Entity<Shell>,
     chat: Entity<Chat>,
+    launched: Instant,
     feed: ReplayFeed,
     lines_per_second: f64,
     stream_for: Duration,
@@ -70,6 +79,23 @@ struct Pacer {
 impl Pacer {
     /// Runs once per display frame, before gpui decides whether to draw.
     fn on_frame(mut self, window: &mut Window, cx: &mut App) {
+        if self.phase == Phase::Load {
+            if !self.shell.read(cx).replay_finished() {
+                window.on_next_frame(move |window, cx| self.on_frame(window, cx));
+                return;
+            }
+            mark(&format!(
+                "info load_ms={:.1}",
+                self.launched.elapsed().as_secs_f64() * 1e3
+            ));
+            mark(&format!(
+                "info scrollback_lines={}",
+                self.chat.read(cx).len()
+            ));
+            mark_rss("rss_mb_after_load");
+            self.phase = Phase::Settle;
+            self.started = Instant::now();
+        }
         let elapsed = self.started.elapsed();
         let phase = if elapsed < SETTLE {
             Phase::Settle
@@ -80,13 +106,13 @@ impl Pacer {
         } else {
             mark_rss("rss_mb_end");
             mark("phase end");
-            cx.quit();
+            window.remove_window();
             return;
         };
         if phase != self.phase {
             self.phase = phase;
             mark(match phase {
-                Phase::Settle => "phase startup",
+                Phase::Load | Phase::Settle => "phase startup",
                 Phase::Stream => "phase stream",
                 Phase::Scroll => "phase scroll",
             });
@@ -94,36 +120,39 @@ impl Pacer {
         if phase != Phase::Settle {
             let stream_started = *self.stream_started.get_or_insert_with(Instant::now);
             let due = (stream_started.elapsed().as_secs_f64() * self.lines_per_second) as u64;
-            let (chat, feed) = (&self.chat, &mut self.feed);
-            chat.update(cx, |chat, cx| {
-                for _ in self.lines_sent..due {
-                    chat.push_server_line(feed.next_line(), cx);
-                }
-                if phase == Phase::Scroll {
-                    chat.scroll_back(px(SCROLL_STEP), cx);
-                }
-            });
+            if due > self.lines_sent {
+                let reads = stream::next_reads(&mut self.feed, due - self.lines_sent);
+                self.shell.read(cx).replay(reads);
+            }
+            if phase == Phase::Scroll {
+                self.chat
+                    .update(cx, |chat, cx| chat.scroll_back(px(SCROLL_STEP), cx));
+            }
             self.lines_sent = due;
         }
         window.on_next_frame(move |window, cx| self.on_frame(window, cx));
     }
 }
 
-/// Runs the measured phases in the child's window, then quits the app.
+/// Runs the measured phases in the child's window, then closes it, which
+/// quits the app the way a player's close does.
 pub fn drive(
     window: AnyWindowHandle,
-    chat: Entity<Chat>,
+    shell: Entity<Shell>,
+    launched: Instant,
     feed: ReplayFeed,
     lines_per_second: f64,
     stream_for: Duration,
     cx: &mut App,
 ) {
     let pacer = Pacer {
-        chat,
+        chat: shell.read(cx).chat(),
+        shell,
+        launched,
         feed,
         lines_per_second,
         stream_for,
-        phase: Phase::Settle,
+        phase: Phase::Load,
         started: Instant::now(),
         stream_started: None,
         lines_sent: 0,
@@ -227,7 +256,7 @@ pub fn run_parent(
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat and command input only; Phase 0 has no panels or split",
+        scope: "chat, status lines and command input; no panels or split yet",
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
