@@ -2,6 +2,7 @@
 //! shell (gpui on the desktop, SwiftUI through UniFFI on iOS) shares it.
 
 pub mod ansi;
+pub mod completion;
 pub mod defaults;
 pub mod line;
 pub mod map;
