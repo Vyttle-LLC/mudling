@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 aho-corasick = "1.1"
+memchr = "2.7"
 serde.workspace = true
 
 [lints]
