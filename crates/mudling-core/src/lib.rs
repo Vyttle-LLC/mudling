@@ -5,11 +5,13 @@ pub mod ansi;
 pub mod defaults;
 pub mod line;
 pub mod map;
+pub mod net;
 pub mod persist;
 pub mod plugin;
 pub mod replay;
 pub mod scrollback;
 pub mod stats;
+pub mod telnet;
 
 pub use ansi::{AnsiParser, Color, Line, LineKind, Span, Style};
 pub use scrollback::Scrollback;
