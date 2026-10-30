@@ -10,9 +10,10 @@ use zxcvbn::{Score, zxcvbn};
 const PRODUCT_WORDS: [&str; 3] = ["mudling", "vault", "password"];
 
 /// Refuses a password that would be too easy to guess, with zxcvbn's reason
-/// when it has one. Anything using this to give live feedback should keep in
-/// mind that zxcvbn copies the password internally without wiping it.
-pub fn check(password: &Secret) -> Result<(), Error> {
+/// when it has one. zxcvbn copies the password internally without wiping it,
+/// so every create and master password change leaves those copies in freed
+/// memory: an accepted limit of the library.
+pub(super) fn check(password: &Secret) -> Result<(), Error> {
     let estimate = zxcvbn(password.expose(), &PRODUCT_WORDS);
     if estimate.score() == Score::Four {
         return Ok(());

@@ -51,6 +51,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 const FORMAT: &str = "mudling-vault";
 const VERSION: u32 = 1;
@@ -62,7 +63,7 @@ pub(super) enum Wrapping {
     Recovery,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VaultFile {
     format: String,
@@ -81,7 +82,7 @@ pub(super) struct VaultFile {
     pub entries: BTreeMap<String, Sealed>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WrappedKey {
     #[serde(with = "base64")]
@@ -90,7 +91,7 @@ struct WrappedKey {
 }
 
 /// A nonce and ciphertext, as [`crypto::seal`] returns them.
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(super) struct Sealed(#[serde(with = "base64")] pub Vec<u8>);
 
@@ -147,16 +148,11 @@ impl VaultFile {
     }
 
     /// Opens the vault key with `wrapping`, telling a key that doesn't belong
-    /// to this vault (`wrong`) from sealed data that's been altered.
-    pub fn unwrap_key(
-        &self,
-        which: Wrapping,
-        wrapping: &WrappingKey,
-        wrong: Error,
-    ) -> Result<VaultKey, Error> {
-        let wrapped = match which {
-            Wrapping::Master => &self.master_password,
-            Wrapping::Recovery => &self.recovery_key,
+    /// to this vault from sealed data that's been altered.
+    pub fn unwrap_key(&self, which: Wrapping, wrapping: &WrappingKey) -> Result<VaultKey, Error> {
+        let (wrapped, wrong) = match which {
+            Wrapping::Master => (&self.master_password, Error::WrongPassword),
+            Wrapping::Recovery => (&self.recovery_key, Error::WrongRecoveryKey),
         };
         if wrapped.check != wrapping.check {
             return Err(wrong);
@@ -239,23 +235,51 @@ fn read_error(error: serde_json::Error) -> Error {
 /// Writes the whole file beside its destination, flushes it, then renames it
 /// over the old one, so a crash leaves either the old vault or the new one.
 pub(super) fn save(path: &Path, file: &VaultFile) -> io::Result<()> {
+    let temporary = write_temporary(path, file)?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    sync_folder(path)
+}
+
+/// Like [`save`], but a vault already at `path`, however recently it arrived,
+/// stays as it is and gives [`Error::AlreadyExists`].
+pub(super) fn save_new(path: &Path, file: &VaultFile) -> Result<(), Error> {
+    let temporary = write_temporary(path, file)?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| match error.error.kind() {
+            io::ErrorKind::AlreadyExists => Error::AlreadyExists,
+            _ => error.error.into(),
+        })?;
+    Ok(sync_folder(path)?)
+}
+
+fn write_temporary(path: &Path, file: &VaultFile) -> io::Result<NamedTempFile> {
     let mut text = serde_json::to_vec_pretty(file)?;
     text.push(b'\n');
-    let folder = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let folder = folder_of(path);
     fs::create_dir_all(folder)?;
     let mut temporary = tempfile::Builder::new()
         .prefix(".secrets.vault.")
         .tempfile_in(folder)?;
     temporary.write_all(&text)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    // A rename is only durable once its folder is; Windows can't open one.
+    Ok(temporary)
+}
+
+/// A rename is only durable once its folder is; Windows can't open one.
+fn sync_folder(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    fs::File::open(folder)?.sync_all()?;
+    fs::File::open(folder_of(path))?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
+}
+
+fn folder_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
 }
 
 /// Serde adapters for binary values stored as base64 text.

@@ -18,7 +18,6 @@ const SERVICE: &str = "com.vyttle.mudling.vault";
 /// A device's store of vault keys, by account. Calls may block on the OS or on
 /// a system prompt; the vault only makes them from its own thread.
 pub trait KeyStore: Send + Sync {
-    /// The cached key, or `None` when this device has none.
     fn load(&self, account: &str) -> Result<Option<VaultKey>, KeyStoreError>;
     fn save(&self, account: &str, key: &VaultKey) -> Result<(), KeyStoreError>;
     /// Removes the key; removing one that isn't there succeeds.

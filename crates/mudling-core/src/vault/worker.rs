@@ -10,7 +10,7 @@ use super::error::Error;
 use super::file::{self, Sealed, VaultFile, Wrapping};
 use super::key_store::KeyStore;
 use super::secret::{RecoveryKey, Secret, VaultKey};
-use super::{AutoLock, DeviceCache, EntryKey, NewVaultKey, VaultState, strength};
+use super::{AutoLock, DeviceCache, EntryKey, RecoveryKeyIssued, VaultState, strength};
 use data_encoding::HEXLOWER;
 use std::fs;
 use std::io;
@@ -106,7 +106,11 @@ impl Worker {
         match fs::read(&self.path) {
             Ok(bytes) => file::parse(&bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.publish(VaultState::NotCreated);
+                // A checkout can take the file away for a moment. While the
+                // key is held the vault is still unlocked, and says so.
+                if self.key.is_none() {
+                    self.publish(VaultState::NotCreated);
+                }
                 Err(Error::NotCreated)
             }
             Err(error) => Err(error.into()),
@@ -131,15 +135,15 @@ impl Worker {
         Ok((file, key))
     }
 
-    pub fn create(&mut self, password: &Secret) -> Result<NewVaultKey, Error> {
+    pub fn create(&mut self, password: &Secret) -> Result<RecoveryKeyIssued, Error> {
         if self.path.exists() {
             return Err(Error::AlreadyExists);
         }
         strength::check(password)?;
         let (file, key, recovery_key) = self.new_vault(crypto::random_array(), password)?;
-        file::save(&self.path, &file)?;
+        file::save_new(&self.path, &file)?;
         let device_cache = self.adopt(key, &file);
-        Ok(NewVaultKey {
+        Ok(RecoveryKeyIssued {
             recovery_key,
             device_cache,
         })
@@ -164,7 +168,7 @@ impl Worker {
     pub fn unlock_with_password(&mut self, password: &Secret) -> Result<DeviceCache, Error> {
         let file = self.read()?;
         let wrapping = WrappingKey::from_password(password, &file.salt, file.kdf)?;
-        let key = file.unwrap_key(Wrapping::Master, &wrapping, Error::WrongPassword)?;
+        let key = file.unwrap_key(Wrapping::Master, &wrapping)?;
         Ok(self.adopt(key, &file))
     }
 
@@ -174,7 +178,7 @@ impl Worker {
     ) -> Result<DeviceCache, Error> {
         let file = self.read()?;
         let wrapping = WrappingKey::from_recovery_key(recovery_key);
-        let key = file.unwrap_key(Wrapping::Recovery, &wrapping, Error::WrongRecoveryKey)?;
+        let key = file.unwrap_key(Wrapping::Recovery, &wrapping)?;
         Ok(self.adopt(key, &file))
     }
 
@@ -255,7 +259,10 @@ impl Worker {
     /// the old file, and with it the old key to anyone holding the old
     /// password. The recovery key has to change too, because the vault can't
     /// wrap a new key for an old recovery key it never stores.
-    pub fn change_master_password(&mut self, password: &Secret) -> Result<NewVaultKey, Error> {
+    pub fn change_master_password(
+        &mut self,
+        password: &Secret,
+    ) -> Result<RecoveryKeyIssued, Error> {
         strength::check(password)?;
         let (old_file, old_key) = self.unlocked()?;
         let plain = old_file
@@ -270,12 +277,28 @@ impl Worker {
             let sealed = encrypt_entry(&file, &key, &id, entry, password);
             file.entries.insert(id, sealed);
         }
-        file::save(&self.path, &file)?;
+        self.save_if_unchanged(&old_file, &file)?;
         let device_cache = self.adopt(key, &file);
-        Ok(NewVaultKey {
+        Ok(RecoveryKeyIssued {
             recovery_key,
             device_cache,
         })
+    }
+
+    /// Saves `file` unless the vault on disk has moved on from `expected`.
+    /// Argon2 leaves time for a pull to land, and saving over it would lose
+    /// whatever it brought. The file system has no compare-and-swap, so this
+    /// narrows the window to the instant between the check and the rename.
+    pub(super) fn save_if_unchanged(
+        &self,
+        expected: &VaultFile,
+        file: &VaultFile,
+    ) -> Result<(), Error> {
+        if self.read()? != *expected {
+            return Err(Error::ChangedDuringSave);
+        }
+        file::save(&self.path, file)?;
+        Ok(())
     }
 
     /// Locks and removes this device's cached key, so the next unlock takes

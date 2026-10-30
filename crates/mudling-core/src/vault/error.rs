@@ -7,7 +7,6 @@ use std::io;
 
 #[derive(Debug)]
 pub enum Error {
-    /// The master password doesn't open this vault.
     WrongPassword,
     /// The recovery key doesn't open this vault, or isn't a recovery key.
     WrongRecoveryKey,
@@ -23,10 +22,12 @@ pub enum Error {
     WeakPassword {
         warning: Option<String>,
     },
-    /// There's no vault file yet.
     NotCreated,
     /// A vault file already exists, and creating one would overwrite it.
     AlreadyExists,
+    /// The file changed while the master password was being changed, usually
+    /// because a sync landed. Nothing was written, so it's safe to try again.
+    ChangedDuringSave,
     /// The vault's thread found it locked. [`Vault`] waits on this rather
     /// than returning it.
     ///
@@ -35,7 +36,6 @@ pub enum Error {
     /// This device holds no cached key for this vault, so unlocking takes the
     /// master password or the recovery key.
     NotCached,
-    /// The vault's thread is gone.
     Stopped,
     Io(io::Error),
     KeyStore(KeyStoreError),
@@ -58,6 +58,7 @@ impl fmt::Display for Error {
             } => write!(f, "that master password is too weak: {warning}"),
             Self::NotCreated => f.write_str("no vault has been created"),
             Self::AlreadyExists => f.write_str("a vault already exists"),
+            Self::ChangedDuringSave => f.write_str("the vault file changed; try again"),
             Self::Locked => f.write_str("the vault is locked"),
             Self::NotCached => f.write_str("this device has no cached vault key"),
             Self::Stopped => f.write_str("the vault's thread has stopped"),

@@ -13,12 +13,13 @@
 //! thread and wipes the key.
 //!
 //! **Cost.** One unlock with the master password runs Argon2id at 64 MiB and
-//! three passes on one core: about 250 ms on an Apple Silicon Mac in a release
-//! build, and creating a vault or changing its password costs the same. It
-//! runs on the vault's thread, so it stalls neither the UI nor a core thread;
-//! other vault calls queue behind it. Peak memory is the 64 MiB. Unlocking
-//! from the device cache (about 0.1 ms) or a recovery key skips Argon2.
-//! `cargo run --release -p mudling-core --example vault_kdf_cost` measures it.
+//! three passes on one core: a few hundred milliseconds at most on an Apple
+//! Silicon Mac in a release build, depending on load, and creating a vault or
+//! changing its password costs the same. It runs on the vault's thread, so it
+//! stalls neither the UI nor a core thread; other vault calls queue behind it.
+//! Peak memory is the 64 MiB. Unlocking from the device cache (around a
+//! millisecond or less) or a recovery key skips Argon2. To measure it here:
+//! `cargo run --release -p mudling-core --example vault_kdf_cost`.
 //!
 //! **Locked vaults.** [`Vault::password`] and the other entry calls wait until
 //! the vault is unlocked, however long that takes, and return once it is.
@@ -52,7 +53,6 @@ mod tests;
 pub use error::Error;
 pub use key_store::{KeyStore, KeyStoreError, MemoryKeyStore, OsKeyStore};
 pub use secret::{RecoveryKey, Secret, VaultKey};
-pub use strength::check as check_strength;
 
 use crypto::KdfParams;
 use std::path::PathBuf;
@@ -99,13 +99,6 @@ impl AutoLock {
     pub const FIFTEEN_MINUTES: Self = Self(Some(Duration::from_secs(15 * 60)));
     pub const ONE_HOUR: Self = Self(Some(Duration::from_secs(60 * 60)));
     pub const NEVER: Self = Self(None);
-    /// The choices the Vault settings offer, shortest first.
-    pub const CHOICES: [Self; 4] = [
-        Self::FIVE_MINUTES,
-        Self::FIFTEEN_MINUTES,
-        Self::ONE_HOUR,
-        Self::NEVER,
-    ];
 
     pub fn duration(self) -> Option<Duration> {
         self.0
@@ -131,7 +124,7 @@ pub enum DeviceCache {
 /// recovery key exists nowhere else, so the UI must show it now.
 #[derive(Debug)]
 #[must_use]
-pub struct NewVaultKey {
+pub struct RecoveryKeyIssued {
     pub recovery_key: RecoveryKey,
     pub device_cache: DeviceCache,
 }
@@ -183,13 +176,11 @@ impl Vault {
         *self.state.borrow()
     }
 
-    /// Follows the state, so the UI can ask for the master password as soon
-    /// as something is waiting on a locked vault.
+    /// Follows the state, so the UI can show when the vault locks or unlocks.
     pub fn subscribe(&self) -> watch::Receiver<VaultState> {
         self.state.clone()
     }
 
-    /// Waits for the vault to be unlocked.
     pub async fn wait_until_unlocked(&self) -> Result<(), Error> {
         let mut state = self.state.clone();
         state
@@ -200,7 +191,7 @@ impl Vault {
     }
 
     /// Creates a new vault under `master_password`, leaving it unlocked.
-    pub async fn create(&self, master_password: Secret) -> Result<NewVaultKey, Error> {
+    pub async fn create(&self, master_password: Secret) -> Result<RecoveryKeyIssued, Error> {
         self.call(move |worker| worker.create(&master_password))
             .await
     }
@@ -277,7 +268,7 @@ impl Vault {
     pub async fn change_master_password(
         &self,
         master_password: Secret,
-    ) -> Result<NewVaultKey, Error> {
+    ) -> Result<RecoveryKeyIssued, Error> {
         let master_password = Arc::new(master_password);
         self.call_unlocked(move |worker| worker.change_master_password(&master_password))
             .await

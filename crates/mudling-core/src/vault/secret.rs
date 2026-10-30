@@ -1,6 +1,6 @@
 //! Types that hold secrets: each wipes itself when dropped and prints as
 //! `[redacted]`. None implements `Display`, `Clone` or `Serialize`, so a secret
-//! reaches a log or a file only through a deliberate `expose`.
+//! reaches a log or a file only through a deliberate `expose` or `reveal`.
 
 use super::error::Error;
 use data_encoding::BASE32_NOPAD;
@@ -15,10 +15,6 @@ const RECOVERY_GROUP_LEN: usize = 4;
 pub struct Secret(Zeroizing<String>);
 
 impl Secret {
-    pub fn new(value: String) -> Self {
-        Self(Zeroizing::new(value))
-    }
-
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -26,13 +22,13 @@ impl Secret {
 
 impl From<String> for Secret {
     fn from(value: String) -> Self {
-        Self::new(value)
+        Self(Zeroizing::new(value))
     }
 }
 
 impl From<&str> for Secret {
     fn from(value: &str) -> Self {
-        Self::new(value.to_owned())
+        value.to_owned().into()
     }
 }
 
@@ -42,8 +38,8 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// The random key that encrypts every saved password. Only a [`KeyStore`]
-/// implementation should ever need [`VaultKey::expose`].
+/// The random key that encrypts every saved password. Outside the vault, only
+/// a [`KeyStore`] implementation should need [`VaultKey::expose`].
 ///
 /// [`KeyStore`]: super::KeyStore
 pub struct VaultKey(Zeroizing<[u8; KEY_LEN]>);

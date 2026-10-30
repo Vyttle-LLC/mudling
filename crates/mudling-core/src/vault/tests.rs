@@ -292,7 +292,10 @@ async fn an_absurd_argon2_cost_is_refused_before_any_memory_is_taken() {
     fixture.created().await;
     fixture.edit(|json| json["kdf"]["memory_kib"] = u32::MAX.into());
 
-    assert!(matches!(fixture.unlock().await, Err(Error::Corrupt(_))));
+    assert!(matches!(
+        fixture.unlock().await,
+        Err(Error::Corrupt("Argon2 parameters out of range"))
+    ));
 }
 
 #[tokio::test]
@@ -659,9 +662,93 @@ async fn time_asleep_counts_towards_the_idle_timer() {
 }
 
 #[test]
-fn settings_offer_the_four_choices() {
-    let minutes = AutoLock::CHOICES.map(|choice| choice.duration().map(|d| d.as_secs() / 60));
+fn auto_lock_offers_the_four_choices() {
+    let choices = [
+        AutoLock::FIVE_MINUTES,
+        AutoLock::FIFTEEN_MINUTES,
+        AutoLock::ONE_HOUR,
+        AutoLock::NEVER,
+    ];
+    let minutes = choices.map(|choice| choice.duration().map(|d| d.as_secs() / 60));
     assert_eq!(minutes, [Some(5), Some(15), Some(60), None]);
+}
+
+#[tokio::test]
+async fn a_new_vault_never_replaces_one_that_appeared_in_the_meantime() {
+    let fixture = Fixture::new();
+    fixture.created().await;
+    let new_vault = file::parse(fixture.text().as_bytes()).unwrap();
+    fs::write(&fixture.path, "pulled while Argon2 ran").unwrap();
+
+    assert!(matches!(
+        file::save_new(&fixture.path, &new_vault),
+        Err(Error::AlreadyExists)
+    ));
+    assert_eq!(fixture.text(), "pulled while Argon2 ran");
+    let folder = fixture.path.parent().unwrap();
+    assert_eq!(fs::read_dir(folder).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn a_master_password_change_never_overwrites_a_pull() {
+    let fixture = Fixture::new();
+    let (vault, _) = fixture.created().await;
+    let before_the_pull = file::parse(fixture.text().as_bytes()).unwrap();
+    let pulled = EntryKey::new("mud.example.org", "Mira");
+    vault.set_password(pulled, "new".into()).await.unwrap();
+    let after_the_pull = fixture.text();
+
+    let outcome = vault
+        .call(move |worker| worker.save_if_unchanged(&before_the_pull, &before_the_pull))
+        .await;
+
+    assert!(matches!(outcome, Err(Error::ChangedDuringSave)));
+    assert_eq!(fixture.text(), after_the_pull);
+    assert_eq!(vault.entries().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_briefly_missing_file_leaves_the_vault_unlocked() {
+    let fixture = Fixture::new();
+    let (vault, _) = fixture.created().await;
+    let moved = fixture.path.with_extension("moved");
+    fs::rename(&fixture.path, &moved).unwrap();
+
+    assert!(matches!(
+        vault.password(&fikus()).await,
+        Err(Error::NotCreated)
+    ));
+    assert_eq!(vault.state(), VaultState::Unlocked);
+    timeout(STILL_WAITING, vault.wait_until_unlocked())
+        .await
+        .expect("nothing hangs while the key is held")
+        .unwrap();
+
+    fs::rename(&moved, &fixture.path).unwrap();
+    assert_eq!(saved(&vault).await.as_deref(), Some("swordfish-42"));
+}
+
+/// Debug builds of Argon2 are slow, so this is the one round trip at full cost.
+#[tokio::test]
+async fn the_default_argon2_cost_opens_what_it_sealed() {
+    let fixture = Fixture::new();
+    let open = || {
+        Vault::open(
+            fixture.path.clone(),
+            fixture.key_store.clone(),
+            AutoLock::NEVER,
+        )
+    };
+    let vault = open();
+    let _ = vault.create(MASTER.into()).await.unwrap();
+    vault
+        .set_password(fikus(), "swordfish-42".into())
+        .await
+        .unwrap();
+
+    let reopened = open();
+    let _ = reopened.unlock_with_password(MASTER.into()).await.unwrap();
+    assert_eq!(saved(&reopened).await.as_deref(), Some("swordfish-42"));
 }
 
 /// The real Argon2 cost, so it has to run on the vault's thread: a heartbeat
