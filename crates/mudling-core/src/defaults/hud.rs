@@ -47,6 +47,19 @@ impl Vital {
             _ => Vital::Other(name.to_owned()),
         }
     }
+
+    /// The vital's common name, which [`Vital::from_name`] reads back.
+    pub fn name(&self) -> &str {
+        match self {
+            Vital::Hp => "hp",
+            Vital::MaxHp => "maxhp",
+            Vital::Mana => "mana",
+            Vital::MaxMana => "maxmana",
+            Vital::Moves => "moves",
+            Vital::MaxMoves => "maxmoves",
+            Vital::Other(name) => name,
+        }
+    }
 }
 
 /// Where a vital's value is: a key of a GMCP message.
