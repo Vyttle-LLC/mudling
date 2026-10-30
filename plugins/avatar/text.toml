@@ -41,6 +41,14 @@ name = "pager"
 pattern = '''\[C\]ontinue:'''
 hook = "on_pager"
 
+# A line of only spaces or dashes: a table's blank or rule line. After the
+# pager's line it shows the pager was answered; indented text after one
+# isn't a wrapped slist row.
+[[pattern]]
+name = "blank"
+pattern = '''^[\s-]*$'''
+hook = "on_blank"
+
 # ---- Character: score ----
 
 # "You are Tamsin the Quiet Attendant": the first line of `score`. The
@@ -52,10 +60,12 @@ hook = "read_score"
 
 # The score lines that hold facts: "Level 8 Harpy Monk  Exp/TNL: ...",
 # "You are 17 years old ...", "Str    :    14 (17) ...", and the
-# "Label : value" rows starting with Gold, Killed and Wimpy.
+# "Label : value" rows starting with Gold, Killed and Wimpy. Also its last
+# two, "Autoexit: Yes ..." and "Autopull: Yes ...", which hold none but
+# show a page after the pager was read.
 [[pattern]]
 name = "character.score.row"
-pattern = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:)'''
+pattern = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
 hook = "read_score"
 
 # ---- Character: practice ----
@@ -89,12 +99,6 @@ hook = "read_slist"
 [[pattern]]
 name = "character.slist.row"
 pattern = '''^(?:.*\[C\]ontinue: ?)?(?:\s*\d+:| {4})'''
-hook = "read_slist"
-
-# A blank line: indented text after one isn't a wrapped row.
-[[pattern]]
-name = "character.slist.blank"
-pattern = '''^\s*$'''
 hook = "read_slist"
 
 # ---- Character: aff ----

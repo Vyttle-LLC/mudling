@@ -36,8 +36,9 @@ line allow a prompt in front.
 A table's start pattern opens a reader, its row patterns add writes, and
 the next prompt (or the next table's start, for a prompt the plugin doesn't
 know) sends them all at once, ending with the table's `read` or `count`
-key. A table left at an unanswered pager (`[C]ontinue:` followed by a
-prompt rather than more rows) was cut short and sends nothing. The client
+key. A table left at an unanswered pager (`[C]ontinue:` followed straight
+by a prompt, with no row, blank or rule line between) was cut short and
+sends nothing; a last page with no rows still counts as answered. The client
 answers the pager with `c` while a table is open.
 
 ## Events
@@ -50,13 +51,13 @@ to consume.
 | --- | --- | --- |
 | `prompt` † | | A prompt, bare or with output after it. Ends the open table. |
 | `pager` † | | The pager's prompt, once answered. |
+| `blank` † | | A line of only spaces or dashes: shows the pager was answered, and ends a run of wrapped slist rows |
 | `character.score.start` † | `name`, `title` | `You are Tamsin the Quiet Attendant` |
 | `character.score.row` † | | `Level 12 Harpy Monk …`, `Str : 15 (18) …`, `Gold : …` |
 | `character.practice.start` † | `sessions` | `You have 12 practice sessions left.`, the header |
 | `character.practice.row` † | | `dodge  95  4  -  0  kick  90  7  -  0` |
 | `character.slist.start` † | | `Spells and skills learnable by your class …` |
 | `character.slist.row` † | | `  3:       fast healing        meditation`, wrapped rows |
-| `character.slist.blank` † | | A blank line, which ends a run of wrapped rows |
 | `character.affects.start` † | | `You are affected by:` |
 | `character.affects.none` † | | `You are not under the affects of any spells` |
 | `character.affects.row` † | `name`, `detail` | `Spell: 'bless'.` |

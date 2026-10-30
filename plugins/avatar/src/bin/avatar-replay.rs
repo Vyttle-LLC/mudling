@@ -186,6 +186,11 @@ impl Replay {
                     open.paged = true;
                 }
             }
+            "blank" => {
+                if let Some(open) = &mut self.open {
+                    open.paged = false;
+                }
+            }
             name if Reader::started_by(name).is_none()
                 && (name.ends_with(".row") || name.starts_with("gear.identify.")) =>
             {

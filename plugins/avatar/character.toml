@@ -30,7 +30,7 @@ reader = "equipment"
 [[reader]]
 name = "score"
 start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
-row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:)'''
+row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
 hook = "read_score"
 
 # The sessions line, the "at your disposal" line or the header, then rows

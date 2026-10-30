@@ -1,8 +1,9 @@
 -- Framing for the tables Avatar prints. One table is read at a time: its
 -- start pattern opens a reader, its rows add store writes to it, and the
 -- next prompt or the next table's start ends it, sending the writes
--- together. A table left at an unanswered pager (the next line is a
--- prompt, not a row) was cut short and sends nothing; nor does a start
+-- together. A table left at an unanswered pager (its line followed by a
+-- prompt, with no row, blank or rule line between) was cut short and sends
+-- nothing; nor does a start
 -- with no rows after it, which was some other line.
 
 local reading = nil
@@ -38,7 +39,7 @@ function Readers.write(reader, store, key, value)
     table.insert(reader.writes, { store, key, value })
 end
 
--- Counts a row read, which also answers the pager.
+-- Counts a row read, which shows the pager was answered.
 function Readers.row(reader)
     reader.rows += 1
     reader.paged = false
@@ -82,5 +83,14 @@ end
 function on_pager(event)
     if reading then
         reading.paged = true
+    end
+end
+
+-- A blank or rule line: the pager was answered, even by a last page with
+-- no rows, and slist's wrapped rows have ended.
+function on_blank(event)
+    if reading then
+        reading.paged = false
+        reading.after_row = false
     end
 end

@@ -156,11 +156,6 @@ function read_slist(event)
     if not reader then
         return
     end
-    if event.name == "character.slist.blank" then
-        -- What follows a blank line is no longer the row before it.
-        reader.after_row = false
-        return
-    end
     local line = Readers.body(event)
     local level, rest = string.match(line, "^%s*(%d+):(.*)$")
     if level then

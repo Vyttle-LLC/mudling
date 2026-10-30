@@ -54,7 +54,7 @@ fn score_fills_the_character() {
     for (key, value) in expected {
         assert_eq!(get(&score, key), &value, "{key}");
     }
-    assert_eq!(get(&score, "score.read"), &number(10.0), "the rows read");
+    assert_eq!(get(&score, "score.read"), &number(12.0), "the rows read");
 }
 
 #[test]
@@ -120,6 +120,21 @@ fn practice_left_at_its_pager_is_not_sent() {
         1,
         "the next table still starts"
     );
+}
+
+#[test]
+fn a_last_page_without_rows_still_answers_the_pager() {
+    let transcript = read(include_str!("fixtures/practice-last-page-empty.txt"));
+    assert_eq!(transcript.pager_prompts, 1);
+    let skills = transcript.store("skills");
+    assert_eq!(get(&skills, "practice.read"), &number(4.0));
+    assert_eq!(get(&skills, "concentrate.learned"), &number(90.0));
+
+    // Score's facts all on its first page, only its tail on the second.
+    let score = read(include_str!("fixtures/score-paged.txt")).store("character");
+    assert_eq!(get(&score, "level"), &number(12.0));
+    assert_eq!(get(&score, "incarnation"), &number(1.0));
+    assert_eq!(get(&score, "score.read"), &number(12.0));
 }
 
 #[test]
