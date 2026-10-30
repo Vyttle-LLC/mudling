@@ -290,6 +290,16 @@ fn a_read_ending_at_a_shorter_shape_waits_for_the_longer_one() {
     );
 }
 
+/// The prompt grew while its old shape had been seen more: the new one still
+/// takes the whole prompt, at once and with output glued after it.
+#[test]
+fn the_longest_matching_shape_opens_a_line() {
+    let learner = PromptLearner::learning(["<1hp> ", "<1hp> ", "<1hp> <2mv> "]);
+    assert_eq!(learner.prefix_len("<5hp> <6mv> "), Some(12));
+    assert_eq!(learner.prefix_len("<5hp> <6mv> You rest."), Some(12));
+    assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+}
+
 /// Learned once with output glued on, the prompt still leaves that output to
 /// be read once the bare prompt is seen.
 #[test]

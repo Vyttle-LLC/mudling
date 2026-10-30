@@ -235,6 +235,14 @@ impl LiveMap {
         }
     }
 
+    /// The connection ended: no answer is coming to anything still waiting
+    /// for one, so the next connection's first room is no move's result.
+    pub fn connection_lost(&mut self) {
+        self.tracker.lose_track();
+        self.dark_line = false;
+        self.maze_line = false;
+    }
+
     /// The game refused a move.
     pub fn move_failed(&mut self, now: Timestamp) {
         self.tracker.move_failed(now);

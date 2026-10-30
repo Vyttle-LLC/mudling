@@ -21,9 +21,10 @@
 //! learned there if it holds a number and its shape comes twice running, so
 //! a line that merely stalled isn't taken for a prompt.
 //!
-//! Each shape is counted and the most seen is tried first, ties going to the
-//! shortest. When the store is full, the rarest shape goes, ties going to
-//! the longest.
+//! Each shape is counted. The longest that matches a line wins, unless it
+//! was seen only once and something else since (see
+//! [`PromptLearner::prefix_len`]). When the store is full, the rarest shape
+//! goes, ties going to the longest.
 
 use crate::line::{Line, LineEnd, Pending};
 
@@ -34,6 +35,8 @@ const MOST_SHAPES: usize = 20;
 pub struct PromptLearner {
     /// Most seen first; ties shortest first.
     shapes: Vec<Shape>,
+    /// How many times a shape has been learned or seen again.
+    confirmations: u64,
     /// Set from a `Char.Vitals` until the prompt after it is learned.
     awaited: Option<AwaitedPrompt>,
     /// The pending text's length, as of the last read.
@@ -123,9 +126,19 @@ impl PromptLearner {
         self.prefix_len(text)
     }
 
-    /// How many bytes a prompt takes up at the start of `text`, if one opens it.
+    /// How many bytes a prompt takes up at the start of `text`, if one opens
+    /// it. The longest shape that matches wins, so a prompt that grew isn't
+    /// cut at its old shape. A shape seen once, and not last, doesn't: it may
+    /// be a prompt with output glued on, and only counts if nothing else
+    /// matches.
     pub fn prefix_len(&self, text: &str) -> Option<usize> {
-        self.shapes.iter().find_map(|shape| shape.prefix_len(text))
+        let trusted = self
+            .shapes
+            .iter()
+            .filter(|shape| shape.seen > 1 || shape.last_confirmed == self.confirmations)
+            .filter_map(|shape| shape.prefix_len(text))
+            .max();
+        trusted.or_else(|| self.shapes.iter().find_map(|shape| shape.prefix_len(text)))
     }
 
     /// The learned shapes, most seen first, each with the times seen. A
@@ -184,11 +197,17 @@ impl PromptLearner {
         {
             self.shapes.remove(rarest);
         }
-        self.shapes.push(shape);
+        self.confirmations += 1;
+        self.shapes.push(Shape {
+            last_confirmed: self.confirmations,
+            ..shape
+        });
         self.sort();
     }
 
     fn seen_again(&mut self, index: usize) {
+        self.confirmations += 1;
+        self.shapes[index].last_confirmed = self.confirmations;
         self.shapes[index].seen += 1;
         self.sort();
     }
@@ -212,6 +231,8 @@ struct Shape {
     /// told from output.
     length: usize,
     seen: u32,
+    /// The learner's count of confirmations when this shape last had one.
+    last_confirmed: u64,
 }
 
 impl Shape {
@@ -228,6 +249,7 @@ impl Shape {
             pieces,
             length,
             seen: 1,
+            last_confirmed: 0,
         }
     }
 

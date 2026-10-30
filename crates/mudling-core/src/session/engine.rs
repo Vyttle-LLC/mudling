@@ -338,6 +338,7 @@ impl Engine {
         }
         self.settle(now);
         self.link = None;
+        self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
         self.publish_settings();

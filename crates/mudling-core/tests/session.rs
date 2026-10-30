@@ -702,6 +702,45 @@ fn a_reconnect_starts_from_nothing_learned() {
     );
 }
 
+/// A move sent as the connection died never got its answer: the next
+/// connection's first room isn't where it led.
+#[test]
+fn a_move_in_flight_doesnt_cross_a_reconnect() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 1, "name": "A road", "exits": {"n": 2}}"#);
+    driven.engine.send("north", Timestamp(0));
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 50, "name": "The temple", "exits": {}}"#);
+    let links = driven.hub.read(|map: &Versioned<MapState>| {
+        let links = map.value().room(1).unwrap().links.iter();
+        links.map(|(_, to)| *to).collect::<Vec<_>>()
+    });
+    assert_eq!(links, [] as [i64; 0]);
+}
+
+/// A prompt that grows, with its old shape seen more: no part of it shows.
+#[test]
+fn a_grown_prompt_is_hidden_whole() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    for hp in 0..5 {
+        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
+        driven.say(format!("<{hp}hp> ").as_bytes());
+        driven.say(&[IAC, GA]);
+    }
+    for hp in 0..3 {
+        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
+        driven.say(format!("<{hp}hp> <{hp}mv> ").as_bytes());
+        driven.say(&[IAC, GA]);
+    }
+    assert_eq!(driven.terminal(), [] as [&str; 0]);
+}
+
 #[test]
 fn output_glued_after_a_prompt_shows_without_the_prompt() {
     let mut driven = Driven::new(Vec::new(), "mud.example.org");
