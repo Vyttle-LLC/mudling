@@ -45,7 +45,8 @@
 //!   re-seal it with. An optional `stranded` map, by key fingerprint, holds a
 //!   whole older vault with just those entries, so its own master password can
 //!   still open it. Each entry there moves back as soon as a device has that
-//!   key. Until then this repeats what git history already holds.
+//!   key, unless it differs from the password saved now, when the player
+//!   chooses. Until then this repeats what git history already holds.
 
 use super::crypto::{
     self, CHECK_LEN, FINGERPRINT_LEN, KdfParams, SALT_LEN, VAULT_ID_LEN, WrappingKey,

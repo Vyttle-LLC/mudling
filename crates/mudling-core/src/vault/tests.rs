@@ -1030,6 +1030,78 @@ async fn another_password_change_keeps_what_waits_for_the_old_one() {
     assert!(!mac.text().contains("stranded"));
 }
 
+/// The iPad, offline, saves Fikus under the old key; the mac changes the
+/// master password and then saves Fikus again; the merge lands on the iPad,
+/// which unlocks with the new password.
+async fn one_character_saved_on_both_sides_of_a_password_change() -> (Fixture, Vault) {
+    let mac = Fixture::new();
+    let (mac_vault, _) = mac.created().await;
+    let (ipad, ipad_vault) = mac.second_device().await;
+    let base = mac.bytes();
+    ipad_vault
+        .set_password(fikus(), "older-2".into())
+        .await
+        .unwrap();
+    let _ = mac_vault
+        .change_master_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+    mac_vault
+        .set_password(fikus(), "newest-3".into())
+        .await
+        .unwrap();
+    ipad.take_merge(&base, &ipad, &mac, false);
+    let _ = ipad_vault
+        .unlock_with_password(OTHER_MASTER.into())
+        .await
+        .unwrap();
+    (ipad, ipad_vault)
+}
+
+#[tokio::test]
+async fn a_rescue_never_overwrites_a_different_password() {
+    let (_ipad, vault) = one_character_saved_on_both_sides_of_a_password_change().await;
+
+    assert_eq!(saved(&vault).await.as_deref(), Some("newest-3"));
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+    assert_eq!(vault.rescue_with_password(MASTER.into()).await.unwrap(), 0);
+    assert_eq!(saved(&vault).await.as_deref(), Some("newest-3"));
+
+    let conflicts = vault.conflicts(MASTER.into()).await.unwrap();
+    let [(entry, stranded)] = conflicts.as_slice() else {
+        panic!("one conflict");
+    };
+    assert_eq!(*entry, fikus());
+    assert_eq!(stranded.expose(), "older-2");
+}
+
+#[tokio::test]
+async fn the_player_keeps_the_stranded_password() {
+    let (_ipad, vault) = one_character_saved_on_both_sides_of_a_password_change().await;
+
+    vault
+        .settle_conflict(MASTER.into(), fikus(), KeepPassword::Stranded)
+        .await
+        .unwrap();
+
+    assert_eq!(saved(&vault).await.as_deref(), Some("older-2"));
+    assert_eq!(vault.stranded().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn the_player_keeps_the_current_password() {
+    let (ipad, vault) = one_character_saved_on_both_sides_of_a_password_change().await;
+
+    vault
+        .settle_conflict(MASTER.into(), fikus(), KeepPassword::Current)
+        .await
+        .unwrap();
+
+    assert_eq!(saved(&vault).await.as_deref(), Some("newest-3"));
+    assert_eq!(vault.stranded().await.unwrap(), 0);
+    assert!(!ipad.text().contains("stranded"));
+}
+
 #[tokio::test]
 async fn a_rescue_on_one_device_holds_against_a_merge_with_another() {
     let (mac, vault, ipad, _) = offline_save_across_a_password_change().await;

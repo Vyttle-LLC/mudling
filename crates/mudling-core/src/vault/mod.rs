@@ -84,6 +84,13 @@ impl EntryKey {
     }
 }
 
+/// Which password survives a conflict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeepPassword {
+    Current,
+    Stranded,
+}
+
 /// Whether a caller's request could go through right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaultState {
@@ -270,7 +277,9 @@ impl Vault {
     /// because a device saved them offline before the master password changed
     /// on another. Unlocking on that device brings them back by itself; on
     /// any other, the UI asks for the old password and calls
-    /// [`Vault::rescue_with_password`].
+    /// [`Vault::rescue_with_password`]. One that differs from the password
+    /// saved now stays counted until the player settles it: see
+    /// [`Vault::conflicts`].
     pub async fn stranded(&self) -> Result<usize, Error> {
         self.call_unlocked(Worker::stranded).await
     }
@@ -280,6 +289,30 @@ impl Vault {
     pub async fn rescue_with_password(&self, old_master_password: Secret) -> Result<usize, Error> {
         let password = Arc::new(old_master_password);
         self.call_unlocked(move |worker| worker.rescue_with_password(&password))
+            .await
+    }
+
+    /// The stranded passwords `old_master_password` opens that differ from
+    /// the one saved now for that character. Nothing says which is newer, so
+    /// the player compares them and calls [`Vault::settle_conflict`].
+    pub async fn conflicts(
+        &self,
+        old_master_password: Secret,
+    ) -> Result<Vec<(EntryKey, Secret)>, Error> {
+        let password = Arc::new(old_master_password);
+        self.call_unlocked(move |worker| worker.conflicts(&password))
+            .await
+    }
+
+    /// Keeps one of the two passwords in a conflict over `entry`.
+    pub async fn settle_conflict(
+        &self,
+        old_master_password: Secret,
+        entry: EntryKey,
+        keep: KeepPassword,
+    ) -> Result<(), Error> {
+        let password = Arc::new(old_master_password);
+        self.call_unlocked(move |worker| worker.settle_conflict(&password, &entry, keep))
             .await
     }
 

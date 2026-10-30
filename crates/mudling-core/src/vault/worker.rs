@@ -10,7 +10,9 @@ use super::error::Error;
 use super::file::{self, Sealed, VaultFile, Wrapping};
 use super::key_store::KeyStore;
 use super::secret::{RecoveryKey, Secret, VaultKey};
-use super::{AutoLock, DeviceCache, EntryKey, RecoveryKeyIssued, VaultState, strength};
+use super::{
+    AutoLock, DeviceCache, EntryKey, KeepPassword, RecoveryKeyIssued, VaultState, strength,
+};
 use data_encoding::HEXLOWER;
 use std::fs;
 use std::io;
@@ -246,20 +248,25 @@ impl Worker {
     /// the vault, returning how many. Fails with [`Error::WrongPassword`] if
     /// it opens nothing stranded.
     pub fn rescue_with_password(&mut self, password: &Secret) -> Result<usize, Error> {
+        let old = self.stranded_key(password)?;
+        self.rescue(&old)
+    }
+
+    /// The replaced key `password` opens among the stranded vaults.
+    fn stranded_key(&mut self, password: &Secret) -> Result<VaultKey, Error> {
         let (file, _) = self.unlocked()?;
         for old in file.stranded.values() {
             let wrapping = WrappingKey::from_password(password, &old.salt, old.kdf)?;
             if let Ok(key) = old.unwrap_key(Wrapping::Master, &wrapping) {
-                return self.rescue(&key);
+                return Ok(key);
             }
         }
         Err(Error::WrongPassword)
     }
 
-    /// Re-seals what `old` opens under the current key. These were saved
-    /// since the key changed, so one replaces the same character's entry,
-    /// which is at best a copy of the password from before. What won't open
-    /// stays stranded.
+    /// Re-seals what `old` opens under the current key. Entries carry no time,
+    /// so one that differs from the password saved now for that character
+    /// stays stranded for the player to settle, as does one that won't open.
     fn rescue(&mut self, old: &VaultKey) -> Result<usize, Error> {
         let stranded_id = file::stranded_id(&crypto::fingerprint(old));
         let (mut file, key) = self.unlocked()?;
@@ -268,15 +275,24 @@ impl Worker {
         };
         let mut rescued = 0;
         for (id, sealed) in std::mem::take(&mut block.entries) {
-            match decrypt_entry(&block, old, &id, &sealed) {
-                Ok((entry, password)) => {
-                    let id = crypto::entry_id(key, &entry);
-                    let sealed = encrypt_entry(&file, key, &id, &entry, &password);
-                    file.entries.insert(id, sealed);
+            let Ok((entry, password)) = decrypt_entry(&block, old, &id, &sealed) else {
+                block.entries.insert(id, sealed);
+                continue;
+            };
+            let current_id = crypto::entry_id(key, &entry);
+            match file.entries.get(&current_id) {
+                None => {
+                    let resealed = encrypt_entry(&file, key, &current_id, &entry, &password);
+                    file.entries.insert(current_id, resealed);
                     rescued += 1;
                 }
-                Err(_) => {
-                    block.entries.insert(id, sealed);
+                Some(current) => {
+                    let opened = decrypt_entry(&file, key, &current_id, current);
+                    if opened.is_ok_and(|(_, held)| held.expose() == password.expose()) {
+                        rescued += 1;
+                    } else {
+                        block.entries.insert(id, sealed);
+                    }
                 }
             }
         }
@@ -285,6 +301,59 @@ impl Worker {
         }
         file::save(&self.path, &file)?;
         Ok(rescued)
+    }
+
+    /// What `password`, a replaced master password, holds that differs from
+    /// what's saved now, after rescuing everything else it opens.
+    pub fn conflicts(&mut self, password: &Secret) -> Result<Vec<(EntryKey, Secret)>, Error> {
+        let old = self.stranded_key(password)?;
+        self.rescue(&old)?;
+        let (file, _) = self.unlocked()?;
+        let Some(block) = file
+            .stranded
+            .get(&file::stranded_id(&crypto::fingerprint(&old)))
+        else {
+            return Ok(Vec::new());
+        };
+        let mut conflicts: Vec<(EntryKey, Secret)> = block
+            .entries
+            .iter()
+            .filter_map(|(id, sealed)| decrypt_entry(block, &old, id, sealed).ok())
+            .collect();
+        conflicts.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(conflicts)
+    }
+
+    /// Ends a conflict over `entry` with the player's choice. Either way the
+    /// stranded copy goes, so the other password survives only in git history.
+    pub fn settle_conflict(
+        &mut self,
+        password: &Secret,
+        entry: &EntryKey,
+        keep: KeepPassword,
+    ) -> Result<(), Error> {
+        let old = self.stranded_key(password)?;
+        let stranded_id = file::stranded_id(&crypto::fingerprint(&old));
+        let (mut file, key) = self.unlocked()?;
+        let Some(block) = file.stranded.get_mut(&stranded_id) else {
+            return Ok(());
+        };
+        let found = block.entries.iter().find_map(|(id, sealed)| {
+            let (held, password) = decrypt_entry(block, &old, id, sealed).ok()?;
+            (held == *entry).then(|| (id.clone(), password))
+        });
+        let Some((old_id, stranded)) = found else {
+            return Ok(());
+        };
+        block.entries.remove(&old_id);
+        file.stranded.retain(|_, block| !block.entries.is_empty());
+        if keep == KeepPassword::Stranded {
+            let id = crypto::entry_id(key, entry);
+            let sealed = encrypt_entry(&file, key, &id, entry, &stranded);
+            file.entries.insert(id, sealed);
+        }
+        file::save(&self.path, &file)?;
+        Ok(())
     }
 
     fn install(&mut self, key: VaultKey, account: String) {
