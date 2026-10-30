@@ -5,14 +5,17 @@
 //! Later tickets fill a slot through [`crate::shell::Shell::mount`]; a dock
 //! only knows the slot's name, its icon and the view to show.
 //!
-//! On a narrow window an open panel slides over the chat instead of pushing it
-//! aside. The rail stays beside the chat: it's too slim to matter.
+//! [`fit_docks`] shares the window between the two docks and the chat column
+//! on every frame, so neither a drag nor a resize can crush the command bar.
+//! When even the narrowest panels would leave the column too little, open
+//! panels slide over the chat instead of pushing it aside. The rail stays
+//! beside the chat: it's too slim to matter.
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::theme::Theme;
 use gpui::{
-    AnyView, Context, Div, DragMoveEvent, FontWeight, Pixels, Role, SharedString, Stateful, Window,
-    deferred, div, prelude::*, px,
+    AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role, SharedString,
+    Stateful, Window, deferred, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
 
@@ -24,8 +27,9 @@ const MIN_WIDTH: Pixels = px(280.);
 /// A panel never takes more than this share of the window.
 const MAX_WINDOW_SHARE: f32 = 0.6;
 const RESIZE_HANDLE_WIDTH: Pixels = px(6.);
-/// Below this window width, open panels overlay the chat.
-const NARROW_WINDOW: Pixels = px(900.);
+/// What the chat column keeps of the window beside docked panels: enough for
+/// the HUD's meters to share one line.
+const MIN_COLUMN_WIDTH: Pixels = px(500.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -120,6 +124,47 @@ fn clamp_width(width: Pixels, window_width: Pixels) -> Pixels {
     width.clamp(MIN_WIDTH, widest)
 }
 
+/// Narrows two panels to fit in `room`, the wider one first. A dock that isn't
+/// open comes in at 0.
+fn shared_widths(left: Pixels, right: Pixels, room: Pixels) -> (Pixels, Pixels) {
+    let excess = (left + right - room).max(px(0.));
+    let from_wider = excess.min((left - right).abs());
+    let from_both = (excess - from_wider) * 0.5;
+    if left > right {
+        (left - from_wider - from_both, right - from_both)
+    } else {
+        (left - from_both, right - from_wider - from_both)
+    }
+}
+
+/// Shares `window_width` between the two docks and the chat column. The shell
+/// runs this before the docks draw, so it follows every drag and resize. A
+/// dragged width is kept, and comes back when the window has room for it.
+pub fn fit_docks(left: &Entity<Dock>, right: &Entity<Dock>, window_width: Pixels, cx: &mut App) {
+    let now = cx.background_executor().now();
+    for dock in [left, right] {
+        dock.update(cx, |dock, _| dock.end_finished_slide(now));
+    }
+    let (left_wanted, right_wanted) = (left.read(cx).open_width(), right.read(cx).open_width());
+    let rails = left.read(cx).rail_width() + right.read(cx).rail_width();
+    let room = window_width - MIN_COLUMN_WIDTH - rails;
+    let (left_fitted, right_fitted) = shared_widths(left_wanted, right_wanted, room);
+    let squeezed = |wanted: Pixels, fitted: Pixels| wanted > px(0.) && fitted < MIN_WIDTH;
+    let overlaying = squeezed(left_wanted, left_fitted) || squeezed(right_wanted, right_fitted);
+    for (dock, fitted) in [(left, left_fitted), (right, right_fitted)] {
+        dock.update(cx, |dock, _| {
+            dock.overlaying = overlaying;
+            dock.width_limit = if overlaying {
+                clamp_width(dock.width, window_width)
+            } else if dock.open_width() > px(0.) {
+                fitted
+            } else {
+                Pixels::MAX
+            };
+        });
+    }
+}
+
 /// Marks the drag of a resize handle.
 #[derive(Clone)]
 struct Resizing(Side);
@@ -133,7 +178,11 @@ impl Render for Resizing {
 pub struct Dock {
     side: Side,
     state: DockState,
+    /// The width the player chose; [`Dock::width_limit`] may hold it back.
     width: Pixels,
+    /// What [`fit_docks`] allows this frame.
+    width_limit: Pixels,
+    overlaying: bool,
     selected: Slot,
     slide: Option<Slide>,
     mounted: Vec<(Slot, AnyView)>,
@@ -145,6 +194,8 @@ impl Dock {
             side,
             state: DockState::Hidden,
             width: DEFAULT_WIDTH,
+            width_limit: Pixels::MAX,
+            overlaying: false,
             selected: Slot::on(side)[0],
             slide: None,
             mounted: Vec::new(),
@@ -175,8 +226,8 @@ impl Dock {
         if state == self.state {
             return;
         }
-        #[cfg(all(target_os = "macos", not(test)))]
-        cx.set_reduce_motion(crate::macos::reduce_motion());
+        #[cfg(not(test))]
+        crate::motion::follow_os(cx);
         let now = cx.background_executor().now();
         let showing = if self.width_of(state) > self.width_of(self.state) {
             state
@@ -198,7 +249,7 @@ impl Dock {
     }
 
     /// Drags the panel's chat-side edge to `x`, in window coordinates.
-    fn resize_to(&mut self, x: Pixels, window_width: Pixels, cx: &mut Context<Dock>) {
+    pub fn resize_to(&mut self, x: Pixels, window_width: Pixels, cx: &mut Context<Dock>) {
         let width = match self.side {
             Side::Left => x,
             Side::Right => window_width - x,
@@ -217,7 +268,26 @@ impl Dock {
         match state {
             DockState::Hidden => px(0.),
             DockState::Rail => RAIL_WIDTH,
+            DockState::Open => self.width.min(self.width_limit),
+        }
+    }
+
+    /// What the dock shows: while it slides, the wider of the two ends.
+    fn showing(&self) -> DockState {
+        self.slide.map_or(self.state, |slide| slide.showing)
+    }
+
+    fn open_width(&self) -> Pixels {
+        match self.showing() {
             DockState::Open => self.width,
+            _ => px(0.),
+        }
+    }
+
+    fn rail_width(&self) -> Pixels {
+        match self.showing() {
+            DockState::Rail => RAIL_WIDTH,
+            _ => px(0.),
         }
     }
 
@@ -233,15 +303,18 @@ impl Dock {
         }
     }
 
+    fn end_finished_slide(&mut self, now: Instant) {
+        self.slide = self
+            .slide
+            .filter(|slide| now.saturating_duration_since(slide.started) < SLIDE);
+    }
+
     /// Ends a slide that has run its time; one still running asks for the
     /// next frame.
     fn advance_slide(&mut self, now: Instant, window: &mut Window) {
-        if let Some(slide) = self.slide {
-            if now.saturating_duration_since(slide.started) >= SLIDE {
-                self.slide = None;
-            } else {
-                window.request_animation_frame();
-            }
+        self.end_finished_slide(now);
+        if self.slide.is_some() {
+            window.request_animation_frame();
         }
     }
 
@@ -304,9 +377,10 @@ impl Dock {
                     .role(Role::Tab)
                     .aria_label(slot.title())
                     .aria_selected(selected)
-                    .flex_1()
-                    .min_w_0()
+                    .flex_grow(1.)
+                    .px(px(2.))
                     .h(px(30.))
+                    .text_size(px(12.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -371,7 +445,7 @@ impl Dock {
                 .into_any_element(),
         };
         div()
-            .w(self.width)
+            .w(self.width_of(DockState::Open))
             .h_full()
             .flex_none()
             .flex()
@@ -415,12 +489,11 @@ impl Render for Dock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Dock>) -> impl IntoElement {
         let now = cx.background_executor().now();
         self.advance_slide(now, window);
-        let showing = self.slide.map_or(self.state, |slide| slide.showing);
+        let showing = self.showing();
         if showing == DockState::Hidden {
             return div().into_any_element();
         }
         let theme = *cx.global::<Theme>();
-        let overlaying = showing == DockState::Open && window.viewport_size().width < NARROW_WINDOW;
         let shown_width = self.shown_width(now);
         let (id, label) = match self.side {
             Side::Left => ("left-dock", "Left panel"),
@@ -428,6 +501,7 @@ impl Render for Dock {
         };
         let dock = div()
             .id(id)
+            .debug_selector(move || id.to_owned())
             .role(Role::Group)
             .aria_label(label)
             .relative()
@@ -452,10 +526,12 @@ impl Render for Dock {
                     }),
                 _ => dock.child(self.render_rail(&theme, cx)),
             });
-        if overlaying {
-            let dock = dock.shadow(theme.floating_shadow());
+        if showing == DockState::Open && self.overlaying {
+            // Occluded, so a click on the panel can't reach the Send button
+            // or the chat under it.
+            let dock = dock.occlude().shadow(theme.floating_shadow());
             let overlay = div().absolute().top_0().bottom_0().child(dock);
-            // Deferred, so it paints and takes clicks above the chat.
+            // Deferred, so it paints above the chat.
             deferred(match self.side {
                 Side::Left => overlay.left_0(),
                 Side::Right => overlay.right_0(),
@@ -577,6 +653,19 @@ mod tests {
         dock.read_with(cx, |dock, _| assert_eq!(dock.width, MIN_WIDTH));
         assert_eq!(clamp_width(px(5_000.), px(1_000.)), px(600.));
         assert_eq!(clamp_width(px(5_000.), px(300.)), MIN_WIDTH);
+    }
+
+    #[test]
+    fn panels_give_way_wider_first_then_equally() {
+        let shared = |left: f32, right: f32, room: f32| {
+            let (left, right) = shared_widths(px(left), px(right), px(room));
+            (f32::from(left), f32::from(right))
+        };
+        assert_eq!(shared(360., 360., 800.), (360., 360.), "they fit");
+        assert_eq!(shared(500., 300., 700.), (400., 300.));
+        assert_eq!(shared(840., 840., 900.), (450., 450.));
+        assert_eq!(shared(600., 300., 500.), (250., 250.));
+        assert_eq!(shared(0., 840., 450.), (0., 450.), "one panel open");
     }
 
     #[test]

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const WIDE: Size<Pixels> = size(px(1434.), px(897.));
+const DEFAULT: Size<Pixels> = size(px(1100.), px(800.));
 const NARROW: Size<Pixels> = size(px(760.), px(640.));
 
 const SAMPLE_CHAT: [&str; 11] = [
@@ -129,6 +130,14 @@ fn window_images() {
     render("panels-open-light", Light, WIDE, |shell, _, cx| {
         shell.open_panels(cx);
     });
+    render(
+        "panels-open-default-size-dark",
+        Dark,
+        DEFAULT,
+        |shell, _, cx| {
+            shell.open_panels(cx);
+        },
+    );
     render("rails-dark", Dark, WIDE, |shell, _, cx| {
         for side in [Side::Left, Side::Right] {
             shell

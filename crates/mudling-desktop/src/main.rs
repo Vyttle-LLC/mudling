@@ -36,6 +36,7 @@ mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 mod measure;
+mod motion;
 mod shell;
 mod status;
 mod stream;
@@ -140,6 +141,7 @@ fn main() -> ExitCode {
     let application = gpui_platform::application().with_assets(assets::Assets);
     application.run(move |cx: &mut App| {
         assets::load_fonts(cx);
+        motion::follow_os(cx);
         input::bind_keys(cx);
         shell::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);

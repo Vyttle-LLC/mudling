@@ -10,7 +10,7 @@
 
 use crate::assets::UI_FONT;
 use crate::chat::{COLUMN_WIDTH, Chat};
-use crate::dock::{Dock, DockState, Side, Slot};
+use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
 use crate::status::{StatusLines, connection_text, lines_for};
@@ -304,7 +304,13 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Shell>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Shell>) -> impl IntoElement {
+        fit_docks(
+            &self.left_dock,
+            &self.right_dock,
+            window.viewport_size().width,
+            cx,
+        );
         let theme = *cx.global::<Theme>();
         let command_bar = div()
             .debug_selector(|| "command-bar".to_owned())
@@ -370,7 +376,8 @@ mod tests {
     use super::*;
     use crate::chat::LINE_HEIGHT;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
-    use gpui::{TestAppContext, VisualTestContext, px};
+    use gpui::{Modifiers, Pixels, TestAppContext, VisualTestContext, point, px, size};
+    use mudling_core::defaults::hud::Vital;
     use mudling_core::session::SessionConfig;
     use mudling_core::store::TerminalState;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
@@ -672,6 +679,135 @@ mod tests {
             chat.read_with(cx, |chat, _| chat.follows_newest()),
             "the newest line stays in view as the bar grows"
         );
+    }
+
+    /// A window on no session, with panels that open at once.
+    fn empty_window(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::input::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_waker, woken) = unbounded();
+        cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx))
+    }
+
+    /// Drags both panels as wide as they go.
+    fn drag_panels_wide(shell: &Entity<Shell>, window_width: Pixels, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            shell.open_panels(cx);
+            shell.dock(Side::Left).update(cx, |dock, cx| {
+                dock.resize_to(window_width, window_width, cx)
+            });
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.resize_to(px(0.), window_width, cx));
+        });
+    }
+
+    #[gpui::test]
+    fn a_click_on_an_overlaid_panel_stops_at_the_panel(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(760.), px(640.)));
+        shell.update(cx, |shell, cx| {
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.toggle(cx));
+        });
+        cx.simulate_input("kill the king");
+        cx.run_until_parked();
+
+        let bar = cx.debug_bounds("command-bar").unwrap();
+        cx.simulate_click(
+            point(bar.right() - px(27.), bar.center().y),
+            Modifiers::none(),
+        );
+
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        assert_eq!(chat.read_with(cx, |chat, _| chat.len()), 0);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "kill the king");
+        });
+    }
+
+    #[gpui::test]
+    fn panels_dragged_wide_leave_the_command_bar_its_width(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        drag_panels_wide(&shell, px(1400.), cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-bar").unwrap().size.width >= px(460.));
+        assert!(cx.debug_bounds("right-dock").unwrap().right() <= px(1400.));
+    }
+
+    #[gpui::test]
+    fn shrinking_the_window_narrows_a_dragged_panel_and_growing_restores_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        shell.update(cx, |shell, cx| {
+            shell.dock(Side::Left).update(cx, |dock, cx| {
+                dock.toggle(cx);
+                dock.resize_to(px(840.), px(1400.), cx);
+            });
+        });
+        cx.run_until_parked();
+        let dragged = cx.debug_bounds("left-dock").unwrap().size.width;
+
+        cx.simulate_resize(size(px(950.), px(800.)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("command-bar").unwrap().size.width >= px(460.));
+
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("left-dock").unwrap().size.width, dragged);
+    }
+
+    #[gpui::test]
+    fn panels_with_no_room_beside_the_column_overlay_it(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(1000.), px(800.)));
+        shell.update(cx, |shell, cx| shell.open_panels(cx));
+        cx.run_until_parked();
+
+        let bar = cx.debug_bounds("command-bar").unwrap();
+        assert!(bar.size.width >= px(700.), "the docks don't push: {bar:?}");
+        let left = cx.debug_bounds("left-dock").unwrap();
+        let right = cx.debug_bounds("right-dock").unwrap();
+        assert!(left.right() <= right.left(), "{left:?} over {right:?}");
+    }
+
+    #[gpui::test]
+    fn every_vital_shows_at_the_default_window_with_both_panels_open(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(1100.), px(800.)));
+        let vitals = VitalsState(
+            [
+                (Vital::Hp, 30),
+                (Vital::MaxHp, 42),
+                (Vital::Mana, 110),
+                (Vital::MaxMana, 115),
+                (Vital::Moves, 110),
+                (Vital::MaxMoves, 110),
+            ]
+            .into(),
+        );
+        shell.update(cx, |shell, cx| {
+            shell.show_sample_status("Connected to mud.example", &vitals, cx);
+            shell.open_panels(cx);
+        });
+        cx.run_until_parked();
+
+        let bar = cx.debug_bounds("command-bar").unwrap();
+        for meter in ["meter-HP", "meter-MP", "meter-MV"] {
+            let meter = cx.debug_bounds(meter).unwrap();
+            assert!(
+                meter.left() >= bar.left() && meter.right() <= bar.right(),
+                "{meter:?} outside {bar:?}"
+            );
+            assert!(meter.top() >= bar.top() && meter.bottom() <= bar.bottom());
+        }
     }
 
     #[gpui::test]

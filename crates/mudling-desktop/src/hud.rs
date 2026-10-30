@@ -1,5 +1,6 @@
 //! The HUD row on the command bar: how the connection stands, then a meter
-//! for each vital the server reports.
+//! for each vital the server reports. When the bar is too narrow for them all
+//! the meters wrap to a line of their own, so no vital is ever clipped.
 
 use crate::theme::Theme;
 use gpui::{Context, FontWeight, Hsla, Pixels, Role, SharedString, Window, div, prelude::*, px};
@@ -7,6 +8,8 @@ use mudling_core::defaults::hud::Vital;
 use mudling_core::store::VitalsState;
 
 const ROW_HEIGHT: Pixels = px(40.);
+/// Below this the meters wrap, rather than squeeze the connection to nothing.
+const MIN_CONNECTION_WIDTH: Pixels = px(120.);
 const METER_WIDTH: Pixels = px(64.);
 const METER_HEIGHT: Pixels = px(4.);
 
@@ -121,6 +124,7 @@ fn render_meter(meter: &Meter, theme: &Theme) -> impl IntoElement {
     });
     div()
         .id(label)
+        .debug_selector(move || format!("meter-{label}"))
         .role(Role::Meter)
         .aria_label(name)
         .aria_value(value.clone())
@@ -140,12 +144,14 @@ impl Render for Hud {
             .id("hud")
             .role(Role::Group)
             .aria_label("Status")
-            .h(ROW_HEIGHT)
+            .min_h(ROW_HEIGHT)
             .px_4()
+            .py_2()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap_6()
-            .overflow_hidden()
+            .gap_x_6()
+            .gap_y_1()
             .text_size(px(13.))
             .border_b_1()
             .border_color(theme.border)
@@ -155,7 +161,7 @@ impl Render for Hud {
                     .role(Role::Label)
                     .aria_value(self.connection.clone())
                     .flex_1()
-                    .min_w_0()
+                    .min_w(MIN_CONNECTION_WIDTH)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -163,7 +169,16 @@ impl Render for Hud {
                     .text_color(theme.text)
                     .child(self.connection.clone()),
             )
-            .children(self.meters.iter().map(|meter| render_meter(meter, theme)))
+            .child(
+                div()
+                    .max_w_full()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x_3()
+                    .gap_y_1()
+                    .children(self.meters.iter().map(|meter| render_meter(meter, theme))),
+            )
     }
 }
 
