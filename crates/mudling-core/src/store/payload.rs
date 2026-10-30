@@ -1,10 +1,11 @@
 //! What each store holds.
 //!
-//! Most of these are placeholders until the tickets that own their models
-//! land: the line pipeline replaces [`TerminalLine`], and the map, mobs,
-//! characters, gear and settings models replace their [`Fields`]. To replace
-//! one, give its state type a real body and its own [`StoreState::Change`];
-//! nothing else in the store set depends on what's inside.
+//! Most of these are placeholders until the stores are joined to the models
+//! that own their data: the line pipeline's `Line` replaces [`TerminalLine`],
+//! and the map, mobs, characters, gear and settings models replace their
+//! [`Fields`]. To replace one, give its state type a real body and its own
+//! [`StoreState::Change`]; nothing else in the store set depends on what's
+//! inside.
 
 use super::StoreState;
 use std::collections::{BTreeMap, VecDeque};
@@ -12,7 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 /// How many lines the terminal store holds (PRD §6: 100,000 lines).
 pub const TERMINAL_CAPACITY: usize = 100_000;
 
-/// A placeholder for the line pipeline's `Line`.
+/// A placeholder: this store doesn't hold the line pipeline's `Line` yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalLine {
     pub text: String,

@@ -120,8 +120,8 @@ impl Session {
         .collect()
     }
 
-    /// Until the connection layer lands, a command is only echoed into the
-    /// terminal store.
+    /// A command is only echoed into the terminal store: this session isn't
+    /// joined to the connection layer yet.
     pub fn send_command(&self, command: String) {
         self.hub
             .write::<TerminalState>(TerminalChange::Append(vec![TerminalLine { text: command }]));

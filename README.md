@@ -10,9 +10,13 @@ creature of living mud — and MUD is where it lives: exits become a D-pad,
 the things in the room become tappable, and commands compose by touch
 instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
 
-> Early days. What's here is the Phase 0 spike: a gpui window with a
-> virtualized chat, a command input with IME, and a first accessibility pass.
-> See [docs/phase-0-spike.md](docs/phase-0-spike.md) for what it proved.
+> Early days. The headless core is here: the connection layer (telnet, GMCP,
+> MCCP2), line pipeline, plugin host with Luau hooks, versioned stores, map,
+> persistence and completion, with the Avatar game plugin on top. The desktop
+> shell is still the Phase 0 spike and doesn't use most of the core yet: a gpui
+> window with a virtualized chat, a command input with IME, and a first
+> accessibility pass. See [docs/phase-0-spike.md](docs/phase-0-spike.md) for
+> what the spike proved.
 
 ## Building
 
@@ -20,17 +24,18 @@ MUDling is a Cargo workspace:
 
 | Path | What it is |
 |---|---|
-| `crates/mudling-core` | Everything except drawing: the scrollback, ANSI parsing, replay |
+| `crates/mudling-core` | Everything except drawing: connection, line pipeline, plugins, stores, map, persistence, completion, scrollback |
 | `crates/mudling-desktop` | The desktop shell, drawn with [gpui](https://gpui.rs) |
-| `crates/mudling-bench` | The headless benchmark against the performance budgets |
-| `crates/mudling-ffi` | UniFFI bindings for the iOS app (a stub for now) |
+| `crates/mudling-bench` | The headless benchmarks against the performance budgets |
+| `crates/mudling-ffi` | UniFFI bindings for the iOS app: store subscriptions and diffs (commands only echo for now) |
 | `crates/mudling-cli` | The `mudling` command line (a stub for now) |
-| `apple/`, `plugins/avatar/` | The iOS app and the first game plugin, both to come |
+| `plugins/avatar/` | The first game plugin, in TOML and Luau |
+| `apple/` | The iOS app, to come |
 
 ```sh
 cargo build --release
 cargo test
-cargo run --release -p mudling-bench                 # append and find budgets
+cargo run --release -p mudling-bench                 # the core's budgets
 cargo run --release -p mudling-desktop -- --synthetic # the chat, with made-up lines
 ```
 
