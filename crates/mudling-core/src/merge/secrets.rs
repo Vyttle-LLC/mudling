@@ -3,10 +3,26 @@
 //!
 //! It looks for what a password looks like from outside, because a locked
 //! vault can't say what the passwords are: a field named for one, in any JSON
-//! file and in JSON held inside a string (`Server.settings`); `password: x`
-//! in text the player wrote; and a trigger that answers a password prompt.
-//! Game text doesn't count, because a room may well say "password: mellon".
-//! A password in an alias with nothing around it to tell it apart isn't found.
+//! file and in JSON held inside a string (`Server.settings`), whatever the
+//! field holds besides a flag; `password: x` in text the player wrote; and a
+//! trigger that answers a password prompt. Game text doesn't count, because a
+//! room may well say "password: mellon".
+//!
+//! So it can't catch:
+//! - a password with no password word beside it: an alias `in` that expands to
+//!   `hunter2`, a note holding only `hunter2`, or a trigger on a prompt with
+//!   no such word, such as `^Speak, friend`
+//! - the words in other languages, such as `Passwort`
+//! - `pw: x` or `pass: x` in text, and an alias named `pw`, because those mean
+//!   other things in a MUD
+//! - a prompt with nothing after the word and no `enter`, `type` or `your`
+//!   before it, such as `^Password required`
+//! - in a file that isn't JSON or `notes.txt`, a value without quotes
+//! - anything in the game's text (map, characters, gear, mobs), in
+//!   `settings.json`'s shortcuts, or in a file that isn't UTF-8
+//!
+//! A field named for a password that holds a number trips it too, such as
+//! `password_length`, which would need renaming before it could be pushed.
 
 use crate::repo::format::{CHARACTERS_FOLDER, GEAR_FOLDER, MAP_FOLDER, MOBS, NOTES, SETTINGS};
 use crate::vault;
@@ -20,7 +36,7 @@ const PASSWORD_WORD: &str = r"pass(word|wd|phrase|code)|pwd";
 /// The name of a field that holds a secret.
 static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?i){PASSWORD_WORD}|^pass$|secret|api_?key|token$"
+        r"(?i){PASSWORD_WORD}|(^|[_-])(pass|pw)$|(?-i:Pw$)|secret|api_?key|token$"
     ))
     .expect("a valid pattern")
 });
@@ -40,9 +56,16 @@ static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r#"(?i)\b({PASSWORD_WORD})\s*[:=]\s*["'][^"']"#)).expect("a valid pattern")
 });
 
-/// A trigger's pattern for a password prompt.
-static PROMPT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r"(?i)({PASSWORD_WORD})\s*:")).expect("a valid pattern"));
+/// A trigger's pattern for a password prompt: the word and then the end of a
+/// question (`Password?`, `password for Alda:`), or an order to give it
+/// (`Enter your password`). `wrong password` is neither.
+static PROMPT: LazyLock<Regex> = LazyLock::new(|| {
+    let word = format!(r"\b({PASSWORD_WORD})\b");
+    Regex::new(&format!(
+        r"(?i){word}\s*\\?[:?>]|{word}.*[:?>]\W*$|\b(enter|type|your)\s+(\w+\s+)?{word}\W*$"
+    ))
+    .expect("a valid pattern")
+});
 
 /// Where `bytes`, a file at `path` in the repo, seems to hold a password. The
 /// answer names the field or line and never quotes the value.
@@ -51,10 +74,15 @@ pub fn find_password(path: &Path, bytes: &[u8]) -> Option<String> {
         return None;
     }
     let text = std::str::from_utf8(bytes).ok()?;
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
+    if let Ok(mut value) = serde_json::from_str::<Value>(text) {
+        // Shortcuts are named for app actions, and hold only keys to press.
+        if path == Path::new(SETTINGS)
+            && let Some(settings) = value.as_object_mut()
+        {
+            settings.remove("shortcuts");
+        }
         let scan = Scan {
             authored: !is_game_text(path),
-            named_fields: path != Path::new(SETTINGS),
         };
         return scan.value(&value, "");
     }
@@ -79,9 +107,6 @@ fn is_game_text(path: &Path) -> bool {
 struct Scan {
     /// The player wrote the values, so they mean what they say.
     authored: bool,
-    /// Field names are the player's, not a list like `settings.json`'s
-    /// shortcuts, whose names are app actions.
-    named_fields: bool,
 }
 
 impl Scan {
@@ -107,13 +132,18 @@ impl Scan {
             } else {
                 format!("{field}.{name}")
             };
-            if self.named_fields && SECRET_FIELD.is_match(name) && has_text(value) {
+            // The game names stats, so only its text can count there.
+            let held = if self.authored {
+                holds_value(value)
+            } else {
+                has_text(value)
+            };
+            if SECRET_FIELD.is_match(name) && held {
                 return Some(inner);
             }
             // A pattern can mention a password without holding one.
             let scan = Scan {
                 authored: self.authored && name != "matches",
-                ..self
             };
             scan.value(value, &inner)
         })
@@ -150,6 +180,17 @@ fn has_text(value: &Value) -> bool {
     value.as_str().is_some_and(|text| !text.is_empty())
 }
 
+/// Anything but nothing or a flag: `save_password: true` holds no password.
+fn holds_value(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.is_empty(),
+        Value::Number(_) => true,
+        Value::Array(items) => items.iter().any(holds_value),
+        Value::Object(fields) => fields.values().any(holds_value),
+        Value::Bool(_) | Value::Null => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +217,109 @@ mod tests {
         let list = format!(r#"{{"servers":[{{"id":"a","settings":"{settings}"}}]}}"#);
 
         assert_eq!(found("servers.json", &list), None);
+    }
+
+    fn in_server_settings(settings: &str) -> Option<String> {
+        let settings = serde_json::to_string(settings).unwrap();
+        let list = format!(r#"{{"servers":[{{"id":"a","settings":{settings}}}]}}"#);
+        found("servers.json", &list)
+    }
+
+    #[test]
+    fn a_secret_field_counts_whatever_it_holds_but_a_flag() {
+        for settings in [
+            r#"{"password":123456}"#,
+            r#"{"passwords":["hunter2"]}"#,
+            r#"{"password":{"plain":"hunter2"}}"#,
+        ] {
+            assert!(in_server_settings(settings).is_some(), "{settings}");
+        }
+        for settings in [
+            r#"{"password":null}"#,
+            r#"{"passwords":[]}"#,
+            r#"{"save_password":false}"#,
+        ] {
+            assert_eq!(in_server_settings(settings), None, "{settings}");
+        }
+    }
+
+    #[test]
+    fn a_number_in_a_stat_the_game_named_is_not_a_password() {
+        let character = r#"{"gear":{"secret_bonus":3}}"#;
+
+        assert_eq!(
+            found("mud.example.org/characters/Alda.json", character),
+            None
+        );
+    }
+
+    #[test]
+    fn short_field_names_count() {
+        for settings in [
+            r#"{"login":{"pw":"hunter2"}}"#,
+            r#"{"pass":"hunter2"}"#,
+            r#"{"login_pw":"hunter2"}"#,
+            r#"{"loginPw":"hunter2"}"#,
+        ] {
+            assert!(in_server_settings(settings).is_some(), "{settings}");
+        }
+        assert_eq!(
+            in_server_settings(r#"{"view":"wide","compass":"on"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_setting_outside_the_shortcuts_is_read() {
+        let settings = r#"{"panels":{"password":"hunter2"}}"#;
+
+        assert_eq!(found("settings.json", settings).unwrap(), "panels.password");
+    }
+
+    #[test]
+    fn common_prompts_are_read_as_prompts() {
+        for prompt in [
+            "What is your password?",
+            r"^Password\?$",
+            "Password>",
+            "password for Alda:",
+            "Enter password",
+            "^Enter your password$",
+            "Type the passphrase",
+        ] {
+            let trigger = format!(
+                r#"{{"triggers":[{{"matches":{},"action":"hunter2"}}]}}"#,
+                serde_json::to_string(prompt).unwrap()
+            );
+            assert!(
+                found("mud.example.org/triggers.json", &trigger).is_some(),
+                "{prompt}"
+            );
+        }
+        for pattern in [
+            "your password is wrong",
+            "wrong password",
+            "password accepted",
+        ] {
+            let trigger = format!(r#"{{"triggers":[{{"matches":"{pattern}","action":"grin"}}]}}"#);
+            assert_eq!(
+                found("mud.example.org/triggers.json", &trigger),
+                None,
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_notes_stay_as_they_were() {
+        for note in [
+            "What is your password?",
+            "Enter password",
+            "pw: ask the guild",
+            "pass: north gate",
+        ] {
+            assert_eq!(found("mud.example.org/notes.txt", note), None, "{note}");
+        }
     }
 
     #[test]

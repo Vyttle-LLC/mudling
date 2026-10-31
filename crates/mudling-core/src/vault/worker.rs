@@ -245,8 +245,9 @@ impl Worker {
     }
 
     /// Moves what `password`, a replaced master password, can open back into
-    /// the vault, returning how many. Fails with [`Error::WrongPassword`] if
-    /// it opens nothing stranded.
+    /// the vault, returning how many, except any that differ from the password
+    /// saved now, which stay for [`Worker::conflicts`]. Fails with
+    /// [`Error::WrongPassword`] if it opens nothing stranded.
     pub fn rescue_with_password(&mut self, password: &Secret) -> Result<usize, Error> {
         let old = self.stranded_key(password)?;
         self.rescue(&old)
@@ -326,6 +327,8 @@ impl Worker {
 
     /// Ends a conflict over `entry` with the player's choice. Either way the
     /// stranded copy goes, so the other password survives only in git history.
+    /// Keeping the current password fails with [`Error::NoCurrentPassword`] if
+    /// no readable one is saved, because that would drop the only copy.
     pub fn settle_conflict(
         &mut self,
         password: &Secret,
@@ -335,7 +338,7 @@ impl Worker {
         let old = self.stranded_key(password)?;
         let stranded_id = file::stranded_id(&crypto::fingerprint(&old));
         let (mut file, key) = self.unlocked()?;
-        let Some(block) = file.stranded.get_mut(&stranded_id) else {
+        let Some(block) = file.stranded.get(&stranded_id) else {
             return Ok(());
         };
         let found = block.entries.iter().find_map(|(id, sealed)| {
@@ -345,13 +348,23 @@ impl Worker {
         let Some((old_id, stranded)) = found else {
             return Ok(());
         };
-        block.entries.remove(&old_id);
-        file.stranded.retain(|_, block| !block.entries.is_empty());
-        if keep == KeepPassword::Stranded {
-            let id = crypto::entry_id(key, entry);
-            let sealed = encrypt_entry(&file, key, &id, entry, &stranded);
-            file.entries.insert(id, sealed);
+        let id = crypto::entry_id(key, entry);
+        match keep {
+            KeepPassword::Current => {
+                let current = file.entries.get(&id);
+                if !current.is_some_and(|sealed| decrypt_entry(&file, key, &id, sealed).is_ok()) {
+                    return Err(Error::NoCurrentPassword);
+                }
+            }
+            KeepPassword::Stranded => {
+                let sealed = encrypt_entry(&file, key, &id, entry, &stranded);
+                file.entries.insert(id, sealed);
+            }
         }
+        if let Some(block) = file.stranded.get_mut(&stranded_id) {
+            block.entries.remove(&old_id);
+        }
+        file.stranded.retain(|_, block| !block.entries.is_empty());
         file::save(&self.path, &file)?;
         Ok(())
     }

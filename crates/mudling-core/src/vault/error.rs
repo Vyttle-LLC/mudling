@@ -28,6 +28,9 @@ pub enum Error {
     /// The file changed while the master password was being changed, usually
     /// because a sync landed. Nothing was written, so it's safe to try again.
     ChangedDuringSave,
+    /// No readable password is saved to keep, so settling a conflict that way
+    /// would drop the only copy. Nothing was written.
+    NoCurrentPassword,
     /// The vault's thread found it locked. [`Vault`] waits on this rather
     /// than returning it.
     ///
@@ -59,6 +62,7 @@ impl fmt::Display for Error {
             Self::NotCreated => f.write_str("no vault has been created"),
             Self::AlreadyExists => f.write_str("a vault already exists"),
             Self::ChangedDuringSave => f.write_str("the vault file changed; try again"),
+            Self::NoCurrentPassword => f.write_str("no current password is saved to keep"),
             Self::Locked => f.write_str("the vault is locked"),
             Self::NotCached => f.write_str("this device has no cached vault key"),
             Self::Stopped => f.write_str("the vault's thread has stopped"),

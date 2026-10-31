@@ -285,7 +285,9 @@ impl Vault {
     }
 
     /// Brings back the stranded passwords `old_master_password` opens,
-    /// returning how many. A wrong one gives [`Error::WrongPassword`].
+    /// returning how many, except any that differ from the password saved now,
+    /// which stay for [`Vault::conflicts`]. A wrong one gives
+    /// [`Error::WrongPassword`].
     pub async fn rescue_with_password(&self, old_master_password: Secret) -> Result<usize, Error> {
         let password = Arc::new(old_master_password);
         self.call_unlocked(move |worker| worker.rescue_with_password(&password))
@@ -304,7 +306,9 @@ impl Vault {
             .await
     }
 
-    /// Keeps one of the two passwords in a conflict over `entry`.
+    /// Keeps one of the two passwords in a conflict over `entry`. Keeping the
+    /// current one when none is saved gives [`Error::NoCurrentPassword`], and
+    /// the stranded one stays.
     pub async fn settle_conflict(
         &self,
         old_master_password: Secret,
@@ -316,8 +320,9 @@ impl Vault {
             .await
     }
 
-    /// Changes the master password, re-encrypting everything under a new
+    /// Changes the master password, re-encrypting every entry under a new
     /// vault key and issuing a new recovery key; the old one stops working.
+    /// Stranded passwords stay under their own keys.
     /// Old copies in git history still open with the old password, so the UI
     /// must say so (PRD §10).
     pub async fn change_master_password(

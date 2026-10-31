@@ -1103,6 +1103,21 @@ async fn the_player_keeps_the_current_password() {
 }
 
 #[tokio::test]
+async fn keeping_a_current_password_that_is_not_there_drops_nothing() {
+    let (_mac, vault, _ipad, _) = offline_save_across_a_password_change().await;
+
+    let outcome = vault
+        .settle_conflict(MASTER.into(), alda(), KeepPassword::Current)
+        .await;
+
+    assert!(matches!(outcome, Err(Error::NoCurrentPassword)));
+    assert_eq!(vault.stranded().await.unwrap(), 1);
+    assert_eq!(vault.rescue_with_password(MASTER.into()).await.unwrap(), 1);
+    let rescued = vault.password(&alda()).await.unwrap().unwrap();
+    assert_eq!(rescued.expose(), "offline-7");
+}
+
+#[tokio::test]
 async fn a_rescue_on_one_device_holds_against_a_merge_with_another() {
     let (mac, vault, ipad, _) = offline_save_across_a_password_change().await;
     let before_the_rescue = ipad.bytes();
