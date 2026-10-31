@@ -419,7 +419,7 @@ pub fn run_parent(
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat, command bar and both side panels open, the Room panel filled; \
+        scope: "chat, command bar and both side panels open, the Room panel and the hotbar filled; \
                 the chat split from the split phase on",
         settings_open: child_args.iter().any(|arg| arg == "--settings-open"),
         lines_per_second,
