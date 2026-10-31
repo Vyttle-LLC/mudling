@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Meta keys the map keeps its own state under.
-const CURRENT_ROOM: &str = "map.current-room";
+pub(crate) const CURRENT_ROOM: &str = "map.current-room";
 const ISLANDS: &str = "map.islands";
 
 /// One server's map, shared by every character on it, kept up to date from

@@ -52,6 +52,8 @@ pub struct Theme {
     /// Text and icons on a filled accent.
     pub on_accent: Hsla,
     pub placeholder: Hsla,
+    /// Words that say what went wrong.
+    pub error: Hsla,
     pub hud_hp: Hsla,
     pub hud_mana: Hsla,
     pub hud_moves: Hsla,
@@ -82,6 +84,7 @@ impl Theme {
                 accent_hover: rgb(MOSS_BRIGHT).into(),
                 on_accent: rgb(NIGHT).into(),
                 placeholder: rgb(0x8A928D).into(),
+                error: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_hp: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_mana: rgb(ANSI_ON_NIGHT[12]).into(),
                 hud_moves: rgb(0x4FBF87).into(),
@@ -106,6 +109,7 @@ impl Theme {
                 accent_hover: rgb(MOSS_DIM).into(),
                 on_accent: rgb(PARCHMENT).into(),
                 placeholder: rgb(0x636C67).into(),
+                error: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_hp: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_mana: rgb(ANSI_ON_PARCHMENT[12]).into(),
                 hud_moves: rgb(0x1F6B45).into(),

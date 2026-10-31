@@ -19,8 +19,14 @@ use gpui::{
     AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
 };
 use mudling_core::LinePipeline;
+use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
-use mudling_core::store::{Diff, Revision, TerminalChange, TerminalState, VitalsState};
+use mudling_core::net::DisconnectReason;
+use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
+use mudling_core::plugin::PluginId;
+use mudling_core::store::{
+    ConnectionStatus, Diff, Revision, SettingsState, TerminalChange, TerminalState, VitalsState,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +83,25 @@ fn server_lines(texts: &[&str]) -> Diff<TerminalState> {
     Diff {
         revision: Revision::default(),
         change: TerminalChange::Append(lines),
+    }
+}
+
+/// The canvas's card, with a made-up server.
+fn sample_saved() -> SavedServers {
+    let last_played = Timestamp::now();
+    SavedServers {
+        servers: vec![SavedServer {
+            host: "mud.example".to_owned(),
+            port: 4000,
+            updated: last_played,
+            last_room: Some("the Donation Room".to_owned()),
+            characters: vec![SavedCharacter {
+                name: Some("Altissima".to_owned()),
+                level: Some(2),
+                last_played,
+            }],
+        }],
+        problems: Vec::new(),
     }
 }
 
@@ -218,5 +243,43 @@ fn window_images() {
     });
     render("title-bar-menu-light", Light, WIDE, |shell, window, cx| {
         shell.open_session_menu(window, cx);
+    });
+    render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+    });
+    render("empty-state-light", Light, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+    });
+    render(
+        "empty-state-first-run-dark",
+        Dark,
+        DEFAULT,
+        |shell, window, cx| {
+            shell.show_sample_empty_state(&SavedServers::default(), window, cx);
+        },
+    );
+    render(
+        "empty-state-narrow-dark",
+        Dark,
+        NARROW,
+        |shell, window, cx| {
+            shell.show_sample_empty_state(&sample_saved(), window, cx);
+        },
+    );
+    render("empty-state-menu-dark", Dark, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+        shell.open_session_menu(window, cx);
+    });
+    render("connection-ended-dark", Dark, WIDE, |shell, _, cx| {
+        let failed = "connection refused".to_owned();
+        let settings = SettingsState {
+            connection: ConnectionStatus::Closed(DisconnectReason::Failed(failed)),
+            suggestion: Some(Suggestion {
+                plugin: PluginId::try_from("sample".to_owned()).expect("a valid id"),
+                source: Source::Host,
+            }),
+            ..SettingsState::default()
+        };
+        shell.show_sample_offers(&settings, cx);
     });
 }

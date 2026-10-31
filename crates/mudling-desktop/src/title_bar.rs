@@ -12,12 +12,15 @@
 
 use crate::assets::{Icon, UI_FONT};
 use crate::dock::{Dock, DockState, Side};
+use crate::empty_state::Card;
+use crate::launcher::Target;
 use crate::shell::{FocusCommandBar, ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::Theme;
 use gpui::{
-    Action, App, Context, Decorations, Div, Entity, FocusHandle, FontWeight, Hsla, KeyBinding,
-    MouseButton, Pixels, Point, ResizeEdge, Role, SharedString, Size, Stateful, Window,
-    WindowControlArea, actions, deferred, div, point, prelude::*, px, transparent_black,
+    Action, App, ClickEvent, Context, Decorations, Div, ElementId, Entity, EventEmitter,
+    FocusHandle, FontWeight, Hsla, KeyBinding, MouseButton, Pixels, Point, ResizeEdge, Role,
+    SharedString, Size, Stateful, Window, WindowControlArea, actions, deferred, div, point,
+    prelude::*, px, transparent_black,
 };
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{CharactersState, ConnectionStatus, SettingsState};
@@ -32,7 +35,7 @@ const BUTTON_SIZE: Pixels = px(28.);
 const ICON_SIZE: Pixels = px(16.);
 const SWITCHER_HEIGHT: Pixels = px(34.);
 const MARK_SIZE: Pixels = px(20.);
-const MENU_MIN_WIDTH: Pixels = px(240.);
+const MENU_MIN_WIDTH: Pixels = px(280.);
 /// How far in from a client-drawn window's edge a press resizes it.
 const RESIZE_MARGIN: Pixels = px(6.);
 /// The key the character's name would be under: the `character` store, which
@@ -55,8 +58,16 @@ actions!(
         FocusNextControl,
         FocusPreviousControl,
         CloseMenu,
+        MenuNext,
+        MenuPrevious,
     ]
 );
+
+/// What the session menu asks of the shell.
+pub enum TitleBarEvent {
+    Open(Target),
+    ChooseServer,
+}
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -68,6 +79,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseMenu, Some(MENU_CONTEXT)),
         KeyBinding::new("tab", CloseMenu, Some(MENU_CONTEXT)),
         KeyBinding::new("shift-tab", CloseMenu, Some(MENU_CONTEXT)),
+        KeyBinding::new("down", MenuNext, Some(MENU_CONTEXT)),
+        KeyBinding::new("up", MenuPrevious, Some(MENU_CONTEXT)),
     ]);
 }
 
@@ -240,23 +253,23 @@ fn action_button(
 }
 
 /// The runestone, in the logomark's two colors.
-fn runestone_mark(theme: &Theme) -> impl IntoElement {
+pub fn runestone_mark(size: Pixels, theme: &Theme) -> impl IntoElement + use<> {
     div()
         .relative()
         .flex_none()
-        .size(MARK_SIZE)
+        .size(size)
         .child(
             Icon::Runestone
                 .svg()
                 .absolute()
-                .size(MARK_SIZE)
+                .size(size)
                 .text_color(theme.runestone),
         )
         .child(
             Icon::RunestoneCursor
                 .svg()
                 .absolute()
-                .size(MARK_SIZE)
+                .size(size)
                 .text_color(theme.accent),
         )
 }
@@ -326,7 +339,16 @@ pub struct TitleBar {
     menu_open: bool,
     menu_item: FocusHandle,
     focus_before_menu: Option<FocusHandle>,
+    /// Where else the menu can go, with each row's focus.
+    elsewhere: Vec<(Card, FocusHandle)>,
+    /// A session is running, so the menu can leave it for the empty state.
+    can_choose_server: bool,
+    choose_server_item: FocusHandle,
+    /// The empty state has no use for the panels or for search.
+    bare: bool,
 }
+
+impl EventEmitter<TitleBarEvent> for TitleBar {}
 
 impl TitleBar {
     pub fn new(
@@ -342,6 +364,10 @@ impl TitleBar {
             menu_open: false,
             menu_item: cx.focus_handle(),
             focus_before_menu: None,
+            elsewhere: Vec::new(),
+            can_choose_server: false,
+            choose_server_item: cx.focus_handle(),
+            bare: false,
         }
     }
 
@@ -350,6 +376,27 @@ impl TitleBar {
             self.session = session;
             cx.notify();
         }
+    }
+
+    /// Fills the menu: the saved characters the player isn't playing, and
+    /// whether a running session can be left for the empty state.
+    pub fn show_saved(
+        &mut self,
+        elsewhere: Vec<Card>,
+        can_choose_server: bool,
+        cx: &mut Context<TitleBar>,
+    ) {
+        self.elsewhere = elsewhere
+            .into_iter()
+            .map(|card| (card, cx.focus_handle()))
+            .collect();
+        self.can_choose_server = can_choose_server;
+        cx.notify();
+    }
+
+    pub fn set_bare(&mut self, bare: bool, cx: &mut Context<TitleBar>) {
+        self.bare = bare;
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -378,6 +425,65 @@ impl TitleBar {
         } else {
             self.open_menu(window, cx);
         }
+    }
+
+    /// Every row's focus, top to bottom.
+    fn menu_rows(&self) -> Vec<&FocusHandle> {
+        std::iter::once(&self.menu_item)
+            .chain(self.elsewhere.iter().map(|(_, focus)| focus))
+            .chain(self.can_choose_server.then_some(&self.choose_server_item))
+            .collect()
+    }
+
+    /// Moves down or up the rows by `steps`, around the ends.
+    fn move_in_menu(&self, steps: usize, window: &mut Window, cx: &mut Context<TitleBar>) {
+        let rows = self.menu_rows();
+        let here = rows.iter().position(|row| row.is_focused(window));
+        let next = (here.unwrap_or(0) + steps) % rows.len();
+        window.focus(rows[next], cx);
+    }
+
+    /// A row of the menu: where it goes, and how that stands.
+    fn menu_row(
+        id: impl Into<ElementId>,
+        selector: String,
+        (name, detail): (SharedString, SharedString),
+        focus: &FocusHandle,
+        theme: &Theme,
+    ) -> Stateful<Div> {
+        let (hover, ring) = (theme.hover, theme.accent);
+        div()
+            .id(id)
+            .debug_selector(move || selector)
+            .role(Role::MenuItem)
+            .aria_label(name.clone())
+            .aria_description(detail.clone())
+            .track_focus(focus)
+            .px_2()
+            .py_1p5()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(transparent_black())
+            .hover(move |style| style.bg(hover))
+            .focus_visible(move |style| style.border_color(ring))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        elided_text(name)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text),
+                    )
+                    .child(
+                        elided_text(detail)
+                            .text_size(px(12.))
+                            .text_color(theme.text_muted),
+                    ),
+            )
     }
 
     fn render_panel_toggle(&self, side: Side, theme: &Theme, cx: &App) -> Stateful<Div> {
@@ -424,7 +530,7 @@ impl TitleBar {
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text)
         .on_click(cx.listener(|bar, _, window, cx| bar.toggle_menu(window, cx)))
-        .child(runestone_mark(theme))
+        .child(runestone_mark(MARK_SIZE, theme))
         .child(elided_text(session.server.clone()))
         .when_some(session.character.clone(), |switcher, character| {
             switcher
@@ -440,53 +546,58 @@ impl TitleBar {
         )
     }
 
-    /// One game runs at a time, so the menu lists only that; VYT-205 adds the
-    /// saved characters.
+    /// The session running now, then the saved characters to switch to. One
+    /// session runs at a time, so choosing one ends this one.
     fn render_menu(&self, theme: &Theme, cx: &mut Context<TitleBar>) -> impl IntoElement {
         let session = &self.session;
-        let name = session.name();
-        let (hover, ring) = (theme.hover, theme.accent);
-        let item = div()
-            .id("session-current")
-            .debug_selector(|| "session-current".to_owned())
-            .role(Role::MenuItem)
-            .aria_label(name.clone())
-            .aria_description(session.connection.clone())
-            .aria_selected(true)
-            .track_focus(&self.menu_item)
-            .px_2()
-            .py_1p5()
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded_md()
-            .border_1()
-            .border_color(transparent_black())
-            .hover(move |style| style.bg(hover))
-            .focus_visible(move |style| style.border_color(ring))
-            .on_click(cx.listener(|bar, _, window, cx| bar.close_menu(window, cx)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        elided_text(name)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text),
-                    )
-                    .child(
-                        elided_text(session.connection.clone())
-                            .text_size(px(12.))
-                            .text_color(theme.text_muted),
-                    ),
+        let current = Self::menu_row(
+            "session-current",
+            "session-current".to_owned(),
+            (session.name(), session.connection.clone()),
+            &self.menu_item,
+            theme,
+        )
+        .aria_selected(true)
+        .on_click(cx.listener(|bar, _, window, cx| bar.close_menu(window, cx)))
+        .child(
+            Icon::Check
+                .svg()
+                .flex_none()
+                .size(ICON_SIZE)
+                .text_color(theme.accent),
+        );
+        let elsewhere = self
+            .elsewhere
+            .iter()
+            .enumerate()
+            .map(|(index, (card, focus))| {
+                let target = card.target.clone();
+                Self::menu_row(
+                    ("session-saved", index),
+                    format!("session-saved-{index}"),
+                    (card.title(), card.detail.clone()),
+                    focus,
+                    theme,
+                )
+                .on_click(cx.listener(move |bar, _: &ClickEvent, window, cx| {
+                    bar.close_menu(window, cx);
+                    cx.emit(TitleBarEvent::Open(target.clone()));
+                }))
+            });
+        let elsewhere: Vec<_> = elsewhere.collect();
+        let choose_server = self.can_choose_server.then(|| {
+            Self::menu_row(
+                "session-choose-server",
+                "session-choose-server".to_owned(),
+                ("All servers".into(), "Disconnect and choose".into()),
+                &self.choose_server_item,
+                theme,
             )
-            .child(
-                Icon::Check
-                    .svg()
-                    .flex_none()
-                    .size(ICON_SIZE)
-                    .text_color(theme.accent),
-            );
+            .on_click(cx.listener(|bar, _, window, cx| {
+                bar.close_menu(window, cx);
+                cx.emit(TitleBarEvent::ChooseServer);
+            }))
+        });
         let menu = div()
             .id("session-menu")
             .debug_selector(|| "session-menu".to_owned())
@@ -506,7 +617,15 @@ impl TitleBar {
             .bg(theme.surface_raised)
             .shadow(theme.floating_shadow())
             .on_action(cx.listener(|bar, _: &CloseMenu, window, cx| bar.close_menu(window, cx)))
-            .child(item);
+            .on_action(cx.listener(|bar, _: &MenuNext, window, cx| {
+                bar.move_in_menu(1, window, cx);
+            }))
+            .on_action(cx.listener(|bar, _: &MenuPrevious, window, cx| {
+                bar.move_in_menu(bar.menu_rows().len() - 1, window, cx);
+            }))
+            .child(current)
+            .children(elsewhere)
+            .children(choose_server);
         deferred(menu).with_priority(MENU_PRIORITY + 1)
     }
 
@@ -607,7 +726,9 @@ impl Render for TitleBar {
                 }
             }))
             .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
-            .child(self.render_panel_toggle(Side::Left, &theme, cx))
+            .when(!self.bare, |bar| {
+                bar.child(self.render_panel_toggle(Side::Left, &theme, cx))
+            })
             .child(switcher)
             .child(connection)
             .child(div().flex_1())
@@ -617,14 +738,17 @@ impl Render for TitleBar {
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(action_button(
-                        ("find-in-scrollback", "Search", Icon::Find),
-                        "F",
-                        FindInScrollback,
-                        theme.placeholder,
-                        &theme,
-                    ))
-                    .child(self.render_panel_toggle(Side::Right, &theme, cx))
+                    .when(!self.bare, |tools| {
+                        tools
+                            .child(action_button(
+                                ("find-in-scrollback", "Search", Icon::Find),
+                                "F",
+                                FindInScrollback,
+                                theme.placeholder,
+                                &theme,
+                            ))
+                            .child(self.render_panel_toggle(Side::Right, &theme, cx))
+                    })
                     .child(action_button(
                         ("open-settings", "Settings", Icon::Sprocket),
                         ",",
