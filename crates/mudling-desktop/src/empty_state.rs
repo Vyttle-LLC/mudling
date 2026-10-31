@@ -286,6 +286,11 @@ impl EmptyState {
         &self.cards
     }
 
+    #[cfg(test)]
+    pub fn quick_typed<'a>(&self, cx: &'a App) -> &'a str {
+        self.quick.read(cx).content()
+    }
+
     /// What the Add form holds, while it's open.
     #[cfg(test)]
     pub fn address_being_added(&self, cx: &App) -> Option<String> {

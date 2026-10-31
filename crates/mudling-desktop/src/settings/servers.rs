@@ -5,7 +5,7 @@
 //! Keep, which takes the place of the Remove button, so focus lands on the
 //! choice that loses nothing.
 
-use super::{Pane, SettingsSheet, SheetEvent, muted_line, text_button};
+use super::{Pane, Section, SettingsSheet, SheetEvent, muted_line, text_button};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{Context, FontWeight, Role, SharedString, div, prelude::*, px};
@@ -158,8 +158,11 @@ impl SettingsSheet {
                         .child(
                             text_button(confirm, "Remove", &pane.stop(cx), theme)
                                 .aria_label(format!("Remove {}", server.name))
-                                .on_click(cx.listener(move |sheet, _, _, cx| {
+                                .on_click(cx.listener(move |sheet, _, window, cx| {
                                     sheet.removing = None;
+                                    // This stop goes with the question.
+                                    let tab = &sheet.tabs[Section::Servers as usize];
+                                    window.focus(tab, cx);
                                     cx.emit(SheetEvent::RemoveServer(host.to_string()));
                                     cx.notify();
                                 })),

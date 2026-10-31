@@ -422,7 +422,11 @@ impl Shell {
             self.play(game, window, cx);
         }
         self.show_where_things_stand(cx);
-        if self.on_empty_state() {
+        // A sheet that's open keeps the keyboard. What it goes back to may be
+        // gone by the time it closes, as a removed server's card is.
+        if self.settings_open {
+            self.focus_before_settings = None;
+        } else if self.on_empty_state() {
             self.empty_state
                 .update(cx, |empty_state, cx| empty_state.focus(window, cx));
         }
@@ -644,8 +648,9 @@ impl Shell {
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         self.settings_open = false;
-        if let Some(focused) = self.focus_before_settings.take() {
-            window.focus(&focused, cx);
+        match self.focus_before_settings.take() {
+            Some(focused) => window.focus(&focused, cx),
+            None => self.focus_command_bar(window, cx),
         }
         cx.notify();
     }
@@ -2529,6 +2534,55 @@ pub mod tests {
         assert_eq!(saved_hosts(launched.folder.path()), ["mud.example"]);
         let servers = launched.folder.path().join(persist::SERVERS_FOLDER);
         assert!(servers.join("typo.example.sqlite").exists());
+    }
+
+    #[gpui::test]
+    fn the_sheet_keeps_the_keyboard_after_a_removal(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let saved = [("127.0.0.1", port), ("typo.example", 23)];
+        let mut launched = launch(&saved, cx);
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        open_servers(&mut launched);
+
+        launched.click("remove-server-1");
+        launched.click("confirm-remove-server-1");
+        launched.frames_until("one card", |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == 1
+        });
+
+        // Behind the sheet, Return would connect to the card that's left.
+        press_enter(launched.cx);
+        launched.cx.run_until_parked();
+        server.set_nonblocking(true).unwrap();
+        assert!(server.accept().is_err(), "connected from behind the sheet");
+
+        launched.cx.simulate_keystrokes("escape");
+        launched.cx.run_until_parked();
+        assert!(!launched.is_drawn("settings-sheet"));
+        press_enter(launched.cx);
+        launched.frames_until("the game", |shell, _| shell.game.is_some());
+    }
+
+    #[gpui::test]
+    fn the_last_server_removed_leaves_the_keyboard_on_quick_connect(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("typo.example", 23)], cx);
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        open_servers(&mut launched);
+        launched.click("remove-server-0");
+        launched.click("confirm-remove-server-0");
+        launched.frames_until("no cards", |shell, cx| {
+            shell.empty_state.read(cx).cards().is_empty()
+        });
+
+        launched.cx.simulate_keystrokes("escape");
+        launched.cx.run_until_parked();
+        launched.cx.simulate_input("mud.example:4000");
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            assert_eq!(
+                shell.empty_state.read(cx).quick_typed(cx),
+                "mud.example:4000"
+            );
+        });
     }
 
     #[gpui::test]
