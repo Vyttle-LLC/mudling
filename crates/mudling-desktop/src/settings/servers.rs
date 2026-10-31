@@ -1,13 +1,13 @@
-//! The Servers & characters section, drawn from a small view model. Nothing
-//! fills it yet: once saved servers have a store, passing them to
-//! [`super::SettingsSheet::show_servers`] is the one step left.
+//! The Servers & characters section, drawn from a small view model that the
+//! shell fills from the saved servers.
 
 use super::{Pane, muted_line};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{FontWeight, Role, SharedString, div, prelude::*, px};
+use mudling_core::persist;
 
-const NOTHING_SAVED: &str = "Saving servers isn't here yet, so this list is empty.";
+const NOTHING_SAVED: &str = "No saved servers yet.";
 
 /// A saved server and its characters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +16,24 @@ pub struct SavedServer {
     pub host: SharedString,
     pub port: u16,
     pub characters: Vec<SharedString>,
+}
+
+impl From<&persist::SavedServer> for SavedServer {
+    /// A server has no name of its own, so its host stands for it. A character
+    /// the game hasn't named yet isn't listed.
+    fn from(server: &persist::SavedServer) -> SavedServer {
+        SavedServer {
+            name: server.host.clone().into(),
+            host: server.host.clone().into(),
+            port: server.port,
+            characters: server
+                .characters
+                .iter()
+                .filter_map(|character| character.name.clone())
+                .map(SharedString::from)
+                .collect(),
+        }
+    }
 }
 
 impl SavedServer {
@@ -76,5 +94,25 @@ mod tests {
         assert_eq!(server.summary(), "mud.example:4000");
         server.characters = vec!["Sample".into(), "Other".into()];
         assert_eq!(server.summary(), "mud.example:4000 · Sample, Other");
+    }
+
+    #[test]
+    fn a_saved_server_lists_the_characters_the_game_has_named() {
+        let character = |name: Option<&str>| persist::SavedCharacter {
+            name: name.map(str::to_owned),
+            level: None,
+            last_played: persist::Timestamp::now(),
+        };
+        let saved = persist::SavedServer {
+            host: "mud.example".to_owned(),
+            port: 4000,
+            updated: persist::Timestamp::now(),
+            last_room: None,
+            characters: vec![character(Some("Sample")), character(None)],
+        };
+        let shown = SavedServer::from(&saved);
+        assert_eq!(shown.host, "mud.example");
+        assert_eq!(shown.port, 4000);
+        assert_eq!(shown.characters, ["Sample"]);
     }
 }

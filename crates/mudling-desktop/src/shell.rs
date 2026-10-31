@@ -18,7 +18,7 @@ use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
-use crate::settings::{PluginRow, SavedSettings, SettingsSheet, SheetEvent};
+use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
 use crate::title_bar::{
@@ -340,6 +340,10 @@ impl Shell {
             if let Some(problem) = outcome.problem {
                 empty_state.show_problem(problem, cx);
             }
+        });
+        self.settings.update(cx, |sheet, cx| {
+            let servers = outcome.saved.servers.iter().map(SavedServer::from);
+            sheet.show_servers(servers.collect(), cx);
         });
         if let Some(game) = outcome.game {
             self.play(game, window, cx);
@@ -1955,6 +1959,20 @@ pub mod tests {
         assert!(launched.is_drawn("connect-0"));
         assert!(!launched.is_drawn("chat-area"));
         assert!(!launched.is_drawn("toggle-left-panel"));
+    }
+
+    #[gpui::test]
+    fn the_saved_servers_reach_settings_with_the_empty_state(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.frames_until("the servers in settings", |shell, cx| {
+            !shell.settings.read(cx).servers().is_empty()
+        });
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let servers = shell.settings.read(cx).servers();
+            assert_eq!(servers.len(), 1);
+            assert_eq!(servers[0].host, "mud.example");
+            assert_eq!(servers[0].port, 4000);
+        });
     }
 
     #[gpui::test]

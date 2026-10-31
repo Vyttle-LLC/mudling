@@ -311,9 +311,6 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// The step that fills Servers & characters, once saved servers have a
-    /// store.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn show_servers(&mut self, servers: Vec<SavedServer>, cx: &mut Context<SettingsSheet>) {
         self.servers = servers;
         cx.notify();
@@ -322,6 +319,11 @@ impl SettingsSheet {
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
         self.plugins = plugins;
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn servers(&self) -> &[SavedServer] {
+        &self.servers
     }
 
     /// What the session says about itself.
