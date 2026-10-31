@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How long to wait for a session to stop writing. A session that doesn't
@@ -394,28 +394,35 @@ fn moves_landed(stores: &[Store<'_>], retired: &Retired) -> Retired {
 }
 
 /// Sessions holding their rows until [`Held::release`].
-struct Held {
+pub(super) struct Held {
     sessions: Vec<HeldSession>,
+    list: Sessions,
 }
 
 impl Held {
     /// Asks the sessions on `servers` to hold, and waits until what they'd
     /// already queued is on the disk, so none of it can land on a merge. A
-    /// session too busy to answer puts the merge off to the next try. The list
-    /// is read here, right before the merge touches anything: a session is on
-    /// it before it loads its map, so none can load a map this misses.
-    fn hold(sessions: &Sessions, servers: &[&str]) -> Result<Held, Failure> {
-        let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
-        sessions.retain(SessionLink::is_alive);
-        let (done, drained) = mpsc::sync_channel(sessions.len().max(1));
-        let held: Vec<HeldSession> = sessions
+    /// session too busy to answer puts the merge off to the next try. Until
+    /// [`Held::release`], a session that attaches holds too, whatever its
+    /// server: it may load its map before the merge lands. One that attaches
+    /// after that loads what the merge left, so none is missed.
+    pub(super) fn hold(sessions: &Sessions, servers: &[&str]) -> Result<Held, Failure> {
+        let mut list = sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        list.sessions.retain(SessionLink::is_alive);
+        let (done, drained) = mpsc::sync_channel(list.sessions.len().max(1));
+        let held: Vec<HeldSession> = list
+            .sessions
             .iter()
             .filter(|session| servers.contains(&session.server()))
             .filter_map(|session| session.hold(done.clone()))
             .collect();
-        drop(sessions);
+        list.attached_during_merge = Some(Vec::new());
+        drop(list);
         drop(done);
-        let held = Held { sessions: held };
+        let held = Held {
+            sessions: held,
+            list: Arc::clone(sessions),
+        };
         for _ in &held.sessions {
             match drained.recv_timeout(HOLD_WAIT) {
                 // A session that ended took its sender with it.
@@ -431,8 +438,11 @@ impl Held {
 
     /// Lets them go. Each writes what it held, moved off retired rooms, and
     /// rebuilds its map.
-    fn release(self, retired: &Retired) {
-        for session in self.sessions {
+    pub(super) fn release(self, retired: &Retired) {
+        let mut list = self.list.lock().unwrap_or_else(PoisonError::into_inner);
+        let late = list.attached_during_merge.take().unwrap_or_default();
+        drop(list);
+        for session in self.sessions.into_iter().chain(late) {
             let moves = retired.get(session.server()).cloned().unwrap_or_default();
             session.release(moves);
         }

@@ -7,10 +7,10 @@
 mod git_server;
 
 use super::*;
-use crate::merge::CHECKPOINT;
+use crate::merge::{self, CHECKPOINT};
 use crate::persist::{Batch, Character, Database, Room, Server, Skill, Timestamp};
 use crate::session::{Session, SessionConfig};
-use crate::store::{MapState, Versioned};
+use crate::store::{MapState, SettingsState, Versioned};
 use crate::telnet::Bytes;
 use crate::vault::{AutoLock, EntryKey, FILE_NAME, MemoryKeyStore, Vault};
 use git_server::GitServer;
@@ -1149,6 +1149,110 @@ fn a_session_syncs_at_its_end_and_its_map_follows_a_merge() {
             .read(|map: &Versioned<MapState>| map.value().room(road).is_none())
     });
     assert!(!world.mac.rooms().contains(&"A quiet road".to_owned()));
+    session.quit().wait().unwrap();
+    sync.quit().wait();
+}
+
+/// The game saying the player is in room `number`, as GMCP.
+fn in_room(number: i64) -> Bytes {
+    let info = format!(
+        r#"Room.Info {{"num": {number}, "name": "Room {number}", "zone": "Fields",
+            "environment": "field", "exits": {{"n": {}}}, "details": []}}"#,
+        number + 1
+    );
+    let mut bytes = vec![255, 251, 201, 255, 250, 201];
+    bytes.extend_from_slice(info.as_bytes());
+    bytes.extend_from_slice(&[255, 240]);
+    Bytes::from(bytes)
+}
+
+fn map_holds(session: &Session, room: i64) -> bool {
+    session
+        .stores()
+        .read(|map: &Versioned<MapState>| map.value().room(room).is_some())
+}
+
+/// Opens a session at the worst moment: after a merge read the session list
+/// and before its import commits, so the map it loads still has a room the
+/// merge deletes. Its first rows are about that room, and they mustn't fail
+/// the batch that holds its new room.
+#[test]
+fn a_session_opened_while_a_merge_lands_follows_it_and_keeps_its_rows() {
+    let world = two_devices();
+    world.ipad.apply(|batch| {
+        batch.delete(crate::persist::Key::Room(1));
+        batch.upsert(room(5_000, "A new road", "The Meadow"));
+    });
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let mac = &world.mac;
+    let sync = Syncer::start(SyncConfig::new(&mac.data), || {}).unwrap();
+    let git = git::Repo::open_or_init(&mac.repo).unwrap();
+    let files = crate::repo::Repo::new(&mac.repo);
+    let database = mac.database();
+    let writer = database.writer().unwrap();
+    let stores = [merge::Store {
+        server_id: SERVER,
+        database: &database,
+        writer: &writer,
+    }];
+    let theirs = git.fetch("origin", "main").unwrap().unwrap();
+    let merging = merge::prepare(&git, &files, theirs).unwrap().unwrap();
+
+    let held = pass::Held::hold(&sync.sessions, &[SERVER]).unwrap();
+    let session = Session::open(
+        SessionConfig {
+            sync: Some(sync.clone()),
+            ..SessionConfig::new(&mac.data, SERVER, 4000)
+        },
+        || {},
+    )
+    .unwrap();
+    wait_until(|| map_holds(&session, 1));
+    session.replay(vec![in_room(1), in_room(7_000)]);
+    wait_until(|| map_holds(&session, 7_000));
+
+    merge::land(&git, &files, &merging, &stores).unwrap();
+    assert!(!mac.rooms().contains(&"Room 7000".to_owned()), "rows wait");
+    held.release(merging.retired());
+
+    wait_until(|| !map_holds(&session, 1) && map_holds(&session, 5_000));
+    assert_eq!(
+        mac.rooms(),
+        ["A new road", "Room 7000"],
+        "the deleted room stays deleted, and the rows around it landed"
+    );
+
+    session.replay(vec![in_room(7_001)]);
+    wait_until(|| map_holds(&session, 7_001));
+    wait_until(|| mac.rooms().contains(&"Room 7001".to_owned()));
+    let notices = session
+        .stores()
+        .read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
+    assert_eq!(notices, Vec::<String>::new());
+    session.quit().wait().unwrap();
+    sync.quit().wait();
+}
+
+#[test]
+fn a_session_that_attaches_after_a_merge_is_not_held() {
+    let world = two_devices();
+    let sync = Syncer::start(SyncConfig::new(&world.mac.data), || {}).unwrap();
+    pass::Held::hold(&sync.sessions, &[SERVER])
+        .unwrap()
+        .release(&merge::Retired::new());
+
+    let session = Session::open(
+        SessionConfig {
+            sync: Some(sync.clone()),
+            ..SessionConfig::new(&world.mac.data, SERVER, 4000)
+        },
+        || {},
+    )
+    .unwrap();
+    session.replay(vec![in_room(7_000)]);
+
+    wait_until(|| world.mac.rooms().contains(&"Room 7000".to_owned()));
     session.quit().wait().unwrap();
     sync.quit().wait();
 }

@@ -77,7 +77,7 @@ pub use crate::store::SyncState;
 pub use pass::Pass;
 
 use crate::repo::AppSettings;
-use crate::session::SessionLink;
+use crate::session::{HeldSession, SessionLink};
 use crate::store::StoreHub;
 use std::fmt;
 use std::io;
@@ -148,7 +148,14 @@ impl SyncConfig {
 
 /// The sessions a merge may have to hold. It's shared, not sent to the thread,
 /// because a session opened during a sync must be seen by that sync's merge.
-type Sessions = Arc<Mutex<Vec<SessionLink>>>;
+type Sessions = Arc<Mutex<SessionList>>;
+
+#[derive(Default)]
+struct SessionList {
+    sessions: Vec<SessionLink>,
+    /// `Some` while a merge lands: the sessions that attached since it began.
+    attached_during_merge: Option<Vec<HeldSession>>,
+}
 
 enum Command {
     Connected,
@@ -274,12 +281,16 @@ impl Syncer {
         }
     }
 
-    /// Call before the session loads its map: see [`Sessions`].
+    /// Call before the session takes its first input. During a merge the hold
+    /// goes first in its queue, so it writes nothing a merge can strand, and
+    /// its map is rebuilt when the merge lands. Nothing here waits.
     pub(crate) fn attach(&self, session: SessionLink) {
-        self.sessions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(session);
+        let mut list = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(late) = &mut list.attached_during_merge {
+            let (drained, _unread) = mpsc::sync_channel(1);
+            late.extend(session.hold(drained));
+        }
+        list.sessions.push(session);
     }
 
     pub(crate) fn connected(&self) {
