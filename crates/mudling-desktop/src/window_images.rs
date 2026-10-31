@@ -24,6 +24,7 @@ use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
+use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
 use mudling_core::plugin::{Layer, PluginId};
 use mudling_core::store::{
     ConnectionStatus, Diff, Revision, SettingsState, TerminalChange, TerminalState, VitalsState,
@@ -81,8 +82,15 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
 /// Opens the sheet on `section`, with made-up servers, plugins and a plugin
 /// turned off for overrunning.
 fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut Context<Shell>) {
-    let notices = ["sample-helper was turned off: Overran(3)".to_owned()];
-    shell.show_sample_notices(&notices, cx);
+    let settings = SettingsState {
+        server: Some("mud.example".to_owned()),
+        turned_off: vec![PluginDisabled {
+            plugin: PluginId::try_from("sample-helper".to_owned()).expect("a good id"),
+            reason: DisabledReason::Overran(3),
+        }],
+        ..SettingsState::default()
+    };
+    shell.show_sample_problems(&settings, cx);
     shell.settings_sheet().update(cx, |sheet, cx| {
         sheet.show_plugins(
             vec![
@@ -175,7 +183,7 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
 }
 
 fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
-    crate::measure::fill_room_panel(shell, cx);
+    crate::measure::fill_room_panel(shell, None, cx);
     shell
         .dock(Side::Right)
         .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));

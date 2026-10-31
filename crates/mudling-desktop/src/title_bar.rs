@@ -23,7 +23,7 @@ use gpui::{
     prelude::*, px, transparent_black,
 };
 use mudling_core::plugin::luau::Value;
-use mudling_core::store::{CharactersState, ConnectionStatus, SettingsState};
+use mudling_core::store::{CHARACTER_NAME, CharactersState, ConnectionStatus, SettingsState};
 use std::time::Duration;
 
 /// Where the traffic lights sit, level with the middle of the bar.
@@ -38,9 +38,6 @@ const MARK_SIZE: Pixels = px(20.);
 const MENU_MIN_WIDTH: Pixels = px(280.);
 /// How far in from a client-drawn window's edge a press resizes it.
 const RESIZE_MARGIN: Pixels = px(6.);
-/// The key the character's name would be under: the `character` store, which
-/// a game plugin writes. None writes this key yet.
-const CHARACTER_NAME_KEY: &str = "character.name";
 /// With no session the switcher has no server to name.
 const NO_SERVER: &str = "MUDling";
 const BADGE_SIZE: Pixels = px(15.);
@@ -83,6 +80,14 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// How a screen reader says the count on the sprocket and the Plugins tab.
+pub fn problems_text(problems: usize) -> String {
+    match problems {
+        1 => "1 problem".to_owned(),
+        _ => format!("{problems} problems"),
+    }
+}
+
 /// What the bar says about the session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionLabel {
@@ -123,7 +128,7 @@ impl SessionLabel {
             Some(server) => server.clone(),
             None => NO_SERVER.to_owned(),
         };
-        let character = match characters.0.get(CHARACTER_NAME_KEY) {
+        let character = match characters.0.get(CHARACTER_NAME) {
             Some(Value::Text(name)) => Some(name.clone().into()),
             _ => None,
         };
@@ -564,26 +569,24 @@ impl TitleBar {
         )
         .relative()
         .when(problems > 0, |button| {
-            button
-                .aria_description(format!("{problems} problems"))
-                .child(
-                    div()
-                        .debug_selector(|| "settings-badge".to_owned())
-                        .absolute()
-                        .top(px(-3.))
-                        .right(px(-3.))
-                        .min_w(BADGE_SIZE)
-                        .h(BADGE_SIZE)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(theme.warning)
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.on_warning)
-                        .child(problems.to_string()),
-                )
+            button.aria_description(problems_text(problems)).child(
+                div()
+                    .debug_selector(|| "settings-badge".to_owned())
+                    .absolute()
+                    .top(px(-3.))
+                    .right(px(-3.))
+                    .min_w(BADGE_SIZE)
+                    .h(BADGE_SIZE)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.on_warning)
+                    .child(problems.to_string()),
+            )
         })
     }
 
@@ -878,7 +881,7 @@ mod tests {
 
         let characters = CharactersState(
             [(
-                CHARACTER_NAME_KEY.to_owned(),
+                CHARACTER_NAME.to_owned(),
                 Value::Text("Altissima".to_owned()),
             )]
             .into(),

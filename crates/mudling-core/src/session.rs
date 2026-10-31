@@ -26,7 +26,9 @@
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 
 mod engine;
+mod game;
 mod inventory;
+mod latency;
 mod login;
 mod map_rules;
 mod values;
@@ -35,9 +37,11 @@ pub use engine::Engine;
 pub use login::Credentials;
 
 use crate::completion::{Completer, Completion, History, KnownWords};
+use crate::line::{Line, Link};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Timestamp};
 use crate::plugin::luau::HookLimits;
+use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
 use crate::store::{ConnectionStatus, SettingsState, StoreHub};
 use crate::telnet::Bytes;
@@ -100,6 +104,8 @@ pub enum SessionError {
     Plugin(PluginError),
     /// The command history couldn't be saved.
     History(io::Error),
+    /// The core thread's async runtime couldn't start.
+    Runtime(io::Error),
     /// The core thread panicked.
     Stopped,
 }
@@ -112,6 +118,7 @@ impl fmt::Display for SessionError {
             SessionError::History(error) => {
                 write!(f, "couldn't save the command history: {error}")
             }
+            SessionError::Runtime(error) => write!(f, "couldn't start the session: {error}"),
             SessionError::Stopped => f.write_str("the session stopped unexpectedly"),
         }
     }
@@ -131,26 +138,23 @@ impl From<PluginError> for SessionError {
     }
 }
 
-impl From<io::Error> for SessionError {
-    fn from(error: io::Error) -> SessionError {
-        SessionError::History(error)
-    }
-}
-
-/// What the command box reads: memory only, under a lock held just long
-/// enough for one key press or one room's words.
+/// What a shell reads on its own thread: memory only, under a lock held just
+/// long enough for one key press, one line's links or one room's words.
 #[derive(Debug, Default)]
 pub struct Typing {
     history: History,
     known: KnownWords,
     completer: Completer,
+    link_rules: Vec<LinkRule>,
 }
 
 enum Input {
     Connect,
     Send(String),
+    SendAction(String),
     Cancel,
     Replay(Vec<Bytes>),
+    TurnPluginOn(PluginId),
     Quit,
 }
 
@@ -216,6 +220,12 @@ impl Session {
         self.queue(Input::Send(typed.into()));
     }
 
+    /// Sends a command from a button, not the command box: see
+    /// [`Engine::send_action`].
+    pub fn send_action(&self, command: impl Into<String>) {
+        self.queue(Input::SendAction(command.into()));
+    }
+
     /// Closes the connection, or gives up on one still opening.
     pub fn cancel(&self) {
         self.queue(Input::Cancel);
@@ -225,6 +235,23 @@ impl Session {
     /// each chunk as a read from the socket. What it would send goes nowhere.
     pub fn replay(&self, chunks: Vec<Bytes>) {
         self.queue(Input::Replay(chunks));
+    }
+
+    /// Turns a plugin back on after the core turned it off;
+    /// `SettingsState::turned_off` lists those. It runs again from the next
+    /// line, on a clean count of overruns.
+    pub fn turn_plugin_on(&self, plugin: PluginId) {
+        self.queue(Input::TurnPluginOn(plugin));
+    }
+
+    /// The links the enabled plugins find in `line`, for a shell to offer.
+    /// Ask for lines shown, not lines read.
+    pub fn links(&self, line: &Line) -> Vec<Link> {
+        let mut links = Vec::new();
+        for rule in &self.typing().link_rules {
+            rule.find(line.plain(), &mut links);
+        }
+        links
     }
 
     /// Up arrow in the command box: see [`History::older`].
@@ -274,12 +301,19 @@ fn run_core(
     typing: Arc<Mutex<Typing>>,
     inputs: UnboundedReceiver<Input>,
 ) -> Result<(), SessionError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
     let host = config.host.clone();
-    let result = match Engine::open(config, Arc::clone(&hub), typing) {
-        Ok(engine) => runtime.block_on(run(engine, inputs)),
+    let started = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(SessionError::Runtime)
+        .and_then(|runtime| Ok((runtime, Engine::open(config, Arc::clone(&hub), typing)?)));
+    match started {
+        Ok((runtime, engine)) => {
+            let result = runtime.block_on(run(engine, inputs));
+            // A hostname lookup still running mustn't hold the session open.
+            runtime.shutdown_background();
+            result
+        }
         Err(error) => {
             hub.write::<SettingsState>(SettingsState {
                 server: Some(host),
@@ -288,10 +322,7 @@ fn run_core(
             });
             Err(error)
         }
-    };
-    // A hostname lookup still running mustn't hold the session open.
-    runtime.shutdown_background();
-    result
+    }
 }
 
 /// An open socket, with what it reports.
@@ -334,6 +365,9 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Connect) => {}
                 Some(Input::Send(typed)) => engine.send(&typed, Timestamp::now()),
+                Some(Input::SendAction(command)) => {
+                    engine.send_action(&command, Timestamp::now());
+                }
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();
@@ -341,6 +375,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Replay(chunks)) if socket.is_none() => replay(&mut engine, chunks),
                 Some(Input::Replay(_)) => {}
+                Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {

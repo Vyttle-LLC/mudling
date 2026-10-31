@@ -20,12 +20,15 @@ pub use servers::SavedServer;
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::shell::{ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::{Appearance, CHAT_FONTS, Theme};
-use crate::title_bar::{FindInScrollback, OpenSettings};
+use crate::title_bar::{FindInScrollback, OpenSettings, problems_text};
 use gpui::{
     AnyElement, App, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
     KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Stateful, Window, actions,
     div, point, prelude::*, px, transparent_black,
 };
+use mudling_core::plugin::luau::PluginDisabled;
+use mudling_core::plugin::{PluginCost, PluginId};
+use mudling_core::store::SettingsState;
 
 const WIDTH: Pixels = px(1000.);
 const HEIGHT: Pixels = px(716.);
@@ -113,6 +116,7 @@ impl Section {
 pub enum SheetEvent {
     Closed,
     Chose(Appearance),
+    TurnOn(PluginId),
 }
 
 /// The pane's stops, kept between frames so a control keeps its focus handle.
@@ -248,6 +252,8 @@ pub struct SettingsSheet {
     servers: Vec<SavedServer>,
     plugins: Vec<PluginRow>,
     notices: Vec<String>,
+    turned_off: Vec<PluginDisabled>,
+    costs: Vec<PluginCost>,
     /// The notice whose details are showing.
     details: Option<String>,
     /// The chat faces this machine has.
@@ -276,6 +282,8 @@ impl SettingsSheet {
             servers: Vec::new(),
             plugins: Vec::new(),
             notices: Vec::new(),
+            turned_off: Vec::new(),
+            costs: Vec::new(),
             details: None,
             fonts: vec![CHAT_FONTS[0]],
             dialog: cx.focus_handle(),
@@ -299,7 +307,7 @@ impl SettingsSheet {
     /// Takes the keyboard. With problems to show, opens on the section that
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
-        if !self.notices.is_empty() {
+        if self.problems() > 0 {
             self.select(Section::Plugins, cx);
         }
         window.focus(&self.tabs[self.section as usize], cx);
@@ -311,9 +319,6 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// The step that fills Servers & characters, once saved servers have a
-    /// store.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn show_servers(&mut self, servers: Vec<SavedServer>, cx: &mut Context<SettingsSheet>) {
         self.servers = servers;
         cx.notify();
@@ -324,18 +329,44 @@ impl SettingsSheet {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn servers(&self) -> &[SavedServer] {
+        &self.servers
+    }
+
+    #[cfg(test)]
+    pub fn plugins(&self) -> &[PluginRow] {
+        &self.plugins
+    }
+
+    #[cfg(test)]
+    pub fn turned_off(&self) -> &[PluginDisabled] {
+        &self.turned_off
+    }
+
+    #[cfg(test)]
+    pub fn costs(&self) -> &[PluginCost] {
+        &self.costs
+    }
+
     /// What the session says about itself.
-    pub fn show_session(
-        &mut self,
-        server: Option<&str>,
-        notices: &[String],
-        cx: &mut Context<SettingsSheet>,
-    ) {
-        if self.server.as_deref() != server || self.notices != notices {
+    pub fn show_session(&mut self, settings: &SettingsState, cx: &mut Context<SettingsSheet>) {
+        let server = settings.server.as_deref();
+        let changed = self.server.as_deref() != server
+            || self.notices != settings.notices
+            || self.turned_off != settings.turned_off
+            || self.costs != settings.plugin_costs;
+        if changed {
             self.server = server.map(|server| server.to_owned().into());
-            self.notices = notices.to_vec();
+            self.notices.clone_from(&settings.notices);
+            self.turned_off.clone_from(&settings.turned_off);
+            self.costs.clone_from(&settings.plugin_costs);
             cx.notify();
         }
+    }
+
+    fn problems(&self) -> usize {
+        self.notices.len() + self.turned_off.len()
     }
 
     fn choose(&mut self, appearance: Appearance, cx: &mut Context<SettingsSheet>) {
@@ -379,7 +410,7 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let chosen = section == self.section;
-        let problems = self.notices.len();
+        let problems = self.problems();
         control(
             SharedString::from(format!("section-{}", section as usize)),
             section.title(),
@@ -389,7 +420,7 @@ impl SettingsSheet {
         .role(Role::Tab)
         .aria_selected(chosen)
         .when(section == Section::Plugins && problems > 0, |tab| {
-            tab.aria_description(format!("{problems} problems"))
+            tab.aria_description(problems_text(problems))
         })
         .w_full()
         .h(px(42.))
@@ -622,6 +653,9 @@ mod tests {
     use crate::shell::{Shell, tests::window_with_keys};
     use crate::theme::{LARGEST_CHAT_SIZE, ThemeChoice};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
+    use mudling_core::plugin::luau::DisabledReason;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use tempfile::TempDir;
 
     fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
@@ -838,8 +872,16 @@ mod tests {
     fn problems_show_on_the_sprocket_and_open_the_plugins_section(cx: &mut TestAppContext) {
         let (shell, cx) = window_with_keys(cx);
         assert!(cx.debug_bounds("settings-badge").is_none());
-        let notices = ["a-plugin was turned off: Overran(3)".to_owned()];
-        shell.update(cx, |shell, cx| shell.show_sample_notices(&notices, cx));
+        let disabled = PluginDisabled {
+            plugin: PluginId::try_from("a-plugin".to_owned()).unwrap(),
+            reason: DisabledReason::Overran(3),
+        };
+        let settings = SettingsState {
+            server: Some("mud.example".to_owned()),
+            turned_off: vec![disabled.clone()],
+            ..SettingsState::default()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_problems(&settings, cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("settings-badge").is_some());
 
@@ -849,6 +891,35 @@ mod tests {
         let open = shell.read_with(cx, |shell, cx| {
             shell.settings_sheet().read(cx).details.clone()
         });
-        assert_eq!(open.as_deref(), Some(notices[0].as_str()));
+        assert_eq!(open, Some(disabled.to_string()));
+    }
+
+    #[gpui::test]
+    fn turn_on_again_asks_for_the_plugin_it_names(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let plugin = PluginId::try_from("a-plugin".to_owned()).unwrap();
+        let settings = SettingsState {
+            turned_off: vec![PluginDisabled {
+                plugin: plugin.clone(),
+                reason: DisabledReason::Overran(3),
+            }],
+            ..SettingsState::default()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_problems(&settings, cx));
+        cx.run_until_parked();
+        let asked = Rc::new(RefCell::new(None));
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let keep = Rc::clone(&asked);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::TurnOn(plugin) = event {
+                    *keep.borrow_mut() = Some(plugin.clone());
+                }
+            })
+        });
+
+        click("open-settings", cx);
+        click("notice-turn-on-0", cx);
+        assert_eq!(*asked.borrow(), Some(plugin));
     }
 }

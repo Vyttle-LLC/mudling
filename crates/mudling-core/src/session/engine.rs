@@ -2,7 +2,9 @@
 //! stores, database writes and bytes to send out. [`crate::session::Session`]
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
+use super::game::GameFeed;
 use super::inventory::{self, Inventory};
+use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
@@ -18,13 +20,16 @@ use crate::net::DisconnectReason;
 use crate::persist::{
     self, Batch, Character, Database, SERVERS_FOLDER, Server, Timestamp, UNNAMED_CHARACTER, Writer,
 };
-use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
+use crate::plugin::luau::{
+    HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
+};
 use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
 use crate::store::{
-    CharactersState, ConnectionStatus, GearState, MapState, Memo, MobsState, RoomState,
-    SettingsState, StoreHub, TerminalChange, TerminalState, Versioned, VitalsState,
+    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, GearState, MapState,
+    Memo, MobsState, RoomState, SettingsState, StoreHub, TargetState, TerminalChange,
+    TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
@@ -41,6 +46,8 @@ const CORE_GMCP: [&str; 3] = ["Core 1", "Char 1", "Room 1"];
 const MAP_WORDS: &str = "map";
 /// Notices kept for a shell to show.
 const MOST_NOTICES: usize = 32;
+/// How often plugin costs are published: each one sorts its samples.
+const COSTS_EVERY_MS: i64 = 2_000;
 
 /// What one connection knows: made fresh for each, so a reconnect learns the
 /// server's prompt again from nothing.
@@ -50,11 +57,16 @@ struct Link {
     defaults: Defaults,
     inventory: Inventory,
     inventory_asked: bool,
+    game: GameFeed,
+    latency: Latency,
     login: Option<Login>,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
     drops_noticed: HashSet<PluginId>,
+    /// The notices of overruns, this connection, which the plugin being
+    /// turned off then takes the place of.
+    overrun_notices: Vec<(PluginId, String)>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
 }
@@ -91,6 +103,12 @@ pub struct Engine {
     /// Which fields hold the vitals, by plugin set and whether any were
     /// learned yet.
     hud_fields: Memo<(u64, bool), FieldMap>,
+    /// The room's contents changed since the last settle.
+    contents_changed: bool,
+    /// When plugin costs were last published.
+    costs_published: Option<Timestamp>,
+    /// The plugin set the shared link rules came from.
+    link_rules_of: u64,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
     /// Plugin writes for the database, at the next settle.
@@ -159,6 +177,9 @@ impl Engine {
             character_id,
             settings,
             hud_fields: Memo::default(),
+            contents_changed: false,
+            costs_published: None,
+            link_rules_of: 0,
             terminal: Vec::new(),
             batch: Batch::new(),
             output: Vec::new(),
@@ -201,16 +222,31 @@ impl Engine {
             defaults: Defaults::default(),
             inventory: Inventory::default(),
             inventory_asked: false,
+            game: GameFeed::default(),
+            latency: Latency::default(),
             login: self.new_login(),
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
+            overrun_notices: Vec::new(),
             mssp_name: None,
             gmcp_enabled: false,
         });
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
+        // Until the game names the character, it's who's logging in.
+        if let Some(credentials) = self
+            .config
+            .credentials
+            .as_ref()
+            .filter(|_| self.character_name().is_none())
+        {
+            let name = HookValue::Text(credentials.name.clone());
+            let change = [(CHARACTER_NAME.to_owned(), name)];
+            self.hub
+                .write::<CharactersState>(CharactersState(change.into()));
+        }
         Ok(())
     }
 
@@ -226,9 +262,14 @@ impl Engine {
         let Some(link) = &mut self.link else {
             return Ok(());
         };
+        let answered = link.latency.received(now);
         let mut parsed = Vec::new();
         let fed = link.parser.feed(bytes, &mut parsed);
         self.output.extend(link.parser.take_output());
+        if answered.is_some() {
+            self.settings.latency = answered;
+            self.publish_settings();
+        }
         for event in parsed {
             self.server_said(event, now);
         }
@@ -269,6 +310,15 @@ impl Engine {
         self.issue(typed, now);
     }
 
+    /// A command a shell's button sent. It's never a password, so with echo
+    /// off it goes nowhere: a click made a frame before the server asked for
+    /// one mustn't land in the password box.
+    pub fn send_action(&mut self, command: &str, now: Timestamp) {
+        if !self.settings.echo_off {
+            self.send(command, now);
+        }
+    }
+
     /// Publishes what changed since the last settle: the stores, and the
     /// rows for the database. A move's map work finishes here.
     pub fn settle(&mut self, now: Timestamp) {
@@ -295,6 +345,11 @@ impl Engine {
             self.publish_map(commit.change);
             self.submit(commit.batch);
         }
+        if std::mem::take(&mut self.contents_changed) {
+            self.publish_room();
+        }
+        self.publish_plugin_costs(now);
+        self.share_link_rules();
         if !self.terminal.is_empty() {
             let lines = std::mem::take(&mut self.terminal);
             self.hub
@@ -337,17 +392,51 @@ impl Engine {
                     gmcp::encode(inventory::ASK, "", &mut self.output);
                 }
             }
-            HookOutput::HookFailed(failed) => self.notice(format!(
-                "{}'s hook {} failed: {}",
-                failed.plugin,
-                failed.hook.as_str(),
-                failed.message
-            )),
-            HookOutput::PluginDisabled(disabled) => self.notice(format!(
-                "{} was turned off: {:?}",
-                disabled.plugin, disabled.reason
-            )),
+            HookOutput::HookFailed(failed) => {
+                let notice = format!(
+                    "{}'s hook {} failed: {}",
+                    failed.plugin,
+                    failed.hook.as_str(),
+                    failed.message
+                );
+                if let Some(link) = self.link.as_mut().filter(|_| failed.overran) {
+                    link.overrun_notices.push((failed.plugin, notice.clone()));
+                }
+                self.notice(notice);
+            }
+            HookOutput::PluginDisabled(disabled) => self.plugin_turned_off(disabled),
         }
+    }
+
+    /// Lists the plugin as turned off, in place of the overruns that led there.
+    fn plugin_turned_off(&mut self, disabled: PluginDisabled) {
+        if let Some(link) = &mut self.link {
+            let overruns = std::mem::take(&mut link.overrun_notices);
+            let (folded, others): (Vec<_>, Vec<_>) = overruns
+                .into_iter()
+                .partition(|(plugin, _)| *plugin == disabled.plugin);
+            link.overrun_notices = others;
+            let notices = &mut self.settings.notices;
+            notices.retain(|notice| !folded.iter().any(|(_, overrun)| overrun == notice));
+        }
+        let off = &mut self.settings.turned_off;
+        off.retain(|off| off.plugin != disabled.plugin);
+        off.push(disabled);
+        self.publish_settings();
+    }
+
+    /// Brings back a plugin the core turned off. A plugin that's on, or
+    /// isn't installed, stays as it is.
+    pub fn turn_plugin_on(&mut self, plugin: &PluginId) {
+        if let Err(error) = self.plugins.set_enabled(plugin, true) {
+            self.notice(format!("{plugin} couldn't be turned on: {error}"));
+            return;
+        }
+        if let Some(link) = &mut self.link {
+            link.hooks.turn_back_on(plugin);
+        }
+        self.settings.turned_off.retain(|off| off.plugin != *plugin);
+        self.publish_settings();
     }
 
     /// The connection ended. Runs what its hooks still hold, so nothing they
@@ -369,7 +458,19 @@ impl Engine {
         self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
+        self.settings.latency = None;
         self.publish_settings();
+        self.publish_room();
+        self.hub.write::<TargetState>(TargetState(None));
+        let had_position = self.hub.read(|characters: &Versioned<CharactersState>| {
+            characters.value().0.contains_key(CHARACTER_POSITION)
+        });
+        if had_position {
+            let position = HookValue::Text(String::new());
+            let change = [(CHARACTER_POSITION.to_owned(), position)];
+            self.hub
+                .write::<CharactersState>(CharactersState(change.into()));
+        }
     }
 
     /// The connection can't go on: closes it, saying why.
@@ -387,7 +488,7 @@ impl Engine {
         let flushed = self.writer.flush();
         let saved = self.history_writer.finish();
         flushed?;
-        Ok(saved?)
+        saved.map_err(SessionError::History)
     }
 
     fn server_said(&mut self, event: Event, now: Timestamp) {
@@ -535,11 +636,37 @@ impl Engine {
         if let Some(entries) = link.inventory.read(package, json) {
             self.hub.write::<CharactersState>(CharactersState(entries));
         }
-        // The first room means the character is in the game.
-        if !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info") {
+        let heard = link.game.read(package, json);
+        self.contents_changed |= heard.contents;
+        if !heard.character.is_empty() {
+            let lasting = heard
+                .character
+                .iter()
+                .filter(|(key, _)| *key != CHARACTER_POSITION);
+            for (key, value) in lasting {
+                self.batch.upsert(persist::CharacterStat {
+                    character_id: self.character_id.clone(),
+                    key: key.clone(),
+                    value: values::to_row(value),
+                    updated: now,
+                });
+            }
+            self.hub
+                .write::<CharactersState>(CharactersState(heard.character));
+        }
+        if let Some(target) = heard.target {
+            self.hub.write::<TargetState>(target);
+        }
+        // The first room means the character is in the game. Asking for the
+        // modules again has a server send their values, which it may not
+        // have done when the character came in.
+        let entered_game = !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info");
+        if entered_game {
             link.inventory_asked = true;
             gmcp::encode(inventory::ASK, "", &mut self.output);
+            self.ask_for_modules();
         }
+        let Some(link) = &self.link else { return };
         let learned = link.defaults.hud.has_learned();
         let hud = &link.defaults.hud;
         let plugins = &self.plugins;
@@ -555,6 +682,9 @@ impl Engine {
             self.hub.write::<VitalsState>(VitalsState(vitals));
         }
         self.map.gmcp(package, json, now);
+        if !heard.mobs.is_empty() {
+            self.map.note_sightings(&heard.mobs, now);
+        }
         if package.eq_ignore_ascii_case("Core.Hello") {
             self.game_signal_arrived(now);
         }
@@ -682,6 +812,9 @@ impl Engine {
     /// tells the map what to expect, one per move, however they're packed.
     fn issue(&mut self, typed: &str, now: Timestamp) {
         let encoding = self.encoding();
+        if let Some(link) = &mut self.link {
+            link.latency.sent(now);
+        }
         if typed.trim().is_empty() {
             write_line("", encoding, &mut self.output);
             return;
@@ -693,7 +826,7 @@ impl Engine {
                     let steps = parse_speedwalk(command).expect("it expanded");
                     for step in steps {
                         for _ in 0..step.count {
-                            self.map.sent(step.direction.word(), now);
+                            self.map.sent(step.direction.name(), now);
                         }
                     }
                     commands.extend(expanded);
@@ -715,6 +848,7 @@ impl Engine {
             store, key, value, ..
         } = write;
         let key = format!("{store}.{key}");
+        self.contents_changed |= key == CHARACTER_NAME;
         let row = values::to_row(&value);
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
@@ -733,6 +867,16 @@ impl Engine {
                 updated: now,
             });
         }
+    }
+
+    /// Who the character is, as far as anything has said.
+    fn character_name(&self) -> Option<String> {
+        self.hub.read(|characters: &Versioned<CharactersState>| {
+            match characters.value().0.get(CHARACTER_NAME) {
+                Some(HookValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            }
+        })
     }
 
     fn take_hook_outputs(&mut self, now: Timestamp) {
@@ -766,10 +910,36 @@ impl Engine {
     }
 
     fn publish_room(&self) {
+        let character = self.character_name();
         self.hub.write::<RoomState>(RoomState {
             room: self.map.shared_current_room(),
             whereabouts: self.map.whereabouts(),
+            contents: self.link.as_ref().map_or_else(Default::default, |link| {
+                link.game.contents(character.as_deref())
+            }),
         });
+    }
+
+    fn publish_plugin_costs(&mut self, now: Timestamp) {
+        let due = self
+            .costs_published
+            .is_none_or(|last| now.0 - last.0 >= COSTS_EVERY_MS);
+        if self.link.is_some() && due {
+            self.costs_published = Some(now);
+            self.settings.plugin_costs = self.plugins.costs();
+            self.publish_settings();
+        }
+    }
+
+    /// Hands a shell the rules [`Session::links`] runs, when they changed.
+    ///
+    /// [`Session::links`]: super::Session::links
+    fn share_link_rules(&mut self) {
+        let generation = self.plugins.generation();
+        if self.link_rules_of != generation {
+            self.link_rules_of = generation;
+            lock(&self.typing).link_rules = self.plugins.link_rules().cloned().collect();
+        }
     }
 
     /// Room and mob names, for Tab. Only names go in: never what's typed.
@@ -805,17 +975,21 @@ impl Engine {
         if !self.link.as_ref().is_some_and(|link| link.gmcp_enabled) {
             return;
         }
+        gmcp::encode_hello(
+            &self.config.client_name,
+            &self.config.client_version,
+            &mut self.output,
+        );
+        self.ask_for_modules();
+    }
+
+    fn ask_for_modules(&mut self) {
         let mut modules: Vec<String> = CORE_GMCP.map(str::to_owned).into();
         for (_, connection) in self.plugins.declared(|points| points.connection.as_ref()) {
             modules.extend(connection.gmcp.iter().cloned());
         }
         modules.sort();
         modules.dedup();
-        gmcp::encode_hello(
-            &self.config.client_name,
-            &self.config.client_version,
-            &mut self.output,
-        );
         gmcp::encode_supports_set(&modules, &mut self.output);
     }
 

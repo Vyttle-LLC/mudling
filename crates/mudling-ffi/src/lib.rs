@@ -8,7 +8,7 @@ use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
     CharactersState, Diff, GearState, MapState, MobsState, RoomState, SettingsState, Store,
-    StoreHub, StoreKind, TerminalChange, TerminalState, Versioned, VitalsState,
+    StoreHub, StoreKind, TargetState, TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -25,6 +25,7 @@ pub enum StoreKind {
     Map,
     Mobs,
     Characters,
+    Target,
     Gear,
     Settings,
 }
@@ -104,6 +105,7 @@ impl Session {
             map,
             mobs,
             characters,
+            target,
             gear,
             settings,
         } = batch;
@@ -114,6 +116,7 @@ impl Session {
             map.map(MapState::diff),
             mobs.map(MobsState::diff),
             characters.map(CharactersState::diff),
+            target.map(TargetState::diff),
             gear.map(GearState::diff),
             settings.map(SettingsState::diff),
         ]
@@ -156,6 +159,10 @@ macro_rules! with_store {
             }
             StoreKind::Characters => {
                 type $S = CharactersState;
+                $body
+            }
+            StoreKind::Target => {
+                type $S = TargetState;
                 $body
             }
             StoreKind::Gear => {
@@ -284,6 +291,26 @@ impl FieldStore for MobsState {
         self.marks
             .iter()
             .map(|(mark, name)| (name.clone(), mark.name().to_owned()))
+            .collect()
+    }
+}
+
+impl FieldStore for TargetState {
+    fn fields(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .flat_map(|target| {
+                let number = |name: &str, value: Option<i64>| {
+                    value.map(|value| (name.to_owned(), value.to_string()))
+                };
+                [
+                    Some(("name".to_owned(), target.name.clone())),
+                    number("level", target.level),
+                    number("health", target.health),
+                    number("max_health", target.max_health),
+                ]
+            })
+            .flatten()
             .collect()
     }
 }

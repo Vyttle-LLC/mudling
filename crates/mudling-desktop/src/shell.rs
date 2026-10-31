@@ -18,7 +18,7 @@ use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
-use crate::settings::{PluginRow, SavedSettings, SettingsSheet, SheetEvent};
+use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
 use crate::title_bar::{
@@ -36,8 +36,8 @@ use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, Versioned,
-    VitalsState,
+    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, TargetState,
+    Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
@@ -101,6 +101,7 @@ struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
     characters: Versioned<CharactersState>,
+    target: Versioned<TargetState>,
     room: Versioned<RoomState>,
     mobs: Versioned<MobsState>,
 }
@@ -111,6 +112,7 @@ impl Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            target: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         }
@@ -204,6 +206,7 @@ impl Shell {
                 |shell, _, event, window, cx| match event {
                     SheetEvent::Closed => shell.close_settings(window, cx),
                     SheetEvent::Chose(choice) => shell.apply_choice(*choice, window, cx),
+                    SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
                 },
             );
         let quitting = cx.on_app_quit(|shell, cx| {
@@ -340,6 +343,10 @@ impl Shell {
             if let Some(problem) = outcome.problem {
                 empty_state.show_problem(problem, cx);
             }
+        });
+        self.settings.update(cx, |sheet, cx| {
+            let servers = outcome.saved.servers.iter().map(SavedServer::from);
+            sheet.show_servers(servers.collect(), cx);
         });
         if let Some(game) = outcome.game {
             self.play(game, window, cx);
@@ -558,7 +565,14 @@ impl Shell {
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
         }
-        if batch.vitals.is_some() || batch.settings.is_some() || batch.characters.is_some() {
+        if let Some(target) = &batch.target {
+            self.copies.target.apply_diff(target);
+        }
+        if batch.vitals.is_some()
+            || batch.settings.is_some()
+            || batch.characters.is_some()
+            || batch.target.is_some()
+        {
             self.show_status(cx);
         }
         if let Some(room) = &batch.room {
@@ -574,26 +588,27 @@ impl Shell {
 
     fn show_room(&mut self, cx: &mut Context<Shell>) {
         let (room, mobs) = (self.copies.room.value(), self.copies.mobs.value());
-        self.room_panel
-            .update(cx, |panel, cx| panel.show_room(room, mobs, cx));
+        self.room_panel.update(cx, |panel, cx| {
+            panel.show_room(room, mobs, cx);
+            panel.show_contents(room.contents.clone(), cx);
+        });
     }
 
     fn show_status(&mut self, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
-        self.show_problems(settings.server.as_deref(), &settings.notices, cx);
+        self.show_problems(settings, cx);
         let lines = lines_for(settings);
-        // The core publishes no latency yet.
-        let latency = None;
         let characters = self.copies.characters.value();
-        let session = SessionLabel::of(settings, characters, game.is_replay(), latency);
+        let session = SessionLabel::of(settings, characters, game.is_replay(), settings.latency);
         let launcher = self.launcher.as_ref();
         let offers = Offers::of(settings, &game.enabled, game.is_replay(), launcher);
         self.status.update(cx, |status, cx| status.show(lines, cx));
         self.session_bar.update(cx, |bar, cx| bar.show(offers, cx));
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
         self.hud.update(cx, |hud, cx| {
-            hud.show(self.copies.vitals.value(), cx);
+            let target = self.copies.target.value();
+            hud.show(self.copies.vitals.value(), characters, target, cx);
         });
     }
 
@@ -624,11 +639,18 @@ impl Shell {
         cx.notify();
     }
 
-    fn show_problems(&self, server: Option<&str>, notices: &[String], cx: &mut Context<Shell>) {
+    fn show_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
         self.settings
-            .update(cx, |sheet, cx| sheet.show_session(server, notices, cx));
+            .update(cx, |sheet, cx| sheet.show_session(settings, cx));
+        let problems = settings.notices.len() + settings.turned_off.len();
         self.title_bar
-            .update(cx, |bar, cx| bar.show_problems(notices.len(), cx));
+            .update(cx, |bar, cx| bar.show_problems(problems, cx));
+    }
+
+    fn turn_plugin_on(&self, plugin: &PluginId) {
+        if let Some(game) = &self.game {
+            game.session.turn_plugin_on(plugin.clone());
+        }
     }
 
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
@@ -657,7 +679,13 @@ impl Shell {
     /// now would go as one, so it's refused, as core refuses a hook's.
     fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
         if !self.copies.settings.value().echo_off {
-            self.submit(&sent.command, cx);
+            self.send_with(
+                &sent.command,
+                |session, command| {
+                    session.send_action(command);
+                },
+                cx,
+            );
         }
         if !sent.by_keyboard {
             window.focus(&self.input.focus_handle(cx), cx);
@@ -668,11 +696,15 @@ impl Shell {
     /// unless it's a password. With no server connected they go nowhere, so
     /// the chat shows them here.
     fn submit(&mut self, typed: &str, cx: &mut Context<Shell>) {
+        self.send_with(typed, |session, command| session.send(command), cx);
+    }
+
+    fn send_with(&mut self, typed: &str, send: impl Fn(&Session, &str), cx: &mut Context<Shell>) {
         let settings = self.copies.settings.value();
         let connected = settings.connection == ConnectionStatus::Connected;
         for command in typed.split('\n') {
             match &self.game {
-                Some(game) if connected && !game.is_replay() => game.session.send(command),
+                Some(game) if connected && !game.is_replay() => send(&game.session, command),
                 _ if settings.echo_off => {}
                 _ => self
                     .chat
@@ -769,13 +801,16 @@ impl Shell {
     }
 
     #[cfg(test)]
-    pub fn show_sample_notices(&self, notices: &[String], cx: &mut Context<Shell>) {
-        self.show_problems(Some("mud.example"), notices, cx);
+    pub fn show_sample_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
+        self.show_problems(settings, cx);
     }
 
     #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
-        self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
+        let characters = CharactersState::default();
+        self.hud.update(cx, |hud, cx| {
+            hud.show(vitals, &characters, &TargetState::default(), cx);
+        });
     }
 
     #[cfg(test)]
@@ -985,6 +1020,7 @@ pub mod tests {
     use super::*;
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::room_panel::press_key;
+    use crate::settings::Section;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
@@ -1027,6 +1063,32 @@ pub mod tests {
                 port,
             },
             plugins: Vec::new(),
+        }
+    }
+
+    /// The next line `server` reads, past any telnet the client put ahead of
+    /// it, which is the only part that isn't printable.
+    fn read_command(server: &mut TcpStream) -> String {
+        let mut heard = Vec::new();
+        let mut byte = [0];
+        while byte != *b"\n" {
+            server.read_exact(&mut byte).unwrap();
+            heard.push(byte[0]);
+        }
+        let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
+        let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
+        String::from_utf8_lossy(command.unwrap()).into_owned()
+    }
+
+    /// Sends a GMCP message from `server`, offering GMCP first.
+    fn send_gmcp(server: &mut TcpStream, message: &str) {
+        for bytes in [
+            &[IAC, WILL, GMCP][..],
+            &[IAC, SB, GMCP],
+            message.as_bytes(),
+            &[IAC, SE],
+        ] {
+            server.write_all(bytes).unwrap();
         }
     }
 
@@ -1119,10 +1181,7 @@ pub mod tests {
         }
 
         fn gmcp(&mut self, message: &str) {
-            self.say(&[IAC, WILL, GMCP]);
-            self.say(&[IAC, SB, GMCP]);
-            self.say(message.as_bytes());
-            self.say(&[IAC, SE]);
+            send_gmcp(&mut self.server, message);
         }
 
         /// Walks into a room with an open exit north and a door east, with
@@ -1158,15 +1217,23 @@ pub mod tests {
         /// The next line the server reads, past any telnet the client put
         /// ahead of it, which is the only part that isn't printable.
         fn heard_command(&mut self) -> String {
-            let mut heard = Vec::new();
-            let mut byte = [0];
-            while byte != *b"\n" {
-                self.server.read_exact(&mut byte).unwrap();
-                heard.push(byte[0]);
+            read_command(&mut self.server)
+        }
+
+        /// Like [`Self::frames_until`], with a line sent each time round, which
+        /// is what keeps a session's clock ticking.
+        fn frames_with_traffic_until(
+            &mut self,
+            what: &str,
+            done: impl Fn(&Shell, &gpui::App) -> bool,
+        ) {
+            let started = Instant::now();
+            while !self.shell.read_with(self.cx, |shell, cx| done(shell, cx)) {
+                assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
+                self.say(b"\r\n");
+                self.frame();
+                sleep(Duration::from_millis(1));
             }
-            let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
-            let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
-            String::from_utf8_lossy(command.unwrap()).into_owned()
         }
 
         fn chat_lines(&mut self) -> Vec<String> {
@@ -2006,6 +2073,16 @@ pub mod tests {
     }
 
     fn launch<'a>(saved: &[(&str, u16)], cx: &'a mut TestAppContext) -> Launched<'a> {
+        launch_with(saved, vec![loopback_plugin()], Vec::new(), cx)
+    }
+
+    /// `enabled` is what the command line turns on.
+    fn launch_with<'a>(
+        saved: &[(&str, u16)],
+        plugins: Vec<Plugin>,
+        enabled: Vec<PluginId>,
+        cx: &'a mut TestAppContext,
+    ) -> Launched<'a> {
         cx.update(|cx| {
             crate::input::bind_keys(cx);
             bind_keys(cx);
@@ -2018,12 +2095,7 @@ pub mod tests {
         for (host, port) in saved {
             persist::save_server(folder.path(), host, *port).unwrap();
         }
-        let launcher = Launcher::new(
-            folder.path().to_owned(),
-            vec![loopback_plugin()],
-            Vec::new(),
-            || {},
-        );
+        let launcher = Launcher::new(folder.path().to_owned(), plugins, enabled, || {});
         let (_wake, woken) = unbounded();
         let (shell, cx) = cx.add_window_view(|window, cx| {
             let mut shell = Shell::new(None, woken, window, cx);
@@ -2100,6 +2172,20 @@ pub mod tests {
     }
 
     #[gpui::test]
+    fn the_saved_servers_reach_settings_with_the_empty_state(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.frames_until("the servers in settings", |shell, cx| {
+            !shell.settings.read(cx).servers().is_empty()
+        });
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let servers = shell.settings.read(cx).servers();
+            assert_eq!(servers.len(), 1);
+            assert_eq!(servers[0].host, "mud.example");
+            assert_eq!(servers[0].port, 4000);
+        });
+    }
+
+    #[gpui::test]
     fn return_on_the_first_card_connects_and_the_chat_takes_over(cx: &mut TestAppContext) {
         let (server, port) = fake_server();
         let mut launched = launch(&[("127.0.0.1", port)], cx);
@@ -2123,6 +2209,50 @@ pub mod tests {
         }
         socket.read_exact(&mut heard[1..]).unwrap();
         assert_eq!(&heard[1..], b"ook");
+    }
+
+    /// Launches the first saved server with `plugin` turned on, and plays.
+    fn launch_playing(plugin: Plugin, cx: &mut TestAppContext) -> (Launched<'_>, TcpStream) {
+        let (server, port) = fake_server();
+        let enabled = vec![plugin.id().clone()];
+        let mut launched = launch_with(&[("127.0.0.1", port)], vec![plugin], enabled, cx);
+        press_enter(launched.cx);
+        let (socket, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        (launched, socket)
+    }
+
+    #[gpui::test]
+    fn a_launched_games_words_reach_the_room_panel(cx: &mut TestAppContext) {
+        let (mut launched, mut socket) = launch_playing(game_plugin(), cx);
+        send_gmcp(
+            &mut socket,
+            r#"Room.Info {"num": 1, "name": "A hall", "exits": {"n": 2}}"#,
+        );
+        launched.frames_until("the room", |shell, cx| {
+            shell.room_panel.read(cx).room_name() == Some("A hall")
+        });
+        launched.shell.update(launched.cx, |shell, cx| {
+            let (_, _, contents) = crate::measure::sample_room();
+            shell
+                .room_panel
+                .update(cx, |panel, cx| panel.show_contents(contents, cx));
+            shell.open_panels(cx);
+        });
+        launched.cx.run_until_parked();
+
+        launched.click("Get a stone");
+        assert_eq!(read_command(&mut socket), "take stone");
+    }
+
+    #[gpui::test]
+    fn a_launched_games_plugins_reach_settings(cx: &mut TestAppContext) {
+        let (launched, _socket) = launch_playing(game_plugin(), cx);
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let rows = shell.settings.read(cx).plugins();
+            let game = rows.iter().find(|row| row.id.as_str() == "game");
+            assert!(game.is_some_and(|row| row.on), "{rows:?}");
+        });
     }
 
     #[gpui::test]
@@ -2292,6 +2422,68 @@ pub mod tests {
         });
         let saved = persist::enabled_plugins(launched.folder.path(), "127.0.0.1").unwrap();
         assert_eq!(saved, ["loopback"]);
+    }
+
+    /// A game plugin whose `go` hook never ends.
+    fn slow_plugin() -> Plugin {
+        Plugin::from_files(|file| {
+            Ok(match file {
+                "plugin.toml" => "id = \"slow\"\nname = \"Slow\"\nversion = \"1.0.0\"\napi = 1\n\
+                                  license = \"MIT\"\nlayer = \"game\"\n\
+                                  [servers]\nhosts = [\"mud.example\"]\n\
+                                  [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"hooks.luau\"]\n"
+                    .to_owned(),
+                "text.toml" => "[[pattern]]\nname = \"go\"\npattern = '''^go$'''\nhook = \"on_go\"\n"
+                    .to_owned(),
+                "hooks.luau" => "function on_go(event) while true do end end".to_owned(),
+                _ => return Err(std::io::ErrorKind::NotFound.into()),
+            })
+        })
+        .expect("the plugin loads")
+    }
+
+    #[gpui::test]
+    fn a_plugin_turned_off_shows_in_settings_and_turns_on_again_through_the_session(
+        cx: &mut TestAppContext,
+    ) {
+        let mut played = play_with(cx, vec![slow_plugin()]);
+        played.connected();
+        played.say(b"go\r\ngo\r\ngo\r\n");
+        played.frames_with_traffic_until("the plugin to be turned off", |shell, cx| {
+            !shell.settings.read(cx).turned_off().is_empty()
+        });
+        played.shell.read_with(played.cx, |shell, cx| {
+            let sheet = shell.settings.read(cx);
+            assert_eq!(sheet.turned_off()[0].plugin.as_str(), "slow");
+            assert!(
+                sheet
+                    .costs()
+                    .iter()
+                    .any(|cost| cost.plugin.as_str() == "slow")
+            );
+        });
+
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            shell
+                .settings
+                .update(cx, |sheet, cx| sheet.select(Section::Plugins, cx));
+        });
+        played.cx.run_until_parked();
+        assert!(
+            played.cx.debug_bounds("notice-0").is_some(),
+            "the notice is drawn"
+        );
+
+        played.click("notice-turn-on-0");
+        played.frames_with_traffic_until("the plugin to come back", |shell, cx| {
+            shell.settings.read(cx).turned_off().is_empty()
+        });
+        played.cx.run_until_parked();
+        assert!(
+            played.cx.debug_bounds("notice-0").is_none(),
+            "the notice went"
+        );
     }
 
     #[gpui::test]

@@ -1,9 +1,8 @@
 //! The Room panel: where the player is, the ways out, who's here and what's
 //! on the ground.
 //!
-//! The room comes from the room and mob stores. Who's here and what's on the
-//! ground have no store yet, so they're a small view model, [`RoomContents`],
-//! that stays empty, and hidden, until something feeds it.
+//! All of it comes from the room and mob stores. Who's here and what's on the
+//! ground stay hidden until the server lists something.
 //!
 //! The panel never sends a command itself: it emits [`SendCommand`] and the
 //! shell sends it, the same way as a typed line.
@@ -16,9 +15,9 @@ use gpui::{
     Pixels, Role, SharedString, Stateful, Window, div, prelude::*, px,
 };
 use mudling_core::defaults::commands::CHAIN_SEPARATOR;
-use mudling_core::map::{Direction, MapRoom, Mark, mob_name};
+use mudling_core::map::{Direction, MapRoom, Mark};
 use mudling_core::plugin::{Plugin, PluginId};
-use mudling_core::store::{MobsState, RoomState};
+use mudling_core::store::{MobsState, RoomContents, RoomState};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
@@ -42,11 +41,10 @@ impl Exit {
     /// door, then go", which the session writes with the plugin's door
     /// command.
     pub fn command(self) -> String {
-        let word = self.direction.name();
         if self.closed {
-            format!("[{}]", &word[..1])
+            format!("[{}]", self.direction.letter())
         } else {
-            word.to_owned()
+            self.direction.name().to_owned()
         }
     }
 
@@ -92,29 +90,6 @@ impl Verbs {
             .unwrap_or_default();
         format!("{word} {target}")
     }
-}
-
-/// Someone in the room. `target` is what the game knows them by, which is
-/// shorter than `name`, the line it shows.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Occupant {
-    pub name: SharedString,
-    pub target: String,
-}
-
-/// Something on the ground, `count` of them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Item {
-    pub name: SharedString,
-    pub target: String,
-    pub count: u32,
-}
-
-/// What's in the room, as plain lists.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RoomContents {
-    pub occupants: Vec<Occupant>,
-    pub items: Vec<Item>,
 }
 
 /// The room as the panel draws it.
@@ -163,18 +138,10 @@ fn sightings(room: &MapRoom, mobs: &MobsState) -> Vec<Sighting> {
         .collect()
 }
 
-/// Aggressive marks are by noun, and the others by the mob's name.
 fn marks_on(title: &str, mobs: &MobsState) -> Vec<Mark> {
-    let name = mob_name(title);
-    let marked = |mark: Mark, marked: &str| match mark {
-        Mark::Aggressive => name
-            .split(|c: char| !c.is_alphabetic())
-            .any(|word| word == marked),
-        Mark::Gear | Mark::Important => name == marked,
-    };
     mobs.marks
         .iter()
-        .filter(|(mark, on)| marked(*mark, on))
+        .filter(|(mark, marked)| mark.covers(marked, title))
         .map(|(mark, _)| *mark)
         .collect()
 }
@@ -237,7 +204,7 @@ impl RoomPanel {
         }
     }
 
-    /// Where a store of who and what is in the room will feed the panel.
+    /// Who and what is in the room, from the room store.
     pub fn show_contents(&mut self, contents: RoomContents, cx: &mut Context<RoomPanel>) {
         if contents != self.contents {
             self.contents = contents;
@@ -396,10 +363,10 @@ impl RoomPanel {
             .iter()
             .enumerate()
             .map(|(index, occupant)| {
-                let name = &occupant.name;
-                let target = &occupant.target;
+                let name = SharedString::from(occupant.name.clone());
                 div()
                     .id(("occupant", index))
+                    .debug_selector(move || format!("occupant-{index}"))
                     .role(Role::ListItem)
                     .aria_label(name.clone())
                     .flex()
@@ -408,24 +375,26 @@ impl RoomPanel {
                     .px_3()
                     .py(px(10.))
                     .child(row_name(name.clone()))
-                    .child(verb_button(
-                        ("look", index),
-                        "Look",
-                        format!("Look at {name}"),
-                        self.verbs.command("look", target),
-                        theme.accent,
-                        theme,
-                        cx,
-                    ))
-                    .child(verb_button(
-                        ("kill", index),
-                        "Kill",
-                        format!("Kill {name}"),
-                        self.verbs.command("kill", target),
-                        theme.danger,
-                        theme,
-                        cx,
-                    ))
+                    .when_some(occupant.target.as_ref(), |row, target| {
+                        row.child(verb_button(
+                            ("look", index),
+                            "Look",
+                            format!("Look at {name}"),
+                            self.verbs.command("look", target),
+                            theme.accent,
+                            theme,
+                            cx,
+                        ))
+                        .child(verb_button(
+                            ("kill", index),
+                            "Kill",
+                            format!("Kill {name}"),
+                            self.verbs.command("kill", target),
+                            theme.danger,
+                            theme,
+                            cx,
+                        ))
+                    })
             })
             .collect();
         section(
@@ -449,7 +418,7 @@ impl RoomPanel {
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let name = &item.name;
+                let name = SharedString::from(item.name.clone());
                 let count = (item.count > 1).then(|| {
                     let count = format!("×{}", item.count);
                     div()
@@ -781,6 +750,23 @@ mod tests {
             panel.show_contents(contents, cx);
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_occupant_with_no_word_to_target_shows_with_no_verbs(cx: &mut TestAppContext) {
+        let (panel, cx, _) = panel_window(cx);
+        let (room, mobs, mut contents) = sample_room();
+        contents.occupants[0].target = None;
+        panel.update(cx, |panel, cx| {
+            panel.show_room(&room, &mobs, cx);
+            panel.show_contents(contents, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("occupant-0").is_some());
+        assert!(
+            cx.debug_bounds("Kill A traveller resting by the wall")
+                .is_none()
+        );
     }
 
     #[gpui::test]

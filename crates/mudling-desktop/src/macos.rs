@@ -263,7 +263,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
         });
         shell.update(cx, |shell, cx| {
-            crate::measure::fill_room_panel(shell, cx);
+            crate::measure::fill_room_panel(shell, None, cx);
             shell.open_panels(cx);
         });
         cx.background_executor().timer(pause).await;
