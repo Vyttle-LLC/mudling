@@ -1,0 +1,854 @@
+//! The settings sheet: one modal sheet with seven sections, opened by the title
+//! bar's sprocket or its shortcut.
+//!
+//! The sheet walks its own stops, because gpui's Tab order spans the window and
+//! the sheet has to keep the keyboard inside it. Every control takes a stop
+//! from [`Pane`], which remembers the row that holds it, so Tab can bring a
+//! control scrolled out of view back in. The arrow and page keys scroll what
+//! has no control to land on, like the list of shortcuts.
+
+mod appearance;
+mod plugins;
+mod saved;
+mod servers;
+mod shortcuts;
+
+pub use plugins::PluginRow;
+pub use saved::SavedSettings;
+pub use servers::SavedServer;
+
+use crate::assets::{HEADING_FONT, Icon, UI_FONT};
+use crate::shell::{ToggleLeftPanel, ToggleRightPanel};
+use crate::theme::{Appearance, CHAT_FONTS, Theme};
+use crate::title_bar::{FindInScrollback, OpenSettings};
+use gpui::{
+    AnyElement, App, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
+    KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Stateful, Window, actions,
+    div, point, prelude::*, px, transparent_black,
+};
+
+const WIDTH: Pixels = px(1000.);
+const HEIGHT: Pixels = px(716.);
+/// The space kept around the sheet in a small window.
+const MARGIN: Pixels = px(24.);
+const NAV_WIDTH: Pixels = px(264.);
+/// The most of a small sheet the sections take.
+const NAV_SHARE: f32 = 0.36;
+const CONTEXT: &str = "SettingsSheet";
+const MAKER: &str = "A Vyttle app";
+/// How far an arrow key scrolls.
+const SCROLL_STEP: Pixels = px(48.);
+
+actions!(
+    settings,
+    [
+        CloseSettings,
+        NextStop,
+        PreviousStop,
+        ScrollUp,
+        ScrollDown,
+        PageUp,
+        PageDown,
+    ]
+);
+
+pub fn bind_keys(cx: &mut App) {
+    let bound_here = Some(CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseSettings, bound_here),
+        KeyBinding::new("tab", NextStop, bound_here),
+        KeyBinding::new("shift-tab", PreviousStop, bound_here),
+        KeyBinding::new("up", ScrollUp, bound_here),
+        KeyBinding::new("down", ScrollDown, bound_here),
+        KeyBinding::new("pageup", PageUp, bound_here),
+        KeyBinding::new("pagedown", PageDown, bound_here),
+    ]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Servers,
+    Plugins,
+    Triggers,
+    Appearance,
+    Shortcuts,
+    Data,
+    Vault,
+}
+
+impl Section {
+    const ALL: [Section; 7] = [
+        Section::Servers,
+        Section::Plugins,
+        Section::Triggers,
+        Section::Appearance,
+        Section::Shortcuts,
+        Section::Data,
+        Section::Vault,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Section::Servers => "Servers & characters",
+            Section::Plugins => "Plugins",
+            Section::Triggers => "Triggers & aliases",
+            Section::Appearance => "Appearance",
+            Section::Shortcuts => "Shortcuts",
+            Section::Data => "Data & sync",
+            Section::Vault => "Vault",
+        }
+    }
+
+    /// The line for a section whose phase hasn't arrived.
+    fn not_yet(self) -> Option<&'static str> {
+        match self {
+            Section::Triggers => Some("Editing triggers and aliases isn't here yet."),
+            Section::Data => Some("Sync isn't here yet. Your data stays on this device."),
+            Section::Vault => Some("The password vault isn't here yet."),
+            _ => None,
+        }
+    }
+}
+
+pub enum SheetEvent {
+    Closed,
+    Chose(Appearance),
+}
+
+/// The pane's stops, kept between frames so a control keeps its focus handle.
+#[derive(Default)]
+struct Stops {
+    handles: Vec<FocusHandle>,
+    /// The row of the pane each stop in use sits in.
+    rows: Vec<usize>,
+}
+
+impl Stops {
+    fn in_use(&self) -> &[FocusHandle] {
+        &self.handles[..self.rows.len()]
+    }
+}
+
+/// A section's content being built: rows for the scrolling list, so the list
+/// can scroll to any of them, and the stops inside those rows.
+pub(crate) struct Pane {
+    rows: Vec<AnyElement>,
+    stops: Stops,
+}
+
+impl Pane {
+    fn row(&mut self, row: impl IntoElement) {
+        self.rows.push(row.into_any_element());
+    }
+
+    /// A stop for a control in the row about to be added.
+    fn stop(&mut self, cx: &mut App) -> FocusHandle {
+        let number = self.stops.rows.len();
+        if number == self.stops.handles.len() {
+            self.stops.handles.push(cx.focus_handle());
+        }
+        self.stops.rows.push(self.rows.len());
+        self.stops.handles[number].clone()
+    }
+}
+
+/// A heading inside a section.
+fn section_heading(title: &'static str, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(title)
+        .role(Role::Heading)
+        .aria_label(title)
+        .aria_level(3)
+        .pt_4()
+        .pb_2()
+        .font_family(UI_FONT)
+        .text_size(px(11.))
+        .text_color(theme.text_muted)
+        .child(title.to_uppercase())
+}
+
+/// One plain line, as a screen reader can read it.
+fn muted_line(text: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
+    let text = text.into();
+    div()
+        .id(text.clone())
+        .role(Role::Label)
+        .aria_value(text.clone())
+        .pb_2()
+        .font_family(UI_FONT)
+        .text_size(px(14.))
+        .text_color(theme.text_muted)
+        .child(text)
+}
+
+/// A control's shape: a stop of the sheet, marked when focus lands on it.
+fn control(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    stop: &FocusHandle,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let id = id.into();
+    let selector = id.to_string();
+    let (hover, ring) = (theme.hover, theme.accent);
+    div()
+        .id(id)
+        .debug_selector(move || selector)
+        .role(Role::Button)
+        .aria_label(label)
+        .track_focus(stop)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border_1()
+        .border_color(transparent_black())
+        .hover(move |style| style.bg(hover))
+        .focus_visible(move |style| style.border_color(ring))
+}
+
+/// An outlined button with its label as its text.
+fn text_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    stop: &FocusHandle,
+    theme: &Theme,
+) -> Stateful<Div> {
+    control(id, label, stop, theme)
+        .h(px(36.))
+        .px_3()
+        .border_color(theme.border)
+        .font_family(UI_FONT)
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(14.))
+        .text_color(theme.text)
+        .child(label)
+}
+
+fn count_badge(count: usize, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .min_w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .bg(theme.warning)
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.on_warning)
+        .child(count.to_string())
+}
+
+pub struct SettingsSheet {
+    section: Section,
+    server: Option<SharedString>,
+    servers: Vec<SavedServer>,
+    plugins: Vec<PluginRow>,
+    notices: Vec<String>,
+    /// The notice whose details are showing.
+    details: Option<String>,
+    /// The chat faces this machine has.
+    fonts: Vec<&'static str>,
+    dialog: FocusHandle,
+    tabs: [FocusHandle; Section::ALL.len()],
+    close: FocusHandle,
+    stops: Stops,
+    scroll: ScrollHandle,
+}
+
+impl EventEmitter<SheetEvent> for SettingsSheet {}
+
+impl SettingsSheet {
+    pub fn new(cx: &mut Context<SettingsSheet>) -> SettingsSheet {
+        let text = cx.text_system().clone();
+        let installed = cx.background_spawn(async move { text.all_font_names() });
+        cx.spawn(async move |sheet, cx| {
+            let installed = installed.await;
+            let _ = sheet.update(cx, |sheet, cx| sheet.keep_fonts(&installed, cx));
+        })
+        .detach();
+        SettingsSheet {
+            section: Section::Appearance,
+            server: None,
+            servers: Vec::new(),
+            plugins: Vec::new(),
+            notices: Vec::new(),
+            details: None,
+            fonts: vec![CHAT_FONTS[0]],
+            dialog: cx.focus_handle(),
+            tabs: std::array::from_fn(|_| cx.focus_handle()),
+            close: cx.focus_handle(),
+            stops: Stops::default(),
+            scroll: ScrollHandle::new(),
+        }
+    }
+
+    fn keep_fonts(&mut self, installed: &[String], cx: &mut Context<SettingsSheet>) {
+        self.fonts = CHAT_FONTS
+            .into_iter()
+            .enumerate()
+            .filter(|(number, font)| *number == 0 || installed.iter().any(|name| name == font))
+            .map(|(_, font)| font)
+            .collect();
+        cx.notify();
+    }
+
+    /// Takes the keyboard. With problems to show, opens on the section that
+    /// shows them.
+    pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        if !self.notices.is_empty() {
+            self.select(Section::Plugins, cx);
+        }
+        window.focus(&self.tabs[self.section as usize], cx);
+    }
+
+    pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
+        self.section = section;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    /// The step that fills Servers & characters, once saved servers have a
+    /// store.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn show_servers(&mut self, servers: Vec<SavedServer>, cx: &mut Context<SettingsSheet>) {
+        self.servers = servers;
+        cx.notify();
+    }
+
+    pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
+        self.plugins = plugins;
+        cx.notify();
+    }
+
+    /// What the session says about itself.
+    pub fn show_session(
+        &mut self,
+        server: Option<&str>,
+        notices: &[String],
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        if self.server.as_deref() != server || self.notices != notices {
+            self.server = server.map(|server| server.to_owned().into());
+            self.notices = notices.to_vec();
+            cx.notify();
+        }
+    }
+
+    fn choose(&mut self, appearance: Appearance, cx: &mut Context<SettingsSheet>) {
+        cx.emit(SheetEvent::Chose(appearance));
+    }
+
+    fn close(&mut self, cx: &mut Context<SettingsSheet>) {
+        cx.emit(SheetEvent::Closed);
+    }
+
+    /// Moves `step` stops on, round the sheet, and brings the stop into view.
+    fn walk(&mut self, step: isize, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        let fixed = self.tabs.len() + 1;
+        let order: Vec<&FocusHandle> = (self.tabs.iter())
+            .chain([&self.close])
+            .chain(self.stops.in_use())
+            .collect();
+        let at = order.iter().position(|stop| stop.is_focused(window));
+        let next = at.map_or(0, |at| {
+            (at as isize + step).rem_euclid(order.len() as isize) as usize
+        });
+        window.focus(order[next], cx);
+        if let Some(stop) = next.checked_sub(fixed) {
+            self.scroll.scroll_to_item(self.stops.rows[stop]);
+            cx.notify();
+        }
+    }
+
+    fn scroll_by(&self, distance: Pixels, cx: &mut Context<SettingsSheet>) {
+        let offset = self.scroll.offset();
+        let lowest = -self.scroll.max_offset().y;
+        self.scroll
+            .set_offset(point(offset.x, (offset.y - distance).clamp(lowest, px(0.))));
+        cx.notify();
+    }
+
+    fn render_tab(
+        &self,
+        section: Section,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
+        let chosen = section == self.section;
+        let problems = self.notices.len();
+        control(
+            SharedString::from(format!("section-{}", section as usize)),
+            section.title(),
+            &self.tabs[section as usize],
+            theme,
+        )
+        .role(Role::Tab)
+        .aria_selected(chosen)
+        .when(section == Section::Plugins && problems > 0, |tab| {
+            tab.aria_description(format!("{problems} problems"))
+        })
+        .w_full()
+        .h(px(42.))
+        .px_3()
+        .justify_between()
+        .rounded_lg()
+        .when(chosen, |tab| tab.bg(theme.selected))
+        .text_size(px(15.))
+        .text_color(theme.text)
+        .on_click(cx.listener(move |sheet, _, _, cx| sheet.select(section, cx)))
+        .child(section.title())
+        .when(section == Section::Plugins && problems > 0, |tab| {
+            tab.child(count_badge(problems, theme))
+        })
+    }
+
+    fn render_nav(
+        &self,
+        width: Pixels,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
+        let tabs = Section::ALL.map(|section| self.render_tab(section, theme, cx));
+        let version = format!(
+            "MUDling {} · {}",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_LICENSE")
+        );
+        div()
+            .flex_none()
+            .w(width)
+            .h_full()
+            .p_3()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(theme.divider)
+            .child(
+                div()
+                    .id("settings-heading")
+                    .role(Role::Heading)
+                    .aria_label("Settings")
+                    .aria_level(1)
+                    .px_3()
+                    .pt_3()
+                    .pb_5()
+                    .font_family(HEADING_FONT)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(22.))
+                    .text_color(theme.text)
+                    .child("Settings"),
+            )
+            .child(
+                div()
+                    .id("settings-sections")
+                    .role(Role::TabList)
+                    .aria_label("Settings sections")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .children(tabs),
+            )
+            .child(
+                div()
+                    .id("settings-about")
+                    .role(Role::Label)
+                    .aria_value(format!("{version} · {MAKER}"))
+                    .px_3()
+                    .pb_2()
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child(version)
+                    .child(MAKER),
+            )
+    }
+
+    fn render_pane(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
+        let mut stops = std::mem::take(&mut self.stops);
+        stops.rows.clear();
+        let mut pane = Pane {
+            rows: Vec::new(),
+            stops,
+        };
+        match self.section {
+            Section::Servers => servers::fill(&mut pane, &self.servers, theme),
+            Section::Plugins => self.fill_plugins(&mut pane, theme, cx),
+            Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
+            Section::Shortcuts => shortcuts::fill(&mut pane, theme),
+            section => pane.row(muted_line(section.not_yet().unwrap_or_default(), theme)),
+        }
+        self.stops = pane.stops;
+        let title = self.section.title();
+        let header = div()
+            .flex_none()
+            .h(px(84.))
+            .px_8()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(theme.divider)
+            .child(
+                div()
+                    .id("settings-title")
+                    .role(Role::Heading)
+                    .aria_label(title)
+                    .aria_level(2)
+                    .font_family(HEADING_FONT)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(19.))
+                    .text_color(theme.text)
+                    .child(title),
+            )
+            .child(
+                control("settings-close", "Close settings", &self.close, theme)
+                    .size(px(32.))
+                    .on_click(cx.listener(|sheet, _, _, cx| sheet.close(cx)))
+                    .child(Icon::WindowClose.svg().size(px(16.)).text_color(theme.text)),
+            );
+        div()
+            .id("settings-pane")
+            .role(Role::TabPanel)
+            .aria_label(title)
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(
+                div()
+                    .id("settings-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .px_8()
+                    .py_5()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(pane.rows),
+            )
+    }
+}
+
+impl gpui::Render for SettingsSheet {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) -> impl IntoElement {
+        let theme = *cx.global::<Theme>();
+        let room = window.viewport_size();
+        let width = WIDTH.min(room.width - MARGIN * 2.);
+        let scrim_click = cx.listener(|sheet, _, window, cx| {
+            window.prevent_default();
+            sheet.close(cx);
+        });
+        let dialog = div()
+            .id("settings-sheet")
+            .debug_selector(|| "settings-sheet".to_owned())
+            .key_context(CONTEXT)
+            .role(Role::Dialog)
+            .aria_label("Settings")
+            .a11y_synthetic_children(|builder| builder.parent_node().set_modal())
+            .track_focus(&self.dialog)
+            .occlude()
+            .w(width)
+            .h(HEIGHT.min(room.height - MARGIN * 2.))
+            .flex()
+            .overflow_hidden()
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface)
+            .shadow(theme.floating_shadow())
+            .font_family(UI_FONT)
+            .text_color(theme.text)
+            .on_action(cx.listener(|sheet, _: &CloseSettings, _, cx| sheet.close(cx)))
+            .on_action(cx.listener(|sheet, _: &NextStop, window, cx| sheet.walk(1, window, cx)))
+            .on_action(
+                cx.listener(|sheet, _: &PreviousStop, window, cx| sheet.walk(-1, window, cx)),
+            )
+            .on_action(cx.listener(|sheet, _: &ScrollUp, _, cx| sheet.scroll_by(-SCROLL_STEP, cx)))
+            .on_action(cx.listener(|sheet, _: &ScrollDown, _, cx| sheet.scroll_by(SCROLL_STEP, cx)))
+            .on_action(cx.listener(|sheet, _: &PageUp, _, cx| {
+                sheet.scroll_by(-sheet.scroll.bounds().size.height, cx);
+            }))
+            .on_action(cx.listener(|sheet, _: &PageDown, _, cx| {
+                sheet.scroll_by(sheet.scroll.bounds().size.height, cx);
+            }))
+            // A modal sheet: what's behind it stays as it is.
+            .on_action(|_: &ToggleLeftPanel, _, _| {})
+            .on_action(|_: &ToggleRightPanel, _, _| {})
+            .on_action(|_: &FindInScrollback, _, _| {})
+            .on_action(|_: &OpenSettings, _, _| {})
+            .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
+            .child(self.render_pane(&theme, cx));
+        div()
+            .id("settings-scrim")
+            .debug_selector(|| "settings-scrim".to_owned())
+            .occlude()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(room.width)
+            .h(room.height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.scrim)
+            .on_mouse_down(MouseButton::Left, scrim_click)
+            .child(dialog)
+    }
+}
+
+/// How a chosen thing stands out from its neighbors.
+fn chosen_ground(chosen: bool, theme: &Theme) -> Hsla {
+    if chosen {
+        theme.surface_raised
+    } else {
+        transparent_black()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::{COLUMN_PADDING, min_column_width};
+    use crate::shell::{Shell, tests::window_with_keys};
+    use crate::theme::{LARGEST_CHAT_SIZE, ThemeChoice};
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
+    use tempfile::TempDir;
+
+    fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update_in(cx, |shell, window, cx| shell.open_settings(window, cx));
+        cx.run_until_parked();
+    }
+
+    fn click(id: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds(id).expect("the control is drawn");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn chosen(cx: &mut VisualTestContext) -> Appearance {
+        cx.update(|_, cx| cx.global::<Theme>().choice)
+    }
+
+    fn section(number: Section, cx: &mut VisualTestContext) {
+        click(format!("section-{}", number as usize).leak(), cx);
+    }
+
+    fn open_key() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd-,"
+        } else {
+            "ctrl-,"
+        }
+    }
+
+    #[gpui::test]
+    fn the_sprocket_and_the_shortcut_open_it_and_esc_gives_typing_back(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        click("open-settings", cx);
+        assert!(cx.debug_bounds("settings-sheet").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-sheet").is_none());
+
+        cx.simulate_keystrokes(open_key());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-sheet").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.simulate_input("look");
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    #[gpui::test]
+    fn seven_sections_each_show_something(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        for section_shown in Section::ALL {
+            section(section_shown, cx);
+            let rows = shell.read_with(cx, |shell, cx| {
+                shell.settings_sheet().read(cx).scroll.children_count()
+            });
+            assert!(rows >= 1, "{section_shown:?} is empty");
+        }
+    }
+
+    #[gpui::test]
+    fn the_keyboard_stays_in_the_sheet_and_reaches_every_stop(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let stops = shell.read_with(cx, |shell, cx| {
+            let sheet = shell.settings_sheet().read(cx);
+            sheet.tabs.len() + 1 + sheet.stops.in_use().len()
+        });
+        assert!(stops > 8, "Appearance has controls: {stops}");
+        let focused_in_sheet = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+            let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+            cx.update(|window, cx| {
+                let sheet = sheet.read(cx);
+                sheet
+                    .tabs
+                    .iter()
+                    .chain([&sheet.close])
+                    .chain(sheet.stops.in_use())
+                    .any(|stop| stop.is_focused(window))
+            })
+        };
+        for _ in 0..stops * 2 {
+            cx.simulate_keystrokes("tab");
+            assert!(focused_in_sheet(&shell, cx));
+        }
+        cx.simulate_keystrokes("shift-tab");
+        assert!(focused_in_sheet(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn a_stop_below_the_fold_scrolls_into_view(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(700.), px(300.)));
+        open(&shell, cx);
+        cx.run_until_parked();
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        // Back from the Appearance tab, round the tabs, to the pane's last stop.
+        cx.simulate_keystrokes("shift-tab shift-tab shift-tab shift-tab");
+        cx.run_until_parked();
+        assert!(sheet.read_with(cx, |sheet, _| sheet.scroll.offset().y < px(0.)));
+    }
+
+    #[gpui::test]
+    fn the_arrow_keys_scroll_a_long_section_and_stop_at_its_ends(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(700.), px(420.)));
+        open(&shell, cx);
+        section(Section::Shortcuts, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let offset =
+            |cx: &mut VisualTestContext| sheet.read_with(cx, |sheet, _| sheet.scroll.offset().y);
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), -SCROLL_STEP);
+        (0..40).for_each(|_| cx.simulate_keystrokes("pagedown"));
+        cx.run_until_parked();
+        let lowest = sheet.read_with(cx, |sheet, _| -sheet.scroll.max_offset().y);
+        assert_eq!(offset(cx), lowest);
+        (0..40).for_each(|_| cx.simulate_keystrokes("pageup"));
+        cx.run_until_parked();
+        assert_eq!(offset(cx), px(0.));
+    }
+
+    #[gpui::test]
+    fn what_is_behind_the_sheet_stays_as_it_is(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-1"
+        } else {
+            "ctrl-1"
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("left-dock")
+                .is_none_or(|dock| dock.size.width == px(0.))
+        );
+        cx.simulate_click(point(px(4.), px(4.)), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-sheet").is_none());
+    }
+
+    #[gpui::test]
+    fn the_shortcut_to_the_command_bar_closes_the_sheet(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-l"
+        } else {
+            "ctrl-l"
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-sheet").is_none());
+        cx.simulate_input("look");
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    #[gpui::test]
+    fn a_theme_applies_at_once_and_holds_when_the_os_changes(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        section(Section::Appearance, cx);
+        click("theme-Light", cx);
+        assert_eq!(chosen(cx).theme, ThemeChoice::Light);
+        let parchment = Theme::for_appearance(WindowAppearance::Light).background;
+        cx.update(|_, cx| assert_eq!(cx.global::<Theme>().background, parchment));
+
+        click("theme-System", cx);
+        assert_eq!(chosen(cx).theme, ThemeChoice::System);
+    }
+
+    #[gpui::test]
+    fn the_size_applies_at_once_and_the_80_column_floor_follows_it(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1300.), px(800.)));
+        open(&shell, cx);
+        section(Section::Appearance, cx);
+        let floor = cx.update(|_, cx| min_column_width(cx));
+        (0..LARGEST_CHAT_SIZE).for_each(|_| click("chat-size-larger", cx));
+        assert_eq!(chosen(cx).font_size, LARGEST_CHAT_SIZE);
+        let larger = cx.update(|_, cx| min_column_width(cx));
+        assert!(larger > floor, "{larger:?} after {floor:?}");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let column = cx.debug_bounds("chat-area").unwrap().size.width;
+        assert!(column >= larger, "{column:?} under {larger:?}");
+        assert!(larger > COLUMN_PADDING * 2.);
+    }
+
+    #[gpui::test]
+    fn a_choice_made_in_the_sheet_is_there_on_the_next_launch(cx: &mut TestAppContext) {
+        let folder = TempDir::new().unwrap();
+        let (shell, cx) = window_with_keys(cx);
+        let (saved, kept) = SavedSettings::open(folder.path()).unwrap();
+        shell.update_in(cx, |shell, window, cx| {
+            shell.restore_settings(saved, kept, window, cx);
+        });
+        open(&shell, cx);
+        section(Section::Appearance, cx);
+        click("theme-Dark", cx);
+        click("chat-size-larger", cx);
+
+        let left = shell.update(cx, |shell, cx| shell.leave(cx));
+        left.expect("the first leave").detach();
+        cx.run_until_parked();
+        let (_saved, next) = SavedSettings::open(folder.path()).unwrap();
+        assert_eq!(next, chosen(cx));
+        assert_eq!(next.theme, ThemeChoice::Dark);
+    }
+
+    #[gpui::test]
+    fn problems_show_on_the_sprocket_and_open_the_plugins_section(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        assert!(cx.debug_bounds("settings-badge").is_none());
+        let notices = ["a-plugin was turned off: Overran(3)".to_owned()];
+        shell.update(cx, |shell, cx| shell.show_sample_notices(&notices, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-badge").is_some());
+
+        click("open-settings", cx);
+        assert!(cx.debug_bounds("notice-0").is_some());
+        click("notice-details-0", cx);
+        let open = shell.read_with(cx, |shell, cx| {
+            shell.settings_sheet().read(cx).details.clone()
+        });
+        assert_eq!(open.as_deref(), Some(notices[0].as_str()));
+    }
+}

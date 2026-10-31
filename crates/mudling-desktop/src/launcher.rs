@@ -3,6 +3,7 @@
 //! blocks on the disk, so the shell calls it off the UI thread.
 
 use crate::room_panel::Verbs;
+use crate::settings::PluginRow;
 use crate::shell::Game;
 use mudling_core::persist;
 use mudling_core::plugin::{Plugin, PluginId};
@@ -95,6 +96,7 @@ impl Launcher {
             session,
             replay_folder: None,
             verbs: Verbs::of(&self.plugins, &enabled),
+            plugins: PluginRow::for_session(&self.plugins, &enabled, &target.host),
             enabled,
             target: target.clone(),
         })

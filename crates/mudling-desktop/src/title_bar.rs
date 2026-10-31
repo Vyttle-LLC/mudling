@@ -43,6 +43,7 @@ const RESIZE_MARGIN: Pixels = px(6.);
 const CHARACTER_NAME_KEY: &str = "character.name";
 /// With no session the switcher has no server to name.
 const NO_SERVER: &str = "MUDling";
+const BADGE_SIZE: Pixels = px(15.);
 const CONTEXT: &str = "TitleBar";
 const MENU_CONTEXT: &str = "TitleBarMenu";
 /// Above a panel that overlays the chat.
@@ -53,7 +54,6 @@ actions!(
     [
         /// Find in the scrollback: VYT-209 handles it.
         FindInScrollback,
-        /// The settings sheet: VYT-208 handles it.
         OpenSettings,
         FocusNextControl,
         FocusPreviousControl,
@@ -332,6 +332,8 @@ fn window_controls(window: &Window, theme: &Theme) -> Option<Div> {
 
 pub struct TitleBar {
     session: SessionLabel,
+    /// Problems for the sprocket's badge.
+    problems: usize,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
     /// The press that may turn into dragging the window.
@@ -358,6 +360,7 @@ impl TitleBar {
     ) -> TitleBar {
         TitleBar {
             session: SessionLabel::default(),
+            problems: 0,
             left_dock,
             right_dock,
             pressed: false,
@@ -399,6 +402,13 @@ impl TitleBar {
         cx.notify();
     }
 
+    pub fn show_problems(&mut self, problems: usize, cx: &mut Context<TitleBar>) {
+        if problems != self.problems {
+            self.problems = problems;
+            cx.notify();
+        }
+    }
+
     #[cfg(test)]
     pub fn connection(&self) -> &str {
         &self.session.connection
@@ -409,6 +419,13 @@ impl TitleBar {
         self.menu_open = true;
         window.focus(&self.menu_item, cx);
         cx.notify();
+    }
+
+    /// Closes the menu, if it's open, for what takes focus from it.
+    pub fn dismiss_menu(&mut self, window: &mut Window, cx: &mut Context<TitleBar>) {
+        if self.menu_open {
+            self.close_menu(window, cx);
+        }
     }
 
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<TitleBar>) {
@@ -508,6 +525,41 @@ impl TitleBar {
         button
             .aria_toggled(open.into())
             .when(open, |button| button.bg(theme.selected))
+    }
+
+    /// The sprocket, with the count of problems on its corner.
+    fn render_settings_button(&self, theme: &Theme) -> Stateful<Div> {
+        let problems = self.problems;
+        action_button(
+            ("open-settings", "Settings", Icon::Sprocket),
+            ",",
+            OpenSettings,
+            theme.text_muted,
+            theme,
+        )
+        .relative()
+        .when(problems > 0, |button| {
+            button
+                .aria_description(format!("{problems} problems"))
+                .child(
+                    div()
+                        .debug_selector(|| "settings-badge".to_owned())
+                        .absolute()
+                        .top(px(-3.))
+                        .right(px(-3.))
+                        .min_w(BADGE_SIZE)
+                        .h(BADGE_SIZE)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme.warning)
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.on_warning)
+                        .child(problems.to_string()),
+                )
+        })
     }
 
     fn render_switcher(&self, theme: &Theme, cx: &mut Context<TitleBar>) -> Stateful<Div> {
@@ -749,13 +801,7 @@ impl Render for TitleBar {
                             ))
                             .child(self.render_panel_toggle(Side::Right, &theme, cx))
                     })
-                    .child(action_button(
-                        ("open-settings", "Settings", Icon::Sprocket),
-                        ",",
-                        OpenSettings,
-                        theme.placeholder,
-                        &theme,
-                    )),
+                    .child(self.render_settings_button(&theme)),
             )
             .children(window_controls(window, &theme))
             .when(self.menu_open, |bar| {
@@ -915,26 +961,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn search_and_settings_dispatch_their_actions_by_click_and_by_key(cx: &mut TestAppContext) {
+    fn search_dispatches_its_action_by_click_and_by_key(cx: &mut TestAppContext) {
         let (_shell, cx) = window(cx);
         let finds = Rc::new(Cell::new(0));
-        let settings = Rc::new(Cell::new(0));
         cx.update(|_, cx| {
             let counted = finds.clone();
             cx.on_action(move |_: &FindInScrollback, _| counted.set(counted.get() + 1));
-            let counted = settings.clone();
-            cx.on_action(move |_: &OpenSettings, _| counted.set(counted.get() + 1));
         });
 
         click("find-in-scrollback", cx);
-        click("open-settings", cx);
         let modifier = if cfg!(target_os = "macos") {
             "cmd"
         } else {
             "ctrl"
         };
-        cx.simulate_keystrokes(&format!("{modifier}-f {modifier}-,"));
-        assert_eq!((finds.get(), settings.get()), (2, 2));
+        cx.simulate_keystrokes(&format!("{modifier}-f"));
+        assert_eq!(finds.get(), 2);
     }
 
     #[gpui::test]

@@ -15,6 +15,8 @@
 //!    width, and the left one is dragged back and forth while lines still
 //!    arrive, so every frame wraps the chat to a new width.
 //!
+//! `--settings-open` runs all of this with the settings sheet open.
+//!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
 //! Lines are due by the clock, so the pace stays exact either way.
@@ -266,6 +268,7 @@ struct FrameReport {
     /// Other work on the machine skews frame times; this says how busy it was.
     load_average_1m: Option<f64>,
     scope: &'static str,
+    settings_open: bool,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -344,6 +347,7 @@ pub fn run_parent(
         optimized: !cfg!(debug_assertions),
         load_average_1m,
         scope: "chat, command bar and both side panels open, the Room panel filled; no split yet",
+        settings_open: child_args.iter().any(|arg| arg == "--settings-open"),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -373,6 +377,14 @@ fn print_report(report: &FrameReport) {
     if let (Some(ttff), Some(first)) = (report.time_to_first_frame_ms, report.first_frame_ms) {
         println!("time to first frame: {ttff:.0} ms (first frame took {first:.1} ms)");
     }
+    println!(
+        "settings sheet: {}",
+        if report.settings_open {
+            "open"
+        } else {
+            "closed"
+        }
+    );
     for (phase, summary) in &report.phases {
         println!(
             "{phase:>8}: {} frames, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",

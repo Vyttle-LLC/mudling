@@ -24,8 +24,8 @@ use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
 use mudling_core::{Line, LineKind, Scrollback};
 use std::collections::HashMap;
 
+/// A row at the default chat size, and what a notch of the wheel scrolls.
 pub const LINE_HEIGHT: Pixels = px(20.);
-pub const FONT_SIZE: Pixels = px(14.);
 /// A comfortable reading width: about 90 columns of the chat font, however
 /// wide the window is.
 pub const COLUMN_WIDTH: Pixels = px(800.);
@@ -34,19 +34,19 @@ pub const COLUMN_PADDING: Pixels = px(32.);
 /// What servers wrap their text to, and tables and maps are drawn for.
 const MIN_COLUMNS: f32 = 80.;
 
-#[cfg(target_os = "macos")]
-pub const MONO_FONT: &str = "Menlo";
-#[cfg(target_os = "windows")]
-pub const MONO_FONT: &str = "Consolas";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub const MONO_FONT: &str = "DejaVu Sans Mono";
-
-/// How wide the chat column has to be to show [`MIN_COLUMNS`] of the chat font
-/// on one row each.
+/// How wide the chat column has to be to show [`MIN_COLUMNS`] of the chosen
+/// chat font on one row each.
 pub fn min_column_width(cx: &App) -> Pixels {
     let text = cx.text_system();
-    let advance = text.ch_advance(text.resolve_font(&font(MONO_FONT)), FONT_SIZE);
+    let choice = cx.global::<Theme>().choice;
+    let advance = text.ch_advance(text.resolve_font(&font(choice.font)), choice.chat_size());
     (advance.unwrap_or_default() * MIN_COLUMNS).ceil() + COLUMN_PADDING * 2.
+}
+
+/// How wide the chat column grows: its reading width, or more if the chosen
+/// font needs it for [`MIN_COLUMNS`].
+pub fn column_width(cx: &App) -> Pixels {
+    COLUMN_WIDTH.max(min_column_width(cx))
 }
 
 /// How many of the newest lines one announcement may carry. A burst of
@@ -212,7 +212,7 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
         .id(ElementId::Integer(number))
         .role(Role::Label)
         .aria_value(SharedString::from(line.plain().to_owned()))
-        .min_h(LINE_HEIGHT)
+        .min_h(theme.choice.chat_line_height())
         .w_full();
     if line.kind() == LineKind::Command {
         row.flex()
@@ -226,6 +226,7 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
 
 impl Render for Chat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Chat>) -> impl IntoElement {
+        let choice = cx.global::<Theme>().choice;
         if !self.unannounced.is_empty() {
             let batch = self.announcement.as_ref().map_or(0, |(batch, _)| batch + 1);
             let text = std::mem::take(&mut self.unannounced).join("\n");
@@ -238,9 +239,9 @@ impl Render for Chat {
             .aria_label("Chat")
             .size_full()
             .relative()
-            .font_family(MONO_FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .font_family(choice.font)
+            .text_size(choice.chat_size())
+            .line_height(choice.chat_line_height())
             .child(LineList::new(cx.entity()))
             .children(
                 self.announcement

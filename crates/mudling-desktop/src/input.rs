@@ -12,7 +12,6 @@
 //! be copied. History, completion and hints stay away from it.
 
 use crate::assets::Icon;
-use crate::chat::{FONT_SIZE, LINE_HEIGHT, MONO_FONT};
 use crate::theme::Theme;
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Div, ElementId,
@@ -663,12 +662,13 @@ impl EntityInputHandler for CommandInput {
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // With nothing typed yet there's no layout; the IME's candidate
         // window then sits at the start of the field.
         let Some(layout) = self.layout() else {
-            return Some(Bounds::new(bounds.origin, size(px(0.), LINE_HEIGHT)));
+            let line_height = cx.global::<Theme>().choice.chat_line_height();
+            return Some(Bounds::new(bounds.origin, size(px(0.), line_height)));
         };
         let range = self.range_from_utf16(&range_utf16);
         let start = layout.position_of(self.shown_offset(range.start));
@@ -766,9 +766,9 @@ impl CommandInput {
             .border_color(theme.border)
             .bg(theme.background)
             .focus(move |style| style.border_color(theme.accent))
-            .font_family(MONO_FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .font_family(theme.choice.font)
+            .text_size(theme.choice.chat_size())
+            .line_height(theme.choice.chat_line_height())
             .text_color(theme.text)
     }
 }
@@ -803,9 +803,9 @@ impl Render for CommandInput {
             .pl_4()
             .pr_2()
             .py_2()
-            .font_family(MONO_FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .font_family(theme.choice.font)
+            .text_size(theme.choice.chat_size())
+            .line_height(theme.choice.chat_line_height())
             .text_color(theme.text)
             .on_click(cx.listener(|input, _, window, cx| window.focus(&input.focus_handle, cx)))
             .child(
