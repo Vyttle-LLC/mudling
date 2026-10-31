@@ -343,6 +343,26 @@ fn rooms_without_numbers_are_told_apart_by_description() {
 }
 
 #[test]
+fn loading_puts_a_building_back_at_its_door() {
+    let mut layout = layout::Layout::new(1);
+    let mut outside = MapRoom::empty(1);
+    outside.zone = FIELDS.to_owned();
+    let mut inside = MapRoom::empty(2);
+    inside.zone = FIELDS.to_owned();
+    inside.building = Some(2);
+    inside.position = GridPoint { x: 50, y: 7, z: 0 };
+    layout.insert(outside);
+    layout.insert(inside);
+    layout.link(1, Direction::East, 2);
+
+    layout.rebuild_buildings();
+
+    let room = layout.room(2).unwrap();
+    assert_eq!(room.building, None);
+    assert_eq!(room.position, GridPoint { x: 1, y: 0, z: 0 });
+}
+
+#[test]
 fn a_rooms_description_comes_from_the_text_before_its_room_info() {
     let mut walk = Walk::new(text_map());
     walk.arrive_in("A pond", FIELDS, &["n"], "Lilies float here.");

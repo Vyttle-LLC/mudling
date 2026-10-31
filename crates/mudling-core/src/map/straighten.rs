@@ -119,6 +119,12 @@ impl Layout {
         }
     }
 
+    /// The rooms of the area around a room.
+    pub(super) fn flat_area_around(&self, id: RoomId) -> Vec<RoomId> {
+        self.room(id)
+            .map_or_else(Vec::new, |room| self.flat_area(room).rooms)
+    }
+
     /// Rooms of the same area and level as `start`, joined by flat paths.
     fn flat_area(&self, start: &MapRoom) -> FlatArea {
         let mut seen = HashSet::from([start.id]);

@@ -135,7 +135,10 @@ impl LiveMap {
         layout.current = value(CURRENT_ROOM).filter(|id| layout.contains(*id));
         layout.islands = value(ISLANDS).unwrap_or(0);
         layout.clear_dirty();
-        LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks))
+        let mut map = LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks));
+        // After the map takes it as saved, so the next commit writes what moved.
+        map.tracker.layout.rebuild_buildings();
+        map
     }
 
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {
