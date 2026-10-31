@@ -12,6 +12,7 @@ VYT-235): each file says what it reads, and each regex has a comment.
 | File | What it declares |
 | --- | --- |
 | `plugin.toml` | The manifest: Avatar's hosts and MSSP name, its points, the stores its hooks write, and the regex fragments its patterns share. |
+| `connection.toml` | The login prompts, each answered once. |
 | `text.toml` | The prompt and pager, and the lines no other point reads. |
 | `readers.luau` | What the table hooks share: rows add writes, and the table's end sends them. |
 | `character.luau` | `score`, `practice`, `slist` and `aff`. |

@@ -5,7 +5,7 @@ use mudling_core::defaults::detect::Source;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::luau::Value;
-use mudling_core::session::{Engine, Session, SessionConfig, Typing};
+use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
     CharactersState, ConnectionStatus, RoomState, SettingsState, StoreHub, Versioned,
 };
@@ -32,6 +32,40 @@ fn engine(folder: &Path) -> (Engine, Arc<StoreHub>) {
     let mut engine = Engine::open(config, Arc::clone(&hub), typing).unwrap();
     engine.start_connection().unwrap();
     (engine, hub)
+}
+
+#[test]
+fn the_login_prompts_are_each_answered_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let plugin = mudling_plugin_avatar::load();
+    let config = SessionConfig {
+        enabled: vec![plugin.id().clone()],
+        plugins: vec![plugin],
+        credentials: Some(Credentials {
+            name: "Fen".to_owned(),
+            password: "pass-word".to_owned(),
+        }),
+        ..SessionConfig::new(folder.path(), HOST, 4000)
+    };
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let typing = Arc::new(Mutex::new(Typing::default()));
+    let mut engine = Engine::open(config, hub, typing).unwrap();
+    engine.start_connection().unwrap();
+    let mut answer = |prompt: &'static [u8]| {
+        let now = Timestamp(0);
+        engine.receive(Bytes::from_static(prompt), now).unwrap();
+        engine.quiet(now);
+        String::from_utf8(engine.take_output()).unwrap()
+    };
+
+    let name = answer(b"What name shall you be known by, adventurer? ");
+    assert_eq!(name.trim(), "Fen");
+    let password = answer(b"Your Password: ");
+    assert_eq!(password.trim(), "pass-word");
+    let banner = answer(b"When you have read this, please press <RETURN> to continue ---->");
+    assert_eq!(banner.trim(), "");
+    assert!(!banner.is_empty(), "the banner wants a blank line");
+    assert_eq!(answer(b"Your Password: "), "", "a second ask is a refusal");
 }
 
 #[test]

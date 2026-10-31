@@ -22,6 +22,7 @@ hosts = ["avatar.outland.org"]
 mssp_names = ["Avatar"]
 
 [points]
+connection = "connection.toml"
 text = "text.toml"
 commands = "commands.toml"
 character = "character.toml"
