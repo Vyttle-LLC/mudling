@@ -58,11 +58,18 @@ local finish_score = Readers.count_rows("character", "score.read")
 function read_score(event)
     local kind, reader = Readers.step(event, "score", finish_score)
     if kind == "start" then
+        Readers.write(reader, "character", "name", event.captures.name)
         Readers.write(reader, "character", "title", event.captures.title)
     elseif kind == "row" then
         Readers.row(reader)
         read_score_row(reader, event.plain)
     end
+end
+
+-- The login's greeting. Avatar sends a full Char.Status in only some
+-- sessions, so this can be the only word of who the character is.
+function on_welcome(event)
+    mud.store("character", "name", event.captures.name)
 end
 
 -- ---- practice ----

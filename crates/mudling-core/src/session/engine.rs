@@ -27,9 +27,9 @@ use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
 use crate::store::{
-    CHARACTER_POSITION, CharactersState, ConnectionStatus, GearState, MapState, Memo, MobsState,
-    RoomState, SettingsState, StoreHub, TargetState, TerminalChange, TerminalState, Versioned,
-    VitalsState,
+    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, GearState, MapState,
+    Memo, MobsState, RoomState, SettingsState, StoreHub, TargetState, TerminalChange,
+    TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
@@ -235,6 +235,18 @@ impl Engine {
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
+        // Until the game names the character, it's who's logging in.
+        if let Some(credentials) = self
+            .config
+            .credentials
+            .as_ref()
+            .filter(|_| self.character_name().is_none())
+        {
+            let name = HookValue::Text(credentials.name.clone());
+            let change = [(CHARACTER_NAME.to_owned(), name)];
+            self.hub
+                .write::<CharactersState>(CharactersState(change.into()));
+        }
         Ok(())
     }
 
@@ -627,6 +639,18 @@ impl Engine {
         let heard = link.game.read(package, json);
         self.contents_changed |= heard.contents;
         if !heard.character.is_empty() {
+            let lasting = heard
+                .character
+                .iter()
+                .filter(|(key, _)| *key != CHARACTER_POSITION);
+            for (key, value) in lasting {
+                self.batch.upsert(persist::CharacterStat {
+                    character_id: self.character_id.clone(),
+                    key: key.clone(),
+                    value: values::to_row(value),
+                    updated: now,
+                });
+            }
             self.hub
                 .write::<CharactersState>(CharactersState(heard.character));
         }
@@ -824,6 +848,7 @@ impl Engine {
             store, key, value, ..
         } = write;
         let key = format!("{store}.{key}");
+        self.contents_changed |= key == CHARACTER_NAME;
         let row = values::to_row(&value);
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
@@ -842,6 +867,16 @@ impl Engine {
                 updated: now,
             });
         }
+    }
+
+    /// Who the character is, as far as anything has said.
+    fn character_name(&self) -> Option<String> {
+        self.hub.read(|characters: &Versioned<CharactersState>| {
+            match characters.value().0.get(CHARACTER_NAME) {
+                Some(HookValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            }
+        })
     }
 
     fn take_hook_outputs(&mut self, now: Timestamp) {
@@ -875,13 +910,13 @@ impl Engine {
     }
 
     fn publish_room(&self) {
+        let character = self.character_name();
         self.hub.write::<RoomState>(RoomState {
             room: self.map.shared_current_room(),
             whereabouts: self.map.whereabouts(),
-            contents: self
-                .link
-                .as_ref()
-                .map_or_else(Default::default, |link| link.game.contents()),
+            contents: self.link.as_ref().map_or_else(Default::default, |link| {
+                link.game.contents(character.as_deref())
+            }),
         });
     }
 

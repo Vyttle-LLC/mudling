@@ -89,6 +89,7 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 
 | Key | Value |
 | --- | --- |
+| `name` | `Tamsin`; also from the login's "Welcome back" line |
 | `title` | `the Quiet Attendant` |
 | `level`, `age` | numbers |
 | `race`, `class` | `Harpy`, `Monk` |

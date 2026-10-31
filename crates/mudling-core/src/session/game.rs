@@ -96,7 +96,6 @@ pub(super) struct GameFeed {
     /// By the server's key for each.
     present: BTreeMap<String, Present>,
     items: Vec<inventory::Item>,
-    character: Option<String>,
     position: Option<String>,
     target: Option<Target>,
 }
@@ -143,11 +142,10 @@ impl GameFeed {
         heard
     }
 
-    /// What's in the room, as shown: the character isn't among those there,
-    /// and copies of an item are one row.
-    pub(super) fn contents(&self) -> RoomContents {
+    /// What's in the room, as shown: `character` isn't among those there, and
+    /// copies of an item are one row.
+    pub(super) fn contents(&self, character: Option<&str>) -> RoomContents {
         let is_you = |present: &Present| {
-            let character = self.character.as_deref();
             character.is_some_and(|name| present.name.eq_ignore_ascii_case(name))
         };
         let occupants = self
@@ -212,9 +210,8 @@ impl GameFeed {
         if let Some(name) = status.character_name.as_deref().map(ansi::plain)
             && !name.is_empty()
         {
-            let value = Value::Text(name.clone());
+            let value = Value::Text(name);
             heard.character.insert(CHARACTER_NAME.to_owned(), value);
-            self.character = Some(name);
             heard.contents = true;
         }
         if let Some(level) = number(status.level.as_ref()) {
@@ -353,11 +350,11 @@ mod tests {
             "111": {"name": "111", "fullname": "(Glowing) A grey wolf sits here."}
         }"#;
         let mut feed = feed(&[("Room.Players", players)]);
-        assert_eq!(targets(&feed.contents()), ["wolf", "bren", "mira"]);
+        assert_eq!(targets(&feed.contents(None)), ["wolf", "bren", "mira"]);
 
         let heard = feed.read("Char.Status", r#"{"character_name": "Bren"}"#);
         assert!(heard.contents, "the list changes with the name");
-        let contents = feed.contents();
+        let contents = feed.contents(Some("bren"));
         assert_eq!(targets(&contents), ["wolf", "mira"]);
         assert_eq!(
             contents.occupants[0].name,
@@ -372,10 +369,10 @@ mod tests {
         let heard = feed.read("Room.AddPlayer", bear);
         assert_eq!(heard.mobs, ["A brown bear stands here."]);
         assert!(heard.contents);
-        assert_eq!(targets(&feed.contents()), ["bear"]);
+        assert_eq!(targets(&feed.contents(None)), ["bear"]);
 
         assert!(feed.read("Room.RemovePlayer", r#""222""#).contents);
-        assert!(feed.contents().occupants.is_empty());
+        assert!(feed.contents(None).occupants.is_empty());
         assert!(!feed.read("Room.RemovePlayer", r#""222""#).contents);
     }
 
@@ -396,7 +393,7 @@ mod tests {
             {"id": "2", "name": "a silver ring", "type": "armor"},
             {"id": "3", "name": "corpse of a wolf", "type": "npc corpse"}]}"#;
         let mut feed = feed(&[("Char.Items.List", list)]);
-        let items = feed.contents().items;
+        let items = feed.contents(None).items;
         assert_eq!(items.len(), 2);
         assert_eq!((items[0].target.as_str(), items[0].count), ("ring", 2));
         assert_eq!((items[1].target.as_str(), items[1].count), ("corpse", 1));
@@ -405,10 +402,10 @@ mod tests {
         assert!(!feed.read("Char.Items.Add", carried).contents);
         let gone = r#"{"location": "room", "item": {"id": "1", "name": "a silver ring"}}"#;
         assert!(feed.read("Char.Items.Remove", gone).contents);
-        assert_eq!(feed.contents().items[0].count, 1);
+        assert_eq!(feed.contents(None).items[0].count, 1);
         let added = r#"{"location": "room", "item": {"id": "4", "name": "a portal"}}"#;
         feed.read("Char.Items.Add", added);
-        assert_eq!(feed.contents().items[2].target, "portal");
+        assert_eq!(feed.contents(None).items[2].target, "portal");
     }
 
     #[test]
@@ -424,7 +421,7 @@ mod tests {
             ),
         ]);
         assert!(feed.read("Room.Info", "{}").contents);
-        assert_eq!(feed.contents(), RoomContents::default());
+        assert_eq!(feed.contents(None), RoomContents::default());
     }
 
     /// A name from the server is shown, but no part of it but letters can
@@ -439,7 +436,7 @@ mod tests {
             "{{\"location\": \"room\", \"items\": [{{\"id\": \"1\", \"name\": \"{colored}\"}}]}}"
         );
         let feed = feed(&[("Room.Players", players), ("Char.Items.List", &items)]);
-        let contents = feed.contents();
+        let contents = feed.contents(None);
         assert_eq!(targets(&contents), ["quitdelete", "bob", "eve"]);
         let item = &contents.items[0];
         assert_eq!(item.name, "a blade;quit");
@@ -459,7 +456,7 @@ mod tests {
         let items = r#"{"location": "room", "items": [{"id": "1", "name": "123"}]}"#;
         assert!(
             feed(&[("Char.Items.List", items)])
-                .contents()
+                .contents(None)
                 .items
                 .is_empty()
         );

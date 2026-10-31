@@ -5,7 +5,7 @@ use mudling_core::defaults::detect::Source;
 use mudling_core::defaults::hud::Vital;
 use mudling_core::map::{Mark, feature};
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::{Database, Timestamp};
+use mudling_core::persist::{Database, Timestamp, saved_servers};
 use mudling_core::plugin::luau::{DisabledReason, Value};
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
@@ -840,6 +840,65 @@ fn color_codes_in_a_room_name_never_reach_the_room() {
     let room = room_state(&driven).room.unwrap();
     assert_eq!(room.name, "A red road");
     assert_eq!(room.zone, "The Fields");
+}
+
+#[test]
+fn the_name_in_the_character_store_keeps_the_character_out_of_the_room() {
+    let name = "Bren";
+    let mut driven = Driven::configured("mud.hearth.example", |config| {
+        config.plugins = vec![hearth()];
+        config.enabled = vec![hearth_id()];
+    });
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 1, "name": "A road", "exits": {}}"#);
+    driven.gmcp(r#"Room.Players {"Bren": {"name": "Bren", "fullname": "Bren is here."}}"#);
+    assert_eq!(room_state(&driven).contents.occupants.len(), 1);
+
+    let write = (CHARACTER_NAME.to_owned(), Value::Text(name.to_owned()));
+    driven
+        .hub
+        .write::<CharactersState>(CharactersState([write].into()));
+    driven.gmcp(r#"Room.Players {"Bren": {"name": "Bren", "fullname": "Bren is here."}}"#);
+    assert!(room_state(&driven).contents.occupants.is_empty());
+}
+
+#[test]
+fn the_login_names_the_character_until_the_game_does() {
+    let mut driven = Driven::configured("mud.example", |config| {
+        config.credentials = Some(Credentials {
+            name: "bren".to_owned(),
+            password: "unused".to_owned(),
+        });
+    });
+    driven.engine.start_connection().unwrap();
+    assert_eq!(
+        character(&driven, CHARACTER_NAME),
+        Some(Value::Text("bren".to_owned()))
+    );
+    driven.gmcp(r#"Char.Status {"character_name": "Bren", "level": "9"}"#);
+    assert_eq!(
+        character(&driven, CHARACTER_NAME),
+        Some(Value::Text("Bren".to_owned()))
+    );
+}
+
+#[test]
+fn a_name_from_gmcp_is_saved_for_the_server_list() {
+    let folder = tempfile::tempdir().unwrap();
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let config = SessionConfig::new(folder.path(), "mud.example", 4000);
+    let typing = Arc::new(Mutex::new(Typing::default()));
+    let mut engine = Engine::open(config, hub, typing).unwrap();
+    engine.start_connection().unwrap();
+    let status = gmcp_frame(r#"Char.Status {"character_name": "Bren", "level": "9"}"#);
+    engine.receive(status.into(), Timestamp(0)).unwrap();
+    engine.settle(Timestamp(0));
+    engine.finish().unwrap();
+
+    let saved = saved_servers(folder.path());
+    let character = &saved.servers[0].characters[0];
+    assert_eq!(character.name.as_deref(), Some("Bren"));
+    assert_eq!(character.level, Some(9));
 }
 
 #[test]
