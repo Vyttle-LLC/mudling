@@ -34,6 +34,25 @@ impl Mark {
     fn parse(name: &str) -> Option<Mark> {
         Mark::ALL.into_iter().find(|mark| mark.name() == name)
     }
+
+    /// Whether this mark, held under `marked`, covers the mob on a room line.
+    pub fn covers(self, marked: &str, title: &str) -> bool {
+        match self {
+            Mark::Aggressive => has_word(title, marked),
+            Mark::Gear | Mark::Important => self.covers_name(marked, &mob_name(title)),
+        }
+    }
+
+    /// [`Mark::covers`], for a mob already named.
+    fn covers_name(self, marked: &str, name: &str) -> bool {
+        match self {
+            Mark::Aggressive => has_word(name, marked),
+            Mark::Gear => marked == name,
+            // Their line changes with what they're doing, so a mark made on
+            // one reading covers the others.
+            Mark::Important => same_mob(marked, name),
+        }
+    }
 }
 
 /// A mark set or cleared, for persisting and for views.
@@ -115,7 +134,9 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, is of a kind known to be aggressive.
     pub fn is_aggressive(&self, title: &str) -> bool {
-        words(title).any(|word| self.aggressive.contains(&word))
+        words(title)
+            .filter_map(|word| self.aggressive.get(&word))
+            .any(|marked| Mark::Aggressive.covers(marked, title))
     }
 
     /// The player marking a kind of mob, by one of its room lines, as
@@ -135,7 +156,9 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, was marked for important gear.
     pub fn is_gear(&self, title: &str) -> bool {
-        self.gear.contains(&self.name(title))
+        let name = self.name(title);
+        let covers = |marked: &String| Mark::Gear.covers_name(marked, &name);
+        self.gear.iter().any(covers)
     }
 
     pub fn set_gear(&mut self, title: &str, gear: bool) {
@@ -146,11 +169,10 @@ impl MobMemory {
     }
 
     /// Whether a mob, by its room line, was marked as someone who matters.
-    /// Their line changes with what they're doing, so a mark made on one
-    /// reading covers the others.
     pub fn is_important(&self, title: &str) -> bool {
         let name = self.name(title);
-        self.important.iter().any(|marked| same_mob(marked, &name))
+        let covers = |marked: &String| Mark::Important.covers_name(marked, &name);
+        self.important.iter().any(covers)
     }
 
     pub fn set_important(&mut self, title: &str, important: bool) {
@@ -244,4 +266,13 @@ fn words(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphabetic())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
+}
+
+/// Whether `lowercase`, a whole word, is in `text`, in any case.
+fn has_word(text: &str, lowercase: &str) -> bool {
+    text.split(|c: char| !c.is_alphabetic()).any(|word| {
+        word.chars()
+            .flat_map(char::to_lowercase)
+            .eq(lowercase.chars())
+    })
 }

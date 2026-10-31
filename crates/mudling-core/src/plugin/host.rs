@@ -29,7 +29,8 @@
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
 use super::points::{
-    Capture, HookName, MapSignal, Pager, Pattern, Point, Points, RoomIdentity, TableReader,
+    Capture, HookName, LinkRule, MapSignal, Pager, Pattern, Point, Points, RoomIdentity,
+    TableReader,
 };
 use crate::ansi::{Span, Style};
 use crate::line::{Encoding, Line, Link, Pending};
@@ -445,12 +446,17 @@ impl PluginHost {
     /// per line read, so they cost the line thread nothing.
     pub fn links(&self, line: &Line) -> Vec<Link> {
         let mut links = Vec::new();
-        for (_, text) in self.declared(|points| points.text.as_ref()) {
-            for rule in &text.links {
-                rule.find(line.plain(), &mut links);
-            }
+        for rule in self.link_rules() {
+            rule.find(line.plain(), &mut links);
         }
         links
+    }
+
+    /// The enabled plugins' link rules, in run order. Copies share their
+    /// compiled patterns, so a shell's thread can run them.
+    pub fn link_rules(&self) -> impl Iterator<Item = &LinkRule> {
+        self.declared(|points| points.text.as_ref())
+            .flat_map(|(_, text)| &text.links)
     }
 
     /// Each installed plugin's sampled cost per line, in the order added.

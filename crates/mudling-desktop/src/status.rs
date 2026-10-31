@@ -1,6 +1,6 @@
-//! A quiet line above the command bar: the newest notice. The connection's
-//! words live in the title bar, and what the player can do about them in the
-//! session bar.
+//! A quiet line above the command bar: the newest plugin turned off, or else
+//! the newest notice. The connection's words live in the title bar, and what
+//! the player can do about them in the session bar.
 
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
@@ -30,10 +30,9 @@ impl StatusLines {
 
 /// What the lines say.
 pub fn lines_for(settings: &SettingsState) -> Vec<SharedString> {
-    settings
-        .notices
-        .last()
-        .cloned()
+    let turned_off = settings.turned_off.last().map(ToString::to_string);
+    turned_off
+        .or_else(|| settings.notices.last().cloned())
         .into_iter()
         .map(SharedString::from)
         .collect()

@@ -94,6 +94,7 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 
 | Key | Value |
 | --- | --- |
+| `name` | `Tamsin`; also from the login's "Welcome back" line |
 | `title` | `the Quiet Attendant` |
 | `level`, `age` | numbers |
 | `race`, `class` | `Harpy`, `Monk` |
@@ -158,6 +159,10 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
   out the copy isn't written yet. Avatar sends no `Char.Items` when gear goes
   on or comes off, so the wear and remove hooks call
   `mud.refresh_inventory()`.
+- **Locked doors**: `Room.Info` gives an exit as open or closed, never locked,
+  so the Room panel can't offer `doors.unlock`. The only sign is a line after
+  an `open`, such as "The door to the east is locked." Reading that needs a
+  map signal API v1 doesn't have; a text rule can come in API v2.
 
 ## Tests
 

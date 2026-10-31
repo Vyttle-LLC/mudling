@@ -2,11 +2,10 @@
 //! session's notices.
 //!
 //! It shows what the core publishes today, and that's less than the canvas:
-//! no cost per line, no description or source for a plugin, and no way to turn
-//! one on or off from here. A plugin turned off for overrunning is known only
-//! by its notice's wording.
+//! no description or source for a plugin, and the switches only report. A
+//! plugin the core turned off has a banner that can turn it on again.
 
-use super::{Pane, SettingsSheet, muted_line, section_heading, text_button};
+use super::{Pane, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
 use crate::assets::{Icon, UI_FONT};
 use crate::theme::Theme;
 use gpui::{
@@ -14,8 +13,8 @@ use gpui::{
     div, prelude::*, px,
 };
 use mudling_core::defaults;
-use mudling_core::plugin::luau::OVERRUNS_TO_TURN_OFF;
-use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
+use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDisabled};
+use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
 
 const SWITCH_WIDTH: Pixels = px(40.);
 const SWITCH_HEIGHT: Pixels = px(22.);
@@ -23,13 +22,9 @@ const SWITCH_KNOB: Pixels = px(16.);
 const SWITCH_NOTE: &str = "The switches show what's running. Changing them isn't here yet.";
 const NO_SESSION: &str = "Connect to a server to see its plugins.";
 const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins over the defaults.";
-/// How the core words the notice for a plugin it turned off.
-const TURNED_OFF: &str = " was turned off: ";
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
 /// Under this, a banner's buttons wrap below its text.
 const BANNER_TEXT_WIDTH: Pixels = px(220.);
-const TURN_ON_AGAIN_NOTE: &str = "Turning it on from here isn't ready yet. For now, restart \
-                                  MUDling to turn it on again.";
 
 // The banner spells the count out, as the canvas does.
 const _: () = assert!(OVERRUNS_TO_TURN_OFF == 3);
@@ -78,14 +73,24 @@ impl PluginRow {
         std::iter::once(built_in).chain(installed).collect()
     }
 
-    fn switched_on(&self, turned_off: &[&str]) -> bool {
-        self.on && !turned_off.contains(&self.id.as_str())
+    /// Whether it's running. The core's costs list what a connection runs;
+    /// before one has, this is how the session would run it.
+    fn switched_on(&self, costs: &[PluginCost], turned_off: &[PluginDisabled]) -> bool {
+        let running = match costs {
+            [] => self.on,
+            costs => costs.iter().any(|cost| cost.plugin == self.id),
+        };
+        running && !turned_off.iter().any(|off| off.plugin == self.id)
     }
-}
 
-/// The id in a notice saying a plugin was turned off.
-fn turned_off(notice: &str) -> Option<&str> {
-    notice.split_once(TURNED_OFF).map(|(plugin, _)| plugin)
+    /// What it costs a line, once sampled, after its version and license.
+    fn detail_with(&self, costs: &[PluginCost]) -> SharedString {
+        let sampled = costs.iter().find(|cost| cost.plugin == self.id);
+        match sampled.and_then(|cost| cost.per_line.as_ref()) {
+            Some(cost) => format!("{} · {:.1} µs a line", self.detail, cost.p99_us).into(),
+            None => self.detail.clone(),
+        }
+    }
 }
 
 fn layer_heading(layer: Layer) -> &'static str {
@@ -127,6 +132,7 @@ fn plugin_row(
     row: &PluginRow,
     switched_on: bool,
     overran: bool,
+    detail: SharedString,
     theme: &Theme,
 ) -> impl IntoElement + use<> {
     let state = match (switched_on, overran) {
@@ -140,10 +146,9 @@ fn plugin_row(
         .debug_selector(move || format!("plugin-{id}"))
         .role(Role::Label)
         .aria_value(format!(
-            "{}, {}: {state}. {}",
+            "{}, {}: {state}. {detail}",
             row.name,
             layer_badge(row.layer),
-            row.detail
         ))
         .flex()
         .items_center()
@@ -180,7 +185,7 @@ fn plugin_row(
                     div()
                         .text_size(px(13.))
                         .text_color(theme.text_muted)
-                        .child(row.detail.clone()),
+                        .child(detail),
                 ),
         )
         .child(
@@ -208,21 +213,24 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A notice's banner. One about a plugin turned off has the canvas's
-    /// words and its two buttons.
+    /// A notice's banner. One about a plugin turned off, in `off`, has the
+    /// canvas's words and its two buttons.
     fn notice_banner(
         &self,
         number: usize,
         notice: &str,
+        off: Option<&PluginDisabled>,
         pane: &mut Pane,
         theme: &Theme,
         cx: &mut Context<SettingsSheet>,
     ) -> Stateful<Div> {
         let open = self.details.as_deref() == Some(notice);
-        let (lead, rest) = match turned_off(notice) {
-            Some(plugin) => (
-                format!("{} was turned off.", self.display_name(plugin)),
-                OVERRAN,
+        let (lead, rest) = match off {
+            Some(off) => (
+                format!("{} was turned off.", self.display_name(off.plugin.as_str())),
+                match off.reason {
+                    DisabledReason::Overran(_) => OVERRAN,
+                },
             ),
             None => (notice.to_owned(), ""),
         };
@@ -237,7 +245,7 @@ impl SettingsSheet {
             .text_size(px(14.))
             .text_color(theme.text)
             .child(StyledText::new(text.clone()).with_highlights([(0..lead.len(), bold)]));
-        let buttons = turned_off(notice).map(|_| {
+        let buttons = off.map(|off| {
             let details = text_button(("notice-details", number), "Details", &pane.stop(cx), theme)
                 .aria_expanded(open)
                 .on_click(cx.listener({
@@ -250,13 +258,9 @@ impl SettingsSheet {
                 &pane.stop(cx),
                 theme,
             )
-            .aria_description(TURN_ON_AGAIN_NOTE)
             .on_click(cx.listener({
-                let notice = notice.to_owned();
-                move |sheet, _, _, cx| {
-                    sheet.details = Some(notice.clone());
-                    cx.notify();
-                }
+                let plugin = off.plugin.clone();
+                move |_, _, _, cx| cx.emit(SheetEvent::TurnOn(plugin.clone()))
             }));
             div()
                 .flex_none()
@@ -295,7 +299,7 @@ impl SettingsSheet {
             )
             .when(open, |banner| {
                 banner.child(
-                    muted_line(format!("{notice}. {TURN_ON_AGAIN_NOTE}"), theme)
+                    muted_line(format!("{notice}."), theme)
                         .mt_2()
                         .pb_0()
                         .text_size(px(13.)),
@@ -309,8 +313,14 @@ impl SettingsSheet {
         theme: &Theme,
         cx: &mut Context<SettingsSheet>,
     ) {
+        for (number, off) in self.turned_off.iter().enumerate() {
+            let notice = off.to_string();
+            let banner = self.notice_banner(number, &notice, Some(off), pane, theme, cx);
+            pane.row(banner);
+        }
+        let first = self.turned_off.len();
         for (number, notice) in self.notices.iter().enumerate() {
-            let banner = self.notice_banner(number, notice, pane, theme, cx);
+            let banner = self.notice_banner(first + number, notice, None, pane, theme, cx);
             pane.row(banner);
         }
         if self.plugins.is_empty() {
@@ -323,7 +333,6 @@ impl SettingsSheet {
         };
         pane.row(muted_line(scope, theme));
         pane.row(muted_line(SWITCH_NOTE, theme));
-        let off: Vec<&str> = self.notices.iter().filter_map(|n| turned_off(n)).collect();
         let mut card = div()
             .id("plugin-layers")
             .mt_3()
@@ -339,8 +348,9 @@ impl SettingsSheet {
             let rows = in_layer.into_iter().map(|row| {
                 plugin_row(
                     row,
-                    row.switched_on(&off),
-                    off.contains(&row.id.as_str()),
+                    row.switched_on(&self.costs, &self.turned_off),
+                    self.turned_off.iter().any(|off| off.plugin == row.id),
+                    row.detail_with(&self.costs),
                     theme,
                 )
             });
@@ -359,6 +369,8 @@ impl SettingsSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mudling_core::stats::Summary;
+    use std::time::Duration;
 
     fn plugin(toml: &'static str) -> Plugin {
         Plugin::from_files(move |file| match file {
@@ -392,12 +404,29 @@ mod tests {
     }
 
     #[test]
-    fn the_core_notice_names_the_plugin_it_turned_off() {
-        // The words of `Engine::hook_output`'s `PluginDisabled` arm.
-        assert_eq!(
-            turned_off("a-game was turned off: Overran(3)"),
-            Some("a-game")
+    fn a_switch_follows_what_a_connection_runs() {
+        let game = plugin(A_GAME);
+        let id = game.id().clone();
+        let row = &PluginRow::for_session(std::slice::from_ref(&game), &[], "a.example")[1];
+        let cost = |per_line| PluginCost {
+            plugin: id.clone(),
+            sampled_lines: 1,
+            per_line,
+        };
+        assert!(
+            !row.switched_on(&[], &[]),
+            "before a connection, the config"
         );
-        assert_eq!(turned_off("couldn't save the map: disk full"), None);
+        assert!(row.switched_on(&[cost(None)], &[]), "in the host, it runs");
+        let off = PluginDisabled {
+            plugin: id.clone(),
+            reason: DisabledReason::Overran(3),
+        };
+        assert!(!row.switched_on(&[cost(None)], &[off]));
+
+        assert_eq!(row.detail_with(&[cost(None)]), row.detail);
+        let summary = Summary::of(&[Duration::from_micros(2)]);
+        let shown = row.detail_with(&[cost(summary)]);
+        assert!(shown.ends_with("· 2.0 µs a line"), "{shown}");
     }
 }

@@ -12,9 +12,13 @@
 //! - **A move:** a `Room.Info` through the session, the map updated, its
 //!   rows queued for the writer and the stores written, walking a map up to
 //!   10,000 rooms and then wandering it.
+//! - **A sighting:** a mob arriving by `Room.AddPlayer` on that full map, with
+//!   500 aggressive kinds remembered, held to the line budget, since one can
+//!   come with any line.
 
 use crate::plugin_host::{PLUGIN_BUDGET_US, realistic_plugins};
-use mudling_core::persist::Timestamp;
+use mudling_core::map::Mark;
+use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::stats::Summary;
@@ -22,6 +26,7 @@ use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsSt
 use mudling_core::telnet::command::{GA, IAC};
 use mudling_core::telnet::{Bytes, gmcp};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +40,9 @@ const LINES_PER_PROMPT: usize = 4;
 const LINES_PER_FRAME: usize = 8;
 const GRID_SIDE: i64 = 100;
 const WANDER_MOVES: i64 = 5_000;
+const SIGHTINGS: i64 = 20_000;
+/// Kinds of aggressive mob a long-played map has learned.
+const AGGRESSIVE_MARKS: i64 = 500;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -46,6 +54,7 @@ pub struct Report {
     pub moves: usize,
     pub mapping: Summary,
     pub wandering: Summary,
+    pub sighting: Summary,
     pub line_budget_us: f64,
     pub plugin_budget_us: f64,
     pub move_budget_us: f64,
@@ -65,13 +74,14 @@ pub fn run(source: &[String]) -> Report {
     let whole_line = measure_lines(&reads);
     let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
-    let (mapping, wandering) = measure_moves();
+    let (mapping, wandering, sighting) = measure_moves();
     Report {
         lines: count,
         within_budget: whole_line.p99_us <= LINE_BUDGET_US
             && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
             && mapping.p99_us <= MOVE_BUDGET_US
-            && wandering.p99_us <= MOVE_BUDGET_US,
+            && wandering.p99_us <= MOVE_BUDGET_US
+            && sighting.p99_us <= LINE_BUDGET_US,
         whole_line,
         without_game_plugin,
         with_game_plugin,
@@ -79,6 +89,7 @@ pub fn run(source: &[String]) -> Report {
         moves: (GRID_SIDE * GRID_SIDE + WANDER_MOVES) as usize,
         mapping,
         wandering,
+        sighting,
         line_budget_us: LINE_BUDGET_US,
         plugin_budget_us: PLUGIN_BUDGET_US,
         move_budget_us: MOVE_BUDGET_US,
@@ -123,6 +134,12 @@ pub fn print(report: &Report) {
                 && report.wandering.p99_us <= report.move_budget_us
         )
     );
+    println!(
+        "  a sighting on that map: {}; budget p99 ≤ {} µs: {}",
+        summary(&report.sighting),
+        report.line_budget_us,
+        verdict(report.sighting.p99_us <= report.line_budget_us)
+    );
 }
 
 /// One line as the server sends it: every few, with a `Char.Vitals` and a
@@ -152,7 +169,13 @@ struct Bench {
 
 impl Bench {
     fn new(with_game: bool) -> Bench {
+        Bench::remembering(with_game, 0)
+    }
+
+    /// A session whose saved map remembers `marks` kinds of aggressive mob.
+    fn remembering(with_game: bool, marks: i64) -> Bench {
         let folder = tempfile::tempdir().expect("a temporary folder");
+        save_marks(folder.path(), marks);
         let hub = Arc::new(StoreHub::new(|| {}));
         hub.subscribe::<TerminalState>();
         hub.subscribe::<VitalsState>();
@@ -190,7 +213,10 @@ impl Bench {
     /// One read, through to the stores. Its bytes are made before the clock
     /// starts, as the socket read makes them.
     fn read(&mut self, bytes: Bytes) -> Duration {
-        let now = Timestamp(0);
+        self.read_at(bytes, Timestamp(0))
+    }
+
+    fn read_at(&mut self, bytes: Bytes, now: Timestamp) -> Duration {
         let started = Instant::now();
         self.engine.receive(bytes, now).expect("the stream is good");
         self.engine.settle(now);
@@ -201,6 +227,26 @@ impl Bench {
     fn finish(self) {
         self.engine.finish().expect("every write reaches the disk");
     }
+}
+
+/// `marks` aggressive kinds in the bench server's database, among them one
+/// that [`mob_arrives`] names.
+fn save_marks(folder: &Path, marks: i64) {
+    let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).expect("the database opens");
+    let writer = database.writer().expect("the writer starts");
+    let mut batch = Batch::new();
+    let names = (1..marks)
+        .map(|n| format!("kind{n}"))
+        .chain(["crow".to_owned()]);
+    for name in names.take(marks as usize) {
+        batch.upsert(MobMark {
+            name,
+            mark: Mark::Aggressive.name().to_owned(),
+            updated: Timestamp(0),
+        });
+    }
+    writer.submit(batch).expect("the writer runs");
+    writer.flush().expect("the marks reach the disk");
 }
 
 fn measure_lines(reads: &[Bytes]) -> Summary {
@@ -287,8 +333,8 @@ fn serpentine() -> Vec<(i64, i64, &'static str)> {
     walk
 }
 
-fn measure_moves() -> (Summary, Summary) {
-    let mut bench = Bench::new(true);
+fn measure_moves() -> (Summary, Summary, Summary) {
+    let mut bench = Bench::remembering(true, AGGRESSIVE_MARKS);
     let walk = serpentine();
     let mut mapping = Vec::with_capacity(walk.len());
     for (x, y, direction) in &walk {
@@ -309,9 +355,34 @@ fn measure_moves() -> (Summary, Summary) {
         wandering.push(bench.read(room_info(x, y)));
         bench.hub.drain();
     }
+    // A mob walks in, on the full map, each at a later time than the last.
+    let mut sightings = Vec::with_capacity(SIGHTINGS as usize);
+    for arrival in 1..=SIGHTINGS {
+        let frame = mob_arrives(arrival);
+        sightings.push(bench.read_at(frame, Timestamp(arrival)));
+        if arrival % LINES_PER_FRAME as i64 == 0 {
+            bench.hub.drain();
+        }
+    }
     bench.finish();
     (
         Summary::of(&mapping).expect("moves were timed"),
         Summary::of(&wandering).expect("moves were timed"),
+        Summary::of(&sightings).expect("sightings were timed"),
     )
+}
+
+/// A `Room.AddPlayer` naming one of a room's few regular mobs.
+fn mob_arrives(arrival: i64) -> Bytes {
+    let (id, mob) = (
+        arrival % 4,
+        ["wolf", "bear", "rat", "crow"][arrival as usize % 4],
+    );
+    let mut bytes = Vec::new();
+    gmcp::encode(
+        "Room.AddPlayer",
+        &format!(r#"{{"{id}": {{"name": "{id}", "fullname": "A grey {mob} stands here."}}}}"#),
+        &mut bytes,
+    );
+    bytes.into()
 }
