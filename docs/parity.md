@@ -60,8 +60,14 @@ empty. All 95 are used.
 
 The final maps match in every field the checker compares (exits, links,
 positions, buildings, doorways, maze and tangle marks, features, sightings,
-environment) except two descriptions, below. Aggressive mobs match. Identifies match:
-every reading MUDling keeps is one the prototype has.
+environment) except two descriptions, below. Aggressive mobs match. Every
+identify reading MUDling keeps is one the prototype has, though it keeps only
+the latest for an item's words, below.
+
+Everything is read from the final database and the final baseline, nothing
+from partway through. Characters' `score`, skills, affects and worn items are
+the plugin's own stores, as their stats rows. The typed `skills`, `affects`
+and `worn` tables have no rows yet: filling them is Phase 5's.
 
 Room ids don't match, and aren't compared: the prototype spends two on Lost in
 the Dark Woods before it works out that's a maze, where the plugin declares
@@ -69,7 +75,7 @@ it. The checker pairs rooms by identity, in order of id.
 
 ## Differences
 
-All 245 are intended. "Prototype" means its code on these logs.
+All 248 are intended. "Prototype" means its code on these logs.
 
 | Kind | Count | Sample | Why |
 | --- | --- | --- | --- |
@@ -80,8 +86,20 @@ All 245 are intended. "Prototype" means its code on these logs.
 | `character.title` | 2 | `the donation room for players level 1 through 10.  Items in` / `the Violent Missionary`; none / `The Lost` | MUDling is right. The first is room text the prototype takes for `score`: "You are in the donation room…". The second is a title with a capital. |
 | `gear.measured` | 38 | a braying mule tattoo, a bright ball of light, a copper bracelet | Not built yet. The prototype learns what an item does from Char.Status before and after wearing it. Hooks don't see Char.Status; this belongs to Phase 5's gear work. |
 | `gear.copies` | 1 | 78 copies by game id / none | Not built yet. Phase 5 fills typed `GearCopy` records; hooks write generic store values today. |
+| `gear.identify-earlier-reading` | 2 | `amulet mushroom`, `mask Tiamat`: an older reading / only the latest kept | Not built yet. The prototype keeps a reading per copy; hooks write one per item's words, so a second copy's replaces the first. Phase 5 fills typed `Identification` records. |
 | `gear.slot` | 1 | a Golden Unicorn Horn: `wield` / `offhand` | MUDling is right: its `eq` table says `<held in offhand>`. The prototype never read that table and took the slot from a wear message. |
+| `character.item-slot` | 1 | the same horn: `wield` / `offhand` | The same miss, in the prototype's per-character `itemSlots`. MUDling keeps where an item goes once per server, in `gear`, as the prototype's gear database also does: the other 102 of 103 entries agree with it. |
 | `map.description` | 2 | `A waiting room ` (The Orphanage), `Through the woods ` (Paradise Point): empty / the room's text | MUDling is right. Avatar's Room.Info gives these names a trailing space, and the prototype compares them with trimmed lines. |
+
+Not compared, on purpose:
+
+| Field | Why |
+| --- | --- |
+| A reading's `details` (weight, value, damage) and `name` | The plugin keeps neither: `details` is Phase 5's, and the name goes in `gear.keywords`. |
+| Gear sets, room notes, gear and important mob marks | Only the player makes these, and the logs hold no such edits. |
+| `updated` and sighting times | The replay's clock isn't the session's. |
+| The map's next id and island count | Bookkeeping; ids aren't compared, and positions show any effect of islands. |
+| Skills' `practice.sessions`, `practice.read`, `slist.read` and `score.read` | The plugin's own counts, with no prototype field. |
 
 The differences these replaced were fixed, not excused:
 
@@ -92,6 +110,7 @@ The differences these replaced were fixed, not excused:
 | 29 rooms moved, 4 rooms in a different building | `LiveMap::load` now rebuilds buildings, as the prototype does on every load. |
 | One "It is pitch black..." room | Dark-room text after a custom prompt starts with a space. |
 | 2 weapons with no slot | `examine`'s "wielded as a weapon" names a slot now. |
+| Each character's worn gear overwriting the last's, so a spell identify read another character's gear | The plugin writes `eq` to a `worn` store, which is the character's own. |
 | 17 items with no keywords | The plugin ties a spell identify to the item at hand, by the prototype's rule. |
 
 ## Questions settled

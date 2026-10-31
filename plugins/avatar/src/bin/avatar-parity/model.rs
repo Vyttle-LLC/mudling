@@ -54,6 +54,9 @@ pub struct World {
     pub characters: BTreeMap<String, BTreeMap<String, String>>,
     /// `slot.<item>` and `keywords.<item>`.
     pub gear: BTreeMap<String, String>,
+    /// Where each character last saw an item worn; only the prototype keeps
+    /// this per character. By character, then `<item>`.
+    pub item_slots: BTreeMap<String, BTreeMap<String, String>>,
     /// Every reading known, by the game's words for the item.
     pub identifies: BTreeMap<String, Vec<BTreeMap<String, String>>>,
     /// Items with a measured effect; only the prototype has these.
@@ -244,8 +247,12 @@ pub fn prototype_world(world: &Value, gear: &Value) -> World {
     }
     out.aggressive = set_of_keys(&world["mobs"]["aggressiveNouns"]);
     for (name, record) in pairs(&world["characters"]) {
-        out.characters
-            .insert(name.to_lowercase(), prototype_character(&record));
+        let name = name.to_lowercase();
+        let slots = pairs(&record["itemSlots"]).into_iter();
+        let slots =
+            slots.filter_map(|(item, slot)| Some((plain_item(&item), short_slot(slot.as_str()?))));
+        out.item_slots.insert(name.clone(), slots.collect());
+        out.characters.insert(name, prototype_character(&record));
     }
     let keep = |out: &mut World, reading: &Value| {
         if let Some(words) = reading["keywords"].as_str() {

@@ -233,6 +233,19 @@ fn compare_people(prototype: &World, mudling: &World, out: &mut Differences) {
             out,
         );
     }
+    // MUDling keeps where an item goes once per server.
+    for (name, slots) in &prototype.item_slots {
+        for (item, slot) in slots {
+            let shared = mudling.gear.get(&format!("slot.{item}"));
+            if shared != Some(slot) {
+                out.add(
+                    "character.item-slot",
+                    format!("{name} {item}"),
+                    format!("{slot} / {shared:?}"),
+                );
+            }
+        }
+    }
 }
 
 fn compare_gear(prototype: &World, mudling: &World, out: &mut Differences) {
@@ -266,6 +279,17 @@ fn compare_gear(prototype: &World, mudling: &World, out: &mut Differences) {
                             "gear.identify-reading",
                             words.clone(),
                             format!("{ours:?} / {reading:?}"),
+                        );
+                    }
+                }
+                let mut seen = Vec::new();
+                for reading in ours {
+                    if !theirs.contains(reading) && !seen.contains(&reading) {
+                        seen.push(reading);
+                        out.add(
+                            "gear.identify-earlier-reading",
+                            words.clone(),
+                            format!("{reading:?} / only the latest is kept"),
                         );
                     }
                 }
