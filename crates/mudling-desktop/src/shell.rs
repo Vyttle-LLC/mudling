@@ -10,18 +10,19 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 use crate::assets::UI_FONT;
-use crate::chat::{COLUMN_PADDING, COLUMN_WIDTH, Chat};
+use crate::chat::{COLUMN_PADDING, Chat, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
+use crate::settings::{PluginRow, SavedSettings, SettingsSheet, SheetEvent};
 use crate::status::{StatusLines, lines_for};
-use crate::theme::Theme;
-use crate::title_bar::{self, FocusPreviousControl, SessionLabel, TitleBar};
+use crate::theme::{Appearance, Theme};
+use crate::title_bar::{self, FocusPreviousControl, OpenSettings, SessionLabel, TitleBar};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyView, App, Context, Entity, Focusable, KeyBinding, Subscription, Task, Window, actions, div,
-    prelude::*,
+    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Subscription, Task, Window,
+    actions, deferred, div, prelude::*,
 };
 use mudling_core::completion::Completion;
 use mudling_core::plugin::PluginId;
@@ -33,6 +34,9 @@ use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
 
 actions!(shell, [ToggleLeftPanel, ToggleRightPanel, FocusCommandBar]);
+
+/// Above everything else that floats.
+const SHEET_PRIORITY: usize = 4;
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -48,6 +52,8 @@ pub struct Game {
     /// A recording's throwaway data folder, or `None` for a real server.
     pub replay_folder: Option<TempDir>,
     pub enabled: Vec<PluginId>,
+    /// What Settings › Plugins lists.
+    pub plugins: Vec<PluginRow>,
 }
 
 impl Game {
@@ -74,7 +80,13 @@ pub struct Shell {
     input: Entity<CommandInput>,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
-    _subscriptions: [Subscription; 3],
+    settings: Entity<SettingsSheet>,
+    settings_open: bool,
+    /// Where focus goes back to when the sheet closes.
+    focus_before_settings: Option<FocusHandle>,
+    /// Keeps the player's choices, if there's a folder to keep them in.
+    saved_settings: Option<SavedSettings>,
+    _subscriptions: [Subscription; 4],
     _woken: Task<()>,
 }
 
@@ -101,9 +113,25 @@ impl Shell {
             shell.on_typing(event, window, cx);
         });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            let choice = cx.global::<Theme>().choice;
+            cx.set_global(Theme::chosen(choice, window.appearance()));
             cx.notify();
         });
+        let plugins = game.as_ref().map(|game| game.plugins.clone());
+        let settings = cx.new(|cx| {
+            let mut sheet = SettingsSheet::new(cx);
+            sheet.show_plugins(plugins.unwrap_or_default(), cx);
+            sheet
+        });
+        let sheet_events =
+            cx.subscribe_in(
+                &settings,
+                window,
+                |shell, _, event, window, cx| match event {
+                    SheetEvent::Closed => shell.close_settings(window, cx),
+                    SheetEvent::Chose(choice) => shell.apply_choice(*choice, window, cx),
+                },
+            );
         let quitting = cx.on_app_quit(|shell, cx| {
             let saved = shell.leave(cx);
             async move {
@@ -129,11 +157,57 @@ impl Shell {
             input,
             left_dock,
             right_dock,
-            _subscriptions: [typing, appearance, quitting],
+            settings,
+            settings_open: false,
+            focus_before_settings: None,
+            saved_settings: None,
+            _subscriptions: [typing, appearance, quitting, sheet_events],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
         shell.show_status(cx);
         shell
+    }
+
+    /// Wears what the player kept, and keeps what they choose from now on.
+    pub fn restore_settings(
+        &mut self,
+        saved: SavedSettings,
+        choice: Appearance,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        cx.set_global(Theme::chosen(choice, window.appearance()));
+        self.saved_settings = Some(saved);
+    }
+
+    /// Takes effect at once, in every view.
+    fn apply_choice(&self, choice: Appearance, window: &mut Window, cx: &mut Context<Shell>) {
+        cx.set_global(Theme::chosen(choice, window.appearance()));
+        window.refresh();
+        if let Some(saved) = &self.saved_settings {
+            saved.save(choice);
+        }
+    }
+
+    pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.settings_open {
+            return;
+        }
+        self.title_bar
+            .update(cx, |bar, cx| bar.dismiss_menu(window, cx));
+        self.focus_before_settings = window.focused(cx);
+        self.settings_open = true;
+        self.settings
+            .update(cx, |sheet, cx| sheet.opened(window, cx));
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.settings_open = false;
+        if let Some(focused) = self.focus_before_settings.take() {
+            window.focus(&focused, cx);
+        }
+        cx.notify();
     }
 
     /// Each wake is one batch waiting, and no other wake comes until a frame
@@ -184,6 +258,7 @@ impl Shell {
     fn show_status(&mut self, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
+        self.show_problems(settings.server.as_deref(), &settings.notices, cx);
         let lines = lines_for(settings, &game.enabled);
         // The core publishes no latency yet.
         let latency = None;
@@ -194,6 +269,13 @@ impl Shell {
         self.hud.update(cx, |hud, cx| {
             hud.show(self.copies.vitals.value(), cx);
         });
+    }
+
+    fn show_problems(&self, server: Option<&str>, notices: &[String], cx: &mut Context<Shell>) {
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_session(server, notices, cx));
+        self.title_bar
+            .update(cx, |bar, cx| bar.show_problems(notices.len(), cx));
     }
 
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
@@ -265,6 +347,16 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub fn settings_sheet(&self) -> Entity<SettingsSheet> {
+        self.settings.clone()
+    }
+
+    #[cfg(test)]
+    pub fn show_sample_notices(&self, notices: &[String], cx: &mut Context<Shell>) {
+        self.show_problems(Some("mud.example"), notices, cx);
+    }
+
+    #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
         self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
     }
@@ -320,7 +412,9 @@ impl Shell {
             return None;
         }
         let game = self.game.take();
+        let saved_settings = self.saved_settings.take();
         Some(cx.background_spawn(async move {
+            drop(saved_settings);
             let Some(game) = game else { return };
             if let Err(error) = game.session.quit().wait() {
                 eprintln!("couldn't finish saving the session: {error}");
@@ -339,6 +433,7 @@ impl Render for Shell {
             cx,
         );
         let theme = *cx.global::<Theme>();
+        let column_width = column_width(cx);
         let command_bar = div()
             .debug_selector(|| "command-bar".to_owned())
             .rounded_xl()
@@ -361,7 +456,7 @@ impl Render for Shell {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .max_w(COLUMN_WIDTH)
+                    .max_w(column_width)
                     .px(COLUMN_PADDING)
                     .pt_4()
                     .child(self.chat.clone()),
@@ -369,7 +464,7 @@ impl Render for Shell {
             .child(
                 div()
                     .w_full()
-                    .max_w(COLUMN_WIDTH)
+                    .max_w(column_width)
                     .px_4()
                     .pt_3()
                     .pb_4()
@@ -390,7 +485,13 @@ impl Render for Shell {
                 shell.toggle_dock(Side::Right, cx);
             }))
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
+                shell.settings_open = false;
+                shell.focus_before_settings = None;
                 window.focus(&shell.input.focus_handle(cx), cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
+                shell.open_settings(window, cx);
             }))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
             .capture_any_mouse_down(|event, window, cx| {
@@ -409,11 +510,14 @@ impl Render for Shell {
                     .child(column)
                     .child(self.right_dock.clone()),
             )
+            .when(self.settings_open, |shell_view| {
+                shell_view.child(deferred(self.settings.clone()).with_priority(SHEET_PRIORITY))
+            })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::chat::{LINE_HEIGHT, min_column_width};
     use futures::channel::mpsc::{UnboundedSender, unbounded};
@@ -442,6 +546,7 @@ mod tests {
             session,
             replay_folder: None,
             enabled: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 
@@ -722,6 +827,18 @@ mod tests {
             chat.read_with(cx, |chat, _| chat.follows_newest()),
             "the newest line stays in view as the bar grows"
         );
+    }
+
+    /// A window on no session, with every key bound.
+    pub fn window_with_keys(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_waker, woken) = unbounded();
+        let opened = cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx));
+        opened.1.run_until_parked();
+        opened
     }
 
     /// A window on no session, with panels that open at once.

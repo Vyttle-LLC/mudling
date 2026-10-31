@@ -1,7 +1,7 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input, the live region and the title bar. Reading another app's
+//! chat, the input, the live region, the title bar and the settings sheet. Reading another app's
 //! tree with `AXUIElement` needs the Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
@@ -143,6 +143,20 @@ const PROBE_LINES: [&str; 2] = [
      wide the window is, and to be read as one line all the same by a screen reader",
 ];
 
+/// What a screen reader must find in the open settings sheet.
+const SETTINGS_CONTROLS: [&str; 10] = [
+    "Servers & characters",
+    "Plugins",
+    "Triggers & aliases",
+    "Appearance",
+    "Shortcuts",
+    "Data & sync",
+    "Vault",
+    "Close settings",
+    "Theme",
+    "Larger chat text",
+];
+
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
     "Session: Recording",
@@ -250,6 +264,45 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: accesskit_focus
                 .as_ref()
                 .is_some_and(|(role, label)| role == "TextInput" && label == "Command"),
+            detail: format!("{accesskit_focus:?}"),
+        });
+
+        let opened = cx.update(|cx| {
+            let window = cx.windows().into_iter().next()?;
+            window
+                .update(cx, |_, window, cx| {
+                    shell.update(cx, |shell, cx| shell.open_settings(window, cx));
+                })
+                .ok()
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing: Vec<_> = SETTINGS_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the settings sheet names its sections and controls",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        let accesskit_tree = cx
+            .update(|cx| {
+                cx.windows().first().and_then(|w| {
+                    w.update(cx, |_, window, _| window.debug_a11y_tree_json())
+                        .ok()
+                })
+            })
+            .flatten();
+        let accesskit_focus = accesskit_tree.as_deref().and_then(focused_accesskit_node);
+        checks.push(Check {
+            name: "AccessKit tree moves focus to a section tab when settings opens",
+            passed: accesskit_focus.as_ref().is_some_and(|(role, label)| {
+                role == "Tab" && SETTINGS_CONTROLS.contains(&label.as_str())
+            }),
             detail: format!("{accesskit_focus:?}"),
         });
 

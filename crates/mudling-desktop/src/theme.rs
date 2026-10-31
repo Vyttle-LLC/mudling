@@ -1,8 +1,30 @@
-//! The Runestone tokens: every color the window draws, for each appearance.
-//! Values come from the MUDling brand guidelines and the design canvas.
+//! The Runestone tokens: every color the window draws, for each appearance,
+//! and what the player chose in Settings › Appearance: the theme and the chat
+//! font. Values come from the MUDling brand guidelines and the design canvas.
 
-use gpui::{BoxShadow, Global, Hsla, WindowAppearance, point, px, rgb, rgba};
+use gpui::{BoxShadow, Global, Hsla, Pixels, WindowAppearance, point, px, rgb, rgba};
 use mudling_core::Color;
+use serde::{Deserialize, Serialize};
+
+/// The monospaced faces offered for the chat, the platform's default first.
+/// Brand type never styles game text, so the bundled faces aren't here.
+#[cfg(target_os = "macos")]
+pub const CHAT_FONTS: [&str; 4] = ["Menlo", "Monaco", "Courier New", "Andale Mono"];
+#[cfg(target_os = "windows")]
+pub const CHAT_FONTS: [&str; 4] = ["Consolas", "Cascadia Mono", "Courier New", "Lucida Console"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const CHAT_FONTS: [&str; 4] = [
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+    "Ubuntu Mono",
+];
+
+pub const SMALLEST_CHAT_SIZE: u8 = 11;
+pub const LARGEST_CHAT_SIZE: u8 = 22;
+const DEFAULT_CHAT_SIZE: u8 = 14;
+/// A chat row's height for its text: 20 px at 14 px, the default.
+const CHAT_LINE_SPACING: f32 = 10. / 7.;
 
 const NIGHT: u32 = 0x111A16;
 const PARCHMENT: u32 = 0xF8F7F2;
@@ -23,8 +45,66 @@ const ANSI_ON_PARCHMENT: [u32; 16] = [
     0x6E7772, 0xC8323F, 0x2F7D3B, 0x8A6A00, 0x2B63C4, 0x9A3FB0, 0x1C8A94, 0x111A16,
 ];
 
+/// Which appearance the window wears.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// What the player chose in Settings › Appearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Appearance {
+    pub theme: ThemeChoice,
+    pub font: &'static str,
+    pub font_size: u8,
+}
+
+impl Default for Appearance {
+    fn default() -> Appearance {
+        Appearance {
+            theme: ThemeChoice::default(),
+            font: CHAT_FONTS[0],
+            font_size: DEFAULT_CHAT_SIZE,
+        }
+    }
+}
+
+impl Appearance {
+    pub fn with_font_size(self, font_size: u8) -> Appearance {
+        Appearance {
+            font_size: font_size.clamp(SMALLEST_CHAT_SIZE, LARGEST_CHAT_SIZE),
+            ..self
+        }
+    }
+
+    /// The offered face called `name`, or the default for one this platform
+    /// doesn't offer.
+    pub fn with_font_named(self, name: &str) -> Appearance {
+        let font = CHAT_FONTS.into_iter().find(|font| *font == name);
+        Appearance {
+            font: font.unwrap_or(CHAT_FONTS[0]),
+            ..self
+        }
+    }
+
+    pub fn chat_size(&self) -> Pixels {
+        px(self.font_size as f32)
+    }
+
+    pub fn chat_line_height(&self) -> Pixels {
+        (self.chat_size() * CHAT_LINE_SPACING).round()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Theme {
+    /// What the player chose, kept here so everything that draws reads it
+    /// from one place.
+    pub choice: Appearance,
     pub background: Hsla,
     /// Panels, a step up from the background.
     pub surface: Hsla,
@@ -52,6 +132,13 @@ pub struct Theme {
     /// Text and icons on a filled accent.
     pub on_accent: Hsla,
     pub placeholder: Hsla,
+    pub warning: Hsla,
+    /// Behind a warning's text.
+    pub warning_ground: Hsla,
+    /// Text on a filled warning.
+    pub on_warning: Hsla,
+    /// Dims the window behind a sheet.
+    pub scrim: Hsla,
     pub hud_hp: Hsla,
     pub hud_mana: Hsla,
     pub hud_moves: Hsla,
@@ -62,9 +149,24 @@ pub struct Theme {
 impl Global for Theme {}
 
 impl Theme {
+    /// The theme for what the player chose, on an OS that's in `os`.
+    pub fn chosen(choice: Appearance, os: WindowAppearance) -> Theme {
+        let appearance = match choice.theme {
+            ThemeChoice::System => os,
+            ThemeChoice::Light => WindowAppearance::Light,
+            ThemeChoice::Dark => WindowAppearance::Dark,
+        };
+        Theme {
+            choice,
+            ..Theme::for_appearance(appearance)
+        }
+    }
+
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
+        let choice = Appearance::default();
         match appearance {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme {
+                choice,
                 background: rgb(NIGHT).into(),
                 surface: rgb(0x151E1B).into(),
                 surface_raised: rgb(0x1B2620).into(),
@@ -82,6 +184,10 @@ impl Theme {
                 accent_hover: rgb(MOSS_BRIGHT).into(),
                 on_accent: rgb(NIGHT).into(),
                 placeholder: rgb(0x8A928D).into(),
+                warning: rgb(0xE5C04F).into(),
+                warning_ground: rgba(0xE5C04F14).into(),
+                on_warning: rgb(NIGHT).into(),
+                scrim: rgba(0x0A100DB8).into(),
                 hud_hp: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_mana: rgb(ANSI_ON_NIGHT[12]).into(),
                 hud_moves: rgb(0x4FBF87).into(),
@@ -89,6 +195,7 @@ impl Theme {
                 ansi: ANSI_ON_NIGHT,
             },
             WindowAppearance::Light | WindowAppearance::VibrantLight => Theme {
+                choice,
                 background: rgb(PARCHMENT).into(),
                 surface: rgb(0xF1EFE8).into(),
                 surface_raised: rgb(0xFFFFFF).into(),
@@ -106,6 +213,10 @@ impl Theme {
                 accent_hover: rgb(MOSS_DIM).into(),
                 on_accent: rgb(PARCHMENT).into(),
                 placeholder: rgb(0x636C67).into(),
+                warning: rgb(0x7A5A0B).into(),
+                warning_ground: rgba(0x7A5A0B14).into(),
+                on_warning: rgb(PARCHMENT).into(),
+                scrim: rgba(0x333C3973).into(),
                 hud_hp: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_mana: rgb(ANSI_ON_PARCHMENT[12]).into(),
                 hud_moves: rgb(0x1F6B45).into(),
@@ -178,6 +289,7 @@ mod tests {
                     theme.text_muted,
                     theme.accent,
                     theme.placeholder,
+                    theme.warning,
                 ] {
                     assert!(
                         contrast(text, ground) >= 4.5,
@@ -186,7 +298,40 @@ mod tests {
                 }
             }
             assert!(contrast(theme.on_accent, theme.accent) >= 4.5);
+            assert!(contrast(theme.on_warning, theme.warning) >= 4.5);
         }
+    }
+
+    #[test]
+    fn a_held_theme_ignores_the_os_and_system_follows_it() {
+        let dark_on = |theme: ThemeChoice, os| {
+            let choice = Appearance {
+                theme,
+                ..Appearance::default()
+            };
+            Theme::chosen(choice, os).background
+                == Theme::for_appearance(WindowAppearance::Dark).background
+        };
+        assert!(dark_on(ThemeChoice::Dark, WindowAppearance::Light));
+        assert!(!dark_on(ThemeChoice::Light, WindowAppearance::Dark));
+        assert!(dark_on(ThemeChoice::System, WindowAppearance::VibrantDark));
+        assert!(!dark_on(ThemeChoice::System, WindowAppearance::Light));
+    }
+
+    #[test]
+    fn the_row_height_follows_the_chat_size_and_the_size_stays_in_range() {
+        let chosen = Appearance::default();
+        assert_eq!(chosen.chat_line_height(), px(20.));
+        assert_eq!(chosen.with_font_size(21).chat_line_height(), px(30.));
+        assert_eq!(chosen.with_font_size(200).font_size, LARGEST_CHAT_SIZE);
+        assert_eq!(chosen.with_font_size(1).font_size, SMALLEST_CHAT_SIZE);
+    }
+
+    #[test]
+    fn a_face_this_platform_does_not_offer_falls_back_to_the_default() {
+        let chosen = Appearance::default();
+        assert_eq!(chosen.with_font_named(CHAT_FONTS[2]).font, CHAT_FONTS[2]);
+        assert_eq!(chosen.with_font_named("No Such Face").font, CHAT_FONTS[0]);
     }
 
     #[test]

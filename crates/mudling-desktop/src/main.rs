@@ -3,8 +3,8 @@
 //! ```text
 //! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
-//!                 [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>]]
-//!                 [--ax-check]
+//!                 [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>]
+//!                 [--settings-open]] [--ax-check]
 //! ```
 //!
 //! `--host` and `--port` connect to a server. `--plugin` installs a plugin
@@ -14,8 +14,9 @@
 //! A replay runs the same window through `Session::replay`: 100,000 lines of
 //! history, then new lines at `--rate` (50 a second by default; 0 turns it
 //! off), with its data in a throwaway folder. `--measure` records frame times
-//! and writes a JSON report (see `measure`). `--ax-check` (macOS) checks the
-//! accessibility tree and exits (see `macos`).
+//! and writes a JSON report (see `measure`); `--settings-open` measures it with
+//! the settings sheet open. `--ax-check` (macOS) checks the accessibility tree
+//! and exits (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
@@ -37,6 +38,7 @@ mod input;
 mod macos;
 mod measure;
 mod motion;
+mod settings;
 mod shell;
 mod status;
 mod stream;
@@ -54,11 +56,13 @@ use gpui::{
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
+use settings::{PluginRow, SavedSettings};
 use shell::{Game, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use theme::Appearance;
 
 const SCROLLBACK_LINES: usize = 100_000;
 /// A replay has no server; its data folder holds this one's database.
@@ -68,7 +72,7 @@ const REPLAY_HOST: &str = "replay";
 const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--rate <lines/s>] \
-                     [--measure [--seconds <n>] [--report <path>]] [--ax-check]";
+                     [--measure [--seconds <n>] [--report <path>] [--settings-open]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -85,7 +89,7 @@ struct Options {
     measured_run: bool,
     stream_for: Duration,
     report: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    settings_open: bool,
     ax_check: bool,
 }
 
@@ -129,6 +133,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let kept_settings = keep_settings(&options);
     let feed = feed.map(|mut feed| {
         let history = stream::next_reads(&mut feed, SCROLLBACK_LINES as u64);
         (feed, history)
@@ -143,10 +148,7 @@ fn main() -> ExitCode {
     application.run(move |cx: &mut App| {
         assets::load_fonts(cx);
         motion::follow_os(cx);
-        input::bind_keys(cx);
-        shell::bind_keys(cx);
-        title_bar::bind_keys(cx);
-        cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
+        bind_keys(cx);
 
         let bounds = Bounds::centered(None, size(px(1300.), px(800.)), cx);
         let options_for_window = WindowOptions {
@@ -167,7 +169,13 @@ fn main() -> ExitCode {
             ..WindowOptions::default()
         };
         let window = match cx.open_window(options_for_window, |window, cx| {
-            cx.new(|cx| Shell::new(game, woken, window, cx))
+            cx.new(|cx| {
+                let mut shell = Shell::new(game, woken, window, cx);
+                if let Some((saved, choice)) = kept_settings {
+                    shell.restore_settings(saved, choice, window, cx);
+                }
+                shell
+            })
         }) {
             Ok(window) => window,
             Err(error) => {
@@ -196,6 +204,11 @@ fn main() -> ExitCode {
             #[cfg(target_os = "macos")]
             _ if options.ax_check => macos::run_ax_check(shell, cx),
             Some(feed) if options.measured_run => {
+                if options.settings_open {
+                    window
+                        .update(cx, |shell, window, cx| shell.open_settings(window, cx))
+                        .expect("the measured window is open");
+                }
                 measure::drive(
                     window.into(),
                     shell,
@@ -213,6 +226,29 @@ fn main() -> ExitCode {
         }
     });
     ExitCode::SUCCESS
+}
+
+/// Every shortcut. `settings::shortcuts` lists them for the player.
+pub(crate) fn bind_keys(cx: &mut App) {
+    input::bind_keys(cx);
+    shell::bind_keys(cx);
+    title_bar::bind_keys(cx);
+    settings::bind_keys(cx);
+    cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
+}
+
+/// Opens what keeps the player's settings. Measured runs and checks leave
+/// them alone, so their results don't depend on the machine's choices. Without
+/// a folder the app runs on the defaults.
+fn keep_settings(options: &Options) -> Option<(SavedSettings, Appearance)> {
+    if options.measured_run || options.ax_check {
+        return None;
+    }
+    let opened = data_folder(options)
+        .and_then(|folder| SavedSettings::open(&folder).map_err(|error| error.to_string()));
+    opened
+        .inspect_err(|error| eprintln!("settings won't be kept: {error}"))
+        .ok()
 }
 
 /// Ends the session, then the app, without holding up the UI thread.
@@ -258,6 +294,7 @@ fn open_game(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
+    let plugin_rows = PluginRow::for_session(&plugins, &enabled, host);
     let config = SessionConfig {
         plugins,
         enabled: enabled.clone(),
@@ -270,6 +307,7 @@ fn open_game(
         session,
         replay_folder,
         enabled,
+        plugins: plugin_rows,
     }))
 }
 
@@ -310,6 +348,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         measured_run: false,
         stream_for: Duration::from_secs(20),
         report: PathBuf::from("reports/frame-report.json"),
+        settings_open: false,
         ax_check: false,
     };
     let mut args = args.iter();
@@ -336,6 +375,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 )
             }
             "--report" => options.report = PathBuf::from(value()?),
+            "--settings-open" => options.settings_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,
