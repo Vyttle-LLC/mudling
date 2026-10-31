@@ -207,6 +207,12 @@ pub enum DisabledReason {
     Overran(u32),
 }
 
+impl fmt::Display for PluginDisabled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} was turned off: {}", self.plugin, self.reason)
+    }
+}
+
 impl fmt::Display for DisabledReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

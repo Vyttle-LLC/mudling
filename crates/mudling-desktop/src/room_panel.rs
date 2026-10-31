@@ -188,6 +188,12 @@ impl RoomPanel {
         }
     }
 
+    /// Switches to a new game's words for the verbs.
+    pub fn use_verbs(&mut self, verbs: Verbs, cx: &mut Context<RoomPanel>) {
+        self.verbs = verbs;
+        cx.notify();
+    }
+
     /// Takes the stores' new state. Redraws only if what's shown changed.
     pub fn show_room(&mut self, room: &RoomState, mobs: &MobsState, cx: &mut Context<RoomPanel>) {
         let place = room.room.as_deref().map(|room| Place::of(room, mobs));

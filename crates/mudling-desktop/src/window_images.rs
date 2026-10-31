@@ -11,16 +11,24 @@
 
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
+use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
-use crate::title_bar::{self, SessionLabel};
+use crate::title_bar::SessionLabel;
 use futures::channel::mpsc::unbounded;
 use gpui::{
     AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
 };
 use mudling_core::LinePipeline;
+use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
-use mudling_core::store::{Diff, Revision, TerminalChange, TerminalState, VitalsState};
+use mudling_core::net::DisconnectReason;
+use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
+use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
+use mudling_core::plugin::{Layer, PluginId};
+use mudling_core::store::{
+    ConnectionStatus, Diff, Revision, SettingsState, TerminalChange, TerminalState, VitalsState,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +69,54 @@ const WRAPPING_CHAT: [&str; 10] = [
     "           [*]",
 ];
 
+fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
+    PluginRow {
+        id: PluginId::try_from(id.to_owned()).expect("the id is valid"),
+        name: name.to_owned().into(),
+        layer,
+        detail: "Version 1.0.0 · MIT".into(),
+        on,
+    }
+}
+
+/// Opens the sheet on `section`, with made-up servers, plugins and a plugin
+/// turned off for overrunning.
+fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut Context<Shell>) {
+    let settings = SettingsState {
+        server: Some("mud.example".to_owned()),
+        turned_off: vec![PluginDisabled {
+            plugin: PluginId::try_from("sample-helper".to_owned()).expect("a good id"),
+            reason: DisabledReason::Overran(3),
+        }],
+        ..SettingsState::default()
+    };
+    shell.show_sample_problems(&settings, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.show_plugins(
+            vec![
+                sample_plugin("sample-tweaks", "Sample's tweaks", Layer::Override, true),
+                sample_plugin("sample-game", "Sample game", Layer::Game, true),
+                sample_plugin("sample-helper", "Sample helper", Layer::Game, true),
+                sample_plugin("sample-defaults", "MUDling defaults", Layer::Default, true),
+            ],
+            cx,
+        );
+        sheet.show_servers(
+            vec![SheetServer {
+                name: "Sample game".into(),
+                host: "mud.example".into(),
+                port: 4000,
+                characters: vec!["Sample".into()],
+            }],
+            cx,
+        );
+    });
+    shell.open_settings(window, cx);
+    shell
+        .settings_sheet()
+        .update(cx, |sheet, cx| sheet.select(section, cx));
+}
+
 fn images_folder() -> PathBuf {
     std::env::var_os("MUDLING_WINDOW_IMAGES").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-images"),
@@ -77,6 +133,25 @@ fn server_lines(texts: &[&str]) -> Diff<TerminalState> {
     Diff {
         revision: Revision::default(),
         change: TerminalChange::Append(lines),
+    }
+}
+
+/// The canvas's card, with a made-up server.
+fn sample_saved() -> SavedServers {
+    let last_played = Timestamp::now();
+    SavedServers {
+        servers: vec![SavedServer {
+            host: "mud.example".to_owned(),
+            port: 4000,
+            updated: last_played,
+            last_room: Some("the Donation Room".to_owned()),
+            characters: vec![SavedCharacter {
+                name: Some("Altissima".to_owned()),
+                level: Some(2),
+                last_played,
+            }],
+        }],
+        problems: Vec::new(),
     }
 }
 
@@ -122,8 +197,7 @@ fn render(
     );
     cx.update(|cx| {
         load_fonts(cx);
-        crate::input::bind_keys(cx);
-        title_bar::bind_keys(cx);
+        crate::bind_keys(cx);
         cx.set_reduce_motion(true);
     });
     let (_waker, woken) = unbounded();
@@ -228,4 +302,57 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+    });
+    render("empty-state-light", Light, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+    });
+    render(
+        "empty-state-first-run-dark",
+        Dark,
+        DEFAULT,
+        |shell, window, cx| {
+            shell.show_sample_empty_state(&SavedServers::default(), window, cx);
+        },
+    );
+    render(
+        "empty-state-narrow-dark",
+        Dark,
+        NARROW,
+        |shell, window, cx| {
+            shell.show_sample_empty_state(&sample_saved(), window, cx);
+        },
+    );
+    render("empty-state-menu-dark", Dark, WIDE, |shell, window, cx| {
+        shell.show_sample_empty_state(&sample_saved(), window, cx);
+        shell.open_session_menu(window, cx);
+    });
+    render("connection-ended-dark", Dark, WIDE, |shell, _, cx| {
+        let failed = "connection refused".to_owned();
+        let settings = SettingsState {
+            connection: ConnectionStatus::Closed(DisconnectReason::Failed(failed)),
+            suggestion: Some(Suggestion {
+                plugin: PluginId::try_from("sample".to_owned()).expect("a valid id"),
+                source: Source::Host,
+            }),
+            ..SettingsState::default()
+        };
+        shell.show_sample_offers(&settings, cx);
+    });
+    for (name, appearance, section) in [
+        ("settings-plugins-dark", Dark, Section::Plugins),
+        ("settings-plugins-light", Light, Section::Plugins),
+        ("settings-appearance-dark", Dark, Section::Appearance),
+        ("settings-shortcuts-dark", Dark, Section::Shortcuts),
+        ("settings-servers-dark", Dark, Section::Servers),
+        ("settings-vault-dark", Dark, Section::Vault),
+    ] {
+        render(name, appearance, WIDE, move |shell, window, cx| {
+            open_sheet(shell, section, window, cx);
+        });
+    }
+    render("settings-narrow-dark", Dark, NARROW, |shell, window, cx| {
+        open_sheet(shell, Section::Plugins, window, cx);
+    });
 }

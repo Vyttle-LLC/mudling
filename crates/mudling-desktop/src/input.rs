@@ -12,14 +12,13 @@
 //! be copied. History, completion and hints stay away from it.
 
 use crate::assets::Icon;
-use crate::chat::{FONT_SIZE, LINE_HEIGHT, MONO_FONT};
 use crate::theme::Theme;
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
+    App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Div, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, KeyBinding, LayoutId, PaintQuad, Pixels, Point, Role, SharedString, Size,
-    Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div,
-    fill, point, prelude::*, px, relative, size,
+    Stateful, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, div, fill, point, prelude::*, px, relative, size,
 };
 use mudling_core::defaults::commands::parse_speedwalk;
 use std::ops::Range;
@@ -39,6 +38,7 @@ const PLACEHOLDER: &str = "Type a command — ↑ for history, Tab to complete";
 /// The field stops growing here and scrolls instead.
 const MOST_ROWS: usize = 8;
 const SEND_BUTTON_SIZE: Pixels = px(36.);
+const FIELD_PADDING: Pixels = px(8.);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -146,10 +146,19 @@ impl InputLayout {
     }
 }
 
+/// What sets a one-line form field apart: it has no history or completion,
+/// Tab leaves it, and Return keeps what's typed.
+#[derive(Clone, Copy)]
+struct Field {
+    label: &'static str,
+    placeholder: &'static str,
+}
+
 pub struct CommandInput {
     focus_handle: FocusHandle,
     content: String,
     masked: bool,
+    field: Option<Field>,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -174,6 +183,7 @@ impl CommandInput {
             focus_handle: cx.focus_handle().tab_stop(true),
             content: String::new(),
             masked: false,
+            field: None,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -181,6 +191,18 @@ impl CommandInput {
             alias_preview: None,
             last_layout: None,
             last_bounds: None,
+        }
+    }
+
+    /// A one-line form field.
+    pub fn field(
+        label: &'static str,
+        placeholder: &'static str,
+        cx: &mut Context<CommandInput>,
+    ) -> CommandInput {
+        CommandInput {
+            field: Some(Field { label, placeholder }),
+            ..CommandInput::new(cx)
         }
     }
 
@@ -247,7 +269,7 @@ impl CommandInput {
         let theme = cx.global::<Theme>();
         let style = window.text_style();
         let (text, color) = if self.content.is_empty() {
-            (SharedString::from(PLACEHOLDER), theme.placeholder)
+            (SharedString::from(self.placeholder()), theme.placeholder)
         } else {
             (self.shown(), style.color)
         };
@@ -291,8 +313,12 @@ impl CommandInput {
         (text, runs)
     }
 
+    fn placeholder(&self) -> &'static str {
+        self.field.map_or(PLACEHOLDER, |field| field.placeholder)
+    }
+
     fn accepts_commands(&self) -> bool {
-        !self.masked && self.marked_range.is_none()
+        self.field.is_none() && !self.masked && self.marked_range.is_none()
     }
 
     fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,8 +346,10 @@ impl CommandInput {
         }
     }
 
-    fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
-        if self.accepts_commands() {
+    fn complete(&mut self, _: &Complete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.is_some() {
+            window.focus_next(cx);
+        } else if self.accepts_commands() {
             cx.emit(InputEvent::Complete {
                 line: self.content.clone(),
                 cursor: self.cursor_offset(),
@@ -356,7 +384,6 @@ impl CommandInput {
         self.masked
     }
 
-    #[cfg(test)]
     pub fn content(&self) -> &str {
         &self.content
     }
@@ -393,6 +420,10 @@ impl CommandInput {
     fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         // Return while composing confirms the composition; it doesn't send.
         if self.marked_range.is_some() {
+            return;
+        }
+        if self.field.is_some() {
+            cx.emit(InputEvent::Submitted(self.content.clone()));
             return;
         }
         let command = std::mem::take(&mut self.content);
@@ -447,7 +478,7 @@ impl CommandInput {
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n");
-            let text = if self.masked {
+            let text = if self.masked || self.field.is_some() {
                 text.replace('\n', " ")
             } else {
                 text
@@ -631,12 +662,13 @@ impl EntityInputHandler for CommandInput {
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // With nothing typed yet there's no layout; the IME's candidate
         // window then sits at the start of the field.
         let Some(layout) = self.layout() else {
-            return Some(Bounds::new(bounds.origin, size(px(0.), LINE_HEIGHT)));
+            let line_height = cx.global::<Theme>().choice.chat_line_height();
+            return Some(Bounds::new(bounds.origin, size(px(0.), line_height)));
         };
         let range = self.range_from_utf16(&range_utf16);
         let start = layout.position_of(self.shown_offset(range.start));
@@ -685,10 +717,67 @@ impl CommandInput {
             }))
             .child(Icon::Send.svg().size(px(16.)).text_color(theme.on_accent))
     }
+
+    /// The text itself, with what it answers to.
+    fn render_text(&self, label: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("command-input")
+            .debug_selector(move || label.to_owned())
+            .role(if self.masked {
+                Role::PasswordInput
+            } else {
+                Role::TextInput
+            })
+            .aria_label(label)
+            .aria_value(self.shown())
+            .aria_placeholder(self.placeholder())
+            .key_context(CONTEXT)
+            .track_focus(&self.focus_handle)
+            .tab_stop(true)
+            .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::complete))
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::copy))
+            .child(InputText { input: cx.entity() })
+    }
+
+    fn render_field(
+        &self,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *cx.global::<Theme>();
+        self.render_text(label, cx)
+            .w_full()
+            .px_3()
+            .py(FIELD_PADDING)
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .focus(move |style| style.border_color(theme.accent))
+            .font_family(theme.choice.font)
+            .text_size(theme.choice.chat_size())
+            .line_height(theme.choice.chat_line_height())
+            .text_color(theme.text)
+    }
 }
 
 impl Render for CommandInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(field) = self.field {
+            return self.render_field(field.label, cx).into_any_element();
+        }
         let theme = *cx.global::<Theme>();
         let hint = self.hint().map(|hint| {
             div()
@@ -714,9 +803,9 @@ impl Render for CommandInput {
             .pl_4()
             .pr_2()
             .py_2()
-            .font_family(MONO_FONT)
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .font_family(theme.choice.font)
+            .text_size(theme.choice.chat_size())
+            .line_height(theme.choice.chat_line_height())
             .text_color(theme.text)
             .on_click(cx.listener(|input, _, window, cx| window.focus(&input.focus_handle, cx)))
             .child(
@@ -730,40 +819,14 @@ impl Render for CommandInput {
                     .child("›"),
             )
             .child(
-                div()
-                    .id("command-input")
-                    .role(if self.masked {
-                        Role::PasswordInput
-                    } else {
-                        Role::TextInput
-                    })
-                    .aria_label("Command")
-                    .aria_value(self.shown())
-                    .aria_placeholder(PLACEHOLDER)
-                    .key_context(CONTEXT)
-                    .track_focus(&self.focus_handle)
-                    .tab_stop(true)
-                    .cursor(CursorStyle::IBeam)
-                    .on_action(cx.listener(Self::submit))
-                    .on_action(cx.listener(Self::newline))
-                    .on_action(cx.listener(Self::complete))
-                    .on_action(cx.listener(Self::backspace))
-                    .on_action(cx.listener(Self::delete))
-                    .on_action(cx.listener(Self::left))
-                    .on_action(cx.listener(Self::right))
-                    .on_action(cx.listener(Self::up))
-                    .on_action(cx.listener(Self::down))
-                    .on_action(cx.listener(Self::home))
-                    .on_action(cx.listener(Self::end))
-                    .on_action(cx.listener(Self::paste))
-                    .on_action(cx.listener(Self::copy))
+                self.render_text("Command", cx)
                     .flex_1()
                     .min_w_0()
-                    .py(px(8.))
-                    .child(InputText { input: cx.entity() }),
+                    .py(px(8.)),
             )
             .children(hint)
             .child(self.render_send_button(&theme, cx))
+            .into_any_element()
     }
 }
 

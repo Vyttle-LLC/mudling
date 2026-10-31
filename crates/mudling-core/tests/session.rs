@@ -897,9 +897,16 @@ fn a_plugin_turned_off_says_why_and_can_come_back() {
     let settings = driven_settings(&driven);
     assert_eq!(settings.turned_off[0].plugin, id);
     assert_eq!(settings.turned_off[0].reason, DisabledReason::Overran(3));
-    let notice = settings.notices.last().unwrap();
-    assert!(!notice.contains("Overran"), "{notice}");
-    assert!(notice.contains("ran too long 3 times"), "{notice}");
+    let turned_off = settings.turned_off[0].to_string();
+    assert_eq!(
+        turned_off,
+        "slow was turned off: its hooks ran too long 3 times"
+    );
+    assert_eq!(
+        settings.notices,
+        [] as [String; 0],
+        "the overruns are folded"
+    );
     assert!(settings.plugin_costs.iter().any(|cost| cost.plugin == id));
 
     driven.engine.turn_plugin_on(&id);

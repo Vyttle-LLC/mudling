@@ -17,7 +17,9 @@ use crate::defaults::{self, Defaults, PendingAction};
 use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
-use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
+use crate::persist::{
+    self, Batch, Character, Database, SERVERS_FOLDER, Server, Timestamp, UNNAMED_CHARACTER, Writer,
+};
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
 };
@@ -38,10 +40,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-/// Under the data folder, one database per server.
-const SERVERS_FOLDER: &str = "servers";
-/// Who the session plays when no credentials name a character.
-const UNNAMED_CHARACTER: &str = "player";
 /// GMCP modules every server is asked for.
 const CORE_GMCP: [&str; 3] = ["Core 1", "Char 1", "Room 1"];
 /// The word list map words are kept under.
@@ -66,6 +64,9 @@ struct Link {
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
     drops_noticed: HashSet<PluginId>,
+    /// The notices of overruns, this connection, which the plugin being
+    /// turned off then takes the place of.
+    overrun_notices: Vec<(PluginId, String)>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
 }
@@ -227,6 +228,7 @@ impl Engine {
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
+            overrun_notices: Vec::new(),
             mssp_name: None,
             gmcp_enabled: false,
         });
@@ -378,23 +380,37 @@ impl Engine {
                     gmcp::encode(inventory::ASK, "", &mut self.output);
                 }
             }
-            HookOutput::HookFailed(failed) => self.notice(format!(
-                "{}'s hook {} failed: {}",
-                failed.plugin,
-                failed.hook.as_str(),
-                failed.message
-            )),
+            HookOutput::HookFailed(failed) => {
+                let notice = format!(
+                    "{}'s hook {} failed: {}",
+                    failed.plugin,
+                    failed.hook.as_str(),
+                    failed.message
+                );
+                if let Some(link) = self.link.as_mut().filter(|_| failed.overran) {
+                    link.overrun_notices.push((failed.plugin, notice.clone()));
+                }
+                self.notice(notice);
+            }
             HookOutput::PluginDisabled(disabled) => self.plugin_turned_off(disabled),
         }
     }
 
+    /// Lists the plugin as turned off, in place of the overruns that led there.
     fn plugin_turned_off(&mut self, disabled: PluginDisabled) {
-        let notice = format!("{} was turned off: {}", disabled.plugin, disabled.reason);
-        self.settings
-            .turned_off
-            .retain(|off| off.plugin != disabled.plugin);
-        self.settings.turned_off.push(disabled);
-        self.notice(notice);
+        if let Some(link) = &mut self.link {
+            let overruns = std::mem::take(&mut link.overrun_notices);
+            let (folded, others): (Vec<_>, Vec<_>) = overruns
+                .into_iter()
+                .partition(|(plugin, _)| *plugin == disabled.plugin);
+            link.overrun_notices = others;
+            let notices = &mut self.settings.notices;
+            notices.retain(|notice| !folded.iter().any(|(_, overrun)| overrun == notice));
+        }
+        let off = &mut self.settings.turned_off;
+        off.retain(|off| off.plugin != disabled.plugin);
+        off.push(disabled);
+        self.publish_settings();
     }
 
     /// Brings back a plugin the core turned off. A plugin that's on, or

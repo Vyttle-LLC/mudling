@@ -34,12 +34,18 @@
 mod batch;
 mod reader;
 mod records;
+mod saved;
 mod schema;
 mod writer;
 
 pub use batch::{Batch, Key, Record};
 pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;
+pub(crate) use saved::UNNAMED_CHARACTER;
+pub use saved::{
+    SERVERS_FOLDER, SavedCharacter, SavedServer, SavedServers, enabled_plugins,
+    save_enabled_plugins, save_server, saved_servers,
+};
 pub use schema::LATEST_VERSION;
 pub use writer::{Failures, Writer};
 
@@ -74,12 +80,7 @@ impl Database {
     /// letters, digits, `.`, `-` and `_`, as in a host name. This touches
     /// the disk: call it from a core thread.
     pub fn open(folder: &Path, server: &str) -> Result<Database, Error> {
-        let valid = !server.is_empty()
-            && !server.starts_with('.')
-            && server
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
-        if !valid {
+        if !Database::can_name(server) {
             return Err(Error::BadServerName(server.to_owned()));
         }
         std::fs::create_dir_all(folder).map_err(Error::Io)?;
@@ -90,6 +91,15 @@ impl Database {
         use_wal(&connection)?;
         schema::migrate(&mut connection)?;
         Ok(database)
+    }
+
+    /// Whether `server` can name a database file: see [`Database::open`].
+    pub fn can_name(server: &str) -> bool {
+        !server.is_empty()
+            && !server.starts_with('.')
+            && server
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     }
 
     pub fn path(&self) -> &Path {

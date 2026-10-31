@@ -59,11 +59,14 @@ icons! {
     ChevronDown => "chevron-down.svg",
     Signal => "signal.svg",
     Check => "check.svg",
+    Warning => "warning.svg",
     Runestone => "runestone.svg",
     RunestoneCursor => "runestone-cursor.svg",
     WindowMinimize => "window-minimize.svg",
     WindowMaximize => "window-maximize.svg",
     WindowClose => "window-close.svg",
+    Plus => "plus.svg",
+    Return => "return.svg",
 }
 
 impl Icon {

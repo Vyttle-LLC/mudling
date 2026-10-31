@@ -272,6 +272,12 @@ impl Session {
             .complete(line, cursor, &typing.history, &typing.known)
     }
 
+    /// Whether the core thread ended: the database wouldn't open, or it
+    /// panicked. Nothing more happens here; only a new session can connect.
+    pub fn has_stopped(&self) -> bool {
+        self.core.is_finished()
+    }
+
     /// Closes the connection and flushes every writer. Returns at once;
     /// [`Quitting::wait`] waits for the disk.
     pub fn quit(self) -> Quitting {
