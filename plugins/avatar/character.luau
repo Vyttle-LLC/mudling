@@ -24,8 +24,12 @@ local function read_score_row(reader, line)
     local write = function(key, value)
         Readers.write(reader, "character", key, value)
     end
-    local level, race, class = string.match(line, "^Level (%d+) (%S+) (%S+)")
+    -- A hero's level carries its own, and a race can be two words: "Level
+    -- 51(14) Kzinti Monk", "Level 4 Lesser Imp Monk    Exp/TNL: ...".
+    local level, who = string.match(line, "^Level (%d+)%S* (.*)$")
     if level then
+        who = string.gsub(who, "%s*Exp/TNL.*$", "")
+        local race, class = string.match(who, "^(.-)%s+(%S+)%s*$")
         write("level", tonumber(level))
         write("race", race)
         write("class", class)

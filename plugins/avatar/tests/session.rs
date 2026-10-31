@@ -7,7 +7,7 @@ use mudling_core::persist::Timestamp;
 use mudling_core::plugin::luau::Value;
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, RoomState, SettingsState, StoreHub, Versioned,
+    CharactersState, ConnectionStatus, GearState, RoomState, SettingsState, StoreHub, Versioned,
 };
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, SB, SE};
@@ -32,6 +32,13 @@ fn engine(folder: &Path) -> (Engine, Arc<StoreHub>) {
     let mut engine = Engine::open(config, Arc::clone(&hub), typing).unwrap();
     engine.start_connection().unwrap();
     (engine, hub)
+}
+
+fn gmcp(package: &str, json: &str) -> Bytes {
+    let mut frame = vec![IAC, SB, GMCP];
+    frame.extend_from_slice(format!("{package} {json}").as_bytes());
+    frame.extend_from_slice(&[IAC, SE]);
+    Bytes::from(frame)
 }
 
 #[test]
@@ -66,6 +73,33 @@ fn the_login_prompts_are_each_answered_once() {
     assert_eq!(banner.trim(), "");
     assert!(!banner.is_empty(), "the banner wants a blank line");
     assert_eq!(answer(b"Your Password: "), "", "a second ask is a refusal");
+}
+
+#[test]
+fn a_spell_identify_is_filed_under_the_one_item_at_hand_it_fits() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let items = r#"{"location":"inv","items":[
+        {"id":"1","name":"(Glowing) an amulet of Gorn"},
+        {"id":"2","name":"a pink ice ring"}]}"#;
+    engine
+        .receive(gmcp("Char.Items.List", &items.replace('\n', " ")), now)
+        .unwrap();
+    engine.settle(now);
+    let identify = b"Object 'gorn amulet newbie' type armor, extra flags none.\r\n\
+        Weight 3, value 40, level 8.\r\n\
+        (119h-130m-104v-1210)(-/-)\r\n";
+    engine.receive(Bytes::from_static(identify), now).unwrap();
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+
+    let keywords = hub.read(|gear: &Versioned<GearState>| {
+        gear.value()
+            .0
+            .get("gear.keywords.an amulet of gorn")
+            .cloned()
+    });
+    assert_eq!(keywords, Some(Value::Text("gorn amulet newbie".to_owned())));
 }
 
 #[test]

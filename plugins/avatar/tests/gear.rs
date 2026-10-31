@@ -26,6 +26,17 @@ fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn examine_places_a_weapon() {
+    let gear = read(
+        "You look at a bloodwood spear in your inventory...\n\
+         This item appears meant to be wielded as a weapon.\n\
+         (120h-130m-104v-1210)(-/-)",
+    )
+    .store("gear");
+    assert_eq!(get(&gear, "slot.a bloodwood spear"), &text("wield"));
+}
+
+#[test]
 fn the_slots_are_the_games_fifteen_in_its_order() {
     let plugin = load();
     let slots = &plugin.points.gear.as_ref().unwrap().slots;

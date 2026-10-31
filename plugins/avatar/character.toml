@@ -24,18 +24,20 @@ reader = "affects"
 command = "equipment"
 reader = "equipment"
 
-# "You are Tamsin the Quiet Attendant": the first line of `score`. The
-# capitals keep out room text ("You are in the northeast corner of ...").
+# "You are Tamsin the Quiet Attendant", or a hero's "You are Fen the
+# unknown" or "You are Fen The Lost": the first line of `score`. The capital
+# on the name keeps out room text ("You are in the donation room for players
+# level 1 ...").
 [[reader]]
 name = "score"
-start = '''^{prompt}?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
+start = '''^\s*{prompt}?\s*You are (?<name>[A-Z]\S*) (?<title>[Tt]he .*?)\s*$'''
 hook = "read_score"
-# The lines that hold facts: "Level 8 Harpy Monk  Exp/TNL: ...", "You are 17
-# years old ...", "Str    :    14 (17) ...", and the "Label : value" rows
-# starting with Gold, Killed and Wimpy. Also its last two, "Autoexit: Yes
-# ..." and "Autopull: Yes ...", which hold none but show a page after the
-# pager was read.
-row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
+# The lines that hold facts: "Level 8 Harpy Monk  Exp/TNL: ...", a hero's
+# "Level 51(14) Kzinti Monk ...", "You are 17 years old ...", "Str    :
+# 14 (17) ...", and the "Label : value" rows starting with Gold, Killed and
+# Wimpy. Also its last two, "Autoexit: Yes ..." and "Autopull: Yes ...", which
+# hold none but show a page after the pager was read.
+row = '''^(?:Level \d+(?:\(\d+\))? \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
 
 # The lines above `practice`'s table, whichever comes first: "You have 18
 # practice sessions left.", "The following skills are at your disposal :",
@@ -61,7 +63,7 @@ row = '''^{pager}?(?:\s*\d+:| {4})'''
 # "You are affected by:", the head of `aff`.
 [[reader]]
 name = "affects"
-start = '''^{prompt}?You are affected by:'''
+start = '''^\s*{prompt}?\s*You are affected by:'''
 hook = "read_affects"
 # "Spell: 'bless'." or, at higher levels, "Spell: 'bless': modifies hit
 # roll by 3 for 6 hours."

@@ -5,7 +5,9 @@
 # Avatar sends no GA or EOR, so a prompt is known by its shape, the
 # `prompt` fragment in plugin.toml. Output often arrives glued after a
 # prompt on the same line, so patterns for a line that may be the first
-# after one start `^{prompt}?`.
+# after one start `^\s*{prompt}?\s*`. A custom prompt can leave a space in
+# front of the next line: "<46/46hp><116/116m><116/116mv>", then " You are
+# using:".
 
 # The pager, which arrives without a line end: "[B]ack,[H]elp,[R]efresh,
 # or [C]ontinue: ". "c" continues.
@@ -24,14 +26,14 @@ pattern = '''^{prompt}'''
 # answer on one line, so no table.
 [[pattern]]
 name = "character.affects.none"
-pattern = '''^{prompt}?You are not (?:under the affects of|affected by) any'''
+pattern = '''^\s*{prompt}?\s*You are not (?:under the affects of|affected by) any'''
 hook = "on_no_affects"
 
 # Spells landing and wearing off, and gear that grants affects: "You feel
 # more frail.", "Your armor spell wears off."
 [[pattern]]
 name = "character.affects_changed"
-pattern = '''^{prompt}?You feel |wears off'''
+pattern = '''^\s*{prompt}?\s*You feel |wears off'''
 
 # A zone as Avatar names it. It shows in text in "You see a vision of your
 # corpse in:" and the area list.
