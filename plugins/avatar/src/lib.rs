@@ -34,6 +34,7 @@ pub fn bundled() -> Plugin {
             "gear.toml" => include_str!("../gear.toml"),
             "map.toml" => include_str!("../map.toml"),
             "mobs.toml" => include_str!("../mobs.toml"),
+            "hud.toml" => include_str!("../hud.toml"),
             "readers.luau" => include_str!("../readers.luau"),
             "character.luau" => include_str!("../character.luau"),
             "gear.luau" => include_str!("../gear.luau"),
