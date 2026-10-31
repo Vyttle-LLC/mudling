@@ -35,6 +35,7 @@ const NAV_WIDTH: Pixels = px(264.);
 /// The most of a small sheet the sections take.
 const NAV_SHARE: f32 = 0.36;
 const CONTEXT: &str = "SettingsSheet";
+const MAKER: &str = "A Vyttle app";
 /// How far an arrow key scrolls.
 const SCROLL_STEP: Pixels = px(48.);
 
@@ -428,6 +429,10 @@ impl SettingsSheet {
             .border_color(theme.divider)
             .child(
                 div()
+                    .id("settings-heading")
+                    .role(Role::Heading)
+                    .aria_label("Settings")
+                    .aria_level(1)
                     .px_3()
                     .pt_3()
                     .pb_5()
@@ -453,13 +458,13 @@ impl SettingsSheet {
                 div()
                     .id("settings-about")
                     .role(Role::Label)
-                    .aria_value(version.clone())
+                    .aria_value(format!("{version} · {MAKER}"))
                     .px_3()
                     .pb_2()
                     .text_size(px(13.))
                     .text_color(theme.text_muted)
                     .child(version)
-                    .child("A Vyttle app"),
+                    .child(MAKER),
             )
     }
 

@@ -139,7 +139,12 @@ fn plugin_row(
         .id(SharedString::from(format!("plugin-{}", row.id)))
         .debug_selector(move || format!("plugin-{id}"))
         .role(Role::Label)
-        .aria_value(format!("{}, {}: {state}", row.name, layer_badge(row.layer)))
+        .aria_value(format!(
+            "{}, {}: {state}. {}",
+            row.name,
+            layer_badge(row.layer),
+            row.detail
+        ))
         .flex()
         .items_center()
         .gap_3()
@@ -290,11 +295,10 @@ impl SettingsSheet {
             )
             .when(open, |banner| {
                 banner.child(
-                    div()
+                    muted_line(format!("{notice}. {TURN_ON_AGAIN_NOTE}"), theme)
                         .mt_2()
-                        .text_size(px(13.))
-                        .text_color(theme.text_muted)
-                        .child(format!("{notice}. {TURN_ON_AGAIN_NOTE}")),
+                        .pb_0()
+                        .text_size(px(13.)),
                 )
             })
     }

@@ -157,6 +157,9 @@ const SETTINGS_CONTROLS: [&str; 10] = [
     "Larger chat text",
 ];
 
+/// Text the sheet's Appearance section shows, read from its nodes' values.
+const SETTINGS_TEXT: [&str; 2] = ["A Vyttle app", "The chat will read like this"];
+
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
     "Session: Recording",
@@ -288,6 +291,18 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "the settings sheet names its sections and controls",
             passed: opened.is_some() && missing.is_empty(),
             detail: format!("not found: {missing:?}"),
+        });
+        let unread: Vec<_> = SETTINGS_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the settings sheet's text reaches the tree",
+            passed: unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
         });
         let accesskit_tree = cx
             .update(|cx| {

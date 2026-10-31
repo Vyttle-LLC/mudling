@@ -145,14 +145,13 @@ impl SettingsSheet {
                 .child(larger),
         );
         pane.row(
-            div()
+            muted_line(SAMPLE, theme)
                 .pt_4()
                 .pb_3()
                 .font_family(choice.font)
                 .text_size(choice.chat_size())
                 .line_height(choice.chat_line_height())
-                .text_color(theme.text)
-                .child(SAMPLE),
+                .text_color(theme.text),
         );
         pane.row(muted_line(LATER_NOTE, theme));
     }
