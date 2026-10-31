@@ -20,9 +20,8 @@
 //! connection learned (the prompt, the HUD fields, hook state) goes with it;
 //! the map and what plugins wrote are saved in the data folder.
 //!
-//! Each extension point's matches reach the engine as [`PluginEvent`]s, read
-//! in one place, so when the host runs more points than Text their events
-//! arrive the same way.
+//! Every extension point's matches reach the engine as [`PluginEvent`]s, read
+//! in one place.
 //!
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 

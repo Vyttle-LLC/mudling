@@ -19,7 +19,7 @@ VYT-235): each file says what it reads, and each regex has a comment.
 | `commands.toml` | Verbs, door commands and the rules for an item's keyword. No separator and no speedwalk: one command a line. |
 | `character.toml` | The background commands, the character's tables, and the messages about skills. |
 | `gear.toml` | The 15 slots in the game's order, the gear tables, and the wear, remove and put messages. |
-| `map.toml` | Rooms known by description, the zone's format, failed moves, darkness, flees and the maze. |
+| `map.toml` | Rooms known by description, the zone's format, the exits line, failed moves, darkness, flees and the maze. |
 | `mobs.toml` | Aggression, and a mob's name from its room title. |
 
 ## How a table is read
@@ -68,6 +68,7 @@ The rest are single lines:
 | Gear | `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
 | Gear | `gear.did_not_fit` | | `It won't fit.` |
 | Gear | `gear.not_carried` | | `You do not have that item.` |
+| Map | `map.exits` | | `[Exits: north up]` |
 | Map | `map.failed_move` | | `No way!  You are still fighting!`, `You are too exhausted.` |
 | Map | `map.darkness` | | `It is pitch black...` |
 | Map | `map.flee` | `dir` | `You flee north! What a COWARD! …` |

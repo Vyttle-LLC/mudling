@@ -562,11 +562,9 @@ fn load_script(lua: &Lua, meter: &Meter, limits: HookLimits, script: &Script) ->
 fn named_hooks(points: &Points) -> Vec<&HookName> {
     let rules = points.event_rules();
     let readers = points.readers();
-    let titles = points.mobs.iter().flat_map(|mobs| &mobs.room_title);
     let mut hooks: Vec<&HookName> = rules
         .iter()
         .filter_map(|(_, rule, _)| rule.hook.as_ref())
-        .chain(titles.filter_map(|rule| rule.hook.as_ref()))
         .chain(
             readers
                 .iter()

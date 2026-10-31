@@ -73,9 +73,8 @@ pub struct Points {
 
 impl Points {
     /// Every rule the host matches over lines, with its point and what it
-    /// tells the automap, Text's first. The structs are taken apart field by
-    /// field, so a new list of rules fails to compile here.
-    /// [`Mobs::room_title`] isn't one: it reads a room title, not a line.
+    /// tells the automap, Text's first. [`Mobs::room_title`] isn't one: it
+    /// reads a room title, not a line.
     pub(super) fn event_rules<'a>(&'a self) -> Vec<(Point, &'a EventRule, Option<MapSignal>)> {
         let Points {
             connection: _,
@@ -851,9 +850,21 @@ pub struct Mobs {
     pub aggro: Vec<EventRule>,
     /// Turns a room title into a mob name, captured as `name`. The map names
     /// mobs by it, so it reads titles, not lines; the highest layer's rule
-    /// that matches wins, and it runs no hook.
+    /// that matches wins, and it can't name a hook.
     #[serde(default)]
     pub room_title: Vec<EventRule>,
+}
+
+impl Mobs {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match self.room_title.iter().find(|rule| rule.hook.is_some()) {
+            Some(rule) => Err(format!(
+                "the room title rule `{}` can't name a hook: it reads titles, not lines",
+                rule.name.as_str()
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 // ---- UI ----

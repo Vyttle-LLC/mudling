@@ -1006,7 +1006,20 @@ fn a_link_naming_a_group_it_does_not_capture_is_rejected() {
 }
 
 #[test]
-fn the_highest_layer_s_area_pattern_applies() {
+fn a_room_title_rule_naming_a_hook_is_rejected_at_load() {
+    let error = rejection(
+        &with_points("mobs = \"mobs.toml\"\n"),
+        &[(
+            "mobs.toml",
+            "[[room_title]]\nname = \"x\"\npattern = '''x'''\nhook = \"on_title\"\n",
+        )],
+    );
+    assert_eq!(error.source, "mobs.toml");
+    assert!(error.to_string().contains("can't name a hook"), "{error}");
+}
+
+#[test]
+fn a_plugins_area_pattern_reaches_the_settings() {
     let host = PluginHost::new([testland()]).unwrap();
     let area = host.settings().area_name.as_ref().unwrap();
     assert!(area.is_match("[1-2] The Moor"));

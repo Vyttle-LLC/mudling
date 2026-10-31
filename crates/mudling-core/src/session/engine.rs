@@ -335,7 +335,7 @@ impl Engine {
                 }
             }
             HookOutput::RefreshInventory => {
-                if self.link.is_some() {
+                if self.link.as_ref().is_some_and(|link| link.gmcp_enabled) {
                     gmcp::encode(inventory::ASK, "", &mut self.output);
                 }
             }

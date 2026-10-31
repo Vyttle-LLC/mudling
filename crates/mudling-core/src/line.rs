@@ -70,8 +70,10 @@ pub enum LineKind {
     Command,
 }
 
-/// A link or action over a byte range of a line's plain text. Nothing
-/// produces these yet; MXP and plugins will.
+/// A link or action over a byte range of a line's plain text. Plugins' link
+/// rules find them on request, through
+/// [`crate::plugin::PluginHost::links`]; nothing sets them on a line yet,
+/// which MXP will.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub start: u32,

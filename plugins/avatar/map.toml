@@ -5,6 +5,12 @@ room_identity = "description"
 # Room.Info's zone, as the `area` fragment in plugin.toml reads it.
 area_name = '''^{area}$'''
 
+# "[Exits: north up]": the room's description follows it, which tells apart
+# rooms that share a name and exits.
+[[exits]]
+name = "map.exits"
+pattern = '''^\s*{prompt}?\[Exits:'''
+
 # Moves the game refuses without a Room.WrongDir.
 [[failed_move]]
 name = "map.failed_move"

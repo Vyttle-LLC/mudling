@@ -1092,11 +1092,23 @@ fn the_inventory_is_asked_for_once_on_entering_the_game() {
 #[test]
 fn a_hook_can_ask_for_the_inventory_again() {
     let mut driven = Driven::scribe();
+    driven.say(&[IAC, WILL, GMCP]);
     driven.say(b"You change your gear.\r\n");
     wait_for("the hook's ask", || {
         driven.engine.settle(Timestamp(0));
         contains(&driven.engine.take_output(), b"Char.Items.Inv")
     });
+}
+
+#[test]
+fn a_hook_asks_for_nothing_on_a_server_without_gmcp() {
+    let mut driven = Driven::scribe();
+    driven.say(b"You change your gear.\r\nYour bag:\r\n- rope\r\n<20hp> ");
+    driven.say(&[IAC, GA]);
+    // The hook that writes this ran after the one that asked.
+    driven.seen("end");
+    driven.engine.settle(Timestamp(0));
+    assert!(!contains(&driven.engine.take_output(), b"Char.Items.Inv"));
 }
 
 #[test]

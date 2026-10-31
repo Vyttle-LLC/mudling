@@ -30,7 +30,7 @@ map = "map.toml"
 mobs = "mobs.toml"
 
 [hooks]
-# readers.luau first: the others use the framing it defines.
+# readers.luau first: the others use the Readers table it defines.
 files = ["readers.luau", "character.luau", "gear.luau"]
 
 [fragments]

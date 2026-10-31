@@ -406,7 +406,7 @@ impl Plugin {
                 map: point::<Map>(load(Point::Map)?)?,
                 character: point::<Character>(load(Point::Character)?)?,
                 gear: point::<Gear>(load(Point::Gear)?)?,
-                mobs: point::<Mobs>(load(Point::Mobs)?)?,
+                mobs: point_checked(load(Point::Mobs)?, Mobs::validate)?,
                 ui: point::<Ui>(load(Point::Ui)?)?,
             })
         })?;
