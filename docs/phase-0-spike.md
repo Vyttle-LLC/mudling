@@ -1,5 +1,11 @@
 # Phase 0: the gpui spike
 
+**This is a record of Phase 0, kept as history.** Its results describe the
+spike's window, which had a chat and a command input and nothing else. Where
+that no longer holds, a note says so, and [Since Phase 0](#since-phase-0) has
+the numbers that replace it. The pin, the commands and the manual checks are
+still current.
+
 Phase 0 asked whether gpui can carry MUDling's desktop shell (PRD §14). The
 spike shows a virtualized chat over 100,000 replayed lines, a command input
 that takes IME composition, and a first accessibility pass through
@@ -15,6 +21,50 @@ macOS 27.0.1), with a 60 Hz display and release builds. Other agents were
 building on the same machine, so **every number is listed with the
 one-minute load average** (`uptime`) when it was taken. A load of 12 means
 all 12 cores are busy.
+
+## Since Phase 0
+
+Taken on 2026-10-31 on the same Mac, with every panel open and filled.
+
+**Memory.** Resident memory after loading 100,000 lines, against PRD §6's
+200 MB (`--measure --sample-map 10000`):
+
+| Lines | Map | After load | At the end of the run |
+|---|---|---|---|
+| Real logs, Avatar on | 10,000 rooms | 152 MB | 155 MB |
+| Real logs | 10,000 rooms | 172 MB | 178 MB |
+| Synthetic | 10,000 rooms | 191 MB | 196 MB |
+| Synthetic | none | 152 MB | 158 MB |
+| Real logs, `--long-lines` | 10,000 rooms | 279 MB | 284 MB |
+| Synthetic, `--long-lines` | 10,000 rooms | 404 MB | 406 MB |
+
+`--long-lines` joins about ten lines into each one, which is a stress feed,
+not play: the logs' longest line is 203 characters. On the synthetic run with
+a map, the malloc heap held 71 MB live and kept 30 MB of freed space; window
+surfaces took 32 MB, and the rest is the binary, stacks and system libraries.
+Of the live heap, the 100,000 lines are 27 MB (about 270 bytes each), and the
+map and its database rows 13 MB. The replay feed's own lines are in there
+too, and a real session has none. The shell's copy of the terminal store costs
+0.8 MB, its index alone, because a `Line` is an `Arc`: both stores share the
+text.
+
+**Single slow frames.** The 12 to 128 ms frames above p99 come in four kinds,
+told apart with a per-frame count of the main thread's CPU time and, in a
+patched copy of gpui's renderer, the time in `nextDrawable` and on the GPU:
+
+| Kind | Wall | Main thread CPU | Cause |
+|---|---|---|---|
+| The first two frames | 10 to 148 ms | 10 to 55 ms | Real work: fonts, atlases, first layout. Once, before play |
+| The first frame of a split | 11 to 13 ms | 8 to 13 ms | Real work: CoreText shaping a screen of lines never drawn. 75% of draw samples while jumping through history. Once per opening |
+| Waiting for a drawable | 8 to 33 ms | 1 to 3 ms | `CAMetalLayer` `nextDrawable` blocks for a display tick or more. Our GPU time per frame stays under a tick (p50 1.1, p99 4.7, max 6.8 ms), so the wait is on the compositor |
+| Preempted | 10 to 181 ms | 1 to 3 ms | The thread is runnable but off a core. No lock or other wait shows under `Window::draw` in 11,000 stack samples, and these frames grow with load: 4 at load 7.6, 92 at load 45 |
+
+The last two are the operating system's, so nothing here fixes them, and they
+need a quiet machine to leave a measured run. The wait for a drawable is also
+what swung p50 from 0.9 to 4.3 ms between runs of one binary: its mean per
+frame ranged from 0.03 to 4.1 ms. Instruments couldn't help on this macOS,
+since `xctrace` exported every trace as malformed, so the stacks come from
+`sample`, which suspends the process and adds slow frames of its own.
 
 ## Results
 
@@ -32,6 +82,9 @@ all 12 cores are busy.
 | Memory: the 100,000 lines themselves | informational (≤ 200 MB with a 10,000-room map) | 8.7 MB heap (logs), 11.7 MB (synthetic) | 11.1 | Well under |
 | Memory: the whole app | informational | 35 MB resident after loading, 122 MB after streaming and scrolling | 10.5–11.4 | Well under |
 | Time to first frame (launch, read and parse the logs, open the window, draw) | informational | 323 / 205 / 226 ms, of which reading and parsing 100,000 lines took 33–59 ms; the first frame itself took 7–8 ms | 10.5–11.4 | — |
+
+Memory no longer holds: Phase 0's window kept only a chat. See
+[Since Phase 0](#since-phase-0).
 
 **Scope of the frame numbers.** These frames hold the chat and the command
 input only. Phase 0 has no side panels, map or split, so this is not yet the
@@ -146,7 +199,7 @@ same script CI runs.
 | Only visible lines are laid out | `uniform_list` renders only the rows in view; the AX tree holds 36 line elements out of 100,000 | Verified |
 | Trimming costs nothing to draw | The ring buffer drops the oldest line in place; the view moves its offset by one line instead of re-laying out (tested by mutation: removing the shift makes the test fail) | Verified |
 | IME composition | Tests drive the same input-handler calls macOS makes for `setMarkedText` and `insertText` (Japanese "き" marked, then "北" committed; Return while composing doesn't send; UTF-16 offsets with emoji). Typing through the test platform's input handler and Return echo the command, and typing doesn't move the chat | **Verified programmatically only.** No real IME was used; see the manual steps |
-| VoiceOver can reach the chat lines and the input | `mudling-desktop --synthetic --ax-check` reads the tree through the `NSAccessibility` methods VoiceOver's server calls, from inside the app, and passes five checks: the chat is an `AXGroup` with subrole `AXApplicationLog` named "Chat"; the visible lines are `AXStaticText`, newest last; focus is an `AXTextField` named "Command"; new lines arrive in an `AXApplicationStatus` live region, as both its value and its title; gpui's AccessKit tree focuses a `TextInput` named "Command" | Verified programmatically, in process. Querying from another process with `AXUIElement` needs the Accessibility permission, which this session doesn't have. Not yet heard with VoiceOver |
+| VoiceOver can reach the chat lines and the input | `mudling-desktop --synthetic --ax-check` reads the tree through the `NSAccessibility` methods VoiceOver's server calls, from inside the app. Phase 0 passed five checks, and it has since grown to cover the panels, the settings sheet and the empty state: the chat is an `AXGroup` with subrole `AXApplicationLog` named "Chat"; the visible lines are `AXStaticText`, newest last; focus is an `AXTextField` named "Command"; new lines arrive in an `AXApplicationStatus` live region, as both its value and its title; gpui's AccessKit tree focuses a `TextInput` named "Command" | Verified programmatically, in process. Querying from another process with `AXUIElement` needs the Accessibility permission, which this session doesn't have. Not yet heard with VoiceOver |
 | VoiceOver announces new lines | The live region node is `Live::Polite` in our code, and `accesskit_macos` posts `NSAccessibilityAnnouncementRequested` when a live node with a value is added. The AX check confirms the node and its text; gpui's tree dump doesn't include `live`, so the flag itself is checked by reading the code path | Partly verified; needs a listen with VoiceOver |
 | NVDA (Windows) and Orca (Linux) | The same AccessKit tree goes to `accesskit_windows` (UI Automation, `LiveRegionChanged`) and `accesskit_unix` (AT-SPI), both enabled at this gpui version. Those two adapters announce a live node's name (its label), while macOS announces its value, so the live region carries the new lines in both; the AX check confirms both | **Unverified**: code path present, manual steps below |
 
@@ -262,7 +315,8 @@ AccessKit adapter onto gpui's window" is already done upstream. What remains:
    across the logs), but wrapping is still needed. Plan: wrap in the core at
    the column width in characters (the chat is monospaced), so each visual
    row keeps the same height and the list stays a `uniform_list`. Rewrap
-   only the visible rows when the width changes.
+   only the visible rows when the width changes. History: this plan was
+   rejected, and the shell now wraps on its own side (VYT-248).
 9. **Inactive windows are drawn at most about 30 times a second** by
    default. That's right for daily use; the measuring mode turns it off.
 10. **The accessibility tree costs nothing until a screen reader connects**,
@@ -334,15 +388,26 @@ AccessKit adapter onto gpui's window" is already done upstream. What remains:
 
 ## Code map
 
-- `crates/mudling-core`: `ansi.rs` (SGR parsed once per line into plain text
-  and style spans), `scrollback.rs` (the ring buffer and find), `replay.rs`
-  (reads MUDPad's session logs: keeps the server text, drops its `[GMCP]`,
-  `[MAP]`, `[telnet]`, `[auto-login]`, `[connected]` and `[disconnected]`
-  notes and the blank lines they add; player input is never in the logs),
-  `stats.rs`.
-- `crates/mudling-bench`: the headless append and find benchmark.
-- `crates/mudling-desktop`: `chat.rs` (the virtualized chat and its live
-  region), `input.rs` (the command input and IME), `shell.rs` (the window's
-  layout), `theme.rs` (brand colors and the ANSI palette), `measure.rs` (the
-  measuring mode), `macos.rs` (the AX check), `stream.rs` (the replay pace
-  for interactive runs).
+Phase 0's map, brought up to date; the spike's own files are all still here.
+
+- `crates/mudling-core`: everything that isn't a shell. `session` runs a
+  connection through `net`, `telnet`, `line`, `plugin`, `defaults`, `map`,
+  `completion`, `persist` and `store`. From the spike: `ansi.rs` (SGR parsed
+  once per line into plain text and style spans), `scrollback.rs` (the ring
+  buffer and find), `replay.rs` (reads MUDPad's session logs: keeps the server
+  text, drops its `[GMCP]`, `[MAP]`, `[telnet]`, `[auto-login]`, `[connected]`
+  and `[disconnected]` notes and the blank lines they add; player input is
+  never in the logs), `stats.rs`.
+- `crates/mudling-bench`: the headless benchmarks, from append and find
+  through the session.
+- `crates/mudling-desktop`: `shell.rs` (the window and the jobs off its UI
+  thread), `launcher.rs` (saved servers, plugins and opening a session),
+  `chat.rs` and `chat/` (the chat, its split and its live region), `input.rs`
+  (the command input and IME), `empty_state.rs`, `title_bar.rs`,
+  `session_bar.rs`, `hud.rs`, `dock.rs`, `room_panel.rs`, `settings/`,
+  `theme.rs` (brand colors and the ANSI palette), `measure.rs` (the measuring
+  mode), `macos.rs` (the AX check), `stream.rs` (the replay pace for
+  interactive runs).
+- `crates/mudling-ffi`: the bindings for the SwiftUI shell.
+- `plugins/avatar`: the game plugin, compiled into the desktop app and off
+  until the player turns it on.
