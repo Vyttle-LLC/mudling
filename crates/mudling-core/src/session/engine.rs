@@ -527,14 +527,23 @@ impl Engine {
         self.publish_settings();
         self.publish_room();
         self.hub.write::<TargetState>(TargetState(None));
-        let had_position = self.hub.read(|characters: &Versioned<CharactersState>| {
-            characters.value().0.contains_key(CHARACTER_POSITION)
-        });
+        let (had_position, had_affects) =
+            self.hub.read(|characters: &Versioned<CharactersState>| {
+                let characters = characters.value();
+                (
+                    characters.0.contains_key(CHARACTER_POSITION),
+                    !characters.affects().is_empty(),
+                )
+            });
         if had_position {
             let position = HookValue::Text(String::new());
             let change = [(CHARACTER_POSITION.to_owned(), position)];
             self.hub
                 .write::<CharactersState>(CharactersState(change.into()));
+        }
+        if had_affects {
+            self.hub
+                .write::<CharactersState>(CharactersState::listing(&[]));
         }
     }
 

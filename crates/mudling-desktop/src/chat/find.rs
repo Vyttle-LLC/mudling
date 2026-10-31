@@ -8,6 +8,8 @@
 //!
 //! A result is a line's number, which trimming doesn't change. Results whose
 //! line has been trimmed drop out as it goes, so what's listed can be opened.
+//! Only what shows is searched, so a prompt the chat hides is never a result;
+//! showing or hiding prompts searches again, and leaves the reader in place.
 //!
 //! Results count lines, however many rows a line wraps to. The first is the
 //! newest, and Next walks back through the scrollback, up the screen.
@@ -75,6 +77,18 @@ fn snapshots(lines: &Scrollback, first: u64) -> Vec<(u64, Scrollback)> {
     pieces.filter(|(_, piece)| !piece.is_empty()).collect()
 }
 
+/// What a search is for, which says what becomes of the results before it.
+#[derive(Clone, Copy)]
+enum Search {
+    /// New text: its results replace them, and open the newest.
+    Typed,
+    /// New lines: its results join them.
+    NewLines,
+    /// Prompts were shown or hidden: its results replace them, where the
+    /// reader is.
+    Redone,
+}
+
 /// What the last finished search found, kept up to date as lines arrive.
 pub(super) struct Results {
     /// Matches as the core's search does, so what's highlighted is what's
@@ -100,6 +114,19 @@ impl Results {
             current: None,
             searched_to,
         }
+    }
+
+    /// Takes `numbers` in place of what's listed. A current result no longer
+    /// among them gives way to the next one back, which comes back as what's
+    /// to open.
+    fn replace(&mut self, numbers: Vec<u64>, searched_to: u64) -> Option<u64> {
+        self.numbers = numbers.into();
+        self.searched_to = searched_to;
+        let was = self.current?;
+        let up_to = self.numbers.partition_point(|number| *number <= was);
+        let kept = up_to.checked_sub(1).or(Some(0));
+        self.current = kept.and_then(|at| self.numbers.get(at).copied());
+        self.current.filter(|current| *current != was)
     }
 
     /// Lets go of the lines trimmed from the scrollback. A current result
@@ -296,22 +323,34 @@ impl Chat {
             find.results = None;
             cx.notify();
         } else {
-            self.search_from(0, true, cx);
+            self.search_from(0, Search::Typed, cx);
         }
     }
 
-    /// Searches the lines numbered `from` on, off the UI thread. `fresh` says
-    /// it's for new text, so its results replace the last ones.
-    fn search_from(&mut self, from: u64, fresh: bool, cx: &mut Context<Chat>) {
+    /// Prompts were shown or hidden, so what can be found changed.
+    pub(super) fn search_again(&mut self, cx: &mut Context<Chat>) {
+        let Some(find) = self.find.as_ref().filter(|find| !find.typed.is_empty()) else {
+            return;
+        };
+        let search = match find.results {
+            Some(_) => Search::Redone,
+            None => Search::Typed,
+        };
+        self.search_from(0, search, cx);
+    }
+
+    /// Searches the lines numbered `from` on, off the UI thread.
+    fn search_from(&mut self, from: u64, search: Search, cx: &mut Context<Chat>) {
         let pieces = snapshots(self.lines(), from.max(self.lines().evicted()));
         let end = self.next_line_number();
+        let prompts_shown = self.prompts_shown;
         let Some(find) = &mut self.find else { return };
         let searches: Vec<_> = pieces
             .into_iter()
             .map(|(first, lines)| {
                 let needle = find.typed.clone();
                 cx.background_spawn(async move {
-                    let indexes = lines.find(&needle, lines.len());
+                    let indexes = lines.find(&needle, lines.len(), prompts_shown);
                     let numbers = indexes.into_iter().rev();
                     numbers
                         .map(|index| first + index as u64)
@@ -321,29 +360,42 @@ impl Chat {
             .collect();
         find.search = Some(cx.spawn(async move |chat, cx| {
             let numbers = join_all(searches).await.concat();
-            chat.update(cx, |chat, cx| chat.found(numbers, end, fresh, cx))
+            chat.update(cx, |chat, cx| chat.found(numbers, end, search, cx))
                 .ok();
         }));
     }
 
     /// Takes in a search's results, `numbers` oldest first, for the lines up
-    /// to `end`. Fresh results open the newest of them, so what's typed shows
-    /// at once, as in any find.
-    fn found(&mut self, numbers: Vec<u64>, end: u64, fresh: bool, cx: &mut Context<Chat>) {
+    /// to `end`. Results for new text open the newest of them, so what's typed
+    /// shows at once, as in any find.
+    fn found(&mut self, numbers: Vec<u64>, end: u64, search: Search, cx: &mut Context<Chat>) {
         let Some(find) = &mut self.find else { return };
         find.search = None;
-        if fresh {
-            let results = Results::new(&find.typed, numbers, end);
-            let count = results.count();
-            find.results = Some(results);
-            find.announce(count);
-            self.step(Results::next, None, cx);
-        } else if let Some(results) = &mut find.results {
-            if !numbers.is_empty() {
+        match (search, &mut find.results) {
+            (Search::Typed, _) => {
+                let results = Results::new(&find.typed, numbers, end);
+                let count = results.count();
+                find.results = Some(results);
+                find.announce(count);
+                self.step(Results::next, None, cx);
+            }
+            (Search::NewLines, Some(results)) => {
+                if !numbers.is_empty() {
+                    cx.notify();
+                }
+                results.numbers.extend(numbers);
+                results.searched_to = end;
+            }
+            (Search::Redone, Some(results)) => {
+                let to_open = results.replace(numbers, end);
+                let count = results.count();
+                find.announce(count);
+                if let Some(number) = to_open {
+                    self.open_history_at(number, cx);
+                }
                 cx.notify();
             }
-            results.numbers.extend(numbers);
-            results.searched_to = end;
+            (_, None) => {}
         }
         self.keep_find_current(cx);
     }
@@ -362,8 +414,10 @@ impl Chat {
             let wait = cx.background_executor().timer(NEW_LINES_WAIT);
             find.search = Some(cx.spawn(async move |chat, cx| {
                 wait.await;
-                chat.update(cx, |chat, cx| chat.search_from(searched_to, false, cx))
-                    .ok();
+                chat.update(cx, |chat, cx| {
+                    chat.search_from(searched_to, Search::NewLines, cx);
+                })
+                .ok();
             }));
         }
     }
@@ -478,11 +532,11 @@ impl Chat {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{chat_window, is_split, push, server_lines};
+    use super::super::tests::{chat_window, is_split, push, server_lines, show_prompts};
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext, WindowAppearance};
     use mudling_core::Line;
-    use mudling_core::store::TERMINAL_CAPACITY;
+    use mudling_core::store::{Diff, TERMINAL_CAPACITY, TerminalChange};
 
     fn results(numbers: &[u64]) -> Results {
         Results::new("x", numbers.to_vec(), 0)
@@ -637,6 +691,79 @@ mod tests {
 
     fn top(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> u64 {
         chat.read_with(cx, |chat, _| chat.scroll_offset().line)
+    }
+
+    /// Output, output after a prompt, then a prompt with a word glued after
+    /// it, then a prompt alone, each of the last three marked. The two
+    /// prompts hold `goblin`, and so does what shows of the first two lines.
+    fn window_with_prompts(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = chat_window(cx, 0);
+        let texts = [
+            ("a goblin", 0),
+            ("<1hp> a goblin", 6),
+            ("<goblin> a bat", 9),
+            ("<goblin> ", 9),
+        ];
+        let Diff { change, revision } = server_lines(texts.map(|(text, _)| text.to_owned()));
+        let TerminalChange::Append(lines) = change;
+        let marked = lines
+            .iter()
+            .zip(texts)
+            .map(|(line, (_, prompt))| match prompt {
+                0 => line.clone(),
+                prompt => line.with_prompt(prompt),
+            });
+        let change = TerminalChange::Append(marked.collect());
+        chat.update(cx, |chat, cx| chat.apply(&Diff { change, revision }, cx));
+        open(&chat, cx);
+        (chat, cx)
+    }
+
+    #[gpui::test]
+    fn a_hidden_prompt_is_never_a_result_or_counted(cx: &mut TestAppContext) {
+        let (chat, cx) = window_with_prompts(cx);
+        search(&chat, "goblin", cx);
+        assert_eq!(summary(&chat, cx), "1 of 2");
+        assert_eq!(top(&chat, cx), 1, "the newest line that shows");
+        assert_eq!(chat.read_with(cx, |chat, _| chat.find_count()), Some(2));
+
+        search(&chat, "hp", cx);
+        assert_eq!(summary(&chat, cx), "No results");
+    }
+
+    #[gpui::test]
+    fn showing_prompts_finds_them_and_leaves_the_reader_in_place(cx: &mut TestAppContext) {
+        let (chat, cx) = window_with_prompts(cx);
+        search(&chat, "goblin", cx);
+
+        show_prompts(true, cx);
+        assert_eq!(summary(&chat, cx), "3 of 4", "still on line 1");
+        assert_eq!(top(&chat, cx), 1);
+    }
+
+    #[gpui::test]
+    fn hiding_prompts_moves_a_result_on_a_prompt_to_one_that_shows(cx: &mut TestAppContext) {
+        let (chat, cx) = window_with_prompts(cx);
+        show_prompts(true, cx);
+        search(&chat, "goblin", cx);
+        assert_eq!(summary(&chat, cx), "1 of 4");
+        assert_eq!(top(&chat, cx), 3);
+
+        show_prompts(false, cx);
+        assert_eq!(summary(&chat, cx), "1 of 2");
+        assert_eq!(top(&chat, cx), 1);
+    }
+
+    #[gpui::test]
+    fn new_lines_are_searched_as_the_setting_stands(cx: &mut TestAppContext) {
+        let (chat, cx) = window_with_prompts(cx);
+        search(&chat, "goblin", cx);
+        let Diff { change, revision } = server_lines(["<goblin> ".to_owned()]);
+        let TerminalChange::Append(lines) = change;
+        let change = TerminalChange::Append(vec![lines[0].with_prompt(9)]);
+        chat.update(cx, |chat, cx| chat.apply(&Diff { change, revision }, cx));
+        search_new_lines(cx);
+        assert_eq!(chat.read_with(cx, |chat, _| chat.find_count()), Some(2));
     }
 
     fn announced(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> Option<SharedString> {

@@ -177,6 +177,15 @@ impl Line {
         self.prompt_len() > 0 && self.prompt_len() == self.plain().len()
     }
 
+    /// The text that shows, without a copy: from past a prompt the HUD repeats,
+    /// unless `prompts_shown`.
+    pub fn shown_text(&self, prompts_shown: bool) -> &str {
+        match prompts_shown {
+            true => self.plain(),
+            false => &self.plain()[self.prompt_len()..],
+        }
+    }
+
     /// What's left with the prompt hidden, if anything.
     pub fn without_prompt(&self) -> Option<Line> {
         match self.prompt_len() {

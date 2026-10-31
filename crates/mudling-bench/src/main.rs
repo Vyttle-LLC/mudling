@@ -266,10 +266,10 @@ fn run(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
         let mut matches = 0;
         for _ in 0..FIND_ROUNDS {
             let started = Instant::now();
-            matches = std::hint::black_box(scrollback.find(needle, usize::MAX)).len();
+            matches = std::hint::black_box(scrollback.find(needle, usize::MAX, false)).len();
             finds.push(started.elapsed());
             let started = Instant::now();
-            std::hint::black_box(scrollback.find(needle, FIND_PAGE));
+            std::hint::black_box(scrollback.find(needle, FIND_PAGE, false));
             first_pages.push(started.elapsed());
         }
         find_matches.push((needle.to_owned(), matches));

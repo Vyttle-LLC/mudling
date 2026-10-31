@@ -1350,6 +1350,13 @@ fn a_hud_point_lists_affects_and_an_empty_list_clears_them() {
     );
     driven.gmcp(r#"Char.Status {"affects": null}"#);
     assert_eq!(affects(&driven), []);
+
+    driven.gmcp(r#"Char.Status {"affects": {"haste": "a while"}}"#);
+    assert_eq!(affects(&driven).len(), 1);
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+    assert_eq!(affects(&driven), [], "a dropped connection clears them");
 }
 
 #[test]

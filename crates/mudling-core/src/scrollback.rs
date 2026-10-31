@@ -59,7 +59,9 @@ impl Scrollback {
     /// Indexes of up to `limit` lines containing `needle`, ignoring ASCII
     /// case, newest first. The search reads each line's plain text in place
     /// and stops at `limit`, so the first page of results comes quickly.
-    pub fn find(&self, needle: &str, limit: usize) -> Vec<usize> {
+    /// Unless `prompts_shown`, the prompts the HUD repeats aren't read: only
+    /// what shows of a line can be found.
+    pub fn find(&self, needle: &str, limit: usize, prompts_shown: bool) -> Vec<usize> {
         if needle.is_empty() {
             return Vec::new();
         }
@@ -71,7 +73,7 @@ impl Scrollback {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, line)| matcher.is_match(line.plain()))
+            .filter(|(_, line)| matcher.is_match(line.shown_text(prompts_shown)))
             .map(|(index, _)| index)
             .take(limit)
             .collect()
@@ -120,13 +122,27 @@ mod tests {
     #[test]
     fn find_ignores_case_and_matches_plain_text_only() {
         let scrollback = scrollback_of(10, &["A Goblin waits", "\x1b[31mgob\x1b[0mlin", "nothing"]);
-        assert_eq!(scrollback.find("GOBLIN", 10), [1, 0]);
-        assert!(scrollback.find("", 10).is_empty());
+        assert_eq!(scrollback.find("GOBLIN", 10, true), [1, 0]);
+        assert!(scrollback.find("", 10, true).is_empty());
     }
 
     #[test]
     fn find_returns_the_newest_matches_up_to_the_limit() {
         let scrollback = scrollback_of(10, &["hit 1", "miss", "hit 2", "hit 3"]);
-        assert_eq!(scrollback.find("hit", 2), [3, 2]);
+        assert_eq!(scrollback.find("hit", 2, true), [3, 2]);
+    }
+
+    #[test]
+    fn find_reads_a_hidden_prompt_only_once_prompts_show() {
+        let mut scrollback = scrollback_of(10, &[]);
+        let plain = scrollback_of(10, &["<9hp> ", "<9hp> You rest.", "a 9hp potion"]);
+        let lines: Vec<&Line> = plain.iter().collect();
+        scrollback.push(lines[0].with_prompt(6));
+        scrollback.push(lines[1].with_prompt(6));
+        scrollback.push(lines[2].clone());
+
+        assert_eq!(scrollback.find("9hp", 10, true), [2, 1, 0]);
+        assert_eq!(scrollback.find("9hp", 10, false), [2]);
+        assert_eq!(scrollback.find("rest", 10, false), [1]);
     }
 }

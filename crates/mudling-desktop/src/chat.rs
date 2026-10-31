@@ -532,7 +532,10 @@ fn render_line(
 impl Render for Chat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Chat>) -> impl IntoElement {
         let choice = cx.global::<Theme>().choice;
-        self.prompts_shown = choice.shows_prompts();
+        if self.prompts_shown != choice.shows_prompts() {
+            self.prompts_shown = choice.shows_prompts();
+            self.search_again(cx);
+        }
         let line_height = choice.chat_line_height();
         if !self.unannounced.is_empty() {
             let batch = self.announcement.as_ref().map_or(0, |(batch, _)| batch + 1);
@@ -803,7 +806,7 @@ mod tests {
         Diff { change, revision }
     }
 
-    fn show_prompts(show_prompts: bool, cx: &mut VisualTestContext) {
+    pub(super) fn show_prompts(show_prompts: bool, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             let choice = cx.global::<Theme>().choice;
             cx.set_global(Theme::chosen(
