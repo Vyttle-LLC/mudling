@@ -1009,6 +1009,27 @@ fn a_door_closing_in_place_shows_without_a_room_info() {
 }
 
 #[test]
+fn marking_a_mob_finds_the_noun_of_any_room_line() {
+    for (title, noun) in [
+        ("A myconoid shaman sways here, spores drifting.", "shaman"),
+        (
+            "(White Aura) A myconoid shaman is here, chanting.",
+            "shaman",
+        ),
+        ("An old, wrinkled nanny watches you.", "nanny"),
+        ("A pixie looks at you and sighs.", "pixie"),
+    ] {
+        let mut mobs = MobMemory::default();
+        mobs.set_aggressive(title, true);
+        assert!(
+            mobs.is_aggressive(&format!("The {noun} is here.")),
+            "{title} should mark {noun}"
+        );
+        assert!(!mobs.is_aggressive("Spores drifting here."), "{title}");
+    }
+}
+
+#[test]
 fn unmarking_undoes_a_learned_guess() {
     let mut mobs = MobMemory::default();
     mobs.learn_aggressor("The old goat");
