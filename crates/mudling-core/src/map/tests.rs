@@ -2,7 +2,7 @@
 //! made up: no game's wording belongs in the core.
 
 use super::*;
-use crate::persist::{Batch, Database, Timestamp};
+use crate::persist::{Batch, Database, Timestamp, Writer};
 use std::collections::BTreeSet;
 
 const FIELDS: &str = "The Fields";
@@ -340,6 +340,33 @@ fn rooms_without_numbers_are_told_apart_by_description() {
     walk.arrive_in("In the grass", FIELDS, &CROSSROADS, "Tall grass sways.");
     assert_eq!(walk.current().id, start);
     assert_eq!(walk.count(), 2);
+}
+
+#[test]
+fn loading_puts_a_building_back_at_its_door() {
+    let mut layout = layout::Layout::new(1);
+    let mut outside = MapRoom::empty(1);
+    outside.zone = FIELDS.to_owned();
+    let mut inside = MapRoom::empty(2);
+    inside.zone = FIELDS.to_owned();
+    inside.building = Some(2);
+    inside.position = GridPoint { x: 50, y: 7, z: 0 };
+    layout.insert(outside);
+    layout.insert(inside);
+    layout.link(1, Direction::East, 2);
+
+    layout.rebuild_buildings();
+
+    let room = layout.room(2).unwrap();
+    assert_eq!(room.building, None);
+    assert_eq!(room.position, GridPoint { x: 1, y: 0, z: 0 });
+}
+
+#[test]
+fn a_room_name_ending_in_a_space_keeps_its_description() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A pond ", FIELDS, &["n"], "Lilies float here.");
+    assert_eq!(walk.current().description, "Lilies float here.");
 }
 
 #[test]
@@ -880,8 +907,7 @@ fn an_off_grid_return_reuses_the_described_room() {
 
 // MARK: Buildings and straightening
 
-#[test]
-fn a_building_walked_through_between_neighbors_is_lifted_out() {
+fn walk_around_the_tower() -> Walk {
     let mut walk = Walk::new(text_map());
     let described = |walk: &mut Walk, direction: &str, name: &str, exits: &[&'static str]| {
         walk.go_described(direction, name, exits, name);
@@ -913,6 +939,12 @@ fn a_building_walked_through_between_neighbors_is_lifted_out() {
         now,
     );
     described(&mut walk, "e", "East of the tower", &["w", "n", "s"]);
+    walk
+}
+
+#[test]
+fn a_building_walked_through_between_neighbors_is_lifted_out() {
+    let mut walk = walk_around_the_tower();
 
     let tower = walk
         .map
@@ -972,6 +1004,162 @@ fn each_area_has_its_own_grid() {
     assert_eq!(walk.tangled(), 0);
 }
 
+/// The rooms by id, as a view reads them. A building is drawn from its doors,
+/// so its rooms count from its first room: its grid has no place of its own.
+fn rooms_by_id(map: &LiveMap) -> Vec<MapRoom> {
+    let mut rooms: Vec<MapRoom> = map.rooms().cloned().collect();
+    for room in &mut rooms {
+        if let Some(first) = room.building.and_then(|building| map.room(building)) {
+            room.position = room.position - first.position;
+        }
+    }
+    rooms.sort_by_key(|room| room.id);
+    rooms
+}
+
+/// The map's rows in a database of their own.
+fn saved(map: &mut LiveMap, now: Timestamp) -> (tempfile::TempDir, Database, Writer) {
+    let folder = tempfile::tempdir().unwrap();
+    let database = Database::open(folder.path(), "test.example").unwrap();
+    let writer = database.writer().unwrap();
+    writer.submit(map.commit(now).unwrap().batch).unwrap();
+    writer.flush().unwrap();
+    (folder, database, writer)
+}
+
+fn reopened(database: &Database) -> LiveMap {
+    let reader = database.reader().unwrap();
+    let (rows, marks) = (reader.map().unwrap(), reader.mob_marks().unwrap());
+    let rules = Box::new(TestRules {
+        identity: RoomIdentity::Text,
+    });
+    LiveMap::load(rules, &rows, &marks, &reader.meta().unwrap())
+}
+
+/// Two rooms lead into a dead end, and the second room walked isn't the
+/// second room numbered, so a load draws one way in and then the other.
+fn two_ways_into_a_dead_end() -> Walk {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("One", FIELDS, &["e"], "One");
+    walk.arrive_in("Two", FIELDS, &["s"], "Two");
+    walk.arrive_in("One", FIELDS, &["e"], "One");
+    walk.go_described("e", "Three", &["e"], "Three");
+    walk.go_described("e", "Sink", &[], "Sink");
+    walk.arrive_in("Two", FIELDS, &["s"], "Two");
+    walk.go_described("s", "Sink", &[], "Sink");
+    walk.arrive_in("Two", FIELDS, &["s"], "Two");
+    walk.arrive_in("Three", FIELDS, &["e"], "Three");
+    walk
+}
+
+#[test]
+fn a_map_reopened_reads_as_it_did_before_saving() {
+    let mut stretched = Walk::new(text_map());
+    stretched.arrive("A", &["e", "n"]);
+    stretched.go("e", "B", &["w"]);
+    stretched.go("w", "A", &["e", "n"]);
+    stretched.go("n", "C", &["s", "e"]);
+    stretched.go("e", "D", &["w", "s"]);
+    stretched.go("s", "E", &["n"]);
+
+    for mut walk in [
+        walk_around_the_tower(),
+        lost_in_the_woods(),
+        stretched,
+        two_ways_into_a_dead_end(),
+    ] {
+        let before = rooms_by_id(&walk.map);
+        let now = walk.now();
+        let (_folder, database, _writer) = saved(&mut walk.map, now);
+        assert_eq!(rooms_by_id(&reopened(&database)), before);
+    }
+}
+
+#[test]
+fn reopening_keeps_a_buildings_rooms() {
+    let mut walk = walk_around_the_tower();
+    let now = walk.now();
+    let (_folder, database, _writer) = saved(&mut walk.map, now);
+    let map = reopened(&database);
+    let tower = map.room(walk.id_of("Inside the tower")).unwrap();
+    assert_eq!(tower.building, Some(tower.id));
+}
+
+#[test]
+fn a_maze_a_load_finds_is_still_one_square_when_reopened() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A clearing", &["e", "n"]);
+    for _ in 0..3 {
+        woods(&mut walk, "e");
+    }
+    assert_eq!(walk.map.rooms().filter(|room| room.maze).count(), 0);
+    let now = walk.now();
+    let (_folder, database, writer) = saved(&mut walk.map, now);
+
+    let reader = database.reader().unwrap();
+    let mut rows = reader.map().unwrap();
+    for room in &mut rows.rooms {
+        room.tangled = room.name == "Lost in the woods";
+    }
+    let rules = Box::new(TestRules {
+        identity: RoomIdentity::Text,
+    });
+    let mut first = LiveMap::load(rules, &rows, &[], &reader.meta().unwrap());
+    assert_eq!(first.rooms().filter(|room| room.maze).count(), 1);
+
+    let before = rooms_by_id(&first);
+    writer.submit(first.commit(now).unwrap().batch).unwrap();
+    writer.flush().unwrap();
+    assert_eq!(rooms_by_id(&reopened(&database)), before);
+}
+
+/// `size` rooms in a row going east, joined both ways, from `first`.
+fn corridor(layout: &mut layout::Layout, first: RoomId, size: i64) {
+    for offset in 0..size {
+        let mut room = MapRoom::empty(first + offset);
+        room.zone = FIELDS.to_owned();
+        room.position = GridPoint::new(offset, 0, 0);
+        layout.insert(room);
+        if offset > 0 {
+            layout.update(first + offset - 1, |room| {
+                room.links.insert(Direction::East, first + offset);
+            });
+            layout.update(first + offset, |room| {
+                room.links.insert(Direction::West, first + offset - 1);
+            });
+        }
+    }
+}
+
+/// The corridor's walk from its first room takes in a pocket reached one way
+/// from room 5, then gives up on an area too big to redraw. Like the
+/// prototype, a load then counts the pocket as seen.
+#[test]
+fn loading_leaves_a_small_area_inside_the_walk_of_one_too_big_to_redraw() {
+    let mut layout = layout::Layout::new(1);
+    corridor(&mut layout, 1, 300);
+    let (pocket, stretched_to) = (1_001, 1_002);
+    let mut far_end = MapRoom::empty(pocket);
+    far_end.zone = FIELDS.to_owned();
+    far_end.position = GridPoint::new(0, 50, 0);
+    layout.insert(far_end);
+    let mut next = MapRoom::empty(stretched_to);
+    next.zone = FIELDS.to_owned();
+    next.position = GridPoint::new(9, 50, 0);
+    layout.insert(next);
+    layout.link(5, Direction::North, pocket);
+    layout.update(pocket, |room| {
+        room.links.insert(Direction::East, stretched_to);
+    });
+
+    layout.rebuild_buildings();
+
+    assert_eq!(
+        layout.room(stretched_to).unwrap().position,
+        GridPoint::new(9, 50, 0)
+    );
+}
+
 // MARK: Mob memory
 
 #[test]
@@ -994,6 +1182,76 @@ fn an_attacker_marks_its_whole_kind_and_the_room() {
     assert!(
         rows.contains(r#"Upsert(RoomFeature(RoomFeature { room_id: 1, feature: "aggressive-mob""#)
     );
+}
+
+#[test]
+fn mobs_in_the_room_are_sightings_and_players_are_not() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A den", &["n"]);
+    let now = walk.now();
+    walk.map.mobs_mut().learn_aggressor("The grey wolf");
+    walk.map.gmcp(
+        "Room.Players",
+        r#"{"Fen": {"name": "Fen", "fullname": "Fen the Brave is here."},
+            "1042": {"name": "1042", "fullname": "A big wolf \u001b[0;36mis here."}}"#,
+        now,
+    );
+    let room = walk.current();
+    let seen: Vec<&String> = room.sightings.keys().collect();
+    assert_eq!(seen, ["A big wolf is here."]);
+    assert!(room.features.contains(feature::AGGRESSIVE_MOB));
+}
+
+#[test]
+fn a_fountain_in_the_room_is_a_feature() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A square", &["n"]);
+    let now = walk.now();
+    walk.map.gmcp(
+        "Char.Items.List",
+        r#"{"location": "inv", "items": [{"id": "1", "name": "a flask", "type": "fountain"}]}"#,
+        now,
+    );
+    assert!(!walk.current().features.contains(feature::FOUNTAIN));
+    walk.map.gmcp(
+        "Char.Items.List",
+        r#"{"location": "room", "items": [{"id": "2", "name": "a fountain", "type": "fountain"}]}"#,
+        now,
+    );
+    assert!(walk.current().features.contains(feature::FOUNTAIN));
+}
+
+#[test]
+fn a_door_closing_in_place_shows_without_a_room_info() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A hall", &["n"]);
+    let now = walk.now();
+    walk.map.gmcp("Char.Status", r#"{"hp": "12"}"#, now);
+    assert!(!walk.current().exits.get(Direction::North).unwrap().closed);
+    walk.map
+        .gmcp("Char.Status", r#"{"room_exits": {"North": "C"}}"#, now);
+    assert!(walk.current().exits.get(Direction::North).unwrap().closed);
+}
+
+#[test]
+fn marking_a_mob_finds_the_noun_of_any_room_line() {
+    for (title, noun) in [
+        ("A myconoid shaman sways here, spores drifting.", "shaman"),
+        (
+            "(White Aura) A myconoid shaman is here, chanting.",
+            "shaman",
+        ),
+        ("An old, wrinkled nanny watches you.", "nanny"),
+        ("A pixie looks at you and sighs.", "pixie"),
+    ] {
+        let mut mobs = MobMemory::default();
+        mobs.set_aggressive(title, true);
+        assert!(
+            mobs.is_aggressive(&format!("The {noun} is here.")),
+            "{title} should mark {noun}"
+        );
+        assert!(!mobs.is_aggressive("Spores drifting here."), "{title}");
+    }
 }
 
 #[test]

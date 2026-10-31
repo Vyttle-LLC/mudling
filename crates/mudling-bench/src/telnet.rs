@@ -1,8 +1,4 @@
-//! `mudling-bench-telnet`: measures the telnet parser on synthetic traffic.
-//!
-//! ```text
-//! mudling-bench-telnet [--check] [--json <report.json>]
-//! ```
+//! The telnet parser on synthetic traffic.
 //!
 //! The traffic is shaped like a real session: colored room text and combat,
 //! a prompt with GA after each burst, GMCP vitals and room info, and now and
@@ -11,9 +7,11 @@
 //! 1 MB, to show the cost per byte doesn't grow with its size.
 //!
 //! The telnet stage shares the 20 µs per line budget (PRD §6) with the line
-//! pipeline and every plugin, so `--check` holds it to a tenth of that: a
-//! 4 KB chunk, about 50 lines, within 100 µs at p99.
+//! pipeline and every plugin, so it's held to a tenth of that: 4 KB of telnet,
+//! about 50 lines, within 100 µs at p99. An MCCP2 chunk inflates to more than
+//! 4 KB, so its time counts per 4 KB of what it inflates to.
 
+use crate::verdict;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use mudling_core::stats::Summary;
@@ -22,7 +20,6 @@ use mudling_core::telnet::option::{COMPRESS2, GMCP};
 use mudling_core::telnet::{Bytes, Parser, gmcp};
 use serde::Serialize;
 use std::io::Write;
-use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 const CHUNK: usize = 4 * 1024;
@@ -39,31 +36,24 @@ struct Run {
     per_chunk: Summary,
 }
 
+impl Run {
+    /// The p99 for a chunk's worth of telnet, however much a wire chunk holds.
+    fn p99_per_telnet_chunk_us(&self) -> f64 {
+        self.per_chunk.p99_us * self.wire_mb / self.telnet_mb
+    }
+}
+
 #[derive(Serialize)]
-struct Report {
+pub struct Report {
     plain: Run,
     mccp2: Run,
     gmcp_32kb_ns_per_byte: f64,
     gmcp_1mb_ns_per_byte: f64,
     chunk_budget_us: f64,
-    within_budget: bool,
+    pub within_budget: bool,
 }
 
-fn main() -> ExitCode {
-    let mut check = false;
-    let mut json = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--check" => check = true,
-            "--json" => json = args.next(),
-            _ => {
-                eprintln!("usage: mudling-bench-telnet [--check] [--json <report.json>]");
-                return ExitCode::from(2);
-            }
-        }
-    }
-
+pub fn run() -> Report {
     let bursts: Vec<Vec<u8>> = (0..BURSTS).map(burst).collect();
     let plain: Vec<u8> = negotiation(false)
         .into_iter()
@@ -74,30 +64,16 @@ fn main() -> ExitCode {
     let mccp2 = measure(&compressed(&bursts), telnet_bytes);
     let gmcp_32kb_ns_per_byte = gmcp_ns_per_byte(32 * 1024);
     let gmcp_1mb_ns_per_byte = gmcp_ns_per_byte(1024 * 1024);
-    let within_budget =
-        plain.per_chunk.p99_us <= CHUNK_BUDGET_US && mccp2.per_chunk.p99_us <= CHUNK_BUDGET_US;
-    let report = Report {
+    let within_budget = plain.p99_per_telnet_chunk_us() <= CHUNK_BUDGET_US
+        && mccp2.p99_per_telnet_chunk_us() <= CHUNK_BUDGET_US;
+    Report {
         plain,
         mccp2,
         gmcp_32kb_ns_per_byte,
         gmcp_1mb_ns_per_byte,
         chunk_budget_us: CHUNK_BUDGET_US,
         within_budget,
-    };
-
-    print_report(&report);
-    if let Some(path) = json {
-        let text = serde_json::to_string_pretty(&report).expect("the report serializes");
-        if let Err(error) = std::fs::write(&path, text) {
-            eprintln!("couldn't write {path}: {error}");
-            return ExitCode::from(2);
-        }
     }
-    if check && !report.within_budget {
-        eprintln!("a budget was missed");
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
 }
 
 /// One server write: what a move, a combat round or a tick sends.
@@ -223,27 +199,22 @@ fn gmcp_ns_per_byte(size: usize) -> f64 {
     started.elapsed().as_secs_f64() * 1e9 / (rounds * stream.len()) as f64
 }
 
-fn print_report(report: &Report) {
+pub fn print(report: &Report) {
     for (name, run) in [("plain", &report.plain), ("MCCP2", &report.mccp2)] {
         println!(
-            "{name}: {:.1} MB on the wire ({:.1} MB of telnet) in {} chunks of 4 KB; {:.0} MB/s wire, {:.0} MB/s telnet",
+            "telnet, {name}: {:.1} MB on the wire ({:.1} MB of telnet) in {} chunks of 4 KB; {:.0} MB/s wire, {:.0} MB/s telnet",
             run.wire_mb, run.telnet_mb, run.chunks, run.wire_mb_per_s, run.telnet_mb_per_s
         );
         println!(
-            "  per chunk: p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",
-            run.per_chunk.p50_us,
-            run.per_chunk.p99_us,
-            run.per_chunk.max_us,
+            "  per chunk: {}; {:.2} µs p99 per 4 KB of telnet; budget ≤ {} µs: {}",
+            run.per_chunk,
+            run.p99_per_telnet_chunk_us(),
             report.chunk_budget_us,
-            if run.per_chunk.p99_us <= report.chunk_budget_us {
-                "ok"
-            } else {
-                "MISSED"
-            }
+            verdict(run.p99_per_telnet_chunk_us() <= report.chunk_budget_us)
         );
     }
     println!(
-        "one GMCP message: {:.2} ns/byte at 32 KB, {:.2} ns/byte at 1 MB",
+        "telnet, one GMCP message: {:.2} ns/byte at 32 KB, {:.2} ns/byte at 1 MB",
         report.gmcp_32kb_ns_per_byte, report.gmcp_1mb_ns_per_byte
     );
 }

@@ -258,6 +258,22 @@ pub struct Pending<'a> {
     pub number: u64,
 }
 
+impl Pending<'_> {
+    /// The text so far from byte `at` of its plain text on, for showing
+    /// before the line ends. Only a display's line: the pipeline still
+    /// finishes the whole line for its readers.
+    pub fn shown_from(&self, at: usize) -> Line {
+        let whole = Line::build(
+            self.raw,
+            self.plain,
+            self.styled,
+            LineEnd::Cut,
+            LineKind::Server,
+        );
+        whole.after(at)
+    }
+}
+
 /// Turns one connection's server text into lines. Feed it the bytes of each
 /// telnet data event in order, and call [`LinePipeline::prompt_end`] for
 /// GA/EOR.

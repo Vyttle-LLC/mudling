@@ -27,7 +27,7 @@ slots = [
 # slot holds "<nothing>".
 [equipment]
 name = "equipment"
-start = '''^{prompt}?You are using:'''
+start = '''^\s*{prompt}?\s*You are using:'''
 row = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
 hook = "read_equipment"
 
@@ -67,44 +67,44 @@ hook = "read_examine"
 # "You wear a Tiamat mask on your head.", "... around your left wrist."
 [[wear]]
 name = "gear.wore"
-pattern = '''^{prompt}?You wear (?<item>.+?) (?<on>on|around|about|over|in) your (?:left |right )?(?<part>\w+)\.$'''
+pattern = '''^\s*{prompt}?\s*You wear (?<item>.+?) (?<on>on|around|about|over|in) your (?:left |right )?(?<part>\w+)\.$'''
 hook = "on_wore"
 
 # "You hold a golden feather in your hands."
 [[wear]]
 name = "gear.wore"
-pattern = '''^{prompt}?You hold (?<item>.+?) in your hands?\.$'''
+pattern = '''^\s*{prompt}?\s*You hold (?<item>.+?) in your hands?\.$'''
 hook = "on_wore"
 
 # "You light Nom's Crystal Lantern and hold it."
 [[wear]]
 name = "gear.wore"
-pattern = '''^{prompt}?You light (?<item>.+?) and hold it\.$'''
+pattern = '''^\s*{prompt}?\s*You light (?<item>.+?) and hold it\.$'''
 hook = "on_wore"
 
 # "You wield a long sword."
 [[wear]]
 name = "gear.wore"
-pattern = '''^{prompt}?You wield (?<item>.+?)\.$'''
+pattern = '''^\s*{prompt}?\s*You wield (?<item>.+?)\.$'''
 hook = "on_wore"
 
 # "You stop using a round shield."
 [[remove]]
 name = "gear.removed"
-pattern = '''^{prompt}?You stop using (?<item>.+?)\.$'''
+pattern = '''^\s*{prompt}?\s*You stop using (?<item>.+?)\.$'''
 hook = "on_removed"
 
 # "You put a rope belt in a satchel."
 [[put]]
 name = "gear.put"
-pattern = '''^{prompt}?You put (?<item>.+?) in (?<container>.+)\.$'''
+pattern = '''^\s*{prompt}?\s*You put (?<item>.+?) in (?<container>.+)\.$'''
 
 # The container refused what was put in it.
 [[put]]
 name = "gear.did_not_fit"
-pattern = '''^{prompt}?It won't fit\.$'''
+pattern = '''^\s*{prompt}?\s*It won't fit\.$'''
 
 # Nothing carried by that name.
 [[put]]
 name = "gear.not_carried"
-pattern = '''^{prompt}?You do not have that item\.$'''
+pattern = '''^\s*{prompt}?\s*You do not have that item\.$'''

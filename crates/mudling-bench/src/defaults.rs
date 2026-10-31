@@ -17,29 +17,20 @@
 //!
 //! Each log is a session: the defaults start over with each one.
 
+use crate::verdict;
 use mudling_core::defaults::{self, Defaults, PendingAction, hud};
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::PluginHost;
-use mudling_core::replay;
+use mudling_core::replay::Event;
 use mudling_core::stats::Summary;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 pub const BUDGET_US: f64 = 5.0;
-/// The prototype's notes, as `replay` lists them.
-const NOTES: [&str; 6] = [
-    "[GMCP] ",
-    "[telnet] ",
-    "[auto-login] ",
-    "[disconnected] ",
-    "[MAP] ",
-    "[connected]",
-];
 /// Reads in the split runs are 1 to this many bytes.
 const LONGEST_SPLIT_READ: usize = 48;
 const SPLIT_RUNS: u64 = 3;
-const SYNTHETIC_LINES: usize = 100_000;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -62,23 +53,11 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(logs: &[String]) -> Report {
-    let (source, events) = if logs.is_empty() {
-        ("synthetic".to_owned(), synthetic_events())
-    } else {
-        let mut events = Vec::new();
-        for path in logs {
-            let bytes =
-                std::fs::read(path).unwrap_or_else(|error| panic!("couldn't read {path}: {error}"));
-            events.extend(log_events(&String::from_utf8_lossy(&bytes)));
-        }
-        (format!("{} log(s)", logs.len()), events)
-    };
-
-    let whole = Replay::run(&events, None);
+pub fn run(source: &str, logs: &[Vec<Event>]) -> Report {
+    let whole = Replay::run(logs, None);
     let mut ever_learned_split = BTreeSet::new();
     for seed in 1..=SPLIT_RUNS {
-        ever_learned_split.extend(Replay::run(&events, Some(seed)).ever_learned);
+        ever_learned_split.extend(Replay::run(logs, Some(seed)).ever_learned);
     }
     let is_start_of_a_top_shape = |shape: &str| {
         whole
@@ -100,7 +79,7 @@ pub fn run(logs: &[String]) -> Report {
     let per_pending = or_zero(&whole.pending_samples);
     let per_gmcp = or_zero(&whole.gmcp_samples);
     Report {
-        source,
+        source: source.to_owned(),
         lines: whole.line_samples.len(),
         vitals: whole.vitals,
         prompts_matched: whole.matched,
@@ -118,12 +97,6 @@ pub fn run(logs: &[String]) -> Report {
 }
 
 pub fn print(report: &Report) {
-    let summary = |s: &Summary| {
-        format!(
-            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
-            s.p50_us, s.p99_us, s.max_us
-        )
-    };
     println!(
         "defaults over {} ({} lines, {} Char.Vitals):",
         report.source, report.lines, report.vitals
@@ -141,86 +114,15 @@ pub fn print(report: &Report) {
     );
     println!(
         "  per line: {}; per pending check: {}",
-        summary(&report.per_line),
-        summary(&report.per_pending)
+        report.per_line, report.per_pending
     );
-    println!("  per GMCP message: {}", summary(&report.per_gmcp));
+    println!("  per GMCP message: {}", report.per_gmcp);
     println!(
         "  line + pending p99: {:.2} µs; budget ≤ {} µs: {}",
         report.per_line.p99_us + report.per_pending.p99_us,
         report.budget_us,
-        if report.within_budget { "ok" } else { "MISSED" }
+        verdict(report.within_budget)
     );
-}
-
-#[derive(Debug, PartialEq)]
-enum Event {
-    /// A session starts.
-    Connected,
-    Text(String),
-    Gmcp {
-        package: String,
-        json: String,
-    },
-    /// GA or EOR.
-    PromptEnd,
-}
-
-/// A prototype log as one session's server text and GMCP messages, in
-/// order. Each note is written `"\n[TAG] …\n"`; the other notes are dropped.
-fn log_events(log: &str) -> Vec<Event> {
-    let mut events = vec![Event::Connected];
-    let push_text = |events: &mut Vec<Event>, text: &str| {
-        let text = text.strip_prefix("[connected]\n").unwrap_or(text);
-        if !text.is_empty() {
-            events.push(Event::Text(text.to_owned()));
-        }
-    };
-    let (mut text_start, mut at) = (0, 0);
-    while let Some(found) = log[at..].find("\n[").map(|offset| at + offset) {
-        let note_start = found + 1;
-        if !NOTES.iter().any(|note| log[note_start..].starts_with(note)) {
-            at = note_start;
-            continue;
-        }
-        push_text(&mut events, &log[text_start..found]);
-        let note_end = log[note_start..]
-            .find('\n')
-            .map_or(log.len(), |offset| note_start + offset);
-        if let Some(gmcp) = log[note_start..note_end].strip_prefix("[GMCP] ") {
-            let (package, json) = gmcp.split_once(' ').unwrap_or((gmcp, ""));
-            events.push(Event::Gmcp {
-                package: package.to_owned(),
-                json: json.to_owned(),
-            });
-        }
-        text_start = (note_end + 1).min(log.len());
-        at = text_start;
-    }
-    push_text(&mut events, &log[text_start..]);
-    events
-}
-
-/// Made-up server text with a `Char.Vitals` and a prompt every fourth
-/// line, ended by GA as Diku-family servers end them, for runs without logs.
-fn synthetic_events() -> Vec<Event> {
-    let mut events = vec![Event::Connected];
-    for (index, line) in replay::synthetic_lines(SYNTHETIC_LINES)
-        .into_iter()
-        .enumerate()
-    {
-        events.push(Event::Text(format!("{line}\n\r")));
-        if index % 4 == 3 {
-            let (hp, mv) = (index % 500, index % 97);
-            events.push(Event::Gmcp {
-                package: "Char.Vitals".into(),
-                json: format!(r#"{{"hp": "{hp}", "mv": "{mv}"}}"#),
-            });
-            events.push(Event::Text(format!("\n\r<{hp}hp {mv}mv> ")));
-            events.push(Event::PromptEnd);
-        }
-    }
-    events
 }
 
 struct Replay {
@@ -244,9 +146,9 @@ struct Replay {
 }
 
 impl Replay {
-    /// Replays `events`, each text in one read, or with `seed` cut into
-    /// small random reads.
-    fn run(events: &[Event], seed: Option<u64>) -> Replay {
+    /// Replays `logs`, each text in one read, or with `seed` cut into small
+    /// random reads.
+    fn run(logs: &[Vec<Event>], seed: Option<u64>) -> Replay {
         let mut replay = Replay {
             pipeline: LinePipeline::default(),
             host: PluginHost::new([defaults::plugin()]).expect("the defaults compile"),
@@ -264,15 +166,14 @@ impl Replay {
             gmcp_samples: Vec::new(),
         };
         let mut random = seed.map(XorShift::new);
-        for event in events {
+        // Each log is a session, whether or not it opens with `[connected]`.
+        let sessions = logs
+            .iter()
+            .flat_map(|log| std::iter::once(&Event::Connected).chain(log));
+        for event in sessions {
             match event {
                 Event::Connected => replay.start_session(),
-                Event::PromptEnd => {
-                    if let Some(line) = replay.pipeline.prompt_end() {
-                        replay.lines.push(line);
-                        replay.read_lines();
-                    }
-                }
+                Event::Command(_) => {}
                 Event::Text(text) => match &mut random {
                     None => replay.push(text.as_bytes()),
                     Some(random) => {
@@ -376,35 +277,5 @@ impl XorShift {
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         (self.0 % bound as u64) as usize
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_server_text_and_gmcp_from_a_log() {
-        // Synthetic: shaped like SessionLogger's output.
-        let log = "[connected]\nWelcome.\r\n\n[telnet] verb 251 option 201\n[B]ack here\n\
-                   \n[GMCP] Char.Vitals { \"hp\": \"7\" }\n\n\r<7hp> \n[GMCP] Room.Info\nYou rest.";
-        assert_eq!(
-            log_events(log),
-            [
-                Event::Connected,
-                Event::Text("Welcome.\r\n".into()),
-                Event::Text("[B]ack here\n".into()),
-                Event::Gmcp {
-                    package: "Char.Vitals".into(),
-                    json: "{ \"hp\": \"7\" }".into()
-                },
-                Event::Text("\n\r<7hp> ".into()),
-                Event::Gmcp {
-                    package: "Room.Info".into(),
-                    json: String::new()
-                },
-                Event::Text("You rest.".into()),
-            ]
-        );
     }
 }

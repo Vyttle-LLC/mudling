@@ -3,7 +3,7 @@
 # a friend already fighting, which isn't aggression.
 [[aggro]]
 name = "mobs.aggro"
-pattern = '''^{prompt}?(?<name>(?:.*[^A-Za-z])?(?<noun>[A-Za-z]+)) GLARES at you and SNARLS!'''
+pattern = '''^\s*{prompt}?\s*(?<name>(?:.*[^A-Za-z])?(?<noun>[A-Za-z]+)) GLARES at you and SNARLS!'''
 
 # Turns a mob's room title into its name, without the tags in front or
 # what it's doing, which change from visit to visit: "(White Aura) A

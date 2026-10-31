@@ -68,26 +68,82 @@ impl Layout {
         misdrawn.then_some(area)
     }
 
+    /// Every room [`Layout::misdrawn_area`] could say yes for: those that
+    /// lead to a path that doesn't line up or to a crowded square, so a load
+    /// needn't walk the area of any other room.
+    pub(super) fn rooms_leading_to_misdrawing(&self) -> HashSet<RoomId> {
+        let misdrawn: Vec<RoomId> = self
+            .rooms()
+            .filter(|room| !room.tangled)
+            .filter(|room| {
+                let mut on_square = self.rooms_at(room.position, &room.zone, room.building);
+                self.has_misdrawn_path(room.id) || on_square.nth(1).is_some()
+            })
+            .map(|room| room.id)
+            .collect();
+        let mut leading = HashSet::new();
+        self.add_rooms_leading_to(misdrawn, &mut leading);
+        leading
+    }
+
+    /// Keeps [`Layout::rooms_leading_to_misdrawing`] true after rooms moved,
+    /// which can only have changed things for them, the rooms with a path
+    /// to them, and the rooms now sharing their squares. Rooms that no longer
+    /// count stay in: they're only looked at.
+    pub(super) fn note_moved_rooms(&self, moved: &[RoomId], leading: &mut HashSet<RoomId>) {
+        let mut changed = Vec::new();
+        for room in moved.iter().filter_map(|id| self.room(*id)) {
+            changed.push(room.id);
+            changed.extend(self.inbound(room.id).iter().map(|(from, _)| *from));
+            let on_square = self.rooms_at(room.position, &room.zone, room.building);
+            changed.extend(on_square.map(|room| room.id));
+        }
+        self.add_rooms_leading_to(changed, leading);
+    }
+
+    fn add_rooms_leading_to(&self, rooms: Vec<RoomId>, leading: &mut HashSet<RoomId>) {
+        let mut queue = rooms;
+        leading.extend(queue.iter().copied());
+        while let Some(id) = queue.pop() {
+            let Some(room) = self.room(id) else { continue };
+            for (from, direction) in self.inbound(id) {
+                if !direction.is_vertical()
+                    && !leading.contains(from)
+                    && self.room(*from).is_some_and(|other| {
+                        !other.tangled
+                            && other.zone == room.zone
+                            && other.building == room.building
+                            && other.position.z == room.position.z
+                    })
+                {
+                    leading.insert(*from);
+                    queue.push(*from);
+                }
+            }
+        }
+    }
+
     /// Redraws the area so its paths line up, keeping its oldest room where
     /// it is. Leaves it alone when no layout with a few fixes works (a real
     /// maze). A long path costs the squares it stretches; a building costs
     /// one square, and loses ties, so indoor rooms stay on the grid unless
-    /// lifting them really helps.
-    pub(super) fn straighten(&mut self, area: &FlatArea) {
+    /// lifting them really helps. Returns the rooms that moved to a new
+    /// square or into a building.
+    pub(super) fn straighten(&mut self, area: &FlatArea) -> Vec<RoomId> {
         let Some(start) = area.rooms.first().and_then(|id| self.room(*id)).cloned() else {
-            return;
+            return Vec::new();
         };
         if area.rooms.len() > LARGEST_AREA {
-            return;
+            return Vec::new();
         }
         let Some(&anchor) = area.rooms.iter().min() else {
-            return;
+            return Vec::new();
         };
         let members: HashSet<RoomId> = area.rooms.iter().copied().collect();
         let passages = self.passages(&members);
         let suspects = self.suspect_passages(&area.rooms, &passages, anchor);
         if suspects.len() > MOST_SUSPECTS {
-            return;
+            return Vec::new();
         }
         let mut fixes: Vec<Fix> = suspects.iter().copied().map(Fix::Long).collect();
         fixes.extend(
@@ -101,22 +157,31 @@ impl Layout {
             members: &members,
         };
         let Some(best) = best_drawing(self, &area.rooms, &passages, &fixes, &level) else {
-            return;
+            return Vec::new();
         };
         let mut placed = best.positions;
         placed.sort_unstable();
+        let mut moved = Vec::new();
         for (id, position) in &placed {
             if self
                 .room(*id)
                 .is_some_and(|room| room.position != *position)
             {
                 self.update(*id, |room| room.position = *position);
+                moved.push(*id);
             }
         }
         let outdoors: HashSet<RoomId> = placed.iter().map(|(id, _)| *id).collect();
         for group in best.lifted {
-            self.lift_into_building(&group, &outdoors);
+            moved.extend(self.lift_into_building(&group, &outdoors));
         }
+        moved
+    }
+
+    /// The rooms of the area around a room.
+    pub(super) fn flat_area_around(&self, id: RoomId) -> Vec<RoomId> {
+        self.room(id)
+            .map_or_else(Vec::new, |room| self.flat_area(room).rooms)
     }
 
     /// Rooms of the same area and level as `start`, joined by flat paths.
@@ -331,8 +396,12 @@ impl Layout {
 
     /// Makes a group of rooms a building, with its floors: the same area's
     /// rooms reached from it going up or down, and the indoor rooms beside
-    /// those.
-    fn lift_into_building(&mut self, group: &BTreeSet<RoomId>, outdoors: &HashSet<RoomId>) {
+    /// those. Returns its rooms.
+    fn lift_into_building(
+        &mut self,
+        group: &BTreeSet<RoomId>,
+        outdoors: &HashSet<RoomId>,
+    ) -> BTreeSet<RoomId> {
         let mut members = group.clone();
         let mut queue: Vec<RoomId> = group.iter().copied().collect();
         while let Some(id) = queue.pop() {
@@ -354,10 +423,11 @@ impl Layout {
             }
         }
         let Some(&building) = members.first() else {
-            return;
+            return members;
         };
-        for id in members {
-            self.update(id, |room| room.building = Some(building));
+        for id in &members {
+            self.update(*id, |room| room.building = Some(building));
         }
+        members
     }
 }

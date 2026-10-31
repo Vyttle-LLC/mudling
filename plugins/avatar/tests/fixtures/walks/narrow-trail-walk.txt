@@ -1,0 +1,79 @@
+Stretch 1
+[Exits: north east south west]
+Text 1.
+[GMCP] Room.Info {"name":"Stretch 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+The Road
+[Exits: north east south west]
+Text 3.
+[GMCP] Room.Info {"name":"The Road","zone":"{1 4} A  Area A","environment":"inside","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move east
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move east
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move east
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move east
+Stretch 1
+[Exits: north east south west]
+Text 1.
+[GMCP] Room.Info {"name":"Stretch 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+A Trail
+[Exits: east west]
+Text 2.
+[GMCP] Room.Info {"name":"A Trail","zone":"{1 4} A  Greenfield","environment":"forest","exits":{"East":"O","West":"O"}}
+[MAP] move west
+The Road
+[Exits: north east south west]
+Text 3.
+[GMCP] Room.Info {"name":"The Road","zone":"{1 4} A  Area A","environment":"inside","exits":{"North":"O","East":"O","South":"O","West":"O"}}

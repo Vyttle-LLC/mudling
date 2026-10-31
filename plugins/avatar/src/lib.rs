@@ -30,6 +30,7 @@ pub fn bundled() -> Plugin {
             "plugin.toml" => include_str!("../plugin.toml"),
             "text.toml" => include_str!("../text.toml"),
             "commands.toml" => include_str!("../commands.toml"),
+            "connection.toml" => include_str!("../connection.toml"),
             "character.toml" => include_str!("../character.toml"),
             "gear.toml" => include_str!("../gear.toml"),
             "map.toml" => include_str!("../map.toml"),

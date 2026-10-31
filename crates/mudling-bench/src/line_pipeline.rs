@@ -2,6 +2,7 @@
 //! each replayed line goes through split, decode and ANSI strip on its own,
 //! so every line gets its own timing.
 
+use crate::verdict;
 use mudling_core::line::LinePipeline;
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -47,12 +48,10 @@ pub fn run(source: &[String]) -> Report {
 
 pub fn print(report: &Report) {
     println!(
-        "line pipeline over {} lines (split + decode + ANSI strip): p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",
+        "line pipeline over {} lines (split + decode + ANSI strip): {}; budget p99 ≤ {} µs: {}",
         report.lines,
-        report.per_line.p50_us,
-        report.per_line.p99_us,
-        report.per_line.max_us,
+        report.per_line,
         report.budget_us,
-        if report.within_budget { "ok" } else { "MISSED" }
+        verdict(report.within_budget)
     );
 }

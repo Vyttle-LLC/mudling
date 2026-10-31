@@ -54,7 +54,7 @@ fn the_clients_hook_worker_loads_the_hooks_and_runs_them() {
     }
     hooks.wait_until_idle();
     let count = received.try_iter().find_map(|output| match output {
-        HookOutput::StoreWrite(write) if write.store == "equipment" && write.key == "count" => {
+        HookOutput::StoreWrite(write) if write.store == "worn" && write.key == "count" => {
             Some(write.value)
         }
         _ => None,

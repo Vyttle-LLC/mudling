@@ -1,12 +1,11 @@
 [package]
 name = "mudling-bench"
-description = "MUDling's headless benchmark: scrollback append and find against the PRD §6 budgets."
+description = "MUDling's headless benchmark: session logs replayed through the core against the PRD §6 budgets."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-default-run = "mudling-bench"
 
 [dependencies]
 mudling-core.workspace = true

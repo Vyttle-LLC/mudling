@@ -17,6 +17,7 @@ replaces it.
 | File | What it declares |
 | --- | --- |
 | `plugin.toml` | The manifest: Avatar's hosts and MSSP name, its points, the stores its hooks write, and the regex fragments its patterns share. |
+| `connection.toml` | The login prompts, each answered once. |
 | `text.toml` | The prompt and pager, and the lines no other point reads. |
 | `readers.luau` | What the table hooks share: rows add writes, and the table's end sends them. |
 | `character.luau` | `score`, `practice`, `slist` and `aff`. |
@@ -33,7 +34,8 @@ replaces it.
 Avatar sends no GA or EOR, so its prompt is known by its shape, the
 `prompt` fragment. The client ends a line there; in a session log the next
 output is glued after it, so the patterns for a table's first line allow a
-prompt in front.
+prompt in front. They allow spaces too: a custom prompt can leave one before
+the next line.
 
 The host frames each table. A start pattern opens it, and row patterns run
 only while it's open. The hook collects rows as writes and sends them at
@@ -124,7 +126,8 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 | `<n>.detail` | `modifies hit roll by 3 for 6 hours`, when given |
 | `count` | entries; last. `0` when nothing is on. |
 
-**`equipment`**, from `equipment`; every row, in the game's order:
+**`worn`**, the character's own, from `equipment`; every row, in the game's
+order:
 
 | Key | Value |
 | --- | --- |
@@ -174,5 +177,9 @@ messages with player-specific values changed; never add session logs, other
 players' names, or channel text.
 
 `cargo run --release -p mudling-plugin-avatar --bin avatar-replay -- <logs…>`
-replays local session logs and counts the reads each table completed. It
-reads logs at runtime only.
+replays local session logs and counts the reads each table completed, and
+the tables left at their pager. It reads logs at runtime only.
+
+`cargo run --release -p mudling-plugin-avatar --bin avatar-parity` compares
+what MUDling reads from every log with what the prototype read. See
+[docs/parity.md](../../docs/parity.md).

@@ -1,0 +1,87 @@
+Scene 1
+[Exits: north east south]
+Text 1.
+[GMCP] Room.Info {"name":"Scene 1","zone":"{1 4} A  Area A","environment":"forest","exits":{"North":"O","East":"O","South":"O"}}
+[MAP] move east
+The Home
+[Exits: north->closed east->closed south->closed west up->closed down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"O","Up":"C","Down":"C"}}
+[MAP] move north
+Scene 2
+[Exits: south up]
+Text 3.
+[GMCP] Room.Info {"name":"Scene 2","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"South":"O","Up":"O"}}
+[MAP] move south
+The Home
+[Exits: north east->closed south->closed west->closed up->closed down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"O","East":"C","South":"C","West":"C","Up":"C","Down":"C"}}
+[MAP] move south
+Scene 3
+[Exits: north east]
+Text 4.
+[GMCP] Room.Info {"name":"Scene 3","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"North":"O","East":"O"}}
+Scene 4
+[Exits: north down]
+Text 5.
+[GMCP] Room.Info {"name":"Scene 4","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"North":"O","Down":"O"}}
+[MAP] move down
+The Home
+[Exits: north->closed east->closed south->closed west->closed up down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"C","Up":"O","Down":"C"}}
+The Home
+[Exits: north->closed east->closed south->closed west->closed up down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"C","Up":"O","Down":"C"}}
+[MAP] move east
+Scene 5
+[Exits: east west]
+Text 6.
+[GMCP] Room.Info {"name":"Scene 5","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"East":"O","West":"O"}}
+[MAP] move east
+Scene 6
+[Exits: east west->closed]
+Text 7.
+[GMCP] Room.Info {"name":"Scene 6","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"East":"O","West":"C"}}
+[MAP] move east
+Lost in the Dark Woods
+[Exits: north east south west]
+Text 8.
+[GMCP] Room.Info {"name":"Lost in the Dark Woods","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+Lost in the Dark Woods
+[Exits: north east south west]
+Text 8.
+[GMCP] Room.Info {"name":"Lost in the Dark Woods","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move north
+Lost in the Dark Woods
+[Exits: north east south west]
+Text 8.
+[GMCP] Room.Info {"name":"Lost in the Dark Woods","zone":"{1 4} A  Brothers Grimm","environment":"forest","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+Scene 7
+[Exits: north]
+Text 9.
+[GMCP] Room.Info {"name":"Scene 7","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"O"}}
+The Home
+[Exits: north->closed east->closed south->closed west->closed up->closed down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"C","Up":"C","Down":"C"}}
+The Home
+[Exits: north->closed east->closed south->closed west->closed up->closed down->closed]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"C","Up":"C","Down":"C"}}
+Scene 8
+[Exits: west up]
+Text 10.
+[GMCP] Room.Info {"name":"Scene 8","zone":"{1 4} A  Brothers Grimm","environment":"mountain","exits":{"West":"O","Up":"O"}}
+The Home
+[Exits: north->closed east->closed south->closed west->closed up->closed down]
+Text 2.
+[GMCP] Room.Info {"name":"The Home","zone":"{1 4} A  Brothers Grimm","environment":"inside","exits":{"North":"C","East":"C","South":"C","West":"C","Up":"C","Down":"O"}}
+[MAP] move down
+Scene 8
+[Exits: west up]
+Text 10.
+[GMCP] Room.Info {"name":"Scene 8","zone":"{1 4} A  Brothers Grimm","environment":"mountain","exits":{"West":"O","Up":"O"}}

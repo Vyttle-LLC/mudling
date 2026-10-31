@@ -33,7 +33,9 @@ end
 
 -- ---- eq ----
 
-local finish_equipment = Readers.count_rows("equipment", "count")
+-- `worn` is the character's own: `gear` and `identify` are shared by a
+-- server's characters, and two characters don't wear the same things.
+local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
     local kind, reader = Readers.step(event, "equipment", finish_equipment)
@@ -47,8 +49,8 @@ function read_equipment(event)
     if item == "<nothing>" then
         item = ""
     end
-    Readers.write(reader, "equipment", index .. ".slot", slot)
-    Readers.write(reader, "equipment", index .. ".item", item)
+    Readers.write(reader, "worn", index .. ".slot", slot)
+    Readers.write(reader, "worn", index .. ".item", item)
     if item ~= "" then
         note_item(function(...)
             Readers.write(reader, ...)
@@ -114,6 +116,63 @@ local function add(totals, key, amount)
     totals[key] = (totals[key] or 0) + amount
 end
 
+-- Words the game might accept for an item: a hyphenated word gives its
+-- first part, "red" for "red-eyed".
+local NOT_WORDS = { a = true, an = true, the = true, some = true, of = true }
+
+local function item_words(plain)
+    local words = {}
+    for word in string.gmatch(plain, "[%a'%-]+") do
+        word = string.match(word, "^[^%-]*")
+        if word ~= "" and not NOT_WORDS[word] then
+            words[word] = true
+        end
+    end
+    return words
+end
+
+-- What the character wears and carries, by plain name.
+local function items_at_hand()
+    local items = {}
+    local function note(key)
+        local name = mud.state(key)
+        if name and name ~= "" then
+            items[Readers.plain(name)] = name
+        end
+    end
+    for index = 1, mud.state("worn.count") or 0 do
+        note("worn." .. index .. ".item")
+    end
+    for index = 1, mud.state("inventory.count") or 0 do
+        note("inventory." .. index .. ".name")
+    end
+    return items
+end
+
+-- The spell names only the game's words for an item, so it's the one at hand
+-- sharing the most of them; none when two tie.
+local function item_answering(keywords)
+    local wanted = {}
+    for word in string.gmatch(string.lower(keywords), "%S+") do
+        wanted[word] = true
+    end
+    local best, best_score, tied = nil, 0, false
+    for plain, name in items_at_hand() do
+        local score = 0
+        for word in item_words(plain) do
+            if wanted[word] then
+                score += 1
+            end
+        end
+        if score > best_score then
+            best, best_score, tied = name, score, false
+        elseif score == best_score then
+            tied = true
+        end
+    end
+    return if tied then nil else best
+end
+
 local function finish_identify(reader)
     if not reader.keywords then
         -- Named, but no object followed.
@@ -123,9 +182,10 @@ local function finish_identify(reader)
     local write = function(key, value)
         Readers.write(reader, "identify", prefix .. key, value)
     end
-    if reader.item then
-        write("name", reader.item)
-        Readers.write(reader, "gear", "keywords." .. Readers.plain(reader.item), reader.keywords)
+    local item = reader.item or item_answering(reader.keywords)
+    if item then
+        write("name", item)
+        Readers.write(reader, "gear", "keywords." .. Readers.plain(item), reader.keywords)
     end
     write("type", reader.type)
     write("flags", reader.flags)
@@ -209,6 +269,8 @@ local function slot_meant(meant)
         return "held"
     elseif string.sub(phrase, 1, 7) == "used as" then
         return "light"
+    elseif string.sub(phrase, 1, 7) == "wielded" then
+        return "wield"
     end
     return SLOTS[phrase]
 end

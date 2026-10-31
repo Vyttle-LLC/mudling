@@ -19,7 +19,7 @@ pattern = '''No way!\s+You are still fighting!|You are too exhausted'''
 # The room name of a room too dark to see; it looks like every other.
 [[darkness]]
 name = "map.darkness"
-pattern = '''^{prompt}?It is pitch black\.\.\.$'''
+pattern = '''^\s*{prompt}?\s*It is pitch black\.\.\.$'''
 
 # "You flee north! What a COWARD!": the way a flee went.
 [[flee]]
