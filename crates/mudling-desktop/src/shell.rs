@@ -370,7 +370,8 @@ impl Shell {
     }
 
     /// Connects again on the same session, keeping the chat. A session whose
-    /// core thread stopped can't, so that one is opened anew.
+    /// core thread stopped can't, so that one is opened anew. The Reconnect
+    /// button goes as the connection starts, so focus moves off it first.
     fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
         if game.session.has_stopped() {
@@ -378,6 +379,7 @@ impl Shell {
             self.open(target, None, window, cx);
         } else {
             game.session.connect();
+            window.focus(&self.input.focus_handle(cx), cx);
         }
     }
 
@@ -1514,6 +1516,12 @@ mod tests {
         launched.click("reconnect");
         let _second = server.accept().unwrap();
         launched.wait_for_connection(ConnectionStatus::Connected);
+
+        launched.cx.simulate_input("look");
+        let typed = launched
+            .shell
+            .read_with(launched.cx, |shell, cx| shell.typed(cx));
+        assert_eq!(typed, "look", "typing goes on in the command bar");
     }
 
     #[gpui::test]
