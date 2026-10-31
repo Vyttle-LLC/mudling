@@ -8,7 +8,7 @@
 //! reached. One lucky round can still set that, so a metric that looks worse
 //! gets fresh blocks, and it's lost only if it loses in every one. Over 30
 //! rounds of one build on a loaded machine, that fails 0.1% of same-build
-//! pairings, 4% of a true +5%, 73% of a true +10%, and every +15%.
+//! pairings, 5% of a true +5%, 82% of a true +10%, and every +15%.
 //!
 //! Both builds replay the same log, this build's fixture, written to a file.
 //! A metric the base's report doesn't have is new: it's skipped.
@@ -20,9 +20,6 @@ use std::process::{Command, ExitCode};
 
 /// More than this much worse is a loss.
 const MOST_LOST: f64 = 1.10;
-/// A gap this small is the clock's resolution, not a loss. In each metric's
-/// own unit, µs or MB.
-const NOISE_FLOOR: f64 = 0.25;
 const ROUNDS_PER_BLOCK: usize = 3;
 const BLOCKS: usize = 3;
 
@@ -31,18 +28,19 @@ const BLOCKS: usize = 3;
 /// difference are. Nor are two p99s that one build can't hold steady, which
 /// `--check` still gates: a move's enqueue times the writer thread being
 /// woken (9 to 35 µs), and a store frame's apply is too short to time (0.7
-/// to 1.7 µs).
+/// to 1.7 µs). Work too short for a clock tick to time per sample is compared
+/// by its mean, which many samples resolve where a percentile can't.
 const METRICS: [&str; 20] = [
-    "/append/p99_us",
+    "/append/mean_us",
     "/find/p99_us",
-    "/line_pipeline/per_line/p99_us",
+    "/line_pipeline/per_line/mean_us",
     "/plugin_host/whole_line/p99_us",
     "/plugin_host/host_all/p99_us",
-    "/defaults/per_line/p99_us",
-    "/luau_hooks/hand_off/p99_us",
+    "/defaults/per_line/mean_us",
+    "/luau_hooks/hand_off/mean_us",
     "/luau_hooks/columns/p99_us",
     "/session/whole_line/p99_us",
-    "/session/whole_line/p50_us",
+    "/session/whole_line/mean_us",
     "/session/mapping/p99_us",
     "/session/wandering/p99_us",
     "/session/memory_mb",
@@ -175,7 +173,7 @@ fn compared(bases: &[Value], heads: &[Value]) -> Vec<Comparison> {
                 metric: (*metric).to_owned(),
                 base,
                 head,
-                lost: head > base * MOST_LOST && head - base > NOISE_FLOOR,
+                lost: head > base * MOST_LOST,
             })
         })
         .collect()
@@ -225,12 +223,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const METRIC: &str = "/append/p99_us";
+    const METRIC: &str = "/append/mean_us";
 
     fn reports(values: &[f64]) -> Vec<Value> {
         values
             .iter()
-            .map(|value| json!({ "append": { "p99_us": value } }))
+            .map(|value| json!({ "append": { "mean_us": value } }))
             .collect()
     }
 
@@ -257,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_the_clock_cant_resolve_is_no_loss() {
-        assert!(!lost(&[0.42], &[0.5]));
+    fn a_loss_on_the_shortest_work_counts_too() {
+        assert!(lost(&[0.08], &[0.09]));
     }
 
     #[test]
