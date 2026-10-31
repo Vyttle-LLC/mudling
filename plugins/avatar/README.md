@@ -28,7 +28,8 @@ VYT-235): each file says what it reads, and each regex has a comment.
 Avatar sends no GA or EOR, so its prompt is known by its shape, the
 `prompt` fragment. The client ends a line there; in a session log the next
 output is glued after it, so the patterns for a table's first line allow a
-prompt in front.
+prompt in front. They allow spaces too: a custom prompt can leave one before
+the next line.
 
 The host frames each table. A start pattern opens it, and row patterns run
 only while it's open. The hook collects rows as writes and sends them at
@@ -164,5 +165,9 @@ messages with player-specific values changed; never add session logs, other
 players' names, or channel text.
 
 `cargo run --release -p mudling-plugin-avatar --bin avatar-replay -- <logs…>`
-replays local session logs and counts the reads each table completed. It
-reads logs at runtime only.
+replays local session logs and counts the reads each table completed, and
+the tables left at their pager. It reads logs at runtime only.
+
+`cargo run --release -p mudling-plugin-avatar --bin avatar-parity` compares
+what MUDling reads from every log with what the prototype read. See
+[docs/parity.md](../../docs/parity.md).
