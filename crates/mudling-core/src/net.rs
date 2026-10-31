@@ -250,7 +250,10 @@ mod tests {
         assert_eq!(last, Some(Event::Closed(DisconnectReason::ClosedByServer)));
     }
 
-    #[tokio::test(start_paused = true)]
+    /// On the real clock: a paused one jumps to the next timer whenever the
+    /// runtime is idle, which real sockets leave it while the OS catches up,
+    /// so it can reach the connect timeout before the connect is done.
+    #[tokio::test]
     async fn silence_after_a_read_is_reported_once() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -264,7 +267,7 @@ mod tests {
         server.write_all(b"Password: ").await.unwrap();
         assert!(matches!(events.recv().await, Some(Event::Received(_))));
         assert_eq!(events.recv().await, Some(Event::Quiet));
-        let more = tokio::time::timeout(QUIET_AFTER * 10, events.recv()).await;
+        let more = tokio::time::timeout(QUIET_AFTER * 3, events.recv()).await;
         assert!(more.is_err(), "quiet again without a read: {more:?}");
     }
 
