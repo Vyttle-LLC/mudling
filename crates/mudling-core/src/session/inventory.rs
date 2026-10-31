@@ -3,8 +3,10 @@
 //! for n from 1. Entries past `count` are stale. The session asks for it on
 //! entering the game, so it's kept for the connection and never saved.
 
+use crate::ansi::AnsiParser;
 use crate::plugin::luau::Value;
-use serde::Deserialize;
+use crate::telnet::gmcp;
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 
 const LOCATION: &str = "inv";
@@ -15,7 +17,16 @@ pub(super) const ASK: &str = "Char.Items.Inv";
 #[derive(Debug, Deserialize)]
 struct Item {
     id: String,
+    #[serde(deserialize_with = "without_colors")]
     name: String,
+}
+
+/// Some games color item names.
+fn without_colors<'de, D: Deserializer<'de>>(names: D) -> Result<String, D::Error> {
+    let name = String::deserialize(names)?;
+    let mut plain = String::with_capacity(name.len());
+    AnsiParser::default().feed(&name, &mut plain, &mut Vec::new());
+    Ok(plain)
 }
 
 #[derive(Deserialize)]
@@ -40,19 +51,19 @@ impl Inventory {
     /// what's carried.
     pub(super) fn read(&mut self, package: &str, json: &str) -> Option<BTreeMap<String, Value>> {
         if package.eq_ignore_ascii_case("Char.Items.List") {
-            let list: List = serde_json::from_str(json).ok()?;
+            let list: List = gmcp::from_json(json)?;
             if list.location != LOCATION {
                 return None;
             }
             self.items = list.items;
         } else if package.eq_ignore_ascii_case("Char.Items.Add") {
-            let added: Change = serde_json::from_str(json).ok()?;
+            let added: Change = gmcp::from_json(json)?;
             if added.location != LOCATION {
                 return None;
             }
             self.items.push(added.item);
         } else if package.eq_ignore_ascii_case("Char.Items.Remove") {
-            let removed: Change = serde_json::from_str(json).ok()?;
+            let removed: Change = gmcp::from_json(json)?;
             if removed.location != LOCATION {
                 return None;
             }
@@ -84,6 +95,26 @@ mod tests {
 
     fn name(entries: &BTreeMap<String, Value>, n: usize) -> Option<&Value> {
         entries.get(&format!("inventory.{n}.name"))
+    }
+
+    #[test]
+    fn raw_color_codes_in_a_name_are_read_and_stripped() {
+        let mut inventory = Inventory::default();
+        let added = "{\"location\":\"inv\",\"item\":{\"id\":\"1\",\
+             \"name\":\"\x1b[1;35ma round shield\x1b[0;32m\"}}";
+        let entries = inventory.read("Char.Items.Add", added).unwrap();
+        assert_eq!(entries["inventory.count"], Value::Number(1.0));
+        assert_eq!(
+            name(&entries, 1),
+            Some(&Value::Text("a round shield".to_owned()))
+        );
+        let entries = inventory.read("Char.Items.Remove", added).unwrap();
+        assert_eq!(entries["inventory.count"], Value::Number(0.0));
+
+        let list = "{\"location\":\"inv\",\"items\":[{\"id\":\"2\",\
+             \"name\":\"\x1b[1;33ma lamp\x1b[0m\"}]}";
+        let entries = inventory.read("Char.Items.List", list).unwrap();
+        assert_eq!(name(&entries, 1), Some(&Value::Text("a lamp".to_owned())));
     }
 
     #[test]
