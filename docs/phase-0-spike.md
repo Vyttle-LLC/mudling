@@ -38,6 +38,11 @@ Taken on 2026-10-31 on the same Mac, with every panel open and filled.
 | Real logs, `--long-lines` | 10,000 rooms | 279 MB | 284 MB |
 | Synthetic, `--long-lines` | 10,000 rooms | 404 MB | 406 MB |
 
+Those runs had the window on screen. Since checks moved it off the screen (see
+`measure.rs`), the same runs read lower: real logs with a map 148 MB after load
+and 153 MB at the end, synthetic with a map 162 and 168 MB. Compare like with
+like.
+
 `--long-lines` joins about ten lines into each one, which is a stress feed,
 not play: the logs' longest line is 203 characters. On the synthetic run with
 a map, the malloc heap held 71 MB live and kept 30 MB of freed space; window
