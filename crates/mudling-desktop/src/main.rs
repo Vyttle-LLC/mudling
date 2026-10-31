@@ -4,8 +4,8 @@
 //! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
-//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]]
-//!                 [--ax-check]
+//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
+//!                 [--find-open]] [--ax-check]
 //! ```
 //!
 //! With no arguments the window shows the saved servers ("Where to today?").
@@ -18,8 +18,8 @@
 //! off), with its data in a throwaway folder. `--long-lines` joins its lines
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
-//! sheet open. `--ax-check` (macOS) checks the accessibility tree and exits
-//! (see `macos`).
+//! sheet open, and `--find-open` with the find bar open and results showing.
+//! `--ax-check` (macOS) checks the accessibility tree and exits (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
@@ -83,7 +83,7 @@ const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open]] [--ax-check]";
+                     [--settings-open] [--find-open]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -102,6 +102,7 @@ struct Options {
     stream_for: Duration,
     report: PathBuf,
     settings_open: bool,
+    find_open: bool,
     ax_check: bool,
 }
 
@@ -241,8 +242,8 @@ fn main() -> ExitCode {
                     shell,
                     launched,
                     feed,
-                    options.lines_per_second,
-                    options.stream_for,
+                    (options.lines_per_second, options.stream_for),
+                    options.find_open,
                     cx,
                 );
             }
@@ -395,6 +396,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         stream_for: Duration::from_secs(20),
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
+        find_open: false,
         ax_check: false,
     };
     let mut args = args.iter();
@@ -423,6 +425,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--report" => options.report = PathBuf::from(value()?),
             "--settings-open" => options.settings_open = true,
+            "--find-open" => options.find_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

@@ -10,7 +10,7 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 use crate::assets::UI_FONT;
-use crate::chat::{self, Chat, column_width};
+use crate::chat::{self, Chat, CloseFind, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::hud::Hud;
@@ -22,8 +22,8 @@ use crate::settings::{PluginRow, SavedSettings, SettingsSheet, SheetEvent};
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
 use crate::title_bar::{
-    self, FocusNextControl, FocusPreviousControl, OpenSettings, SessionLabel, TitleBar,
-    TitleBarEvent,
+    self, FindInScrollback, FocusNextControl, FocusPreviousControl, OpenSettings, SessionLabel,
+    TitleBar, TitleBarEvent,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -611,9 +611,11 @@ impl Shell {
             .collect();
         let can_choose_server = self.game.is_some() && self.launcher.is_some();
         let bare = self.on_empty_state();
+        let find_open = self.chat.read(cx).find_is_open();
         self.title_bar.update(cx, |bar, cx| {
             bar.show_saved(elsewhere, can_choose_server, cx);
             bar.set_bare(bare, cx);
+            bar.show_find(find_open, cx);
             if bare {
                 bar.show(SessionLabel::default(), cx);
             }
@@ -709,6 +711,26 @@ impl Shell {
         }
     }
 
+    /// Opens the find bar over the scrollback, or goes back to it.
+    pub fn open_find(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.on_empty_state() {
+            return;
+        }
+        self.title_bar.update(cx, |bar, cx| {
+            bar.dismiss_menu(window, cx);
+            bar.show_find(true, cx);
+        });
+        self.chat.update(cx, |chat, cx| chat.open_find(window, cx));
+    }
+
+    /// Closes the find bar, and typing goes back to the command bar.
+    pub fn close_find(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.chat.update(cx, |chat, cx| chat.close_find(cx));
+        self.title_bar
+            .update(cx, |bar, cx| bar.show_find(false, cx));
+        self.focus_command_bar(window, cx);
+    }
+
     fn focus_command_bar(&self, window: &mut Window, cx: &mut Context<Shell>) {
         if self.on_empty_state() {
             self.empty_state
@@ -734,6 +756,11 @@ impl Shell {
                 .ok();
         })
         .detach();
+    }
+
+    #[cfg(test)]
+    pub fn title_bar_shows_find(&self, cx: &App) -> bool {
+        self.title_bar.read(cx).find_open()
     }
 
     #[cfg(test)]
@@ -898,16 +925,18 @@ impl Render for Shell {
                 .child(column)
                 .child(self.right_dock.clone())
         };
-        chat::handle_keys(div(), &self.chat)
+        chat::handle_keys(div(), &self.chat, cx)
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
             .text_color(theme.text)
             .font_family(UI_FONT)
-            // End closes the split once it has no caret left to move.
-            .capture_action(cx.listener(|shell, _: &input::End, _, cx| {
-                if shell.input.read(cx).caret_at_end() {
+            // End closes the split once the command bar has no caret left to
+            // move. Other fields, like find, keep it for themselves.
+            .capture_action(cx.listener(|shell, _: &input::End, window, cx| {
+                let input = shell.input.read(cx);
+                if input.focus_handle(cx).is_focused(window) && input.caret_at_end() {
                     shell.chat.update(cx, |chat, cx| chat.back_to_live(cx));
                 }
             }))
@@ -928,6 +957,12 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
                 shell.focus_room_panel(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &FindInScrollback, window, cx| {
+                shell.open_find(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &CloseFind, window, cx| {
+                shell.close_find(window, cx);
             }))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
@@ -1192,6 +1227,113 @@ pub mod tests {
 
     fn is_split(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
         shell.read_with(cx, |shell, cx| !shell.chat.read(cx).follows_newest())
+    }
+
+    fn press_find(cx: &mut VisualTestContext) {
+        let modifier = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        cx.simulate_keystrokes(&format!("{modifier}-f"));
+        cx.run_until_parked();
+    }
+
+    /// A window on no session with the app's keys, and a page of lines, every
+    /// other one a goblin, found through the find bar.
+    fn finding_window(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.update(|_, cx| crate::bind_keys(cx));
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        chat.update(cx, |chat, cx| {
+            for number in 0..500 {
+                chat.echo_unsent("a line", cx);
+                chat.echo_unsent(&format!("a goblin {number}"), cx);
+            }
+        });
+        cx.run_until_parked();
+        press_find(cx);
+        cx.simulate_input("goblin");
+        cx.run_until_parked();
+        (shell, cx)
+    }
+
+    fn top_line(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
+        shell.read_with(cx, |shell, cx| shell.chat.read(cx).scroll_offset().line)
+    }
+
+    fn find_is_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, cx| shell.chat.read(cx).find_is_open())
+    }
+
+    #[gpui::test]
+    fn the_find_key_takes_typing_and_esc_gives_it_back(cx: &mut TestAppContext) {
+        let (shell, cx) = finding_window(cx);
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "");
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.chat.read(cx).find_count()),
+            Some(500)
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!find_is_open(&shell, cx));
+        assert!(!shell.read_with(cx, |shell, cx| shell.title_bar_shows_find(cx)));
+        assert!(is_split(&shell, cx), "the result stays open to read");
+
+        cx.simulate_input("look");
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!is_split(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn return_walks_the_results_from_the_field(cx: &mut TestAppContext) {
+        let (shell, cx) = finding_window(cx);
+        assert_eq!(top_line(&shell, cx), 999);
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(top_line(&shell, cx), 997);
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert_eq!(top_line(&shell, cx), 999);
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "");
+    }
+
+    #[gpui::test]
+    fn end_in_the_find_field_stays_in_the_field(cx: &mut TestAppContext) {
+        let (shell, cx) = finding_window(cx);
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        assert!(is_split(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn esc_closes_find_from_the_command_bar_before_the_split(cx: &mut TestAppContext) {
+        let (shell, cx) = finding_window(cx);
+        shell.update_in(cx, |shell, window, cx| {
+            shell.focus_command_bar(window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!find_is_open(&shell, cx));
+        assert!(is_split(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn the_find_key_does_nothing_on_the_empty_state(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.update(|_, cx| crate::bind_keys(cx));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.show_sample_empty_state(&SavedServers::default(), window, cx);
+        });
+        cx.run_until_parked();
+        press_find(cx);
+        assert!(!find_is_open(&shell, cx));
     }
 
     #[gpui::test]

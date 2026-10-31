@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 mudling-core.workspace = true
+aho-corasick = "1.1"
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true

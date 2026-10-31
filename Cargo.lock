@@ -3456,6 +3456,7 @@ dependencies = [
 name = "mudling-desktop"
 version = "0.0.0"
 dependencies = [
+ "aho-corasick",
  "futures",
  "gpui-pre",
  "gpui-pre-apple",

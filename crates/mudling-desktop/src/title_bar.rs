@@ -52,7 +52,6 @@ const MENU_PRIORITY: usize = 2;
 actions!(
     title_bar,
     [
-        /// Find in the scrollback: VYT-209 handles it.
         FindInScrollback,
         OpenSettings,
         FocusNextControl,
@@ -227,7 +226,7 @@ fn control(id: &'static str, label: impl Into<SharedString>, theme: &Theme) -> S
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
-fn icon_button(
+pub fn icon_button(
     id: &'static str,
     label: &'static str,
     icon: Icon,
@@ -348,6 +347,7 @@ pub struct TitleBar {
     choose_server_item: FocusHandle,
     /// The empty state has no use for the panels or for search.
     bare: bool,
+    find_open: bool,
 }
 
 impl EventEmitter<TitleBarEvent> for TitleBar {}
@@ -371,6 +371,7 @@ impl TitleBar {
             can_choose_server: false,
             choose_server_item: cx.focus_handle(),
             bare: false,
+            find_open: false,
         }
     }
 
@@ -400,6 +401,16 @@ impl TitleBar {
     pub fn set_bare(&mut self, bare: bool, cx: &mut Context<TitleBar>) {
         self.bare = bare;
         cx.notify();
+    }
+
+    pub fn show_find(&mut self, open: bool, cx: &mut Context<TitleBar>) {
+        self.find_open = open;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn find_open(&self) -> bool {
+        self.find_open
     }
 
     pub fn show_problems(&mut self, problems: usize, cx: &mut Context<TitleBar>) {
@@ -525,6 +536,20 @@ impl TitleBar {
         button
             .aria_toggled(open.into())
             .when(open, |button| button.bg(theme.selected))
+    }
+
+    fn render_find_button(&self, theme: &Theme) -> Stateful<Div> {
+        let open = self.find_open;
+        let color = if open { theme.text } else { theme.text_muted };
+        action_button(
+            ("find-in-scrollback", "Search", Icon::Find),
+            "F",
+            FindInScrollback,
+            color,
+            theme,
+        )
+        .aria_toggled(open.into())
+        .when(open, |button| button.bg(theme.selected))
     }
 
     /// The sprocket, with the count of problems on its corner.
@@ -792,13 +817,7 @@ impl Render for TitleBar {
                     .gap_4()
                     .when(!self.bare, |tools| {
                         tools
-                            .child(action_button(
-                                ("find-in-scrollback", "Search", Icon::Find),
-                                "F",
-                                FindInScrollback,
-                                theme.placeholder,
-                                &theme,
-                            ))
+                            .child(self.render_find_button(&theme))
                             .child(self.render_panel_toggle(Side::Right, &theme, cx))
                     })
                     .child(self.render_settings_button(&theme)),
@@ -817,8 +836,6 @@ mod tests {
     use futures::channel::mpsc::unbounded;
     use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext, size};
     use mudling_core::net::DisconnectReason;
-    use std::cell::Cell;
-    use std::rc::Rc;
 
     fn connected() -> SettingsState {
         SettingsState {
@@ -961,22 +978,30 @@ mod tests {
     }
 
     #[gpui::test]
-    fn search_dispatches_its_action_by_click_and_by_key(cx: &mut TestAppContext) {
-        let (_shell, cx) = window(cx);
-        let finds = Rc::new(Cell::new(0));
-        cx.update(|_, cx| {
-            let counted = finds.clone();
-            cx.on_action(move |_: &FindInScrollback, _| counted.set(counted.get() + 1));
-        });
+    fn search_opens_find_by_click_and_by_key_and_lights_up(cx: &mut TestAppContext) {
+        let (shell, cx) = window(cx);
+        let find_open = |cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                let lit = shell.title_bar_shows_find(cx);
+                assert_eq!(lit, shell.chat().read(cx).find_is_open());
+                lit
+            })
+        };
 
         click("find-in-scrollback", cx);
+        assert!(find_open(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!find_open(cx));
+
         let modifier = if cfg!(target_os = "macos") {
             "cmd"
         } else {
             "ctrl"
         };
         cx.simulate_keystrokes(&format!("{modifier}-f"));
-        assert_eq!(finds.get(), 2);
+        cx.run_until_parked();
+        assert!(find_open(cx));
     }
 
     #[gpui::test]

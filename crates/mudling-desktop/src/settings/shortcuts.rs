@@ -66,6 +66,13 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
             row("Read back a page", &["pageup"], &["chat::PageBack"]),
             row("Forward a page", &["pagedown"], &["chat::PageForward"]),
             row("Back to live", &["end", "escape"], &["chat::BackToLive"]),
+            row("Close find", &["escape"], &["find::CloseFind"]),
+            row("Next find result", &["enter"], &["find::NextResult"]),
+            row(
+                "Previous find result",
+                &["shift-enter"],
+                &["find::PreviousResult"],
+            ),
         ],
     ),
     (
