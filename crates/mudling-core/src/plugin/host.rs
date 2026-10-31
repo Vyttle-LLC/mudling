@@ -105,6 +105,14 @@ pub struct Settings {
     pub area_name: Option<Pattern>,
 }
 
+impl Settings {
+    /// Whether `text` is the pager's prompt.
+    pub fn is_pager(&self, text: &str) -> bool {
+        let pager = self.pager.as_ref();
+        pager.is_some_and(|pager| pager.prompt.is_match(text))
+    }
+}
+
 /// One plugin's cost per line, from sampled lines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginCost {
@@ -385,12 +393,7 @@ impl PluginHost {
     /// The server ended `line` with GA or EOR, which ends every open table,
     /// unless it was the pager's prompt: that table has more to come.
     pub fn end_tables_at_signal(&mut self, line: &Line, sink: &mut impl PluginSink) {
-        if !self.open.is_empty()
-            && !matches!(
-                self.classify_pending(line.plain()),
-                Some(PendingKind::Pager { .. })
-            )
-        {
+        if !self.settings().is_pager(line.plain()) {
             self.end_tables(line, sink);
         }
     }
@@ -489,10 +492,6 @@ impl PluginHost {
             ..
         } = &self.compiled;
         let text = &line.plain()[start..];
-        let is_pager = || {
-            let pager = settings.pager.as_ref();
-            pager.is_some_and(|pager| pager.prompt.is_match(text))
-        };
         let starts: Vec<(usize, &LineRule)> = self
             .matched
             .iter()
@@ -516,7 +515,7 @@ impl PluginHost {
                     .find(|rule| rule.table == open.table);
                 let Some(rule) = rule else {
                     // The pager's line is the table going on, not a gap in it.
-                    if !open.in_gap && !is_pager() {
+                    if !open.in_gap && !settings.is_pager(text) {
                         open.in_gap = true;
                         table.send(TableEvent::Gap, line, Box::default(), sink);
                     }

@@ -12,7 +12,7 @@ use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_
 use crate::defaults::detect::{ServerSignals, suggest};
 use crate::defaults::hud::{self, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
-use crate::line::{Encoding, Line, LinePipeline};
+use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
 use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
@@ -441,8 +441,14 @@ impl Engine {
         let mut lines = std::mem::take(&mut self.lines);
         for line in lines.drain(..) {
             let Some(link) = &mut self.link else { return };
-            let prompt = link.defaults.read_line(&line);
             let text = line.plain();
+            let at_signal = line.end() == LineEnd::PromptEnd;
+            let prompt = if at_signal && self.plugins.settings().is_pager(text) {
+                link.defaults.read_pager_line();
+                None
+            } else {
+                link.defaults.read_line(&line)
+            };
             if prompt.is_some() {
                 self.plugins.end_tables(&line, &mut self.events);
             }

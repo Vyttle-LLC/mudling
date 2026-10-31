@@ -1034,6 +1034,37 @@ fn the_pager_is_answered_in_a_table_and_left_alone_outside_one() {
 }
 
 #[test]
+fn a_pager_line_at_a_signal_is_no_prompt_with_vitals_awaited() {
+    let mut driven = Driven::scribe();
+    driven.gmcp(r#"Char.Vitals {"hp": 20}"#);
+    driven.say(b"Your bag:\r\n- rope\r\n--more--");
+    driven.say(&[IAC, GA]);
+    driven.say(b"\r\n- lamp\r\n");
+    driven.gmcp(r#"Char.Vitals {"hp": 18}"#);
+    driven.say(b"<18hp> ");
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.seen("end"), Some(Value::Number(-1.0)));
+    assert_eq!(driven.seen_rows(), 2, "the rest of the table was read");
+}
+
+#[test]
+fn a_pager_prompt_is_not_learned_and_later_pages_read_on() {
+    let mut driven = Driven::scribe();
+    driven.gmcp(r#"Char.Vitals {"hp": 20}"#);
+    driven.say(b"Your bag:\r\n- rope\r\n--more--");
+    driven.gmcp("Char.Status {}");
+    driven.engine.quiet(Timestamp(0));
+    driven.say(b"\r\n- lamp\r\n--more--");
+    driven.say(&[IAC, GA]);
+    driven.say(b"\r\n- coil\r\n");
+    driven.gmcp(r#"Char.Vitals {"hp": 18}"#);
+    driven.say(b"<18hp> ");
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.seen("end"), Some(Value::Number(-1.0)));
+    assert_eq!(driven.seen_rows(), 3);
+}
+
+#[test]
 fn a_connection_ending_in_a_table_cuts_it() {
     let mut driven = Driven::scribe();
     driven.say(b"Your bag:\r\n- rope\r\n");

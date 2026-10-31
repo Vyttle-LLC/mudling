@@ -117,6 +117,25 @@ impl PromptLearner {
         self.is_whole_prompt(pending.plain)
     }
 
+    /// The pending text is the pager's prompt, which is never learned: the
+    /// prompt a `Char.Vitals` announced is still to come.
+    pub fn pager_pending(&mut self, pending: &Pending<'_>) {
+        self.pending_len = pending.plain.len();
+        if let Some(awaited) = &mut self.awaited {
+            awaited.text.clear();
+        }
+    }
+
+    /// A line ended at a prompt signal is the pager's prompt. Read it in
+    /// place of [`PromptLearner::read_line`], for the same reason.
+    pub fn pager_line(&mut self) {
+        self.pending_len = 0;
+        if let Some(awaited) = &mut self.awaited {
+            awaited.before = 0;
+            awaited.text.clear();
+        }
+    }
+
     /// A finished line; read every one, in order. Learns it if it ended at
     /// a prompt signal, and returns how many bytes of its plain text a
     /// prompt takes up at its start.
