@@ -28,11 +28,13 @@ pub(super) struct Login {
 }
 
 impl Login {
-    /// `None` when no enabled plugin names a login prompt.
+    /// `None` when no enabled plugin names a login prompt. With no password
+    /// saved only the name is answered: the player types the rest.
     pub(super) fn new(host: &PluginHost, credentials: Credentials) -> Option<Login> {
         let prompts: Vec<LoginPrompt> = host
             .declared(|points| points.connection.as_ref())
             .flat_map(|(_, connection)| connection.logins.iter().cloned())
+            .filter(|prompt| !credentials.password.is_empty() || prompt.send == LoginReply::Name)
             .collect();
         (!prompts.is_empty()).then_some(Login {
             prompts,
