@@ -546,7 +546,7 @@ impl Engine {
         }
         if had_affects {
             self.hub
-                .write::<CharactersState>(CharactersState::listing(&[]));
+                .write::<CharactersState>(CharactersState::no_affects());
         }
     }
 
@@ -1053,13 +1053,19 @@ impl Engine {
             mobs.marks.extend(names.map(|name| (mark, name.clone())));
         }
         self.hub.write::<MobsState>(mobs);
-        let character = stats
-            .iter()
-            .filter(|stat| stat.character_id == self.character_id)
-            .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
-            .collect();
-        self.hub
-            .write::<CharactersState>(CharactersState(character));
+        let character = CharactersState(
+            stats
+                .iter()
+                .filter(|stat| stat.character_id == self.character_id)
+                .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
+                .collect(),
+        );
+        let had_affects = !character.affects().is_empty();
+        self.hub.write::<CharactersState>(character);
+        if had_affects {
+            self.hub
+                .write::<CharactersState>(CharactersState::no_affects());
+        }
         let gear = meta
             .iter()
             .filter_map(|entry| {

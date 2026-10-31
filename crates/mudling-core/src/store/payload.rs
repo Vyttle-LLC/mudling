@@ -190,6 +190,9 @@ pub const CHARACTER_POSITION: &str = "character.position";
 /// `.count`, then `.<n>.name` and `.<n>.detail` for n from 1. Rows past the
 /// count are left from a longer list.
 pub const CHARACTER_AFFECTS: &str = "character.affects";
+/// Where a plugin's hooks keep the affects they read from the game's text, in
+/// the same rows: its store of that name.
+const READ_AFFECTS: &str = "affects";
 
 /// Something affecting the character, as the game words it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,18 +217,45 @@ impl CharactersState {
         CharactersState(values)
     }
 
+    /// The change that empties both lists. A saved list stays on the disk, but
+    /// it says nothing of a character in a game played since.
+    pub fn no_affects() -> CharactersState {
+        CharactersState(BTreeMap::from(
+            [CHARACTER_AFFECTS, READ_AFFECTS]
+                .map(|list| (format!("{list}.count"), Value::Number(0.))),
+        ))
+    }
+
+    /// What's on the character: what was last read from the game's text, with
+    /// what GMCP lists. Each comes once, with GMCP's detail if it gives one.
     pub fn affects(&self) -> Vec<Affect> {
+        let mut affects: Vec<Affect> = Vec::new();
+        for affect in [READ_AFFECTS, CHARACTER_AFFECTS]
+            .map(|list| self.listed(list))
+            .concat()
+        {
+            let same = |known: &&mut Affect| known.name.eq_ignore_ascii_case(&affect.name);
+            match affects.iter_mut().find(same) {
+                Some(known) if !affect.detail.is_empty() => known.detail = affect.detail,
+                Some(_) => {}
+                None => affects.push(affect),
+            }
+        }
+        affects
+    }
+
+    fn listed(&self, list: &str) -> Vec<Affect> {
         let text = |key: String| match self.0.get(&key) {
             Some(Value::Text(text)) => Some(text.clone()),
             _ => None,
         };
-        let count = match self.0.get(&format!("{CHARACTER_AFFECTS}.count")) {
+        let count = match self.0.get(&format!("{list}.count")) {
             Some(Value::Number(count)) => *count as usize,
             _ => 0,
         };
         (1..=count)
             .filter_map(|row| {
-                let row = format!("{CHARACTER_AFFECTS}.{row}");
+                let row = format!("{list}.{row}");
                 Some(Affect {
                     name: text(format!("{row}.name"))?,
                     detail: text(format!("{row}.detail")).unwrap_or_default(),
