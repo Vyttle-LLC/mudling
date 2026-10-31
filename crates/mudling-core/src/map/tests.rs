@@ -363,6 +363,13 @@ fn loading_puts_a_building_back_at_its_door() {
 }
 
 #[test]
+fn a_room_name_ending_in_a_space_keeps_its_description() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A pond ", FIELDS, &["n"], "Lilies float here.");
+    assert_eq!(walk.current().description, "Lilies float here.");
+}
+
+#[test]
 fn a_rooms_description_comes_from_the_text_before_its_room_info() {
     let mut walk = Walk::new(text_map());
     walk.arrive_in("A pond", FIELDS, &["n"], "Lilies float here.");
