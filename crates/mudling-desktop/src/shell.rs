@@ -897,12 +897,21 @@ impl Shell {
         cx.notify();
     }
 
-    /// With no game, nothing is running: what the settings sheet and title bar
-    /// said about the last session goes with it.
+    /// With no game, nothing is running: what the settings sheet, the title
+    /// bar, the hotbar, the find bar and the command bar said about the last
+    /// session goes with it.
     fn forget_the_session(&self, cx: &mut Context<Shell>) {
         self.show_problems(&SettingsState::default(), cx);
-        self.settings
-            .update(cx, |sheet, cx| sheet.show_plugins(Vec::new(), cx));
+        self.settings.update(cx, |sheet, cx| {
+            sheet.show_plugins(Vec::new(), cx);
+            sheet.show_rules(&RulesState::default(), cx);
+        });
+        self.hotbar.update(cx, |hotbar, cx| hotbar.show(&[], cx));
+        self.chat.update(cx, |chat, cx| chat.close_find(cx));
+        self.title_bar
+            .update(cx, |bar, cx| bar.show_find(false, cx));
+        self.input
+            .update(cx, |input, cx| input.set_alias_preview(None, cx));
     }
 
     fn show_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
@@ -2949,6 +2958,38 @@ pub mod tests {
             assert!(sheet.turned_off().is_empty());
             assert!(sheet.costs().is_empty());
             assert!(sheet.plugins().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn leaving_for_the_empty_state_forgets_the_sessions_chips_rules_and_find(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut launched, _socket) = launch_playing(game_plugin(), cx);
+        let rules = RulesState {
+            hotbar: vec!["look".to_owned()],
+            ..RulesState::default()
+        };
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.show_sample_rules(rules.clone(), cx);
+            shell
+                .hotbar
+                .update(cx, |hotbar, cx| hotbar.show(&rules.hotbar, cx));
+            shell.open_find(window, cx);
+        });
+        launched.cx.run_until_parked();
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            assert!(shell.chat.read(cx).find_is_open());
+            assert_eq!(shell.hotbar.read(cx).chips(), ["look"]);
+        });
+
+        launched.click("session-switcher");
+        launched.click("session-choose-server");
+        launched.frames_until("the empty state", |shell, _| shell.on_empty_state());
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            assert!(!shell.chat.read(cx).find_is_open());
+            assert!(shell.hotbar.read(cx).chips().is_empty());
+            assert_eq!(shell.settings.read(cx).rules(), &RulesState::default());
         });
     }
 

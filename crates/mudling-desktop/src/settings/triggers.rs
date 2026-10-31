@@ -202,6 +202,11 @@ impl SettingsSheet {
         }
     }
 
+    #[cfg(test)]
+    pub fn rules(&self) -> &RulesState {
+        &self.rules
+    }
+
     fn edit(&mut self, edit: RuleEdit, cx: &mut Context<SettingsSheet>) {
         cx.emit(SheetEvent::Edit(edit));
     }
