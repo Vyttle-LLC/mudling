@@ -37,6 +37,8 @@ pub use engine::Engine;
 pub use login::Credentials;
 
 use crate::completion::{Completer, Completion, History, KnownWords};
+use crate::defaults::aliases::{AliasRule, AliasSet};
+use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Timestamp};
@@ -146,12 +148,33 @@ pub struct Typing {
     known: KnownWords,
     completer: Completer,
     link_rules: Vec<LinkRule>,
+    aliases: AliasSet,
+}
+
+impl Typing {
+    /// What `typed` would send, for the alias preview, if it holds an alias.
+    pub fn alias_preview(&self, typed: &str) -> Option<String> {
+        self.aliases.preview(typed)
+    }
+}
+
+/// A change the player made to what they set up. A rule with no id is new.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuleEdit {
+    SaveTrigger(TriggerRule),
+    RemoveTrigger(String),
+    SaveAlias(AliasRule),
+    RemoveAlias(String),
+    /// The hotbar's whole new list.
+    SetHotbar(Vec<String>),
 }
 
 enum Input {
     Connect,
     Send(String),
     SendAction(String),
+    Press(String),
+    Edit(RuleEdit),
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
@@ -224,6 +247,22 @@ impl Session {
     /// [`Engine::send_action`].
     pub fn send_action(&self, command: impl Into<String>) {
         self.queue(Input::SendAction(command.into()));
+    }
+
+    /// Runs a command the player pressed, as on the hotbar. While the server
+    /// asks for a password it does nothing: it would go as the password.
+    pub fn press(&self, command: impl Into<String>) {
+        self.queue(Input::Press(command.into()));
+    }
+
+    /// Saves a change the player made; the rules store shows it.
+    pub fn edit(&self, edit: RuleEdit) {
+        self.queue(Input::Edit(edit));
+    }
+
+    /// See [`Typing::alias_preview`].
+    pub fn alias_preview(&self, typed: &str) -> Option<String> {
+        self.typing().alias_preview(typed)
     }
 
     /// Closes the connection, or gives up on one still opening.
@@ -368,6 +407,8 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::SendAction(command)) => {
                     engine.send_action(&command, Timestamp::now());
                 }
+                Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
+                Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();

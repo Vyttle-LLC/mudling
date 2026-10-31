@@ -5,7 +5,7 @@
 //! exists. Each call opens databases, so call it from a core thread or
 //! another thread that may wait on the disk, never the UI thread.
 
-use super::records::{Meta, Server};
+use super::records::{Alias, Meta, Server, Trigger};
 use super::{Batch, Database, Error, Timestamp};
 use crate::map::CURRENT_ROOM;
 use std::path::Path;
@@ -121,6 +121,53 @@ fn read_server(folder: &Path, name: &str) -> Result<Option<SavedServer>, Error> 
         last_room,
         characters,
     }))
+}
+
+/// Every other saved server's triggers and aliases, each with the server
+/// whose database keeps it, and what went wrong with those that can't be read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OtherServersRows {
+    pub triggers: Vec<(String, Trigger)>,
+    pub aliases: Vec<(String, Alias)>,
+    pub problems: Vec<String>,
+}
+
+/// Reads the rules of every saved server but `host`.
+pub fn other_servers_rows(data_folder: &Path, host: &str) -> OtherServersRows {
+    let folder = data_folder.join(SERVERS_FOLDER);
+    let mut rows = OtherServersRows::default();
+    let Ok(files) = std::fs::read_dir(&folder) else {
+        return rows;
+    };
+    for file in files.flatten() {
+        let path = file.path();
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        if name == host || path.extension().is_none_or(|e| e != EXTENSION) {
+            continue;
+        }
+        let read = Database::open(&folder, &name)
+            .and_then(|database| database.reader())
+            .and_then(|reader| Ok((reader.triggers()?, reader.aliases()?)));
+        match read {
+            Ok((triggers, aliases)) => {
+                let keeper = || name.to_string();
+                rows.triggers
+                    .extend(triggers.into_iter().map(|row| (keeper(), row)));
+                rows.aliases
+                    .extend(aliases.into_iter().map(|row| (keeper(), row)));
+            }
+            Err(error) => rows.problems.push(format!("{name}: {error}")),
+        }
+    }
+    rows
+}
+
+/// Commits `batch` to `host`'s database. It blocks until that's on the disk.
+pub fn write_to_server(data_folder: &Path, host: &str, batch: Batch) -> Result<(), Error> {
+    let folder = data_folder.join(SERVERS_FOLDER);
+    let writer = Database::open(&folder, host)?.writer()?;
+    writer.submit(batch)?;
+    writer.flush()
 }
 
 /// Saves a server the player added. It blocks until the row is on the disk.

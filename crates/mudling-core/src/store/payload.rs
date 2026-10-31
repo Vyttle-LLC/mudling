@@ -6,8 +6,10 @@
 //! terminal and the map.
 
 use super::StoreState;
+use crate::defaults::aliases::AliasRule;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
+use crate::defaults::triggers::TriggerRule;
 use crate::line::Line;
 use crate::map::{MapChange, MapRoom, Mark, MarkChange, RoomId, Whereabouts};
 use crate::net::DisconnectReason;
@@ -288,6 +290,45 @@ pub struct SettingsState {
     pub turned_off: Vec<PluginDisabled>,
 }
 
+/// What the player set up for this session: what Settings edits, and the
+/// hotbar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RulesState {
+    /// The host this session plays on.
+    pub server: String,
+    /// The character this session plays, by id.
+    pub character: String,
+    /// What the game chains commands with, if it does.
+    pub separator: Option<String>,
+    pub triggers: Vec<TriggerRule>,
+    pub aliases: Vec<AliasRule>,
+    /// The hotbar's commands, in order.
+    pub hotbar: Vec<String>,
+}
+
+/// Sounds the triggers asked for: a shell plays each change, once.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CuesState {
+    pub sounds: Vec<String>,
+}
+
+impl StoreState for CuesState {
+    type Change = Vec<String>;
+
+    fn apply(&mut self, change: &Vec<String>) -> bool {
+        self.sounds.clone_from(change);
+        !change.is_empty()
+    }
+
+    fn coalesce(earlier: &mut Vec<String>, later: Vec<String>) {
+        for sound in later {
+            if !earlier.contains(&sound) {
+                earlier.push(sound);
+            }
+        }
+    }
+}
+
 /// Declares stores whose change is the whole new state, so a write that
 /// equals the current state is no change.
 macro_rules! whole_value_stores {
@@ -310,7 +351,7 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, TargetState, SettingsState);
+whole_value_stores!(RoomState, MobsState, TargetState, SettingsState, RulesState);
 
 #[cfg(test)]
 mod tests {

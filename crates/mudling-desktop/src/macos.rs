@@ -166,6 +166,10 @@ const SPLIT_PROBE_LINES: [&str; 1] = ["ax-check: a line arriving while the chat 
 /// How far back the check splits the chat: past anything still on screen.
 const SPLIT_DISTANCE: f32 = 2_000.;
 
+/// What a screen reader must find around the command bar. `look` is one of
+/// the chips [`crate::measure::fill_hotbar`] puts there.
+const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to the hotbar"];
+
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
     "Session: Recording",
@@ -261,10 +265,23 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         shell.update(cx, |shell, cx| {
             crate::measure::fill_room_panel(shell, None, cx);
+            crate::measure::fill_hotbar(shell, cx);
             shell.open_panels(cx);
         });
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
+        let unnamed: Vec<_> = COMMAND_BAR_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the hotbar and the pin are named",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
         let named_buttons = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXButton", None))
                 .into_iter()

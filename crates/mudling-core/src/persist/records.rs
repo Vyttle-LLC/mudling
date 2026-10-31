@@ -13,7 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// When a record last changed, in milliseconds since the Unix epoch. A
 /// later sync merges two copies of a record by keeping the newer one.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
 pub struct Timestamp(pub i64);
 
 impl Timestamp {
@@ -775,6 +778,89 @@ impl Stored for Identification {
             added: row.get::<_, Json<_>>(9)?.0,
             details: row.get::<_, Json<_>>(10)?.0,
             updated: row.get(11)?,
+        })
+    }
+}
+
+/// What to do when a line matches. `scope` says who it applies to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Trigger {
+    pub id: String,
+    pub scope: String,
+    pub matches: String,
+    pub action: String,
+    pub enabled: bool,
+    pub updated: Timestamp,
+}
+
+impl Stored for Trigger {
+    const UPSERT: &'static str =
+        "INSERT INTO triggers (id, scope, matches, action, enabled, updated)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT (id) DO UPDATE SET scope = excluded.scope, matches = excluded.matches,
+            action = excluded.action, enabled = excluded.enabled, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT id, scope, matches, action, enabled, updated FROM triggers ORDER BY id";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![
+            self.id,
+            self.scope,
+            self.matches,
+            self.action,
+            self.enabled,
+            self.updated
+        ])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Trigger {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            matches: row.get(2)?,
+            action: row.get(3)?,
+            enabled: row.get(4)?,
+            updated: row.get(5)?,
+        })
+    }
+}
+
+/// A short word that expands to a longer command. `scope` says who it
+/// applies to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Alias {
+    pub id: String,
+    pub scope: String,
+    pub name: String,
+    pub expansion: String,
+    pub updated: Timestamp,
+}
+
+impl Stored for Alias {
+    const UPSERT: &'static str = "INSERT INTO aliases (id, scope, name, expansion, updated)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT (id) DO UPDATE SET scope = excluded.scope, name = excluded.name,
+            expansion = excluded.expansion, updated = excluded.updated";
+    const SELECT: &'static str =
+        "SELECT id, scope, name, expansion, updated FROM aliases ORDER BY id";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![
+            self.id,
+            self.scope,
+            self.name,
+            self.expansion,
+            self.updated
+        ])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Alias {
+            id: row.get(0)?,
+            scope: row.get(1)?,
+            name: row.get(2)?,
+            expansion: row.get(3)?,
+            updated: row.get(4)?,
         })
     }
 }

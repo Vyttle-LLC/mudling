@@ -20,14 +20,17 @@ use gpui::{
     AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
 };
 use mudling_core::LinePipeline;
+use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
+use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
 use mudling_core::plugin::{Layer, PluginId};
 use mudling_core::store::{
-    ConnectionStatus, Diff, Revision, SettingsState, TerminalChange, TerminalState, VitalsState,
+    ConnectionStatus, Diff, Revision, RulesState, SettingsState, TerminalChange, TerminalState,
+    VitalsState,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -182,6 +185,48 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
     );
 }
 
+/// Rules made up for this file.
+fn sample_rules() -> RulesState {
+    let trigger = |pattern: &str, color, hides, sound: Option<&str>, scope| TriggerRule {
+        color,
+        hides,
+        sound: sound.map(str::to_owned),
+        scope,
+        ..TriggerRule::new(pattern)
+    };
+    let character = || Scope::Character("sample".to_owned());
+    RulesState {
+        server: "mud.example".to_owned(),
+        character: "sample".to_owned(),
+        separator: None,
+        triggers: vec![
+            trigger(
+                "tells you",
+                Some(Highlight::Purple),
+                false,
+                Some("chime"),
+                Scope::All,
+            ),
+            trigger("flaps its wings", None, true, None, Scope::Server),
+            trigger(
+                "is DEAD!!",
+                Some(Highlight::Red),
+                false,
+                Some("bell"),
+                character(),
+            ),
+        ],
+        aliases: vec![
+            AliasRule::new("k", "kill $1;kick $1"),
+            AliasRule {
+                enabled: false,
+                ..AliasRule::new("gg", "get $2 $1;wear $2")
+            },
+        ],
+        hotbar: crate::measure::sample_chips(),
+    }
+}
+
 fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     crate::measure::fill_room_panel(shell, None, cx);
     shell
@@ -323,6 +368,54 @@ fn window_images() {
     render("speedwalk-dark", Dark, WIDE, |shell, window, cx| {
         shell.type_sample("3n2e", window, cx);
     });
+    render("hotbar-dark", Dark, WIDE, |shell, _, cx| {
+        crate::measure::fill_hotbar(shell, cx);
+    });
+    render("hotbar-light", Light, WIDE, |shell, _, cx| {
+        crate::measure::fill_hotbar(shell, cx);
+    });
+    render(
+        "hotbar-alias-preview-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            crate::measure::fill_hotbar(shell, cx);
+            shell.type_sample("k spirit", window, cx);
+            shell.show_sample_alias_preview("kill spirit; kick spirit", cx);
+        },
+    );
+    render("hotbar-narrow-dark", Dark, NARROW, |shell, _, cx| {
+        crate::measure::fill_hotbar(shell, cx);
+    });
+    for (name, appearance) in [
+        ("settings-triggers-dark", Dark),
+        ("settings-triggers-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            shell.show_sample_rules(sample_rules(), cx);
+            open_sheet(shell, Section::Triggers, window, cx);
+        });
+    }
+    render(
+        "settings-triggers-form-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            shell.show_sample_rules(sample_rules(), cx);
+            open_sheet(shell, Section::Triggers, window, cx);
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.edit_sample_trigger(window, cx);
+            });
+        },
+    );
+    render(
+        "settings-triggers-no-game-dark",
+        Dark,
+        DEFAULT,
+        |shell, window, cx| {
+            open_sheet(shell, Section::Triggers, window, cx);
+        },
+    );
     render("title-bar-server-only-dark", Dark, WIDE, |shell, _, cx| {
         shell.show_sample_session(SessionLabel::new("mud.example", None, "Connected"), cx);
     });

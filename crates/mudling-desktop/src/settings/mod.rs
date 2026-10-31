@@ -12,13 +12,15 @@ mod plugins;
 mod saved;
 mod servers;
 mod shortcuts;
+mod triggers;
 
 pub use plugins::PluginRow;
 pub use saved::SavedSettings;
 pub use servers::SavedServer;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
-use crate::shell::{ToggleLeftPanel, ToggleRightPanel};
+use crate::input;
+use crate::shell::{FocusHotbar, PinCommand, ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::{Appearance, CHAT_FONTS, Theme};
 use crate::title_bar::{FindInScrollback, OpenSettings, problems_text};
 use gpui::{
@@ -28,6 +30,8 @@ use gpui::{
 };
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
+use mudling_core::session::RuleEdit;
+use mudling_core::store::RulesState;
 use mudling_core::store::SettingsState;
 
 const WIDTH: Pixels = px(1000.);
@@ -105,7 +109,6 @@ impl Section {
     /// The line for a section whose phase hasn't arrived.
     fn not_yet(self) -> Option<&'static str> {
         match self {
-            Section::Triggers => Some("Editing triggers and aliases isn't here yet."),
             Section::Data => Some("Sync isn't here yet. Your data stays on this device."),
             Section::Vault => Some("The password vault isn't here yet."),
             _ => None,
@@ -117,19 +120,33 @@ pub enum SheetEvent {
     Closed,
     Chose(Appearance),
     TurnOn(PluginId),
+    /// A change to the player's rules, for the session.
+    Edit(RuleEdit),
+    /// A sound was chosen: the player hears what they chose.
+    TrySound(&'static str),
 }
 
-/// The pane's stops, kept between frames so a control keeps its focus handle.
+/// The pane's stops. Controls' handles are kept between frames, so a control
+/// keeps its focus handle.
 #[derive(Default)]
 struct Stops {
     handles: Vec<FocusHandle>,
+    /// How many of `handles` this frame has handed out.
+    handed_out: usize,
+    in_use: Vec<FocusHandle>,
     /// The row of the pane each stop in use sits in.
     rows: Vec<usize>,
 }
 
 impl Stops {
     fn in_use(&self) -> &[FocusHandle] {
-        &self.handles[..self.rows.len()]
+        &self.in_use
+    }
+
+    fn start_frame(&mut self) {
+        self.handed_out = 0;
+        self.in_use.clear();
+        self.rows.clear();
     }
 }
 
@@ -147,12 +164,21 @@ impl Pane {
 
     /// A stop for a control in the row about to be added.
     fn stop(&mut self, cx: &mut App) -> FocusHandle {
-        let number = self.stops.rows.len();
+        let number = self.stops.handed_out;
         if number == self.stops.handles.len() {
             self.stops.handles.push(cx.focus_handle());
         }
+        self.stops.handed_out += 1;
+        let stop = self.stops.handles[number].clone();
+        self.adopt(stop.clone());
+        stop
+    }
+
+    /// Makes a stop of a handle that isn't the pane's, like a text field's,
+    /// in the row about to be added.
+    fn adopt(&mut self, handle: FocusHandle) {
+        self.stops.in_use.push(handle);
         self.stops.rows.push(self.rows.len());
-        self.stops.handles[number].clone()
     }
 }
 
@@ -251,6 +277,8 @@ pub struct SettingsSheet {
     server: Option<SharedString>,
     servers: Vec<SavedServer>,
     plugins: Vec<PluginRow>,
+    rules: RulesState,
+    form: triggers::Form,
     notices: Vec<String>,
     turned_off: Vec<PluginDisabled>,
     costs: Vec<PluginCost>,
@@ -262,13 +290,15 @@ pub struct SettingsSheet {
     tabs: [FocusHandle; Section::ALL.len()],
     close: FocusHandle,
     stops: Stops,
+    /// A stop to bring into view at the next draw, once its row exists.
+    reveal: Option<FocusHandle>,
     scroll: ScrollHandle,
 }
 
 impl EventEmitter<SheetEvent> for SettingsSheet {}
 
 impl SettingsSheet {
-    pub fn new(cx: &mut Context<SettingsSheet>) -> SettingsSheet {
+    pub fn new(window: &mut Window, cx: &mut Context<SettingsSheet>) -> SettingsSheet {
         let text = cx.text_system().clone();
         let installed = cx.background_spawn(async move { text.all_font_names() });
         cx.spawn(async move |sheet, cx| {
@@ -281,6 +311,8 @@ impl SettingsSheet {
             server: None,
             servers: Vec::new(),
             plugins: Vec::new(),
+            rules: RulesState::default(),
+            form: triggers::Form::new(window, cx),
             notices: Vec::new(),
             turned_off: Vec::new(),
             costs: Vec::new(),
@@ -290,6 +322,7 @@ impl SettingsSheet {
             tabs: std::array::from_fn(|_| cx.focus_handle()),
             close: cx.focus_handle(),
             stops: Stops::default(),
+            reveal: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -505,7 +538,7 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let mut stops = std::mem::take(&mut self.stops);
-        stops.rows.clear();
+        stops.start_frame();
         let mut pane = Pane {
             rows: Vec::new(),
             stops,
@@ -513,9 +546,15 @@ impl SettingsSheet {
         match self.section {
             Section::Servers => servers::fill(&mut pane, &self.servers, theme),
             Section::Plugins => self.fill_plugins(&mut pane, theme, cx),
+            Section::Triggers => self.fill_triggers_section(&mut pane, theme, cx),
             Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
             Section::Shortcuts => shortcuts::fill(&mut pane, theme),
             section => pane.row(muted_line(section.not_yet().unwrap_or_default(), theme)),
+        }
+        if let Some(wanted) = self.reveal.take()
+            && let Some(at) = pane.stops.in_use().iter().position(|stop| *stop == wanted)
+        {
+            self.scroll.scroll_to_item(pane.stops.rows[at]);
         }
         self.stops = pane.stops;
         let title = self.section.title();
@@ -599,6 +638,11 @@ impl gpui::Render for SettingsSheet {
             .shadow(theme.floating_shadow())
             .font_family(UI_FONT)
             .text_color(theme.text)
+            // Tab in a text field is a stop like any other here.
+            .capture_action(cx.listener(|sheet, _: &input::Complete, window, cx| {
+                sheet.walk(1, window, cx);
+                cx.stop_propagation();
+            }))
             .on_action(cx.listener(|sheet, _: &CloseSettings, _, cx| sheet.close(cx)))
             .on_action(cx.listener(|sheet, _: &NextStop, window, cx| sheet.walk(1, window, cx)))
             .on_action(
@@ -617,6 +661,8 @@ impl gpui::Render for SettingsSheet {
             .on_action(|_: &ToggleRightPanel, _, _| {})
             .on_action(|_: &FindInScrollback, _, _| {})
             .on_action(|_: &OpenSettings, _, _| {})
+            .on_action(|_: &FocusHotbar, _, _| {})
+            .on_action(|_: &PinCommand, _, _| {})
             .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
             .child(self.render_pane(&theme, cx));
         div()
@@ -653,6 +699,7 @@ mod tests {
     use crate::shell::{Shell, tests::window_with_keys};
     use crate::theme::{LARGEST_CHAT_SIZE, ThemeChoice};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
+    use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
     use mudling_core::plugin::luau::DisabledReason;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -866,6 +913,248 @@ mod tests {
         let (_saved, next) = SavedSettings::open(folder.path()).unwrap();
         assert_eq!(next, chosen(cx));
         assert_eq!(next.theme, ThemeChoice::Dark);
+    }
+
+    fn rules() -> RulesState {
+        RulesState {
+            server: "mud.example".to_owned(),
+            character: "ana".to_owned(),
+            triggers: vec![TriggerRule {
+                id: "t1".to_owned(),
+                ..TriggerRule::new("bat")
+            }],
+            hotbar: vec!["look".to_owned(), "score".to_owned()],
+            ..RulesState::default()
+        }
+    }
+
+    /// Opens Triggers & aliases, keeping what it asks the session to do.
+    fn open_rules(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Shell>,
+        &mut VisualTestContext,
+        Rc<RefCell<Vec<RuleEdit>>>,
+    ) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1300.), px(800.)));
+        let edits = Rc::new(RefCell::new(Vec::new()));
+        let kept = Rc::clone(&edits);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event, _| {
+                if let SheetEvent::Edit(edit) = event {
+                    kept.borrow_mut().push(edit.clone());
+                }
+            })
+            .detach();
+        });
+        shell.update(cx, |shell, cx| shell.show_sample_rules(rules(), cx));
+        open(&shell, cx);
+        section(Section::Triggers, cx);
+        (shell, cx, edits)
+    }
+
+    #[gpui::test]
+    fn with_no_game_the_section_says_what_it_needs(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        section(Section::Triggers, cx);
+        assert!(cx.debug_bounds("new-trigger").is_none());
+    }
+
+    #[gpui::test]
+    fn a_new_trigger_saves_what_the_form_says(cx: &mut TestAppContext) {
+        let (_shell, cx, edits) = open_rules(cx);
+        click("new-trigger", cx);
+        cx.simulate_input("tells you");
+        click("Highlight-Purple", cx);
+        click("In the chat-Hide the line", cx);
+        click("Applies to-This character", cx);
+        click("form-save", cx);
+
+        let edits = edits.borrow();
+        let [RuleEdit::SaveTrigger(saved)] = edits.as_slice() else {
+            panic!("one save, not {edits:?}");
+        };
+        assert_eq!(saved.pattern, "tells you");
+        assert_eq!(saved.color, Some(Highlight::Purple));
+        assert!(saved.hides);
+        assert_eq!(saved.scope, Scope::Character("ana".to_owned()));
+        assert!(cx.debug_bounds("form-save").is_none(), "the form closes");
+    }
+
+    #[gpui::test]
+    fn a_bad_regular_expression_stays_in_the_form_and_says_why(cx: &mut TestAppContext) {
+        let (_shell, cx, edits) = open_rules(cx);
+        click("new-trigger", cx);
+        cx.simulate_input("rat(");
+        click("Matches-Regular expression", cx);
+        click("form-save", cx);
+        assert!(edits.borrow().is_empty());
+        assert!(cx.debug_bounds("form-save").is_some());
+    }
+
+    #[gpui::test]
+    fn return_in_a_field_saves_and_tab_walks_on_inside_the_sheet(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("new-alias", cx);
+        cx.simulate_input("k");
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        cx.simulate_input("kill $1");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let edits = edits.borrow();
+        let [RuleEdit::SaveAlias(saved)] = edits.as_slice() else {
+            panic!("one save, not {edits:?}");
+        };
+        assert_eq!(
+            (saved.name.as_str(), saved.expansion.as_str()),
+            ("k", "kill $1")
+        );
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "");
+    }
+
+    #[gpui::test]
+    fn a_rule_turns_off_and_comes_out_from_its_row(cx: &mut TestAppContext) {
+        let (_shell, cx, edits) = open_rules(cx);
+        click("trigger-on-0", cx);
+        click("trigger-remove-0", cx);
+        let edits = edits.borrow();
+        let [RuleEdit::SaveTrigger(off), RuleEdit::RemoveTrigger(id)] = edits.as_slice() else {
+            panic!("a save and a remove, not {edits:?}");
+        };
+        assert!(!off.enabled);
+        assert_eq!(id, "t1");
+    }
+
+    #[gpui::test]
+    fn chips_reorder_and_come_out_here_too(cx: &mut TestAppContext) {
+        let (_shell, cx, edits) = open_rules(cx);
+        click("chip-Later-0", cx);
+        click("chip-remove-1", cx);
+        let chips = |edit: &RuleEdit| match edit {
+            RuleEdit::SetHotbar(chips) => chips.clone(),
+            other => panic!("{other:?}"),
+        };
+        let edits = edits.borrow();
+        assert_eq!(chips(&edits[0]), ["score", "look"]);
+        assert_eq!(chips(&edits[1]), ["look"]);
+    }
+
+    /// Applies what the sheet asked for, as the session's store would.
+    fn echo_chips(
+        shell: &Entity<Shell>,
+        edits: &Rc<RefCell<Vec<RuleEdit>>>,
+        cx: &mut VisualTestContext,
+    ) {
+        let Some(RuleEdit::SetHotbar(hotbar)) = edits.borrow().last().cloned() else {
+            panic!("a hotbar edit");
+        };
+        let echoed = RulesState { hotbar, ..rules() };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(echoed, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_chip_moved_under_its_form_is_the_one_saved(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("chip-edit-1", cx);
+        click("chip-Earlier-1", cx);
+        echo_chips(&shell, &edits, cx);
+        click("Hotbar command", cx);
+        cx.simulate_input(" all");
+        click("form-save", cx);
+        echo_chips(&shell, &edits, cx);
+        let chips = shell.read_with(cx, |shell, cx| {
+            shell.settings_sheet().read(cx).rules.hotbar.clone()
+        });
+        assert_eq!(chips, ["score all", "look"]);
+    }
+
+    #[gpui::test]
+    fn a_chip_removed_under_its_form_stays_removed(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("chip-edit-1", cx);
+        click("chip-remove-1", cx);
+        echo_chips(&shell, &edits, cx);
+        let before = edits.borrow().len();
+        click("form-save", cx);
+        assert_eq!(edits.borrow().len(), before, "nothing came back");
+        assert!(cx.debug_bounds("form-save").is_none(), "the form closes");
+    }
+
+    #[gpui::test]
+    fn a_trigger_switched_under_its_form_stays_switched(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("trigger-edit-0", cx);
+        let off = RulesState {
+            triggers: vec![TriggerRule {
+                enabled: false,
+                ..rules().triggers[0].clone()
+            }],
+            ..rules()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(off, cx));
+        cx.run_until_parked();
+        click("form-save", cx);
+        let edits = edits.borrow();
+        let [RuleEdit::SaveTrigger(saved)] = edits.as_slice() else {
+            panic!("one save, not {edits:?}");
+        };
+        assert!(!saved.enabled);
+    }
+
+    #[gpui::test]
+    fn opening_the_form_brings_it_into_view(cx: &mut TestAppContext) {
+        let (shell, cx, _edits) = open_rules(cx);
+        let many = RulesState {
+            triggers: (0..40)
+                .map(|number| TriggerRule {
+                    id: number.to_string(),
+                    ..TriggerRule::new(format!("line {number}"))
+                })
+                .collect(),
+            ..rules()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(many, cx));
+        cx.run_until_parked();
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.scroll.offset().y),
+            px(0.)
+        );
+
+        click("trigger-edit-0", cx);
+        cx.run_until_parked();
+        let (offset, pane) = sheet.read_with(cx, |sheet, _| {
+            (sheet.scroll.offset().y, sheet.scroll.bounds().size.height)
+        });
+        assert!(offset < -pane, "scrolled past the first page: {offset:?}");
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_every_control_of_the_section(cx: &mut TestAppContext) {
+        let (shell, cx, _edits) = open_rules(cx);
+        click("new-trigger", cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let (stops, field) = sheet.read_with(cx, |sheet, cx| {
+            (
+                sheet.tabs.len() + 1 + sheet.stops.in_use().len(),
+                sheet.form_field_handle(cx),
+            )
+        });
+        let mut reached_field = 0;
+        for _ in 0..stops {
+            cx.simulate_keystrokes("tab");
+            cx.run_until_parked();
+            if cx.update(|window, _| field.is_focused(window)) {
+                reached_field += 1;
+            }
+        }
+        assert_eq!(reached_field, 1, "the field is one stop of {stops}");
     }
 
     #[gpui::test]

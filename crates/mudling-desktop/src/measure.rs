@@ -144,6 +144,19 @@ pub fn fullest_room(logs: &[PathBuf]) -> Option<RoomState> {
     Some(room)
 }
 
+/// Chips such as a player keeps. Made up for measuring.
+pub fn sample_chips() -> Vec<String> {
+    ["look", "inv", "score", "kill spirit", "sleep"]
+        .map(str::to_owned)
+        .into()
+}
+
+pub fn fill_hotbar(shell: &Shell, cx: &mut App) {
+    shell
+        .hotbar()
+        .update(cx, |hotbar, cx| hotbar.show(&sample_chips(), cx));
+}
+
 pub fn fill_room_panel(shell: &Shell, room: Option<RoomState>, cx: &mut App) {
     let (sample, mobs, _) = sample_room();
     let room = room.unwrap_or(sample);
@@ -303,7 +316,10 @@ pub fn drive(
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
     };
-    pacer.shell.update(cx, |shell, cx| shell.open_panels(cx));
+    pacer.shell.update(cx, |shell, cx| {
+        shell.open_panels(cx);
+        fill_hotbar(shell, cx);
+    });
     mark(&format!(
         "info window_active={}",
         u8::from(cx.active_window().is_some())

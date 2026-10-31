@@ -8,12 +8,16 @@ use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
-use super::{SessionConfig, SessionError, Typing};
+use super::{RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
-use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_chain};
+use crate::defaults::aliases::{AliasRule, AliasSet};
+use crate::defaults::commands::{
+    CommandVariety, WalkSyntax, chain_lines, parse_speedwalk, split_chain,
+};
 use crate::defaults::detect::{ServerSignals, suggest};
 use crate::defaults::hud::{self, FieldMap};
-use crate::defaults::{self, Defaults, PendingAction};
+use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
+use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
@@ -27,14 +31,16 @@ use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
 use crate::store::{
-    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, GearState, MapState,
-    Memo, MobsState, RoomState, SettingsState, StoreHub, TargetState, TerminalChange,
-    TerminalState, Versioned, VitalsState,
+    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState,
+    MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub, TargetState,
+    TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -60,6 +66,7 @@ struct Link {
     game: GameFeed,
     latency: Latency,
     login: Option<Login>,
+    variety: CommandVariety,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
@@ -100,6 +107,13 @@ pub struct Engine {
     link: Option<Link>,
     character_id: String,
     settings: SettingsState,
+    rules: RulesState,
+    /// The triggers in the matcher: those on, for this character.
+    running_triggers: Vec<TriggerRule>,
+    /// Sounds for the cues store, at the next settle.
+    sounds: Vec<String>,
+    /// How many rules this session has given an id.
+    rules_made: u32,
     /// Which fields hold the vitals, by plugin set and whether any were
     /// learned yet.
     hud_fields: Memo<(u64, bool), FieldMap>,
@@ -176,6 +190,10 @@ impl Engine {
             link: None,
             character_id,
             settings,
+            rules: RulesState::default(),
+            running_triggers: Vec::new(),
+            sounds: Vec::new(),
+            rules_made: 0,
             hud_fields: Memo::default(),
             contents_changed: false,
             costs_published: None,
@@ -190,6 +208,7 @@ impl Engine {
         engine.enable_plugins_for_server();
         engine.load_saved()?;
         engine.walk = WalkSyntax::of(&engine.plugins);
+        engine.load_rules()?;
         engine.publish_settings();
         Ok(engine)
     }
@@ -225,6 +244,7 @@ impl Engine {
             game: GameFeed::default(),
             latency: Latency::default(),
             login: self.new_login(),
+            variety: CommandVariety::default(),
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
@@ -307,7 +327,45 @@ impl Engine {
         }
         drop(typing);
         self.terminal.push(Line::command(typed));
-        self.issue(typed, now);
+        self.issue_expanded(typed, now);
+    }
+
+    /// A command the player pressed. With echo off it would go as a password,
+    /// so it does nothing. It isn't typing: history doesn't keep it.
+    pub fn press(&mut self, command: &str, now: Timestamp) {
+        if self.link.is_some() && !self.settings.echo_off {
+            self.terminal.push(Line::command(command));
+            self.issue_expanded(command, now);
+        }
+    }
+
+    /// Applies a change the player made and saves it.
+    pub fn edit(&mut self, edit: RuleEdit, now: Timestamp) {
+        match edit {
+            RuleEdit::SaveTrigger(rule) => self.save_trigger(rule, now),
+            RuleEdit::RemoveTrigger(id) => {
+                let triggers = &mut self.rules.triggers;
+                if let Some(at) = triggers.iter().position(|rule| rule.id == id) {
+                    let rule = triggers.remove(at);
+                    self.remove_row(&rule.home, persist::Key::Trigger(rule.id));
+                    self.run_triggers();
+                }
+            }
+            RuleEdit::SaveAlias(rule) => self.save_alias(rule, now),
+            RuleEdit::RemoveAlias(id) => {
+                let aliases = &mut self.rules.aliases;
+                if let Some(at) = aliases.iter().position(|rule| rule.id == id) {
+                    let rule = aliases.remove(at);
+                    self.remove_row(&rule.home, persist::Key::Alias(rule.id));
+                    self.run_aliases();
+                }
+            }
+            RuleEdit::SetHotbar(chips) => {
+                self.batch.upsert(hotbar::to_meta(&chips, now));
+                self.rules.hotbar = chips;
+            }
+        }
+        self.publish_rules();
     }
 
     /// A command a shell's button sent. It's never a password, so with echo
@@ -350,6 +408,10 @@ impl Engine {
         }
         self.publish_plugin_costs(now);
         self.share_link_rules();
+        if !self.sounds.is_empty() {
+            let sounds = std::mem::take(&mut self.sounds);
+            self.hub.write::<CuesState>(sounds);
+        }
         if !self.terminal.is_empty() {
             let lines = std::mem::take(&mut self.terminal);
             self.hub
@@ -555,6 +617,8 @@ impl Engine {
             let coloring = self
                 .plugins
                 .read_line_from(&line, output_at, &mut self.events);
+            let response = self.trigger_response();
+            let Some(link) = &mut self.link else { return };
             answer_login(&mut link.login, text, encoding, &mut self.output);
             let body = &text[prompt.unwrap_or(0)..];
             if prompt.is_none() || !body.is_empty() {
@@ -568,6 +632,14 @@ impl Engine {
             } else {
                 line.colored(&coloring)
             };
+            let shown = match response.color {
+                Some(color) => shown.highlighted(output_at, color.style()),
+                None => shown,
+            };
+            self.sounds.extend(response.sounds);
+            if response.hides {
+                continue;
+            }
             match prompt.filter(|_| hide) {
                 Some(at) if at == text.len() => {}
                 Some(at) => self.terminal.push(shown.after(at)),
@@ -576,6 +648,16 @@ impl Engine {
         }
         // The buffer is kept: it's reused for every read.
         self.lines = lines;
+    }
+
+    /// What the triggers ask of the line just read. While the server asks
+    /// for a password none of them acts: nothing in that exchange is game text.
+    fn trigger_response(&self) -> TriggerResponse {
+        match self.plugins.triggered() {
+            [] => TriggerResponse::default(),
+            _ if self.settings.echo_off => TriggerResponse::default(),
+            matched => TriggerResponse::to(matched, &self.running_triggers),
+        }
     }
 
     /// Sends what the plugins matched to the map and to the hooks.
@@ -769,6 +851,162 @@ impl Engine {
         link.pipeline.set_encoding(encoding);
         link.login = login;
         self.subscribe_gmcp();
+        self.run_aliases();
+        self.rules.separator = self.plugins.settings().separator.clone();
+        self.publish_rules();
+    }
+
+    /// Loads what the player set up for this server, and the `all`-scoped
+    /// rules the other saved servers keep.
+    fn load_rules(&mut self) -> Result<(), SessionError> {
+        let reader = self.database.reader()?;
+        let host = self.config.host.clone();
+        let mut triggers: Vec<TriggerRule> = reader
+            .triggers()?
+            .into_iter()
+            .map(|row| TriggerRule::from_row(row, &host))
+            .collect();
+        let mut aliases: Vec<AliasRule> = reader
+            .aliases()?
+            .into_iter()
+            .map(|row| AliasRule::from_row(row, &host))
+            .collect();
+        let hotbar = hotbar::from_meta(&reader.meta()?);
+        let others = persist::other_servers_rows(&self.config.data_folder, &host);
+        for (home, row) in others.triggers {
+            let rule = TriggerRule::from_row(row, &home);
+            if rule.scope == Scope::All {
+                triggers.push(rule);
+            }
+        }
+        for (home, row) in others.aliases {
+            let rule = AliasRule::from_row(row, &home);
+            if rule.scope == Scope::All {
+                aliases.push(rule);
+            }
+        }
+        for problem in others.problems {
+            self.notice(format!("couldn't read the rules of {problem}"));
+        }
+        self.rules = RulesState {
+            server: host,
+            character: self.character_id.clone(),
+            separator: self.plugins.settings().separator.clone(),
+            triggers,
+            aliases,
+            hotbar,
+        };
+        self.run_triggers();
+        self.run_aliases();
+        self.publish_rules();
+        Ok(())
+    }
+
+    /// Hands the matcher the triggers that apply to this character.
+    fn run_triggers(&mut self) {
+        let mut running = Vec::new();
+        let mut patterns = Vec::new();
+        for rule in &self.rules.triggers {
+            if rule.enabled
+                && rule.scope.covers(&self.character_id)
+                && let Some(pattern) = rule.compiled()
+            {
+                running.push(rule.clone());
+                patterns.push(pattern);
+            }
+        }
+        match self.plugins.set_triggers(patterns) {
+            Ok(()) => self.running_triggers = running,
+            Err(error) => self.notice(format!("couldn't use the triggers: {error}")),
+        }
+    }
+
+    /// Hands the command path the aliases that apply to this character: the
+    /// player's, then the plugins', the highest layer first.
+    fn run_aliases(&self) {
+        let players = (self.rules.aliases.iter())
+            .filter(|rule| rule.enabled && rule.problem().is_none())
+            .filter(|rule| rule.scope.covers(&self.character_id))
+            .map(|rule| (rule.name.as_str(), rule.expansion.as_str()));
+        let layers: Vec<_> = self
+            .plugins
+            .declared(|points| points.commands.as_ref())
+            .collect();
+        let plugins = (layers.iter().rev())
+            .flat_map(|(_, commands)| &commands.aliases)
+            .map(|alias| (alias.name.as_str(), alias.expansion.as_str()));
+        lock(&self.typing).aliases = AliasSet::new(players.chain(plugins));
+    }
+
+    fn publish_rules(&self) {
+        self.hub.write::<RulesState>(self.rules.clone());
+    }
+
+    fn save_trigger(&mut self, mut rule: TriggerRule, now: Timestamp) {
+        let at = (self.rules.triggers.iter()).position(|saved| saved.id == rule.id);
+        self.find_home(&mut rule.id, &mut rule.home, &rule.scope, |id| {
+            persist::Key::Trigger(id)
+        });
+        let mut batch = Batch::new();
+        batch.upsert(rule.to_row(now));
+        self.write_rows(&rule.home.clone(), batch);
+        match at {
+            Some(at) => self.rules.triggers[at] = rule,
+            None => self.rules.triggers.push(rule),
+        }
+        self.run_triggers();
+    }
+
+    fn save_alias(&mut self, mut rule: AliasRule, now: Timestamp) {
+        let at = (self.rules.aliases.iter()).position(|saved| saved.id == rule.id);
+        self.find_home(&mut rule.id, &mut rule.home, &rule.scope, |id| {
+            persist::Key::Alias(id)
+        });
+        let mut batch = Batch::new();
+        batch.upsert(rule.to_row(now));
+        self.write_rows(&rule.home.clone(), batch);
+        match at {
+            Some(at) => self.rules.aliases[at] = rule,
+            None => self.rules.aliases.push(rule),
+        }
+        self.run_aliases();
+    }
+
+    /// Gives a new rule an id and this server for a home. A rule that stops
+    /// being for every server leaves the other server's database for this one.
+    fn find_home(
+        &mut self,
+        id: &mut String,
+        home: &mut String,
+        scope: &Scope,
+        key: impl Fn(String) -> persist::Key,
+    ) {
+        if id.is_empty() {
+            self.rules_made += 1;
+            *id = rule_id(self.rules_made);
+        }
+        if home.is_empty() {
+            home.clone_from(&self.config.host);
+        } else if *home != self.config.host && *scope != Scope::All {
+            self.remove_row(home, key(id.clone()));
+            home.clone_from(&self.config.host);
+        }
+    }
+
+    fn remove_row(&mut self, home: &str, key: persist::Key) {
+        let mut batch = Batch::new();
+        batch.delete(key);
+        self.write_rows(home, batch);
+    }
+
+    /// Saves `batch` to the database of `home`: this server's writer for its
+    /// own, and a short wait on the disk for a rule another server keeps.
+    fn write_rows(&mut self, home: &str, batch: Batch) {
+        if home == self.config.host {
+            self.submit(batch);
+        } else if let Err(error) = persist::write_to_server(&self.config.data_folder, home, batch) {
+            self.notice(format!("couldn't save to {home}: {error}"));
+        }
     }
 
     /// Loads the map, the mobs and the plugin stores from the database,
@@ -808,19 +1046,40 @@ impl Engine {
         Ok(())
     }
 
-    /// What the player or a hook sent, as the lines that go out. Each step
-    /// tells the map what to expect, one per move, however they're packed.
+    /// [`Engine::issue`], with the player's aliases expanded. Only the
+    /// player's own commands come this way: a hook's go as the hook wrote them.
+    fn issue_expanded(&mut self, typed: &str, now: Timestamp) {
+        let expanded = lock(&self.typing).aliases.expand_chain(typed);
+        match expanded {
+            Some(commands) => self.issue_commands(&commands, now),
+            None => self.issue(typed, now),
+        }
+    }
+
+    /// What the player or a hook sent, as the lines that go out.
     fn issue(&mut self, typed: &str, now: Timestamp) {
-        let encoding = self.encoding();
+        if typed.trim().is_empty() {
+            self.note_sent(now);
+            write_line("", self.encoding(), &mut self.output);
+            return;
+        }
+        self.issue_commands(&split_chain(typed), now);
+    }
+
+    /// Starts the clock on the round trip a command begins.
+    fn note_sent(&mut self, now: Timestamp) {
         if let Some(link) = &mut self.link {
             link.latency.sent(now);
         }
-        if typed.trim().is_empty() {
-            write_line("", encoding, &mut self.output);
-            return;
-        }
+    }
+
+    /// Each step tells the map what to expect, one per move, however they're
+    /// packed.
+    fn issue_commands(&mut self, chain: &[impl AsRef<str>], now: Timestamp) {
+        self.note_sent(now);
+        let encoding = self.encoding();
         let mut commands = Vec::new();
-        for command in split_chain(typed) {
+        for command in chain.iter().map(AsRef::as_ref) {
             match self.walk.expand(command) {
                 Some(expanded) => {
                     let steps = parse_speedwalk(command).expect("it expanded");
@@ -835,6 +1094,11 @@ impl Engine {
                     self.map.sent(command, now);
                     commands.push(command.to_owned());
                 }
+            }
+        }
+        if let Some(link) = &mut self.link {
+            for command in &mut commands {
+                *command = link.variety.next(command);
             }
         }
         let separator = self.plugins.settings().separator.as_deref();
@@ -1025,6 +1289,14 @@ impl Engine {
     pub(super) fn connect_timeout(&self) -> Duration {
         self.config.connect_timeout
     }
+}
+
+/// An id for a new rule. Rows load in id order and the first rule to match
+/// wins, so ids sort by when they were made; the random end keeps two devices'
+/// apart.
+fn rule_id(made: u32) -> String {
+    let random = RandomState::new().build_hasher().finish() as u32;
+    format!("{:012x}{made:04x}{random:08x}", Timestamp::now().0)
 }
 
 /// Answers `text` if it's a login prompt still to come.

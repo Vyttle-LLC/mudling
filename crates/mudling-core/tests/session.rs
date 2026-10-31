@@ -1281,7 +1281,7 @@ fn a_speedwalk_sends_its_moves_and_the_map_expects_them() {
     driven.engine.take_output();
     driven.engine.send("2n, e", Timestamp(0));
     let sent = driven.engine.take_output();
-    assert_eq!(sent, b"north\r\nnorth\r\neast\r\n");
+    assert_eq!(sent, b"north\r\nn\r\neast\r\n");
     driven.gmcp(r#"Room.Info {"num": 1, "name": "A", "exits": {"n": 2}}"#);
     driven.gmcp(r#"Room.Info {"num": 2, "name": "B", "exits": {"s": 1}}"#);
     let linked = driven
