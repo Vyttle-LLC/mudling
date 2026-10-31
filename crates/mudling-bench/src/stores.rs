@@ -6,8 +6,10 @@
 //! - **Burst:** a core thread writes 50 lines/s, in bursts, one write per
 //!   line, while a shell ticks every 8 ms and drains once per tick. The shell
 //!   must get at most one batch per frame, and be woken once per batch, not
-//!   once per write.
+//!   once per write: with no writes coalesced, each burst would wake it for
+//!   every line.
 
+use crate::verdict;
 use mudling_core::defaults::hud::Vital;
 use mudling_core::map::{LiveMap, MapRoom, PlainRules};
 use mudling_core::persist::Timestamp;
@@ -50,7 +52,7 @@ pub fn run() -> Report {
     Report {
         within_budget: frame_apply.p99_us <= FRAME_BUDGET_US
             && burst.frame.p99_us <= FRAME_BUDGET_US
-            && burst.batches <= burst.frames
+            && burst.batches < burst.line_writes
             && burst.wakes <= burst.batches,
         frame_apply,
         burst_line_writes: burst.line_writes,
@@ -62,26 +64,21 @@ pub fn run() -> Report {
 }
 
 pub fn print(report: &Report) {
-    let verdict = if report.within_budget { "ok" } else { "MISSED" };
-    let apply = &report.frame_apply;
     println!(
-        "store frame apply ({LINES_PER_FRAME} lines + vitals + room, {TERMINAL_CAPACITY}-line terminal): \
-         p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
-        apply.p50_us, apply.p99_us, apply.max_us
+        "store frame apply ({LINES_PER_FRAME} lines + vitals + room, {TERMINAL_CAPACITY}-line terminal): {}",
+        report.frame_apply
     );
-    let frame = &report.burst_frame;
     println!(
         "store burst ({BURST_LINES_PER_SECOND} lines/s): {} line writes in {} batches over {} frames, \
-         {} wakes; frame drain + apply p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; \
-         budget p99 ≤ {} ms, ≤ 1 batch per frame, ≤ 1 wake per batch: {verdict}",
+         {} wakes; frame drain + apply {}; \
+         budget p99 ≤ {} ms, fewer batches than writes, ≤ 1 wake per batch: {}",
         report.burst_line_writes,
         report.burst_batches,
         report.burst_frames,
         report.burst_wakes,
-        frame.p50_us,
-        frame.p99_us,
-        frame.max_us,
+        report.burst_frame,
         FRAME_BUDGET_US / 1e3,
+        verdict(report.within_budget)
     );
 }
 

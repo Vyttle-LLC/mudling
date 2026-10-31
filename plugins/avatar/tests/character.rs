@@ -30,6 +30,70 @@ fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn a_heros_score_has_an_unknown_title_and_a_level_of_its_own() {
+    let score = read(
+        "(805h-272m-314v-1462)(-/-)You are Fen the unknown\n\
+         Level 51(14) Kzinti Monk    Exp/TNL:      96970/1462  .\n\
+         You are 17 years old (129 real life hours) .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "title"), &text("the unknown"));
+    assert_eq!(get(&score, "level"), &number(51.0));
+    assert_eq!(get(&score, "race"), &text("Kzinti"));
+    assert_eq!(get(&score, "age"), &number(17.0));
+
+    let capital = read(
+        "You are Fen The Lost\n\
+         Level 51(15) Gnome Cleric    Exp/TNL:      96970/1046  .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&capital, "title"), &text("The Lost"));
+}
+
+#[test]
+fn a_prompt_can_show_hit_points_below_zero() {
+    let score = read(
+        "$*(-10h-133m-104v-402)(-/-)You are Fen the Violent Fist\n\
+         Level 10 Harpy Monk    Exp/TNL:      14748/402  .\n\
+         $*(-10h-133m-104v-402)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "level"), &number(10.0));
+}
+
+#[test]
+fn a_race_can_be_two_words() {
+    let score = read(
+        "You are Fen the Sharp Initiate\n\
+         Level 4 Lesser Imp Monk    Exp/TNL:      400/1000  .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "race"), &text("Lesser Imp"));
+    assert_eq!(get(&score, "class"), &text("Monk"));
+}
+
+#[test]
+fn a_custom_prompt_can_leave_a_space_before_the_next_line() {
+    let score = read(
+        "<44/50hp><117/117m><122/122mv>\n \
+         You are Fen the Violent Missionary\n\
+         Level 4 Harpy Monk    Exp/TNL:      400/1000  .\n\
+         <44/50hp><117/117m><122/122mv>",
+    )
+    .store("character");
+    assert_eq!(get(&score, "title"), &text("the Violent Missionary"));
+}
+
+#[test]
+fn room_text_is_no_score() {
+    let transcript = read("You are in the donation room for players level 1 through 10.");
+    assert!(transcript.store("character").is_empty());
+}
+
+#[test]
 fn score_fills_the_character() {
     let score = read(include_str!("fixtures/score.txt")).store("character");
     let expected = [
@@ -155,7 +219,7 @@ fn the_next_table_ends_one_whose_prompt_is_unknown() {
         "You are using:\n<worn on head>      a Tiamat mask\nhp:46 >\n\
          You have 1 practice sessions left.\ndodge               95   4   -    0\nhp:46 >",
     );
-    assert_eq!(get(&transcript.store("equipment"), "count"), &number(1.0));
+    assert_eq!(get(&transcript.store("worn"), "count"), &number(1.0));
     assert!(
         transcript.store("skills").is_empty(),
         "the last waits for a prompt or the next table"

@@ -8,11 +8,13 @@ use super::map_rules::PluginRules;
 use super::values::{self, HubView};
 use super::{SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
-use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_chain};
+use crate::defaults::commands::{
+    CommandVariety, WalkSyntax, chain_lines, parse_speedwalk, split_chain,
+};
 use crate::defaults::detect::{ServerSignals, suggest};
 use crate::defaults::hud::{self, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
-use crate::line::{Encoding, Line, LineEnd, LinePipeline};
+use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::merge::{RoomMoves, repoint_batch};
 use crate::net::DisconnectReason;
@@ -55,6 +57,9 @@ struct Link {
     inventory: Inventory,
     inventory_asked: bool,
     login: Option<Login>,
+    variety: CommandVariety,
+    /// How much of the pending line the chat already shows.
+    pending_shown: usize,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
@@ -97,6 +102,8 @@ pub struct Engine {
     hud_fields: Memo<(u64, bool), FieldMap>,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
+    /// The last line shown was a blank one from the server, or none has been.
+    blank_shown: bool,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
     /// Rows waiting out a merge, while one lands.
@@ -166,6 +173,7 @@ impl Engine {
             settings,
             hud_fields: Memo::default(),
             terminal: Vec::new(),
+            blank_shown: true,
             batch: Batch::new(),
             held: None,
             output: Vec::new(),
@@ -209,6 +217,8 @@ impl Engine {
             inventory: Inventory::default(),
             inventory_asked: false,
             login: self.new_login(),
+            variety: CommandVariety::default(),
+            pending_shown: 0,
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
@@ -275,7 +285,8 @@ impl Engine {
             self.history_writer.save(&typing.history);
         }
         drop(typing);
-        self.terminal.push(Line::command(typed));
+        self.show_pending();
+        self.show(Line::command(typed));
         self.issue(typed, now);
     }
 
@@ -338,7 +349,7 @@ impl Engine {
                 // What's being typed now is a password; a hook's command
                 // would land in the password box.
                 if self.link.is_some() && !self.settings.echo_off {
-                    self.terminal.push(Line::command(&send.command));
+                    self.show(Line::command(&send.command));
                     self.issue(&send.command, now);
                 }
             }
@@ -538,17 +549,19 @@ impl Engine {
                 self.map.line(body, now);
             }
             self.route_events(now);
-            let Some(link) = &self.link else { return };
+            let Some(link) = &mut self.link else { return };
             let hide = link.defaults.hide_prompts && link.defaults.hud.has_learned();
             let shown = if coloring.is_empty() {
                 line.clone()
             } else {
                 line.colored(&coloring)
             };
-            match prompt.filter(|_| hide) {
-                Some(at) if at == text.len() => {}
-                Some(at) => self.terminal.push(shown.after(at)),
-                None => self.terminal.push(shown),
+            let hidden = prompt.filter(|_| hide).unwrap_or(0);
+            let from = hidden.max(std::mem::take(&mut link.pending_shown));
+            if from == 0 {
+                self.show(shown);
+            } else if from < text.len() {
+                self.show(shown.after(from));
             }
         }
         // The buffer is kept: it's reused for every read.
@@ -782,10 +795,41 @@ impl Engine {
                 }
             }
         }
+        if let Some(link) = &mut self.link {
+            for command in &mut commands {
+                *command = link.variety.next(command);
+            }
+        }
         let separator = self.plugins.settings().separator.as_deref();
         for line in chain_lines(&commands, separator) {
             write_line(&line, encoding, &mut self.output);
         }
+    }
+
+    /// Text the server hasn't ended came before the command being sent, so
+    /// the chat shows it now. Only the chat: the line stays pending, and
+    /// what follows it joins it for the plugins, the map and the learner.
+    fn show_pending(&mut self) {
+        let Some(link) = &mut self.link else { return };
+        let Some(pending) = link.pipeline.pending() else {
+            return;
+        };
+        if pending.plain[link.pending_shown..].trim().is_empty() {
+            return;
+        }
+        let line = pending.shown_from(link.pending_shown);
+        link.pending_shown = pending.plain.len();
+        self.show(line);
+    }
+
+    /// Queues a line for the terminal. Runs of blank lines show as one, so
+    /// the prompts hidden between them leave no gaps.
+    fn show(&mut self, line: Line) {
+        let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
+        if !(blank && self.blank_shown) {
+            self.terminal.push(line);
+        }
+        self.blank_shown = blank;
     }
 
     fn plugin_store_write(&mut self, write: StoreWrite, now: Timestamp) {

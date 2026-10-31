@@ -36,6 +36,8 @@ impl RoomText {
     /// may carry tags after the name ("A cave (Water)") or a prompt before
     /// it.
     pub fn take_description(&mut self, name: &str, rules: &dyn MapRules) -> String {
+        // Lines are kept trimmed, and a Room.Info's name can end in a space.
+        let name = name.trim();
         let recent = std::mem::take(&mut self.recent);
         let reported = self.exits.take();
         let found = || recent.iter().rposition(|line| rules.exits_line(line));

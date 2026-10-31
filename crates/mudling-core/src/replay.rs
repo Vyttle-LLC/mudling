@@ -15,13 +15,81 @@ use std::path::Path;
 
 /// Notes written by the prototype, not by the server.
 const NOTE_PREFIXES: [&str; 5] = [
-    "[GMCP] ",
+    GMCP_NOTE,
     "[telnet] ",
     "[auto-login] ",
     "[disconnected] ",
-    "[MAP] ",
+    MAP_NOTE,
 ];
 const CONNECTED_NOTE: &str = "[connected]";
+const GMCP_NOTE: &str = "[GMCP] ";
+const MAP_NOTE: &str = "[MAP] ";
+
+/// What a log recorded, in order.
+#[derive(Debug, PartialEq)]
+pub enum Event {
+    /// A connection opened.
+    Connected,
+    /// Server text, line endings kept.
+    Text(String),
+    Gmcp {
+        package: String,
+        json: String,
+    },
+    /// What a command told the map: a move's direction, or a look.
+    Command(String),
+}
+
+fn is_note(line: &str) -> bool {
+    line.starts_with(CONNECTED_NOTE) || NOTE_PREFIXES.iter().any(|note| line.starts_with(note))
+}
+
+/// One log as events. Each note is written `"\n[TAG] …\n"`; notes that say
+/// nothing about the game are dropped.
+pub fn events(log: &str) -> Vec<Event> {
+    let mut events = Vec::new();
+    let push_text = |events: &mut Vec<Event>, text: &str| {
+        if !text.is_empty() {
+            events.push(Event::Text(text.to_owned()));
+        }
+    };
+    let (mut text_start, mut at) = (0, 0);
+    loop {
+        // The first note, `[connected]`, has no newline before it.
+        let note_start = if at == 0 && is_note(log) {
+            0
+        } else if let Some(offset) = log[at..].find("\n[") {
+            at + offset + 1
+        } else {
+            break;
+        };
+        if !is_note(&log[note_start..]) {
+            at = note_start;
+            continue;
+        }
+        push_text(&mut events, &log[text_start..note_start.saturating_sub(1)]);
+        let note_end = log[note_start..]
+            .find('\n')
+            .map_or(log.len(), |offset| note_start + offset);
+        let note = log[note_start..note_end].trim_end_matches('\r');
+        if note == CONNECTED_NOTE {
+            events.push(Event::Connected);
+        } else if let Some(gmcp) = note.strip_prefix(GMCP_NOTE) {
+            let (package, json) = gmcp.split_once(' ').unwrap_or((gmcp, ""));
+            events.push(Event::Gmcp {
+                package: package.to_owned(),
+                json: json.to_owned(),
+            });
+        } else if let Some(command) = note.strip_prefix(MAP_NOTE) {
+            let command = command.strip_prefix("move ").unwrap_or(command);
+            events.push(Event::Command(command.to_owned()));
+        }
+        text_start = (note_end + 1).min(log.len());
+        at = text_start;
+    }
+    push_text(&mut events, &log[text_start..]);
+    events
+}
 
 /// The server text of one session log, one entry per line.
 pub fn server_lines(log: &str) -> Vec<&str> {
@@ -33,7 +101,7 @@ pub fn server_lines(log: &str) -> Vec<&str> {
             pending_blanks += 1;
         } else if line == CONNECTED_NOTE {
             continue;
-        } else if NOTE_PREFIXES.iter().any(|prefix| line.starts_with(prefix)) {
+        } else if is_note(line) {
             pending_blanks = pending_blanks.saturating_sub(1);
         } else {
             lines.extend(std::iter::repeat_n("", pending_blanks));
@@ -143,6 +211,34 @@ mod tests {
                 "",
                 "A path leads east.",
                 "<20hp 30mv> ",
+            ]
+        );
+    }
+
+    #[test]
+    fn events_keep_text_gmcp_and_commands_in_order() {
+        // Synthetic: shaped like SessionLogger's output.
+        let log = "[connected]\nWelcome.\r\n\n[telnet] verb 251 option 201\n[B]ack here\n\
+                   \n[GMCP] Char.Vitals { \"hp\": \"7\" }\n\n\r<7hp> \n[MAP] move east\n\
+                   \n[GMCP] Room.Info\n\n[MAP] look\nYou rest.";
+        assert_eq!(
+            events(log),
+            [
+                Event::Connected,
+                Event::Text("Welcome.\r\n".into()),
+                Event::Text("[B]ack here\n".into()),
+                Event::Gmcp {
+                    package: "Char.Vitals".into(),
+                    json: "{ \"hp\": \"7\" }".into()
+                },
+                Event::Text("\n\r<7hp> ".into()),
+                Event::Command("east".into()),
+                Event::Gmcp {
+                    package: "Room.Info".into(),
+                    json: String::new()
+                },
+                Event::Command("look".into()),
+                Event::Text("You rest.".into()),
             ]
         );
     }

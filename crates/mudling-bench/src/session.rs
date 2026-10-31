@@ -8,27 +8,38 @@
 //! - **Whole line:** each source line as one read, with `Char.Vitals` and a
 //!   prompt every few lines, as a game sends them.
 //! - **One more plugin:** two sessions read each line in turn, one with the
-//!   game plugin and one without; the gate is the difference in their p99s.
+//!   last game plugin and one without; the gate is the difference in their
+//!   p99s. Its hooks run and its Map rules read every line, as in play.
 //! - **A move:** a `Room.Info` through the session, the map updated, its
 //!   rows queued for the writer and the stores written, walking a map up to
 //!   10,000 rooms and then wandering it.
+//! - **Memory:** the live Rust heap of the session and a shell's stores with
+//!   that map and 100,000 lines. SQLite's and Luau's C heaps aren't counted.
+//! - **Cold start:** the session opened on that map's database, as far as
+//!   connected: no socket, so no network time.
 
-use crate::plugin_host::{PLUGIN_BUDGET_US, realistic_plugins};
+use crate::plugin_host::PLUGIN_BUDGET_US;
+use crate::{HEAP_BYTES, heap_mb, verdict};
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::stats::Summary;
-use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsState};
+use mudling_core::store::{StoreHub, Stores};
 use mudling_core::telnet::command::{GA, IAC};
 use mudling_core::telnet::{Bytes, gmcp};
 use serde::Serialize;
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const LINE_BUDGET_US: f64 = 20.0;
-const MOVE_BUDGET_US: f64 = 1_000.0;
-const HOST: &str = "bench.example";
-const MIN_LINES: usize = 100_000;
+pub const LINE_BUDGET_US: f64 = 20.0;
+pub const MOVE_BUDGET_US: f64 = 1_000.0;
+const MEMORY_BUDGET_MB: f64 = 200.0;
+const COLD_START_BUDGET_US: f64 = 300_000.0;
+const COLD_STARTS: usize = 10;
+pub const HOST: &str = "bench.example";
+pub const MIN_LINES: usize = 100_000;
 /// A `Char.Vitals` and a prompt after this many lines.
 const LINES_PER_PROMPT: usize = 4;
 /// Lines between a shell's drains: its frame.
@@ -46,13 +57,17 @@ pub struct Report {
     pub moves: usize,
     pub mapping: Summary,
     pub wandering: Summary,
+    pub memory_mb: f64,
+    pub cold_start: Summary,
     pub line_budget_us: f64,
     pub plugin_budget_us: f64,
     pub move_budget_us: f64,
+    pub memory_budget_mb: f64,
+    pub cold_start_budget_us: f64,
     pub within_budget: bool,
 }
 
-pub fn run(source: &[String]) -> Report {
+pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
     let count = source.len().max(MIN_LINES);
     let reads: Vec<Bytes> = source
         .iter()
@@ -62,16 +77,23 @@ pub fn run(source: &[String]) -> Report {
         .map(|(index, line)| read(index, line))
         .collect();
 
-    let whole_line = measure_lines(&reads);
-    let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads);
+    let whole_line = measure_lines(&reads, plugins);
+    let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads, plugins);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
-    let (mapping, wandering) = measure_moves();
+    let Moves {
+        mapping,
+        wandering,
+        memory_mb,
+        cold_start,
+    } = measure_world(&reads, plugins);
     Report {
         lines: count,
         within_budget: whole_line.p99_us <= LINE_BUDGET_US
             && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
             && mapping.p99_us <= MOVE_BUDGET_US
-            && wandering.p99_us <= MOVE_BUDGET_US,
+            && wandering.p99_us <= MOVE_BUDGET_US
+            && memory_mb <= MEMORY_BUDGET_MB
+            && cold_start.p99_us <= COLD_START_BUDGET_US,
         whole_line,
         without_game_plugin,
         with_game_plugin,
@@ -79,34 +101,31 @@ pub fn run(source: &[String]) -> Report {
         moves: (GRID_SIDE * GRID_SIDE + WANDER_MOVES) as usize,
         mapping,
         wandering,
+        memory_mb,
+        cold_start,
         line_budget_us: LINE_BUDGET_US,
         plugin_budget_us: PLUGIN_BUDGET_US,
         move_budget_us: MOVE_BUDGET_US,
+        memory_budget_mb: MEMORY_BUDGET_MB,
+        cold_start_budget_us: COLD_START_BUDGET_US,
     }
 }
 
 pub fn print(report: &Report) {
-    let verdict = |ok: bool| if ok { "ok" } else { "MISSED" };
-    let summary = |s: &Summary| {
-        format!(
-            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
-            s.p50_us, s.p99_us, s.max_us
-        )
-    };
     println!(
         "session over {} lines (telnet → plugins → stores, writer on its thread):",
         report.lines
     );
     println!(
         "  whole line: {}; budget p99 ≤ {} µs: {}",
-        summary(&report.whole_line),
+        report.whole_line,
         report.line_budget_us,
         verdict(report.whole_line.p99_us <= report.line_budget_us)
     );
     println!(
         "  one more plugin: {} without, {} with; +{:.2} µs p99; budget ≤ {} µs: {}",
-        summary(&report.without_game_plugin),
-        summary(&report.with_game_plugin),
+        report.without_game_plugin,
+        report.with_game_plugin,
         report.one_more_plugin_p99_us,
         report.plugin_budget_us,
         verdict(report.one_more_plugin_p99_us <= report.plugin_budget_us)
@@ -115,13 +134,27 @@ pub fn print(report: &Report) {
         "  a move, {} of them over {} rooms: mapping {}; wandering {}; budget p99 ≤ {} µs: {}",
         report.moves,
         GRID_SIDE * GRID_SIDE,
-        summary(&report.mapping),
-        summary(&report.wandering),
+        report.mapping,
+        report.wandering,
         report.move_budget_us,
         verdict(
             report.mapping.p99_us <= report.move_budget_us
                 && report.wandering.p99_us <= report.move_budget_us
         )
+    );
+    println!(
+        "  memory with that map and {} lines: {:.1} MB of Rust heap; budget ≤ {} MB: {}",
+        report.lines,
+        report.memory_mb,
+        report.memory_budget_mb,
+        verdict(report.memory_mb <= report.memory_budget_mb)
+    );
+    println!(
+        "  cold start to connected on that map: p50 {:.1} ms, p99 {:.1} ms; budget ≤ {} ms: {}",
+        report.cold_start.p50_us / 1e3,
+        report.cold_start.p99_us / 1e3,
+        report.cold_start_budget_us / 1e3,
+        verdict(report.cold_start.p99_us <= report.cold_start_budget_us)
     );
 }
 
@@ -143,54 +176,65 @@ fn read(index: usize, line: &str) -> Bytes {
     bytes.into()
 }
 
+/// The session's config, for a folder: every plugin given that a session
+/// loads itself rather than as the built-in defaults, each turned on.
+pub fn config(folder: &Path, plugins: Vec<Plugin>) -> SessionConfig {
+    let plugins: Vec<Plugin> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.layer() != Layer::Default)
+        .collect();
+    let enabled = plugins
+        .iter()
+        .filter(|plugin| plugin.layer() == Layer::Game)
+        .map(|plugin| plugin.id().clone())
+        .collect();
+    SessionConfig {
+        plugins,
+        enabled,
+        ..SessionConfig::new(folder, HOST, 4000)
+    }
+}
+
+/// A shell's copy of the stores it shows.
+pub fn subscribe(hub: &StoreHub) -> Stores {
+    Stores {
+        terminal: hub.subscribe(),
+        vitals: hub.subscribe(),
+        room: hub.subscribe(),
+        map: hub.subscribe(),
+        ..Stores::default()
+    }
+}
+
 /// A connected session with a shell subscribed, in a folder of its own.
-struct Bench {
-    engine: Engine,
-    hub: Arc<StoreHub>,
-    _folder: tempfile::TempDir,
+pub struct Bench {
+    pub engine: Engine,
+    pub hub: Arc<StoreHub>,
+    pub shell: Stores,
+    folder: tempfile::TempDir,
 }
 
 impl Bench {
-    fn new(with_game: bool) -> Bench {
+    pub fn new(plugins: Vec<Plugin>) -> Bench {
         let folder = tempfile::tempdir().expect("a temporary folder");
         let hub = Arc::new(StoreHub::new(|| {}));
-        hub.subscribe::<TerminalState>();
-        hub.subscribe::<VitalsState>();
-        hub.subscribe::<RoomState>();
-        hub.subscribe::<MapState>();
-        let plugins: Vec<Plugin> = realistic_plugins()
-            .into_iter()
-            .filter(|plugin| match plugin.layer() {
-                Layer::Default => false,
-                Layer::Game => with_game,
-                Layer::Override => true,
-            })
-            .collect();
-        let enabled = plugins
-            .iter()
-            .filter(|plugin| plugin.layer() == Layer::Game)
-            .map(|plugin| plugin.id().clone())
-            .collect();
-        let config = SessionConfig {
-            plugins,
-            enabled,
-            ..SessionConfig::new(folder.path(), HOST, 4000)
-        };
+        let shell = subscribe(&hub);
         let typing = Arc::new(Mutex::new(Typing::default()));
+        let config = config(folder.path(), plugins);
         let mut engine = Engine::open(config, Arc::clone(&hub), typing).expect("the session opens");
         engine.start_connection().expect("the session connects");
         engine.connected();
         Bench {
             engine,
             hub,
-            _folder: folder,
+            shell,
+            folder,
         }
     }
 
     /// One read, through to the stores. Its bytes are made before the clock
     /// starts, as the socket read makes them.
-    fn read(&mut self, bytes: Bytes) -> Duration {
-        let now = Timestamp(0);
+    pub fn read(&mut self, bytes: Bytes, now: Timestamp) -> Duration {
         let started = Instant::now();
         self.engine.receive(bytes, now).expect("the stream is good");
         self.engine.settle(now);
@@ -198,41 +242,58 @@ impl Bench {
         started.elapsed()
     }
 
-    fn finish(self) {
+    fn drain(&mut self) {
+        if let Some(batch) = self.hub.drain() {
+            self.shell.apply_batch(&batch);
+        }
+    }
+
+    /// Ends the session, handing back its folder and how long the writer
+    /// took to catch up.
+    pub fn finish(self) -> (tempfile::TempDir, Duration) {
+        let started = Instant::now();
         self.engine.finish().expect("every write reaches the disk");
+        (self.folder, started.elapsed())
     }
 }
 
-fn measure_lines(reads: &[Bytes]) -> Summary {
-    let mut bench = Bench::new(true);
+fn measure_lines(reads: &[Bytes], plugins: &[Plugin]) -> Summary {
+    let mut bench = Bench::new(plugins.to_vec());
     let mut samples = Vec::with_capacity(reads.len());
     for (index, read) in reads.iter().enumerate() {
-        samples.push(bench.read(read.clone()));
+        samples.push(bench.read(read.clone(), Timestamp(0)));
         if index % LINES_PER_FRAME == 0 {
-            bench.hub.drain();
+            bench.drain();
         }
     }
     bench.finish();
     Summary::of(&samples).expect("lines were timed")
 }
 
-fn measure_one_more_plugin(reads: &[Bytes]) -> (Summary, Summary) {
-    let mut without = Bench::new(false);
-    let mut with = Bench::new(true);
+fn measure_one_more_plugin(reads: &[Bytes], plugins: &[Plugin]) -> (Summary, Summary) {
+    let mut others = plugins.to_vec();
+    if let Some(game) = plugins
+        .iter()
+        .rposition(|plugin| plugin.layer() == Layer::Game)
+    {
+        others.remove(game);
+    }
+    let mut without = Bench::new(others);
+    let mut with = Bench::new(plugins.to_vec());
     let mut without_samples = Vec::with_capacity(reads.len());
     let mut with_samples = Vec::with_capacity(reads.len());
     for (index, read) in reads.iter().enumerate() {
         // Alternate which goes first, so neither always reads a warm line.
         if index % 2 == 0 {
-            without_samples.push(without.read(read.clone()));
-            with_samples.push(with.read(read.clone()));
+            without_samples.push(without.read(read.clone(), Timestamp(0)));
+            with_samples.push(with.read(read.clone(), Timestamp(0)));
         } else {
-            with_samples.push(with.read(read.clone()));
-            without_samples.push(without.read(read.clone()));
+            with_samples.push(with.read(read.clone(), Timestamp(0)));
+            without_samples.push(without.read(read.clone(), Timestamp(0)));
         }
         if index % LINES_PER_FRAME == 0 {
-            without.hub.drain();
-            with.hub.drain();
+            without.drain();
+            with.drain();
         }
     }
     without.finish();
@@ -287,14 +348,24 @@ fn serpentine() -> Vec<(i64, i64, &'static str)> {
     walk
 }
 
-fn measure_moves() -> (Summary, Summary) {
-    let mut bench = Bench::new(true);
+struct Moves {
+    mapping: Summary,
+    wandering: Summary,
+    memory_mb: f64,
+    cold_start: Summary,
+}
+
+/// Builds the §6 world: maps 10,000 rooms and wanders them, timing each move,
+/// then fills the terminal to weigh it all, and opens it again from the disk.
+fn measure_world(reads: &[Bytes], plugins: &[Plugin]) -> Moves {
+    let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
+    let mut bench = Bench::new(plugins.to_vec());
     let walk = serpentine();
     let mut mapping = Vec::with_capacity(walk.len());
     for (x, y, direction) in &walk {
         bench.engine.send(direction, Timestamp(0));
-        mapping.push(bench.read(room_info(*x, *y)));
-        bench.hub.drain();
+        mapping.push(bench.read(room_info(*x, *y), Timestamp(0)));
+        bench.drain();
     }
     // Back and forth along the last row, over rooms already mapped.
     let mut wandering = Vec::with_capacity(WANDER_MOVES as usize);
@@ -306,12 +377,42 @@ fn measure_moves() -> (Summary, Summary) {
             (0, "west")
         };
         bench.engine.send(direction, Timestamp(0));
-        wandering.push(bench.read(room_info(x, y)));
-        bench.hub.drain();
+        wandering.push(bench.read(room_info(x, y), Timestamp(0)));
+        bench.drain();
     }
-    bench.finish();
-    (
-        Summary::of(&mapping).expect("moves were timed"),
-        Summary::of(&wandering).expect("moves were timed"),
-    )
+    for (index, read) in reads.iter().enumerate() {
+        bench.read(read.clone(), Timestamp(0));
+        if index % LINES_PER_FRAME == 0 {
+            bench.drain();
+        }
+    }
+    bench.drain();
+    let memory_mb = heap_mb(HEAP_BYTES.load(Ordering::Relaxed) - heap_before);
+    let (folder, _) = bench.finish();
+    Moves {
+        mapping: Summary::of(&mapping).expect("moves were timed"),
+        wandering: Summary::of(&wandering).expect("moves were timed"),
+        memory_mb,
+        cold_start: measure_cold_start(folder.path(), plugins),
+    }
+}
+
+/// Opens the session on a saved map. Each loads the plugins and reads the
+/// whole map, as an app start does.
+fn measure_cold_start(folder: &Path, plugins: &[Plugin]) -> Summary {
+    let samples: Vec<Duration> = (0..COLD_STARTS)
+        .map(|_| {
+            let config = config(folder, plugins.to_vec());
+            let hub = Arc::new(StoreHub::new(|| {}));
+            let typing = Arc::new(Mutex::new(Typing::default()));
+            let started = Instant::now();
+            let mut engine = Engine::open(config, hub, typing).expect("the session opens");
+            engine.start_connection().expect("the session connects");
+            engine.connected();
+            let elapsed = started.elapsed();
+            engine.finish().expect("every write reaches the disk");
+            elapsed
+        })
+        .collect();
+    Summary::of(&samples).expect("starts were timed")
 }

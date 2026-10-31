@@ -3,11 +3,11 @@
 
 use mudling_core::defaults::detect::Source;
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::Timestamp;
+use mudling_core::persist::{Database, Timestamp};
 use mudling_core::plugin::luau::Value;
-use mudling_core::session::{Engine, Session, SessionConfig, Typing};
+use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, RoomState, SettingsState, StoreHub, Versioned,
+    CharactersState, ConnectionStatus, GearState, RoomState, SettingsState, StoreHub, Versioned,
 };
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, SB, SE};
@@ -32,6 +32,125 @@ fn engine(folder: &Path) -> (Engine, Arc<StoreHub>) {
     let mut engine = Engine::open(config, Arc::clone(&hub), typing).unwrap();
     engine.start_connection().unwrap();
     (engine, hub)
+}
+
+fn gmcp(package: &str, json: &str) -> Bytes {
+    let mut frame = vec![IAC, SB, GMCP];
+    frame.extend_from_slice(format!("{package} {json}").as_bytes());
+    frame.extend_from_slice(&[IAC, SE]);
+    Bytes::from(frame)
+}
+
+#[test]
+fn the_login_prompts_are_each_answered_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let plugin = mudling_plugin_avatar::load();
+    let config = SessionConfig {
+        enabled: vec![plugin.id().clone()],
+        plugins: vec![plugin],
+        credentials: Some(Credentials {
+            name: "Fen".to_owned(),
+            password: "pass-word".to_owned(),
+        }),
+        ..SessionConfig::new(folder.path(), HOST, 4000)
+    };
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let typing = Arc::new(Mutex::new(Typing::default()));
+    let mut engine = Engine::open(config, hub, typing).unwrap();
+    engine.start_connection().unwrap();
+    let mut answer = |prompt: &'static [u8]| {
+        let now = Timestamp(0);
+        engine.receive(Bytes::from_static(prompt), now).unwrap();
+        engine.quiet(now);
+        String::from_utf8(engine.take_output()).unwrap()
+    };
+
+    let name = answer(b"What name shall you be known by, adventurer? ");
+    assert_eq!(name.trim(), "Fen");
+    let password = answer(b"Your Password: ");
+    assert_eq!(password.trim(), "pass-word");
+    let banner = answer(b"When you have read this, please press <RETURN> to continue ---->");
+    assert_eq!(banner.trim(), "");
+    assert!(!banner.is_empty(), "the banner wants a blank line");
+    assert_eq!(answer(b"Your Password: "), "", "a second ask is a refusal");
+}
+
+/// One connection as `name`, reading `text`; what's saved stays in `folder`.
+fn play_as(name: &str, folder: &Path, text: &'static [u8]) -> Vec<(String, String)> {
+    let plugin = mudling_plugin_avatar::load();
+    let config = SessionConfig {
+        enabled: vec![plugin.id().clone()],
+        plugins: vec![plugin],
+        credentials: Some(Credentials {
+            name: name.to_owned(),
+            password: "pass-word".to_owned(),
+        }),
+        ..SessionConfig::new(folder, HOST, 4000)
+    };
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let typing = Arc::new(Mutex::new(Typing::default()));
+    let mut engine = Engine::open(config, hub, typing).unwrap();
+    engine.start_connection().unwrap();
+    let now = Timestamp(0);
+    engine.receive(Bytes::from_static(text), now).unwrap();
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+    engine.finish().unwrap();
+    let database = Database::open(&folder.join("servers"), HOST).unwrap();
+    let stats = database.reader().unwrap().characters().unwrap().stats;
+    stats
+        .into_iter()
+        .filter(|stat| stat.key.starts_with("worn.") && stat.key.ends_with(".item"))
+        .map(|stat| (stat.character_id, stat.value))
+        .collect()
+}
+
+#[test]
+fn each_character_keeps_what_it_wears() {
+    let folder = tempfile::tempdir().unwrap();
+    play_as(
+        "Fen",
+        folder.path(),
+        b"You are using:\r\n<worn on head>      a red hat\r\n(1h-1m-1v-1)(-/-)\r\n",
+    );
+    let saved = play_as(
+        "Ash",
+        folder.path(),
+        b"You are using:\r\n<worn on feet>      blue boots\r\n(1h-1m-1v-1)(-/-)\r\n",
+    );
+    assert_eq!(
+        saved,
+        [
+            ("ash".to_owned(), "\"blue boots\"".to_owned()),
+            ("fen".to_owned(), "\"a red hat\"".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_spell_identify_is_filed_under_the_one_item_at_hand_it_fits() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let items = r#"{"location":"inv","items":[
+        {"id":"1","name":"(Glowing) an amulet of Gorn"},
+        {"id":"2","name":"a pink ice ring"}]}"#;
+    engine
+        .receive(gmcp("Char.Items.List", &items.replace('\n', " ")), now)
+        .unwrap();
+    engine.settle(now);
+    let identify = b"Object 'gorn amulet newbie' type armor, extra flags none.\r\n\
+        Weight 3, value 40, level 8.\r\n\
+        (119h-130m-104v-1210)(-/-)\r\n";
+    engine.receive(Bytes::from_static(identify), now).unwrap();
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+
+    let keywords = hub.read(|gear: &Versioned<GearState>| {
+        gear.value()
+            .0
+            .get("gear.keywords.an amulet of gorn")
+            .cloned()
+    });
+    assert_eq!(keywords, Some(Value::Text("gorn amulet newbie".to_owned())));
 }
 
 #[test]
