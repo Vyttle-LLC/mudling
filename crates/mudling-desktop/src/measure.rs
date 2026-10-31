@@ -9,10 +9,11 @@
 //! 1. `startup`: the window opens, the session replays the full scrollback
 //!    into it, then it settles.
 //! 2. `stream`: lines arrive at the replay pace, pinned to the newest line.
-//! 3. `rewrap`: lines still arrive while the left panel is dragged back and
-//!    forth, so every frame wraps the chat to a new width.
-//! 4. `scroll`: the view scrolls back through history while lines still
+//! 3. `scroll`: the view scrolls back through history while lines still
 //!    arrive, so every frame lays out lines it hasn't shown before.
+//! 4. `rewrap`: the right panel closes, leaving the column room to change
+//!    width, and the left one is dragged back and forth while lines still
+//!    arrive, so every frame wraps the chat to a new width.
 //!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
@@ -21,8 +22,8 @@
 //! Lines go through `Session::replay` on the core thread, and reach the chat
 //! the way a server's do: as a store diff, applied on a later frame.
 
-use crate::chat::Chat;
-use crate::dock::Side;
+use crate::chat::{COLUMN_WIDTH, Chat};
+use crate::dock::{Dock, DockState, Side};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
@@ -39,11 +40,10 @@ const MARKER: &str = "mudling-measure: ";
 const FRAME_PREFIX: &str = "frame duration: ";
 const FRAME_BUDGET_US: f64 = 8_000.0;
 const SETTLE: Duration = Duration::from_secs(1);
-const REWRAP_DURATION: Duration = Duration::from_secs(5);
-/// The panel's default width, where the drag starts and ends.
-const REWRAP_WIDEST: f32 = 360.;
-const REWRAP_NARROWEST: f32 = 280.;
 const SCROLL_DURATION: Duration = Duration::from_secs(5);
+const REWRAP_DURATION: Duration = Duration::from_secs(5);
+/// How far the panel is dragged: about what the column has to give.
+const REWRAP_DRAG: f32 = 60.;
 /// Scrolled per display frame: about a line and a half.
 const SCROLL_STEP: f32 = 30.;
 
@@ -66,8 +66,8 @@ enum Phase {
     Load,
     Settle,
     Stream,
-    Rewrap,
     Scroll,
+    Rewrap,
 }
 
 struct Pacer {
@@ -109,10 +109,10 @@ impl Pacer {
             Phase::Settle
         } else if elapsed < SETTLE + self.stream_for {
             Phase::Stream
-        } else if elapsed < SETTLE + self.stream_for + REWRAP_DURATION {
-            Phase::Rewrap
-        } else if elapsed < SETTLE + self.stream_for + REWRAP_DURATION + SCROLL_DURATION {
+        } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION {
             Phase::Scroll
+        } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION + REWRAP_DURATION {
+            Phase::Rewrap
         } else {
             mark_rss("rss_mb_end");
             mark("phase end");
@@ -124,11 +124,12 @@ impl Pacer {
             mark(match phase {
                 Phase::Load | Phase::Settle => "phase startup",
                 Phase::Stream => "phase stream",
-                Phase::Rewrap => "phase rewrap",
                 Phase::Scroll => "phase scroll",
+                Phase::Rewrap => "phase rewrap",
             });
-            if phase == Phase::Scroll {
-                self.drag_panel_to(REWRAP_WIDEST, window, cx);
+            if phase == Phase::Rewrap {
+                self.dock(Side::Right, cx)
+                    .update(cx, |dock, cx| dock.move_to(DockState::Hidden, cx));
             }
         }
         if phase != Phase::Settle {
@@ -139,10 +140,12 @@ impl Pacer {
                 self.shell.read(cx).replay(reads);
             }
             if phase == Phase::Rewrap {
-                let drag = (elapsed - SETTLE - self.stream_for).as_secs_f32();
-                let there_and_back = (drag % 2.0 - 1.0).abs();
-                let width = REWRAP_NARROWEST + (REWRAP_WIDEST - REWRAP_NARROWEST) * there_and_back;
-                self.drag_panel_to(width, window, cx);
+                let there_and_back = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
+                let window_width = window.viewport_size().width;
+                let panel_width = window_width - COLUMN_WIDTH + px(REWRAP_DRAG * there_and_back);
+                self.dock(Side::Left, cx).update(cx, |dock, cx| {
+                    dock.resize_to(panel_width, window_width, cx);
+                });
             }
             if phase == Phase::Scroll {
                 self.chat
@@ -153,15 +156,8 @@ impl Pacer {
         window.on_next_frame(move |window, cx| self.on_frame(window, cx));
     }
 
-    fn drag_panel_to(&self, width: f32, window: &Window, cx: &mut App) {
-        let window_width = window.viewport_size().width;
-        self.shell
-            .read(cx)
-            .dock(Side::Left)
-            .clone()
-            .update(cx, |dock, cx| {
-                dock.resize_to(px(width), window_width, cx);
-            });
+    fn dock(&self, side: Side, cx: &App) -> Entity<Dock> {
+        self.shell.read(cx).dock(side).clone()
     }
 }
 

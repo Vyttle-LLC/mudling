@@ -6,12 +6,13 @@
 //! only knows the slot's name, its icon and the view to show.
 //!
 //! [`fit_docks`] shares the window between the two docks and the chat column
-//! on every frame, so neither a drag nor a resize can crush the command bar.
-//! When even the narrowest panels would leave the column too little, open
-//! panels slide over the chat instead of pushing it aside. The rail stays
-//! beside the chat: it's too slim to matter.
+//! on every frame, so neither a drag nor a resize can take the column below
+//! 80 columns of chat text. When even the narrowest panels would leave it too
+//! little, open panels slide over the chat instead of pushing it aside. The
+//! rail stays beside the chat: it's too slim to matter.
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
+use crate::chat::min_column_width;
 use crate::theme::Theme;
 use gpui::{
     AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role, SharedString,
@@ -27,9 +28,6 @@ const MIN_WIDTH: Pixels = px(280.);
 /// A panel never takes more than this share of the window.
 const MAX_WINDOW_SHARE: f32 = 0.6;
 const RESIZE_HANDLE_WIDTH: Pixels = px(6.);
-/// What the chat column keeps of the window beside docked panels: enough for
-/// the HUD's meters to share one line.
-const MIN_COLUMN_WIDTH: Pixels = px(500.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -147,7 +145,7 @@ pub fn fit_docks(left: &Entity<Dock>, right: &Entity<Dock>, window_width: Pixels
     }
     let (left_wanted, right_wanted) = (left.read(cx).open_width(), right.read(cx).open_width());
     let rails = left.read(cx).rail_width() + right.read(cx).rail_width();
-    let room = window_width - MIN_COLUMN_WIDTH - rails;
+    let room = window_width - min_column_width(cx) - rails;
     let (left_fitted, right_fitted) = shared_widths(left_wanted, right_wanted, room);
     let squeezed = |wanted: Pixels, fitted: Pixels| wanted > px(0.) && fitted < MIN_WIDTH;
     let overlaying = squeezed(left_wanted, left_fitted) || squeezed(right_wanted, right_fitted);

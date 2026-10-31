@@ -25,8 +25,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 const WIDE: Size<Pixels> = size(px(1434.), px(897.));
-const DEFAULT: Size<Pixels> = size(px(1100.), px(800.));
+const DEFAULT: Size<Pixels> = size(px(1300.), px(800.));
 const NARROW: Size<Pixels> = size(px(760.), px(640.));
+const UNDER_80_COLUMNS: Size<Pixels> = size(px(560.), px(640.));
 
 const SAMPLE_CHAT: [&str; 11] = [
     "\x1b[36mYou are carrying:\x1b[0m",
@@ -42,12 +43,14 @@ const SAMPLE_CHAT: [&str; 11] = [
     "\x1b[32mYou donate 50 standard bolts.\x1b[0m",
 ];
 
-/// Prose wider than the panels leave the column, a word wider than the
-/// column, and a table and a map that fit it.
-const WRAPPING_CHAT: [&str; 9] = [
+/// A ruler of exactly 80 columns, a table and a map that fit them, and prose
+/// and a word too long for the column.
+const WRAPPING_CHAT: [&str; 10] = [
+    "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
     "\x1b[33mThe goblin swings a rusty sword at you and misses, stumbling past the \
-     torch and down the quiet stone path towards the river.\x1b[0m",
-    "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+     torch and down the quiet stone path, then over the old bridge and away towards \
+     the river, where it trips on a root and drops its lantern.\x1b[0m",
+    "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
     "| Name   | Lvl | Class  |",
     "| Mira   |  12 | Mage   |",
     "| Oskar  |   7 | Ranger |",
@@ -160,12 +163,23 @@ fn window_images() {
         shell.chat().update(cx, |chat, cx| {
             chat.apply(&server_lines(&WRAPPING_CHAT), cx);
             chat.echo_unsent(
-                "say a command long enough to wrap beside the marker that starts it",
+                "say a command long enough to wrap beside the marker that starts it, \
+                 because a player can always type more than a server would ever send",
                 cx,
             );
         });
         shell.open_panels(cx);
     });
+    render(
+        "wrapped-narrow-dark",
+        Dark,
+        UNDER_80_COLUMNS,
+        |shell, _, cx| {
+            shell
+                .chat()
+                .update(cx, |chat, cx| chat.apply(&server_lines(&WRAPPING_CHAT), cx));
+        },
+    );
     render("rails-dark", Dark, WIDE, |shell, _, cx| {
         for side in [Side::Left, Side::Right] {
             shell

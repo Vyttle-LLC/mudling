@@ -1,8 +1,11 @@
 //! The chat: a virtualized view onto the shell's copy of the terminal store.
 //!
-//! Lines wrap to the column, so they differ in height; [`lines`] lays out only
-//! the ones in view, however long the scrollback is, and holds a scrolled-back
-//! view on its top line as lines are trimmed or the column changes width.
+//! Servers wrap their own text to 80 columns, so the column keeps that much
+//! room and most lines take one row. A longer line wraps rather than lose its
+//! text, as does any line in a window too narrow for 80 columns. So lines
+//! differ in height; [`lines`] lays out only the ones in view, however long the
+//! scrollback is, and holds a scrolled-back view on its top line as lines are
+//! trimmed or the column changes width.
 //!
 //! Accessibility: the chat is a `Log` node whose visible lines are `Label`
 //! nodes, readable line by line however many rows each wraps to. New lines are
@@ -13,8 +16,8 @@ mod lines;
 
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, AvailableSpace, Bounds, Context, ElementId, FontWeight, HighlightStyle, Pixels,
-    Role, SharedString, StyledText, Window, div, point, prelude::*, px, size,
+    AnyElement, App, AvailableSpace, Bounds, Context, ElementId, FontWeight, HighlightStyle,
+    Pixels, Role, SharedString, StyledText, Window, div, font, point, prelude::*, px, size,
 };
 use lines::{LineList, LinePosition};
 use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
@@ -26,6 +29,10 @@ pub const FONT_SIZE: Pixels = px(14.);
 /// A comfortable reading width: about 90 columns of the chat font, however
 /// wide the window is.
 pub const COLUMN_WIDTH: Pixels = px(800.);
+/// The chat column's padding on each side.
+pub const COLUMN_PADDING: Pixels = px(32.);
+/// What servers wrap their text to, and tables and maps are drawn for.
+const MIN_COLUMNS: f32 = 80.;
 
 #[cfg(target_os = "macos")]
 pub const MONO_FONT: &str = "Menlo";
@@ -33,6 +40,14 @@ pub const MONO_FONT: &str = "Menlo";
 pub const MONO_FONT: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const MONO_FONT: &str = "DejaVu Sans Mono";
+
+/// How wide the chat column has to be to show [`MIN_COLUMNS`] of the chat font
+/// on one row each.
+pub fn min_column_width(cx: &App) -> Pixels {
+    let text = cx.text_system();
+    let advance = text.ch_advance(text.resolve_font(&font(MONO_FONT)), FONT_SIZE);
+    (advance.unwrap_or_default() * MIN_COLUMNS).ceil() + COLUMN_PADDING * 2.
+}
 
 /// How many of the newest lines one announcement may carry. A burst of
 /// server text is summarized by its tail rather than read in full.
@@ -119,6 +134,12 @@ impl Chat {
     #[cfg(test)]
     pub fn scroll_offset(&self) -> lines::Anchor {
         self.position.top()
+    }
+
+    /// How tall the line at the top of the view drew.
+    #[cfg(test)]
+    pub fn top_line_height(&self) -> Pixels {
+        self.position.top_height()
     }
 
     /// Lays out this frame's lines inside `bounds`, top to bottom, the order
@@ -414,6 +435,23 @@ mod tests {
             chat.read_with(cx, |chat, _| chat.position.top_height()),
             LINE_HEIGHT
         );
+    }
+
+    #[gpui::test]
+    fn eighty_columns_take_one_row_and_a_longer_line_wraps(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 0);
+        let text_width = cx.update(|_, cx| min_column_width(cx)) - COLUMN_PADDING * 2.;
+        // One row high, so the newest line is the top line.
+        cx.simulate_resize(size(text_width, LINE_HEIGHT));
+        let height_of = |columns: usize, cx: &mut VisualTestContext| {
+            let line = "0".repeat(columns);
+            chat.update(cx, |chat, cx| chat.apply(&server_lines([line]), cx));
+            cx.run_until_parked();
+            chat.read_with(cx, |chat, _| chat.top_line_height())
+        };
+
+        assert_eq!(height_of(80, cx), LINE_HEIGHT);
+        assert_eq!(height_of(81, cx), LINE_HEIGHT * 2.);
     }
 
     #[test]
