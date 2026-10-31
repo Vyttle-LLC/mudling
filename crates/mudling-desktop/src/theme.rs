@@ -54,6 +54,8 @@ pub struct Theme {
     /// What can't be taken back, such as Kill.
     pub danger: Hsla,
     pub placeholder: Hsla,
+    /// Words that say what went wrong.
+    pub error: Hsla,
     pub hud_hp: Hsla,
     pub hud_mana: Hsla,
     pub hud_moves: Hsla,
@@ -85,6 +87,7 @@ impl Theme {
                 on_accent: rgb(NIGHT).into(),
                 danger: rgb(ANSI_ON_NIGHT[9]).into(),
                 placeholder: rgb(0x8A928D).into(),
+                error: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_hp: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_mana: rgb(ANSI_ON_NIGHT[12]).into(),
                 hud_moves: rgb(0x4FBF87).into(),
@@ -110,6 +113,7 @@ impl Theme {
                 on_accent: rgb(PARCHMENT).into(),
                 danger: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 placeholder: rgb(0x636C67).into(),
+                error: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_hp: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_mana: rgb(ANSI_ON_PARCHMENT[12]).into(),
                 hud_moves: rgb(0x1F6B45).into(),

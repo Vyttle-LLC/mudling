@@ -1,6 +1,6 @@
 //! The window's root view, a thin shell over a [`Session`]: the title bar over
 //! a centered chat column with the floating command bar at its foot, between
-//! two [`Dock`]s.
+//! two [`Dock`]s. With no game running, the [`EmptyState`] stands in for them.
 //!
 //! The bar looks like it floats, but the chat ends where it begins, so
 //! however tall the bar grows it can't cover the newest line.
@@ -12,12 +12,17 @@
 use crate::assets::UI_FONT;
 use crate::chat::{COLUMN_PADDING, COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
+use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
+use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
+use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 use crate::status::{StatusLines, lines_for};
 use crate::theme::Theme;
-use crate::title_bar::{self, FocusPreviousControl, SessionLabel, TitleBar};
+use crate::title_bar::{
+    self, FocusNextControl, FocusPreviousControl, SessionLabel, TitleBar, TitleBarEvent,
+};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
@@ -25,10 +30,12 @@ use gpui::{
     prelude::*,
 };
 use mudling_core::completion::Completion;
+use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, Versioned, VitalsState,
+    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, Versioned,
+    VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
@@ -55,7 +62,8 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// What the window runs on. Without one the window only echoes what's typed.
+/// What the window runs on. Without one, and with a [`Launcher`], it shows the
+/// empty state; with neither it only echoes what's typed.
 pub struct Game {
     pub session: Session,
     /// A recording's throwaway data folder, or `None` for a real server.
@@ -63,11 +71,20 @@ pub struct Game {
     pub enabled: Vec<PluginId>,
     /// The game's words for what the panels send.
     pub verbs: Verbs,
+    pub target: Target,
 }
 
 impl Game {
     fn is_replay(&self) -> bool {
         self.replay_folder.is_some()
+    }
+
+    /// Ends the session. This blocks until it's on the disk.
+    fn finish(self) {
+        if let Err(error) = self.session.quit().wait() {
+            eprintln!("couldn't finish saving the session: {error}");
+        }
+        drop(self.replay_folder);
     }
 }
 
@@ -80,19 +97,47 @@ struct Copies {
     mobs: Versioned<MobsState>,
 }
 
+impl Copies {
+    fn of(stores: Option<&StoreHub>) -> Copies {
+        Copies {
+            settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+        }
+    }
+}
+
+/// What a job off the UI thread comes back with.
+struct Outcome {
+    game: Option<Game>,
+    saved: SavedServers,
+    problem: Option<String>,
+}
+
 pub struct Shell {
     game: Option<Game>,
+    launcher: Option<Launcher>,
+    /// The one job running off the UI thread: a session ending, another
+    /// opening, a server being saved.
+    job: Option<Task<()>>,
+    /// One session is ending and the next opening, so the window stays on the
+    /// chat rather than flash the empty state.
+    switching: bool,
     copies: Copies,
     left: bool,
     chat: Entity<Chat>,
     status: Entity<StatusLines>,
+    session_bar: Entity<SessionBar>,
+    empty_state: Entity<EmptyState>,
     title_bar: Entity<TitleBar>,
     hud: Entity<Hud>,
     input: Entity<CommandInput>,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
     room_panel: Entity<RoomPanel>,
-    _subscriptions: [Subscription; 5],
+    _subscriptions: [Subscription; 8],
     _woken: Task<()>,
 }
 
@@ -108,13 +153,7 @@ impl Shell {
         cx.set_global(Theme::for_appearance(window.appearance()));
         let stores = game.as_ref().map(|game| game.session.stores());
         let terminal = stores.map(|stores| stores.subscribe()).unwrap_or_default();
-        let copies = Copies {
-            settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
-            vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
-            characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
-            room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
-            mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
-        };
+        let copies = Copies::of(stores);
         let chat = cx.new(|_| Chat::new(terminal));
         let input = cx.new(CommandInput::new);
         let typing = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
@@ -151,25 +190,246 @@ impl Shell {
         }
         let left_dock = cx.new(|_| Dock::new(Side::Left));
         let right_dock = cx.new(|_| Dock::new(Side::Right));
+        let title_bar = cx.new(|cx| TitleBar::new(left_dock.clone(), right_dock.clone(), cx));
+        let session_bar = cx.new(|_| SessionBar::default());
+        let empty_state = cx.new(|cx| EmptyState::new(window, cx));
+        let menu = cx.subscribe_in(
+            &title_bar,
+            window,
+            |shell, _, event, window, cx| match event {
+                TitleBarEvent::Open(target) => shell.open(target.clone(), None, window, cx),
+                TitleBarEvent::ChooseServer => shell.choose_server(window, cx),
+            },
+        );
+        let offers = cx.subscribe_in(
+            &session_bar,
+            window,
+            |shell, _, event, window, cx| match event {
+                SessionBarEvent::Reconnect => shell.reconnect(window, cx),
+                SessionBarEvent::ChooseServer => shell.choose_server(window, cx),
+                SessionBarEvent::TurnOn(plugin) => shell.turn_on(plugin.clone(), window, cx),
+            },
+        );
+        let places = cx.subscribe_in(
+            &empty_state,
+            window,
+            |shell, _, event, window, cx| match event {
+                EmptyStateEvent::Connect(target) => shell.open(target.clone(), None, window, cx),
+                EmptyStateEvent::Add(target) => shell.add_server(target.clone(), window, cx),
+            },
+        );
         let mut shell = Shell {
             game,
+            launcher: None,
+            job: None,
+            switching: false,
             copies,
             left: false,
             chat,
             status: cx.new(|_| StatusLines::default()),
-            title_bar: cx.new(|cx| TitleBar::new(left_dock.clone(), right_dock.clone(), cx)),
+            session_bar,
+            empty_state,
+            title_bar,
             hud: cx.new(|_| Hud::default()),
             input,
             left_dock,
             right_dock,
             room_panel,
-            _subscriptions: [typing, verb_sent, focus_lost, appearance, quitting],
+            _subscriptions: [
+                typing, verb_sent, focus_lost, appearance, quitting, menu, offers, places,
+            ],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
         shell.show_status(cx);
         shell.show_room(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
         shell
+    }
+
+    /// Lets the window open games. With no game running it shows the empty
+    /// state. A replay has no use for this: it never calls it.
+    pub fn use_launcher(
+        &mut self,
+        launcher: Launcher,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        self.launcher = Some(launcher);
+        self.show_where_things_stand(cx);
+        self.off_the_ui_thread(
+            |launcher| Outcome {
+                game: None,
+                saved: launcher.saved(),
+                problem: None,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Runs `job` away from the UI thread, one job at a time.
+    fn off_the_ui_thread(
+        &mut self,
+        job: impl FnOnce(&Launcher) -> Outcome + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let done = cx.background_spawn(async move { job(&launcher) });
+        self.job = Some(cx.spawn_in(window, async move |shell, cx| {
+            let outcome = done.await;
+            let _ = shell.update_in(cx, |shell, window, cx| {
+                shell.job_done(outcome, window, cx);
+            });
+        }));
+    }
+
+    fn job_done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Shell>) {
+        self.job = None;
+        self.switching = false;
+        // A game opened as the window left goes unused: dropping it ends it.
+        if self.left {
+            return;
+        }
+        self.empty_state.update(cx, |empty_state, cx| {
+            empty_state.show(&outcome.saved, cx);
+            if let Some(problem) = outcome.problem {
+                empty_state.show_problem(problem, cx);
+            }
+        });
+        if let Some(game) = outcome.game {
+            self.play(game, window, cx);
+        }
+        self.show_where_things_stand(cx);
+        if self.on_empty_state() {
+            self.empty_state
+                .update(cx, |empty_state, cx| empty_state.focus(window, cx));
+        }
+    }
+
+    /// Moves the window onto `game`: a chat and copies of its own, so nothing
+    /// of the last session carries over. A real server's connection opens
+    /// here, once the stores are subscribed.
+    fn play(&mut self, game: Game, window: &mut Window, cx: &mut Context<Shell>) {
+        let stores = game.session.stores();
+        let terminal = stores.subscribe();
+        self.copies = Copies::of(Some(stores));
+        self.chat = cx.new(|_| Chat::new(terminal));
+        self.room_panel
+            .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
+        self.show_room(cx);
+        game.session.connect();
+        self.game = Some(game);
+        self.input.update(cx, |input, cx| {
+            input.set_masked(false, window, cx);
+            input.show(String::new(), 0, window, cx);
+        });
+        window.focus(&self.input.focus_handle(cx), cx);
+    }
+
+    /// Whether the window shows "Where to today?" rather than a game.
+    fn on_empty_state(&self) -> bool {
+        self.game.is_none() && self.launcher.is_some() && !self.switching
+    }
+
+    /// Ends the session running, if any, and opens one on `target`. `turn_on`
+    /// is a game plugin the player just turned on: a session reads its
+    /// plugins when it opens, so this is also how that takes effect.
+    fn open(
+        &mut self,
+        target: Target,
+        turn_on: Option<PluginId>,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        if self.job.is_some() || self.launcher.is_none() {
+            return;
+        }
+        let leaving = self.game.take();
+        self.switching = leaving.is_some();
+        let connecting = SessionLabel::new(target.host.clone(), None, "Connecting…");
+        self.title_bar
+            .update(cx, |bar, cx| bar.show(connecting, cx));
+        self.off_the_ui_thread(
+            move |launcher| {
+                if let Some(game) = leaving {
+                    game.finish();
+                }
+                let opened = launcher.open(&target, turn_on.as_ref());
+                let (game, problem) = match opened {
+                    Ok(game) => (Some(game), None),
+                    Err(problem) => (None, Some(problem)),
+                };
+                Outcome {
+                    game,
+                    saved: launcher.saved(),
+                    problem,
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Ends the session and goes back to the empty state.
+    fn choose_server(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.job.is_some() {
+            return;
+        }
+        let leaving = self.game.take();
+        self.show_where_things_stand(cx);
+        self.off_the_ui_thread(
+            move |launcher| {
+                if let Some(game) = leaving {
+                    game.finish();
+                }
+                Outcome {
+                    game: None,
+                    saved: launcher.saved(),
+                    problem: None,
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn add_server(&mut self, target: Target, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.job.is_some() {
+            return;
+        }
+        self.off_the_ui_thread(
+            move |launcher| Outcome {
+                game: None,
+                problem: launcher.save(&target).err(),
+                saved: launcher.saved(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Connects again on the same session, keeping the chat. A session whose
+    /// core thread stopped can't, so that one is opened anew. The Reconnect
+    /// button goes as the connection starts, so focus moves off it first.
+    fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        let Some(game) = &self.game else { return };
+        if game.session.has_stopped() {
+            let target = game.target.clone();
+            self.open(target, None, window, cx);
+        } else {
+            game.session.connect();
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
+    }
+
+    fn turn_on(&mut self, plugin: PluginId, window: &mut Window, cx: &mut Context<Shell>) {
+        if let Some(game) = &self.game {
+            let target = game.target.clone();
+            self.open(target, Some(plugin), window, cx);
+        }
     }
 
     /// Each wake is one batch waiting, and no other wake comes until a frame
@@ -235,16 +495,44 @@ impl Shell {
     fn show_status(&mut self, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
-        let lines = lines_for(settings, &game.enabled);
+        let lines = lines_for(settings);
         // The core publishes no latency yet.
         let latency = None;
         let characters = self.copies.characters.value();
         let session = SessionLabel::of(settings, characters, game.is_replay(), latency);
+        let launcher = self.launcher.as_ref();
+        let offers = Offers::of(settings, &game.enabled, game.is_replay(), launcher);
         self.status.update(cx, |status, cx| status.show(lines, cx));
+        self.session_bar.update(cx, |bar, cx| bar.show(offers, cx));
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
         self.hud.update(cx, |hud, cx| {
             hud.show(self.copies.vitals.value(), cx);
         });
+    }
+
+    /// Brings the title bar and what's beside the chat in line with whether
+    /// a game is running, once that changes.
+    fn show_where_things_stand(&mut self, cx: &mut Context<Shell>) {
+        let current = self.game.as_ref().map(|game| game.target.host.as_str());
+        let elsewhere = self
+            .empty_state
+            .read(cx)
+            .cards()
+            .iter()
+            .filter(|card| Some(card.target.host.as_str()) != current)
+            .cloned()
+            .collect();
+        let can_choose_server = self.game.is_some() && self.launcher.is_some();
+        let bare = self.on_empty_state();
+        self.title_bar.update(cx, |bar, cx| {
+            bar.show_saved(elsewhere, can_choose_server, cx);
+            bar.set_bare(bare, cx);
+            if bare {
+                bar.show(SessionLabel::default(), cx);
+            }
+        });
+        self.show_status(cx);
+        cx.notify();
     }
 
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
@@ -322,7 +610,18 @@ impl Shell {
     }
 
     fn toggle_dock(&self, side: Side, cx: &mut Context<Shell>) {
-        self.dock(side).update(cx, |dock, cx| dock.toggle(cx));
+        if !self.on_empty_state() {
+            self.dock(side).update(cx, |dock, cx| dock.toggle(cx));
+        }
+    }
+
+    fn focus_command_bar(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.on_empty_state() {
+            self.empty_state
+                .update(cx, |empty_state, cx| empty_state.focus(window, cx));
+        } else {
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
     }
 
     /// Shows the Room panel, opening the right panel if it's closed, and
@@ -357,6 +656,35 @@ impl Shell {
     pub fn open_session_menu(&self, window: &mut Window, cx: &mut Context<Shell>) {
         self.title_bar
             .update(cx, |bar, cx| bar.open_menu(window, cx));
+    }
+
+    /// Shows the empty state with `saved` on it, with no disk involved.
+    #[cfg(test)]
+    pub fn show_sample_empty_state(
+        &mut self,
+        saved: &SavedServers,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        self.launcher = Some(Launcher::new(
+            "unused".into(),
+            Vec::new(),
+            Vec::new(),
+            || {},
+        ));
+        self.empty_state.update(cx, |empty_state, cx| {
+            empty_state.show(saved, cx);
+            empty_state.focus(window, cx);
+        });
+        self.show_where_things_stand(cx);
+    }
+
+    /// Shows the row a closed connection brings, with no session behind it.
+    #[cfg(test)]
+    pub fn show_sample_offers(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
+        let launcher = Launcher::new("unused".into(), Vec::new(), Vec::new(), || {});
+        let offers = Offers::of(settings, &[], false, Some(&launcher));
+        self.session_bar.update(cx, |bar, cx| bar.show(offers, cx));
     }
 
     #[cfg(test)]
@@ -402,13 +730,15 @@ impl Shell {
         if std::mem::replace(&mut self.left, true) {
             return None;
         }
+        let job = self.job.take();
         let game = self.game.take();
         Some(cx.background_spawn(async move {
-            let Some(game) = game else { return };
-            if let Err(error) = game.session.quit().wait() {
-                eprintln!("couldn't finish saving the session: {error}");
+            if let Some(job) = job {
+                job.await;
             }
-            drop(game.replay_folder);
+            if let Some(game) = game {
+                game.finish();
+            }
         }))
     }
 }
@@ -456,9 +786,22 @@ impl Render for Shell {
                     .px_4()
                     .pt_3()
                     .pb_4()
+                    .child(self.session_bar.clone())
                     .child(self.status.clone())
                     .child(command_bar),
             );
+        let body = if self.on_empty_state() {
+            div().flex_1().min_h_0().child(self.empty_state.clone())
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .flex()
+                .child(self.left_dock.clone())
+                .child(column)
+                .child(self.right_dock.clone())
+        };
         div()
             .size_full()
             .flex()
@@ -473,29 +816,21 @@ impl Render for Shell {
                 shell.toggle_dock(Side::Right, cx);
             }))
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
-                window.focus(&shell.input.focus_handle(cx), cx);
+                shell.focus_command_bar(window, cx);
             }))
             .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
                 shell.focus_room_panel(window, cx);
             }))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
+            .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
             .capture_any_mouse_down(|event, window, cx| {
                 if title_bar::resize_from_edge(event.position, window) {
                     cx.stop_propagation();
                 }
             })
             .child(self.title_bar.clone())
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .flex()
-                    .child(self.left_dock.clone())
-                    .child(column)
-                    .child(self.right_dock.clone()),
-            )
+            .child(body)
     }
 }
 
@@ -509,6 +844,7 @@ mod tests {
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
     };
     use mudling_core::defaults::hud::Vital;
+    use mudling_core::persist;
     use mudling_core::plugin::Plugin;
     use mudling_core::session::SessionConfig;
     use mudling_core::store::TerminalState;
@@ -540,6 +876,10 @@ mod tests {
             replay_folder: None,
             enabled,
             verbs,
+            target: Target {
+                host: "127.0.0.1".to_owned(),
+                port,
+            },
         }
     }
 
@@ -1259,6 +1599,330 @@ mod tests {
         });
         press_key("enter", played.cx);
         assert_eq!(played.heard_command(), "north");
+    }
+
+    /// A window with a launcher on a folder of its own, and what it's listening
+    /// for: the fake servers are real sockets on loopback.
+    struct Launched<'a> {
+        shell: Entity<Shell>,
+        cx: &'a mut VisualTestContext,
+        folder: TempDir,
+    }
+
+    const OTHER_HOST: &str = "localhost";
+
+    fn fake_server() -> (TcpListener, u16) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    /// A game plugin that claims the fake server's host.
+    fn loopback_plugin() -> Plugin {
+        Plugin::from_files(|file| match file {
+            "plugin.toml" => Ok(r#"
+                id = "loopback"
+                name = "Loopback"
+                version = "1.0.0"
+                api = 1
+                license = "MIT"
+                layer = "game"
+                [servers]
+                hosts = ["127.0.0.1"]
+            "#
+            .to_owned()),
+            _ => Err(std::io::ErrorKind::NotFound.into()),
+        })
+        .expect("the manifest is valid")
+    }
+
+    fn launch<'a>(saved: &[(&str, u16)], cx: &'a mut TestAppContext) -> Launched<'a> {
+        cx.update(|cx| {
+            crate::input::bind_keys(cx);
+            bind_keys(cx);
+            title_bar::bind_keys(cx);
+            crate::empty_state::bind_keys(cx);
+            crate::session_bar::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let folder = TempDir::new().unwrap();
+        for (host, port) in saved {
+            persist::save_server(folder.path(), host, *port).unwrap();
+        }
+        let launcher = Launcher::new(
+            folder.path().to_owned(),
+            vec![loopback_plugin()],
+            Vec::new(),
+            || {},
+        );
+        let (_wake, woken) = unbounded();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let mut shell = Shell::new(None, woken, window, cx);
+            shell.use_launcher(launcher, window, cx);
+            shell
+        });
+        cx.run_until_parked();
+        Launched { shell, cx, folder }
+    }
+
+    impl Launched<'_> {
+        fn frames_until(&mut self, what: &str, done: impl Fn(&Shell, &App) -> bool) {
+            let started = Instant::now();
+            while !self.shell.read_with(self.cx, |shell, cx| done(shell, cx)) {
+                assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
+                self.cx.run_until_parked();
+                self.shell
+                    .update_in(self.cx, |shell, window, cx| shell.apply_stores(window, cx));
+                self.cx.run_until_parked();
+                sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn click(&mut self, id: &'static str) {
+            let bounds = self.cx.debug_bounds(id).expect("the control is drawn");
+            self.cx.simulate_click(bounds.center(), Modifiers::none());
+            self.cx.run_until_parked();
+        }
+
+        fn is_drawn(&mut self, id: &'static str) -> bool {
+            self.cx.run_until_parked();
+            self.cx.debug_bounds(id).is_some()
+        }
+
+        fn wait_for_connection(&mut self, status: ConnectionStatus) {
+            self.frames_until("the connection", move |shell, _| {
+                shell.copies.settings.value().connection == status
+            });
+        }
+
+        fn wait_for_closed(&mut self) -> Offers {
+            self.frames_until("the connection to end", |shell, cx| {
+                shell.session_bar.read(cx).offers().ended().is_some()
+            });
+            self.shell.read_with(self.cx, |shell, cx| {
+                shell.session_bar.read(cx).offers().clone()
+            })
+        }
+
+        fn host(&mut self) -> Option<String> {
+            self.shell.read_with(self.cx, |shell, _| {
+                shell.game.as_ref().map(|game| game.target.host.clone())
+            })
+        }
+    }
+
+    /// Enter activates a focused control when it's let go.
+    fn press_enter(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn with_no_game_the_window_offers_what_is_saved(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        assert!(launched.is_drawn("empty-state"));
+        assert!(launched.is_drawn("privacy-line"));
+        assert!(launched.is_drawn("connect-0"));
+        assert!(!launched.is_drawn("chat-area"));
+        assert!(!launched.is_drawn("toggle-left-panel"));
+    }
+
+    #[gpui::test]
+    fn return_on_the_first_card_connects_and_the_chat_takes_over(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        press_enter(launched.cx);
+        let (mut socket, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert!(launched.is_drawn("chat-area"));
+        assert!(!launched.is_drawn("empty-state"));
+
+        socket.write_all(b"Hello.\r\n").unwrap();
+        launched.frames_until("the line", |shell, cx| {
+            shell.chat.read(cx).newest_text().as_deref() == Some("Hello.")
+        });
+        launched.cx.simulate_input("look");
+        launched.cx.simulate_keystrokes("enter");
+        let mut heard = [0; 4];
+        socket.set_read_timeout(Some(WAIT)).unwrap();
+        let mut next = [0];
+        while next != *b"l" {
+            socket.read_exact(&mut next).unwrap();
+        }
+        socket.read_exact(&mut heard[1..]).unwrap();
+        assert_eq!(&heard[1..], b"ook");
+    }
+
+    #[gpui::test]
+    fn quick_connect_says_why_a_bad_value_is_bad_and_connects_a_good_one(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[], cx);
+        launched.cx.simulate_input("127.0.0.1");
+        launched.cx.simulate_keystrokes("enter");
+        assert!(launched.is_drawn("quick-error"));
+        assert_eq!(launched.host(), None);
+
+        launched.cx.simulate_input(&format!(":{port}"));
+        launched.cx.simulate_keystrokes("enter");
+        launched.cx.run_until_parked();
+        let _socket = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+    }
+
+    #[gpui::test]
+    fn a_server_added_is_saved_and_gets_a_card(cx: &mut TestAppContext) {
+        let mut launched = launch(&[], cx);
+        launched.click("add-server");
+        launched.cx.simulate_input("mud.example");
+        launched.cx.simulate_keystrokes("enter");
+        assert!(launched.is_drawn("add-error"));
+        launched.cx.simulate_input(":4000");
+        launched.cx.simulate_keystrokes("enter");
+        assert!(launched.is_drawn("connect-0"));
+        assert!(!launched.is_drawn("add-error"));
+
+        let saved = persist::saved_servers(launched.folder.path());
+        assert_eq!(saved.servers[0].host, "mud.example");
+        assert_eq!(saved.servers[0].port, 4000);
+    }
+
+    #[gpui::test]
+    fn esc_cancels_adding_a_server(cx: &mut TestAppContext) {
+        let mut launched = launch(&[], cx);
+        launched.click("add-server");
+        assert!(launched.is_drawn("save-server"));
+        launched.cx.simulate_keystrokes("escape");
+        assert!(!launched.is_drawn("save-server"));
+        assert!(launched.is_drawn("add-server"));
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_every_control(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        // From the first card: Add, Quick connect's field, then its button.
+        launched.cx.simulate_keystrokes("tab");
+        press_enter(launched.cx);
+        assert!(launched.is_drawn("save-server"), "Add opened the form");
+        launched.cx.simulate_keystrokes("escape");
+        launched.cx.simulate_keystrokes("tab");
+        launched.cx.simulate_input("bad");
+        launched.cx.simulate_keystrokes("tab");
+        press_enter(launched.cx);
+        assert!(launched.is_drawn("quick-error"));
+    }
+
+    #[gpui::test]
+    fn a_failure_says_what_went_wrong_and_reconnect_needs_no_restart(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let (_, closed_port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", closed_port)], cx);
+        press_enter(launched.cx);
+        let offers = launched.wait_for_closed();
+        assert!(
+            offers
+                .ended()
+                .unwrap()
+                .starts_with("The connection failed:"),
+            "{offers:?}"
+        );
+
+        // The server comes back on a port of its own: the card's session is
+        // for the closed one, so a new session goes there.
+        launched.click("choose-server");
+        launched.frames_until("the empty state", |shell, _| shell.on_empty_state());
+        launched.cx.simulate_keystrokes("tab tab");
+        launched.cx.simulate_input(&format!("127.0.0.1:{port}"));
+        launched.cx.simulate_keystrokes("enter");
+        launched.cx.run_until_parked();
+        let (first, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+
+        drop(first);
+        let offers = launched.wait_for_closed();
+        assert_eq!(offers.ended(), Some("The server closed the connection."));
+        launched.click("reconnect");
+        let _second = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+
+        launched.cx.simulate_input("look");
+        let typed = launched
+            .shell
+            .read_with(launched.cx, |shell, cx| shell.typed(cx));
+        assert_eq!(typed, "look", "typing goes on in the command bar");
+    }
+
+    #[gpui::test]
+    fn the_switcher_lists_saved_characters_and_moves_between_them(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port), (OTHER_HOST, port)], cx);
+        launched.click("connect-1");
+        let (first, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        let playing = launched.host().unwrap();
+
+        launched.click("session-switcher");
+        assert!(launched.is_drawn("session-current"));
+        launched.cx.simulate_keystrokes("down");
+        press_enter(launched.cx);
+        let (_second, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert_ne!(launched.host().unwrap(), playing);
+
+        // The first session ended: one runs at a time.
+        first.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(
+            std::io::copy(&mut &first, &mut std::io::sink()).ok(),
+            Some(0)
+        );
+    }
+
+    #[gpui::test]
+    fn leaving_for_the_empty_state_ends_the_session(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        press_enter(launched.cx);
+        let (first, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+
+        launched.click("session-switcher");
+        launched.click("session-choose-server");
+        launched.frames_until("the empty state", |shell, _| shell.on_empty_state());
+        assert!(launched.is_drawn("connect-0"));
+        first.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(
+            std::io::copy(&mut &first, &mut std::io::sink()).ok(),
+            Some(0)
+        );
+    }
+
+    #[gpui::test]
+    fn turning_a_suggested_plugin_on_opens_a_new_session_with_it(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        press_enter(launched.cx);
+        let _first = server.accept().unwrap();
+        launched.frames_until("the suggestion", |shell, cx| {
+            shell.session_bar.read(cx).offers().turn_on().is_some()
+        });
+        let enabled = |launched: &mut Launched| {
+            launched.shell.read_with(launched.cx, |shell, _| {
+                shell.game.as_ref().map_or(0, |game| game.enabled.len())
+            })
+        };
+        assert_eq!(enabled(&mut launched), 0, "detection only suggests");
+
+        launched.click("turn-on-plugin");
+        let _second = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert_eq!(enabled(&mut launched), 1);
+        launched.frames_until("the offer to go", |shell, cx| {
+            shell.session_bar.read(cx).offers().turn_on().is_none()
+        });
+        let saved = persist::enabled_plugins(launched.folder.path(), "127.0.0.1").unwrap();
+        assert_eq!(saved, ["loopback"]);
     }
 
     #[gpui::test]

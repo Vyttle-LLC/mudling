@@ -15,7 +15,9 @@ use crate::defaults::{self, Defaults, PendingAction};
 use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
-use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
+use crate::persist::{
+    self, Batch, Character, Database, SERVERS_FOLDER, Server, Timestamp, UNNAMED_CHARACTER, Writer,
+};
 use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
 use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
@@ -33,10 +35,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-/// Under the data folder, one database per server.
-const SERVERS_FOLDER: &str = "servers";
-/// Who the session plays when no credentials name a character.
-const UNNAMED_CHARACTER: &str = "player";
 /// GMCP modules every server is asked for.
 const CORE_GMCP: [&str; 3] = ["Core 1", "Char 1", "Room 1"];
 /// The word list map words are kept under.

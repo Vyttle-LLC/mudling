@@ -64,6 +64,8 @@ icons! {
     WindowMinimize => "window-minimize.svg",
     WindowMaximize => "window-maximize.svg",
     WindowClose => "window-close.svg",
+    Plus => "plus.svg",
+    Return => "return.svg",
 }
 
 impl Icon {

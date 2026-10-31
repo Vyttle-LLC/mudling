@@ -7,9 +7,10 @@
 //!                 [--ax-check]
 //! ```
 //!
-//! `--host` and `--port` connect to a server. `--plugin` installs a plugin
-//! from its folder, off, so game detection can suggest it; `--enable` turns
-//! one on and lets it send commands.
+//! With no arguments the window shows the saved servers ("Where to today?").
+//! `--host` and `--port` connect to a server at once. The plugins in the data
+//! folder are installed, off, as is any `--plugin` folder, so game detection
+//! can suggest them; `--enable` turns one on and lets it send commands.
 //!
 //! A replay runs the same window through `Session::replay`: 100,000 lines of
 //! history, then new lines at `--rate` (50 a second by default; 0 turns it
@@ -32,13 +33,16 @@ mod assets;
 mod chat;
 mod dock;
 mod dpad;
+mod empty_state;
 mod hud;
 mod input;
+mod launcher;
 #[cfg(target_os = "macos")]
 mod macos;
 mod measure;
 mod motion;
 mod room_panel;
+mod session_bar;
 mod shell;
 mod status;
 mod stream;
@@ -53,6 +57,7 @@ use gpui::{
     App, AppContext, AsyncApp, Bounds, Entity, KeyBinding, Task, TitlebarOptions, WindowBounds,
     WindowDecorations, WindowOptions, actions, px, size,
 };
+use launcher::{Launcher, Target, installed_plugins};
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
@@ -119,13 +124,24 @@ fn main() -> ExitCode {
     // Everything that reads the disk happens here, before the app starts:
     // from `run` on, this is the UI thread.
     let (wake, woken) = mpsc::unbounded();
+    let waker = move || {
+        let _ = wake.unbounded_send(());
+    };
     let opened = load_feed(&options).and_then(|feed| {
-        let game = open_game(&options, feed.is_some(), move || {
-            let _ = wake.unbounded_send(());
-        })?;
-        Ok((feed, game))
+        let (game, launcher) = match feed {
+            Some(_) => (Some(open_replay(&options, waker)?), None),
+            None => {
+                let launcher = launcher_for(&options, waker)?;
+                let target = options.host.clone().zip(options.port);
+                let game = target
+                    .map(|(host, port)| launcher.open(&Target { host, port }, None))
+                    .transpose()?;
+                (game, Some(launcher))
+            }
+        };
+        Ok((feed, game, launcher))
     });
-    let (feed, game) = match opened {
+    let (feed, game, launcher) = match opened {
         Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
@@ -149,6 +165,8 @@ fn main() -> ExitCode {
         input::bind_keys(cx);
         shell::bind_keys(cx);
         title_bar::bind_keys(cx);
+        empty_state::bind_keys(cx);
+        session_bar::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 
         let bounds = Bounds::centered(None, size(px(1300.), px(800.)), cx);
@@ -170,7 +188,14 @@ fn main() -> ExitCode {
             ..WindowOptions::default()
         };
         let window = match cx.open_window(options_for_window, |window, cx| {
-            cx.new(|cx| Shell::new(game, woken, window, cx))
+            cx.new(|cx| {
+                let mut shell = Shell::new(game, woken, window, cx);
+                // The accessibility check reads the chat and the command bar.
+                if let Some(launcher) = launcher.filter(|_| !options.ax_check) {
+                    shell.use_launcher(launcher, window, cx);
+                }
+                shell
+            })
         }) {
             Ok(window) => window,
             Err(error) => {
@@ -238,44 +263,58 @@ async fn wait_for_save(saved: Task<()>, cx: &AsyncApp) {
     }
 }
 
-/// The session the options ask for. `None` with neither a server nor a
-/// recording.
-fn open_game(
+/// The session for a recording, with its data in a throwaway folder.
+fn open_replay(
     options: &Options,
-    replaying: bool,
     waker: impl Fn() + Send + Sync + 'static,
-) -> Result<Option<Game>, String> {
-    let replay_folder = replaying
-        .then(TempDir::new)
-        .transpose()
+) -> Result<Game, String> {
+    let folder = TempDir::new()
         .map_err(|error| format!("couldn't make a folder for the replay: {error}"))?;
-    let (host, port, data_folder) = match (&options.host, options.port, &replay_folder) {
-        (_, _, Some(folder)) => (REPLAY_HOST, 0, folder.path().to_owned()),
-        (Some(host), Some(port), None) => (host.as_str(), port, data_folder(options)?),
-        _ => return Ok(None),
-    };
-    let plugins = options
-        .plugins
-        .iter()
-        .map(Plugin::load)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+    let plugins = command_line_plugins(options)?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
     let verbs = Verbs::of(&plugins, &enabled);
     let config = SessionConfig {
         plugins,
         enabled: enabled.clone(),
         approved: enabled.clone(),
-        ..SessionConfig::new(data_folder, host, port)
+        ..SessionConfig::new(folder.path(), REPLAY_HOST, 0)
     };
     let session = Session::open(config, waker)
         .map_err(|error| format!("couldn't start the session: {error}"))?;
-    Ok(Some(Game {
+    Ok(Game {
         session,
-        replay_folder,
+        replay_folder: Some(folder),
         enabled,
         verbs,
-    }))
+        target: Target {
+            host: REPLAY_HOST.to_owned(),
+            port: 0,
+        },
+    })
+}
+
+/// Opens games on real servers, with the data folder's plugins and those the
+/// command line names.
+fn launcher_for(
+    options: &Options,
+    waker: impl Fn() + Send + Sync + 'static,
+) -> Result<Launcher, String> {
+    let folder = data_folder(options)?;
+    let named = command_line_plugins(options)?;
+    let enabled = enabled_plugins(&named, &options.enable)?;
+    let mut plugins = installed_plugins(&folder);
+    plugins.retain(|plugin| !named.iter().any(|named| named.id() == plugin.id()));
+    plugins.extend(named);
+    Ok(Launcher::new(folder, plugins, enabled, waker))
+}
+
+fn command_line_plugins(options: &Options) -> Result<Vec<Plugin>, String> {
+    options
+        .plugins
+        .iter()
+        .map(Plugin::load)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn data_folder(options: &Options) -> Result<PathBuf, String> {
