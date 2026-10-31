@@ -263,6 +263,17 @@ impl Sheet {
         self.squares.get(&room).copied()
     }
 
+    /// The tile closest to a point of the grid. This walks every tile, so it
+    /// runs with the sheet's build.
+    pub fn nearest(&self, (x, y): (f32, f32)) -> Option<(i32, i32)> {
+        let distance = |tile: &&Tile| (tile.x as f32 - x).powi(2) + (tile.y as f32 - y).powi(2);
+        let nearest = self
+            .tiles
+            .iter()
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+        Some((nearest.x, nearest.y))
+    }
+
     /// The tiles in a region.
     pub fn tiles_in(&self, region: Region) -> impl Iterator<Item = &Tile> {
         let start = self

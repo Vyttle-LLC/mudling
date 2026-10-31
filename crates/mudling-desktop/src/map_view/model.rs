@@ -17,13 +17,27 @@ type SheetKey = (Revision, Place);
 pub struct SheetJob {
     key: SheetKey,
     map: MapState,
+    /// Where the view was looking when the player went to this sheet.
+    arriving_from: Option<(f32, f32)>,
 }
 
 impl SheetJob {
-    pub fn run(self) -> (SheetKey, Sheet) {
+    pub fn run(self) -> BuiltSheet {
         let sheet = Sheet::build(&self.map, &self.key.1);
-        (self.key, sheet)
+        let arrival = self.arriving_from.and_then(|from| sheet.nearest(from));
+        BuiltSheet {
+            key: self.key,
+            sheet,
+            arrival,
+        }
     }
+}
+
+pub struct BuiltSheet {
+    key: SheetKey,
+    sheet: Sheet,
+    /// The square to look at on arriving here.
+    arrival: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +99,8 @@ pub struct MapModel {
     sheet: Arc<Sheet>,
     built: Option<SheetKey>,
     building: Option<SheetKey>,
+    /// The next sheet was asked for by going to it, so it should come into view.
+    arriving: bool,
     selection: Option<Selection>,
     walk_for: Option<WalkKey>,
     walking: Option<WalkKey>,
@@ -175,21 +191,32 @@ impl MapModel {
         self.place.as_ref()
     }
 
-    /// Shows an area's outdoors, for Find and the way out of a building.
+    /// Goes to a sheet. Its nearest room comes into view once it's built.
     pub fn show(&mut self, place: Place) {
         self.following = false;
+        self.arriving = true;
         self.place = Some(place);
     }
 
+    /// Leaves a building for the outdoors, by its door when it has one.
     pub fn outdoors(&mut self) {
-        if let Some(place) = &self.place {
-            let zone = place.zone.clone();
-            self.show(Place {
-                zone,
-                building: None,
-                floor: 0,
-            });
+        let Some(place) = self.place.clone() else {
+            return;
+        };
+        let map = self.map.value();
+        let door = place
+            .building
+            .and_then(|id| map.derived()?.building(id)?.doors.first())
+            .and_then(|door| map.room(door.outside));
+        let floor = door.map_or(0, |room| room.position.z);
+        if let Some(door) = door {
+            self.camera.center = (door.position.x as f32, door.position.y as f32);
         }
+        self.show(Place {
+            zone: place.zone,
+            building: None,
+            floor,
+        });
     }
 
     /// The nearest floor with rooms above or below this one.
@@ -251,6 +278,7 @@ impl MapModel {
     /// The sheet the view needs built, if it isn't built or being built.
     pub fn sheet_job(&mut self) -> Option<SheetJob> {
         let key = (self.rooms_changed, self.place.clone()?);
+        let arriving_from = std::mem::take(&mut self.arriving).then_some(self.camera.center);
         if self.built.as_ref() == Some(&key) || self.building.as_ref() == Some(&key) {
             return None;
         }
@@ -258,12 +286,21 @@ impl MapModel {
         Some(SheetJob {
             key,
             map: self.map.value().clone(),
+            arriving_from,
         })
     }
 
-    pub fn finish_sheet(&mut self, (key, sheet): (SheetKey, Sheet)) {
+    pub fn finish_sheet(&mut self, built: BuiltSheet) {
+        let BuiltSheet {
+            key,
+            sheet,
+            arrival,
+        } = built;
         if self.building.as_ref() == Some(&key) {
             self.building = None;
+        }
+        if let Some((x, y)) = arrival.filter(|_| self.place.as_ref() == Some(&key.1)) {
+            self.camera.center = (x as f32, y as f32);
         }
         self.sheet = Arc::new(sheet);
         self.built = Some(key);
@@ -274,6 +311,7 @@ impl MapModel {
         let selection = self.selection.as_mut()?;
         let Some(start) = self.map.value().whereabouts().room else {
             selection.walk = Walk::Unknown;
+            self.walk_for = None;
             return None;
         };
         let key = WalkKey {
@@ -320,12 +358,15 @@ impl MapModel {
     pub fn click(&mut self, point: (f32, f32), size: (f32, f32)) -> Option<Hit> {
         let hit = self.sheet.hit(self.camera.to_grid(point, size))?;
         match hit {
-            Hit::Room(room) => {
+            // The selected room keeps its walk; another room needs its own.
+            Hit::Room(room) if self.selection.as_ref().is_none_or(|s| s.room != room) => {
                 self.selection = Some(Selection {
                     room,
                     walk: Walk::Unknown,
                 });
+                self.walk_for = None;
             }
+            Hit::Room(_) => {}
             Hit::Building(building) => {
                 let zone = self.place.as_ref()?.zone.clone();
                 let floor = self.map.value().room(building)?.position.z;
@@ -524,9 +565,106 @@ mod tests {
         assert_eq!(model.sheet().square_of(20), Some((7, 7)));
         assert_eq!(model.building_name(), Some("Square 7, 7"));
 
+        assert_eq!(model.camera().center, (7., 7.), "the hall comes into view");
+
         model.outdoors();
         assert!(build_sheet(&mut model));
         assert_eq!(model.sheet().square_of(1), Some((0, 0)));
+        assert_eq!(model.camera().center, (0., 0.), "back out by the door");
+    }
+
+    #[test]
+    fn a_floor_with_rooms_elsewhere_comes_into_view() {
+        let mut ground = room(1, 0, 0);
+        ground.links.insert(Direction::Up, 2);
+        let mut upstairs = room(2, 9, 9);
+        upstairs.position.z = 1;
+        let mut model = MapModel::new(versioned(store_of(vec![ground, upstairs], Vec::new())));
+        build_sheet(&mut model);
+
+        model.change_floor(true);
+        assert!(build_sheet(&mut model));
+        assert_eq!(model.camera().center, (9., 9.));
+    }
+
+    #[test]
+    fn a_sheet_left_behind_does_not_move_the_view() {
+        let mut model = grid_model();
+        model.change_floor(true);
+        let place = model.place().cloned().expect("a place is shown");
+        model.show(Place {
+            floor: place.floor + 1,
+            ..place.clone()
+        });
+        let stale = model.sheet_job().expect("the new floor needs a sheet");
+        model.show(place);
+        model.camera.center = (5., 5.);
+
+        model.finish_sheet(stale.run());
+        assert_eq!(model.camera().center, (5., 5.));
+    }
+
+    fn walk_of(model: &MapModel) -> Option<Walk> {
+        model.selection().map(|selection| selection.walk.clone())
+    }
+
+    fn finish_walk(model: &mut MapModel) {
+        let job = model.walk_job().expect("the walk needs working out");
+        assert!(model.finish_walk(job.run()));
+    }
+
+    #[test]
+    fn clicking_the_selected_room_again_keeps_its_walk() {
+        let mut model = grid_model();
+        let point = model.camera().to_view((2., 1.), VIEW);
+        model.click(point, VIEW);
+        finish_walk(&mut model);
+        let walk = walk_of(&model);
+        assert!(matches!(walk, Some(Walk::Steps(_))));
+
+        model.click(point, VIEW);
+        assert_eq!(walk_of(&model), walk);
+        assert!(model.walk_job().is_none());
+    }
+
+    #[test]
+    fn coming_back_to_a_room_works_its_walk_out_again() {
+        let mut model = grid_model();
+        let first = model.camera().to_view((2., 1.), VIEW);
+        let second = model.camera().to_view((3., 1.), VIEW);
+        model.click(first, VIEW);
+        finish_walk(&mut model);
+
+        model.click(second, VIEW);
+        let abandoned = model.walk_job().expect("a new room needs a walk");
+        model.click(first, VIEW);
+        assert!(!model.finish_walk(abandoned.run()));
+
+        finish_walk(&mut model);
+        assert!(matches!(walk_of(&model), Some(Walk::Steps(_))));
+    }
+
+    #[test]
+    fn a_walk_comes_back_when_the_player_is_found_again() {
+        let mut model = grid_model();
+        model.click(model.camera().to_view((2., 1.), VIEW), VIEW);
+        finish_walk(&mut model);
+
+        let lost = Whereabouts::default();
+        model.apply(&Diff {
+            revision: Revision(2),
+            change: MapChange {
+                revision: 2,
+                whereabouts: Some(lost),
+                ..MapChange::default()
+            },
+        });
+        assert!(model.walk_job().is_none());
+        assert_eq!(walk_of(&model), Some(Walk::Unknown));
+
+        move_to(&mut model, 0, 3);
+        finish_walk(&mut model);
+        assert!(matches!(walk_of(&model), Some(Walk::Steps(_))));
     }
 
     #[test]
