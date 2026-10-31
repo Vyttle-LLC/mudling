@@ -997,6 +997,43 @@ fn an_attacker_marks_its_whole_kind_and_the_room() {
 }
 
 #[test]
+fn mobs_in_the_room_are_sightings_and_players_are_not() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A den", &["n"]);
+    let now = walk.now();
+    walk.map.mobs_mut().learn_aggressor("The grey wolf");
+    walk.map.gmcp(
+        "Room.Players",
+        r#"{"Fen": {"name": "Fen", "fullname": "Fen the Brave is here."},
+            "1042": {"name": "1042", "fullname": "A big wolf \u001b[0;36mis here."}}"#,
+        now,
+    );
+    let room = walk.current();
+    let seen: Vec<&String> = room.sightings.keys().collect();
+    assert_eq!(seen, ["A big wolf is here."]);
+    assert!(room.features.contains(feature::AGGRESSIVE_MOB));
+}
+
+#[test]
+fn a_fountain_in_the_room_is_a_feature() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A square", &["n"]);
+    let now = walk.now();
+    walk.map.gmcp(
+        "Char.Items.List",
+        r#"{"location": "inv", "items": [{"id": "1", "name": "a flask", "type": "fountain"}]}"#,
+        now,
+    );
+    assert!(!walk.current().features.contains(feature::FOUNTAIN));
+    walk.map.gmcp(
+        "Char.Items.List",
+        r#"{"location": "room", "items": [{"id": "2", "name": "a fountain", "type": "fountain"}]}"#,
+        now,
+    );
+    assert!(walk.current().features.contains(feature::FOUNTAIN));
+}
+
+#[test]
 fn a_door_closing_in_place_shows_without_a_room_info() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["n"]);

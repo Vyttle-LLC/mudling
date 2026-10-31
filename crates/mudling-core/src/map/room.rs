@@ -11,6 +11,8 @@ pub type RoomId = i64;
 pub mod feature {
     /// An aggressive mob has been seen here.
     pub const AGGRESSIVE_MOB: &str = "aggressive-mob";
+    /// A fountain lies here.
+    pub const FOUNTAIN: &str = "fountain";
     /// Important gear is here.
     pub const GEAR: &str = "gear";
 }

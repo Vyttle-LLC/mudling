@@ -3,11 +3,16 @@
 
 use super::geometry::{DirMap, Direction};
 use super::rules::MapRules;
+use crate::ansi::AnsiParser;
 use crate::telnet::gmcp;
 use serde_json::Value;
 
 /// Char.Status's key for the room's exits.
 pub(super) const ROOM_EXITS: &str = "room_exits";
+/// Char.Items's location for what lies in the room.
+const ROOM_LOCATION: &str = "room";
+/// Char.Items's type for a fountain.
+const FOUNTAIN: &str = "fountain";
 
 /// A Room.Info, read.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -51,6 +56,59 @@ pub(super) fn status_exits(json: &str, rules: &dyn MapRules) -> Option<DirMap<Ex
     let status: Value = gmcp::from_json(json)?;
     let listed = status.get(ROOM_EXITS)?;
     Some(exits(Some(listed), rules))
+}
+
+/// The room lines of the mobs in a Room.Players or Room.AddPlayer. Mobs are
+/// keyed by number; players, by name.
+pub(super) fn mob_titles(json: &str) -> Vec<String> {
+    let Some(Value::Object(occupants)) = gmcp::from_json(json) else {
+        return Vec::new();
+    };
+    occupants
+        .iter()
+        .filter_map(|(key, occupant)| {
+            let name = occupant.get("name").and_then(Value::as_str).unwrap_or(key);
+            if name.parse::<i64>().is_err() {
+                return None;
+            }
+            let title = occupant.get("fullname").and_then(Value::as_str);
+            Some(plain(title.unwrap_or(name)))
+        })
+        .collect()
+}
+
+fn plain(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    AnsiParser::default().feed(text, &mut plain, &mut Vec::new());
+    plain
+}
+
+/// A change to the items lying in the room, from a Char.Items message.
+pub(super) struct RoomItems {
+    /// A whole list, not one more item.
+    pub(super) whole: bool,
+    pub(super) fountain: bool,
+}
+
+impl RoomItems {
+    /// `None` when the message is about somewhere else.
+    pub(super) fn read(json: &str) -> Option<RoomItems> {
+        let message: Value = gmcp::from_json(json)?;
+        if message.get("location")?.as_str()? != ROOM_LOCATION {
+            return None;
+        }
+        let is_fountain = |item: &Value| item.get("type").and_then(Value::as_str) == Some(FOUNTAIN);
+        Some(match message.get("items").and_then(Value::as_array) {
+            Some(items) => RoomItems {
+                whole: true,
+                fountain: items.iter().any(is_fountain),
+            },
+            None => RoomItems {
+                whole: false,
+                fountain: message.get("item").is_some_and(is_fountain),
+            },
+        })
+    }
 }
 
 impl RoomInfo {

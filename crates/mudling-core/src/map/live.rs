@@ -3,7 +3,7 @@
 
 use super::buildings::MapDoor;
 use super::geometry::{DirMap, Direction, GridPoint};
-use super::info::{self, ExitInfo, RoomInfo};
+use super::info::{self, ExitInfo, RoomInfo, RoomItems};
 use super::layout::{Layout, Step, UNNUMBERED_IDS};
 use super::mobs::{MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
@@ -35,6 +35,8 @@ pub struct LiveMap {
     dark_line: bool,
     /// A line said the player is in a maze.
     maze_line: bool,
+    /// The last word on the room's items showed a fountain.
+    fountain_here: bool,
     /// The map as last committed.
     committed: Layout,
     committed_whereabouts: Whereabouts,
@@ -146,6 +148,7 @@ impl LiveMap {
             text: RoomText::default(),
             dark_line: false,
             maze_line: false,
+            fountain_here: false,
             committed: layout,
             committed_whereabouts: Whereabouts::default(),
             revision: 0,
@@ -169,10 +172,21 @@ impl LiveMap {
         }
         if is("Room.WrongDir") {
             self.tracker.move_failed(now);
+        } else if is("Room.Players") || is("Room.AddPlayer") {
+            self.mobs_here(&info::mob_titles(json), now);
         } else if is("Char.Status") {
             self.status(json);
+        } else if is("Char.Items.List") || is("Char.Items.Add") {
+            self.items_here(json);
         }
         None
+    }
+
+    fn mobs_here(&mut self, titles: &[String], now: Timestamp) {
+        self.note_sightings(titles, now);
+        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
+            self.note_feature(feature::AGGRESSIVE_MOB);
+        }
     }
 
     /// A door changed in place, which brings no Room.Info.
@@ -185,6 +199,15 @@ impl LiveMap {
             let exits = exit_states(&exits);
             self.tracker
                 .update_current_rooms(|room| room.note_exits(exits.clone()));
+        }
+    }
+
+    fn items_here(&mut self, json: &str) {
+        if let Some(items) = RoomItems::read(json) {
+            self.fountain_here = items.fountain || (self.fountain_here && !items.whole);
+        }
+        if self.fountain_here {
+            self.note_feature(feature::FOUNTAIN);
         }
     }
 
