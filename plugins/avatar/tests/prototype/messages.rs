@@ -22,7 +22,7 @@ fn items(transcript: &Transcript, event: &str) -> Vec<String> {
 }
 
 fn equipment_items(transcript: &Transcript) -> Vec<Value> {
-    let equipment = transcript.store("equipment");
+    let equipment = transcript.store("worn");
     let Some(Value::Number(count)) = equipment.get("count") else {
         panic!("{equipment:?}");
     };
@@ -46,7 +46,7 @@ fn equipment_glued_to_the_prompt_is_read() {
          <wielded>           (Magical) (Glowing) (Humming) hand of Buddha\n\
          (599hp 1173m 514v 1046tnl)(-/-)",
     );
-    let equipment = transcript.store("equipment");
+    let equipment = transcript.store("worn");
     let slots: Vec<&Value> = (1..=4)
         .map(|row| &equipment[&format!("{row}.slot")])
         .collect();

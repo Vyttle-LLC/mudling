@@ -33,7 +33,9 @@ end
 
 -- ---- eq ----
 
-local finish_equipment = Readers.count_rows("equipment", "count")
+-- `worn` is the character's own: `gear` and `identify` are shared by a
+-- server's characters, and two characters don't wear the same things.
+local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
     local kind, reader = Readers.step(event, "equipment", finish_equipment)
@@ -47,8 +49,8 @@ function read_equipment(event)
     if item == "<nothing>" then
         item = ""
     end
-    Readers.write(reader, "equipment", index .. ".slot", slot)
-    Readers.write(reader, "equipment", index .. ".item", item)
+    Readers.write(reader, "worn", index .. ".slot", slot)
+    Readers.write(reader, "worn", index .. ".item", item)
     if item ~= "" then
         note_item(function(...)
             Readers.write(reader, ...)
@@ -138,8 +140,8 @@ local function items_at_hand()
             items[Readers.plain(name)] = name
         end
     end
-    for index = 1, mud.state("equipment.count") or 0 do
-        note("equipment." .. index .. ".item")
+    for index = 1, mud.state("worn.count") or 0 do
+        note("worn." .. index .. ".item")
     end
     for index = 1, mud.state("inventory.count") or 0 do
         note("inventory." .. index .. ".name")

@@ -52,7 +52,7 @@ fn the_slots_are_the_games_fifteen_in_its_order() {
 #[test]
 fn equipment_lists_every_row_in_order_empty_slots_included() {
     let transcript = read(include_str!("fixtures/equipment.txt"));
-    let equipment = transcript.store("equipment");
+    let equipment = transcript.store("worn");
     assert_eq!(get(&equipment, "count"), &Value::Number(17.0));
     let rows: Vec<(String, String)> = (1..=17)
         .map(|row| {

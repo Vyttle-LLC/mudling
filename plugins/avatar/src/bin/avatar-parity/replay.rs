@@ -30,8 +30,6 @@ const HOOK_QUEUE: usize = 1 << 22;
 const IDENTIFY: &[u8] = b"Object '";
 const PACED_EVENTS: usize = 4;
 const HOOK_CATCH_UP: Duration = Duration::from_millis(10);
-/// What `equipment`'s rows are saved under; see [`flat_equipment`].
-const EQUIPMENT_META: &str = "plugin.equipment.";
 const GEAR_META: &str = "plugin.gear.";
 const IDENTIFY_META: &str = "plugin.identify.";
 
@@ -234,71 +232,40 @@ fn flat_character(stats: &BTreeMap<String, String>) -> BTreeMap<String, String> 
     flat
 }
 
-/// `equipment` is saved once per server, so the rows left behind are the
-/// last character's: [`run`] takes each character's after each log.
-fn flat_equipment(rows: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+/// A character's `worn` rows as the shared flat keys, without empty slots.
+fn flat_worn(stats: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut flat = BTreeMap::new();
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let total = rows
-        .get("count")
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let total = stats
+        .get("worn.count")
         .and_then(|count| count.parse().ok())
         .unwrap_or(0usize);
     for index in 1..=total {
         let (Some(slot), Some(item)) = (
-            rows.get(&format!("{index}.slot")),
-            rows.get(&format!("{index}.item")),
+            stats.get(&format!("worn.{index}.slot")),
+            stats.get(&format!("worn.{index}.item")),
         ) else {
             continue;
         };
         if item.is_empty() {
             continue;
         }
-        let count = counts.entry(slot.clone()).or_default();
+        let count = counts.entry(slot).or_default();
         *count += 1;
         flat.insert(format!("worn.{slot}.{count}"), plain_item(item));
     }
     flat
 }
 
-/// Reads `equipment`'s rows if `since` this log wrote them.
-fn equipment_read(
-    database: &Database,
-    since: i64,
-) -> Result<Option<BTreeMap<String, String>>, String> {
-    let meta = database
-        .reader()
-        .and_then(|reader| reader.meta())
-        .map_err(|error| error.to_string())?;
-    let fresh = meta
-        .iter()
-        .any(|row| row.key == format!("{EQUIPMENT_META}count") && row.updated.0 >= since);
-    Ok(fresh.then(|| {
-        meta.iter()
-            .filter_map(|row| {
-                let key = row.key.strip_prefix(EQUIPMENT_META)?;
-                Some((key.to_owned(), row_text(&row.value)))
-            })
-            .collect()
-    }))
-}
-
 pub fn run(logs: &[PathBuf], folder: &Path) -> Result<Replay, String> {
     let servers = folder.join("servers");
     let mut clock = 0;
     let mut notices = Vec::new();
-    let mut worn: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for path in logs {
         let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let log = String::from_utf8_lossy(&bytes);
         clock += SESSION_GAP_MS;
-        let since = clock;
         read_log(&log, folder, &mut clock, &mut notices)?;
-        let database = Database::open(&servers, HOST).map_err(|error| error.to_string())?;
-        if let Some(character) = log::character(&log)
-            && let Some(rows) = equipment_read(&database, since)?
-        {
-            worn.insert(character.to_lowercase(), rows);
-        }
     }
 
     let database = Database::open(&servers, HOST).map_err(|error| error.to_string())?;
@@ -322,9 +289,7 @@ pub fn run(logs: &[PathBuf], folder: &Path) -> Result<Replay, String> {
     }
     for (character, stats) in stats {
         let mut flat = flat_character(&stats);
-        if let Some(rows) = worn.get(&character) {
-            flat.extend(flat_equipment(rows));
-        }
+        flat.extend(flat_worn(&stats));
         world.characters.insert(character, flat);
     }
     let mut readings: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();

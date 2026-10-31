@@ -219,7 +219,7 @@ fn the_next_table_ends_one_whose_prompt_is_unknown() {
         "You are using:\n<worn on head>      a Tiamat mask\nhp:46 >\n\
          You have 1 practice sessions left.\ndodge               95   4   -    0\nhp:46 >",
     );
-    assert_eq!(get(&transcript.store("equipment"), "count"), &number(1.0));
+    assert_eq!(get(&transcript.store("worn"), "count"), &number(1.0));
     assert!(
         transcript.store("skills").is_empty(),
         "the last waits for a prompt or the next table"

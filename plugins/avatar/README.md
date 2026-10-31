@@ -119,7 +119,8 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 | `<n>.detail` | `modifies hit roll by 3 for 6 hours`, when given |
 | `count` | entries; last. `0` when nothing is on. |
 
-**`equipment`**, from `equipment`; every row, in the game's order:
+**`worn`**, the character's own, from `equipment`; every row, in the game's
+order:
 
 | Key | Value |
 | --- | --- |

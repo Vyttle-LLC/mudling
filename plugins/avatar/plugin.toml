@@ -12,7 +12,7 @@ permissions = [
     "write_store:character",
     "write_store:skills",
     "write_store:affects",
-    "write_store:equipment",
+    "write_store:worn",
     "write_store:identify",
     "write_store:gear",
 ]

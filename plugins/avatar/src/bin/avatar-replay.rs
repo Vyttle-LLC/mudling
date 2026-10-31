@@ -73,7 +73,7 @@ impl Reader {
             ("skills", "practice.read") => Reader::Practice,
             ("skills", "slist.read") => Reader::Slist,
             ("affects", "count") => Reader::Affects,
-            ("equipment", "count") => Reader::Equipment,
+            ("worn", "count") => Reader::Equipment,
             ("identify", "read") => Reader::Identify,
             ("gear", key) if key.starts_with("slot.") => Reader::Examine,
             _ => return None,

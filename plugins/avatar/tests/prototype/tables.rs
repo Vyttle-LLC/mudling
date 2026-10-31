@@ -2,7 +2,7 @@
 
 use crate::game::Game;
 use mudling_core::plugin::luau::Value;
-use mudling_core::store::{CharactersState, GearState, Versioned};
+use mudling_core::store::{CharactersState, Versioned};
 use mudling_plugin_avatar::Transcript;
 use std::collections::HashMap;
 
@@ -133,10 +133,7 @@ fn a_command_mid_line_leaves_the_line_whole() {
     );
     game.close();
     assert_eq!(game.terminal()[..3], ["You are", "look", " using:"]);
-    let worn = game
-        .hub
-        .read(|gear: &Versioned<GearState>| gear.value().0.get("equipment.count").cloned());
-    assert_eq!(worn, number(2.0));
+    assert_eq!(stored(&game, "worn.count"), number(2.0));
 }
 
 #[test]
@@ -187,10 +184,7 @@ fn a_table_the_player_asked_for_shows_and_is_read() {
     game.line("(1h-1m-1v-1)(-/-)");
     game.close();
     assert_eq!(game.terminal()[..3], table);
-    let worn = game
-        .hub
-        .read(|gear: &Versioned<GearState>| gear.value().0.get("equipment.count").cloned());
-    assert_eq!(worn, number(2.0));
+    assert_eq!(stored(&game, "worn.count"), number(2.0));
 }
 
 #[test]

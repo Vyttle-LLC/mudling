@@ -3,7 +3,7 @@
 
 use mudling_core::defaults::detect::Source;
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::Timestamp;
+use mudling_core::persist::{Database, Timestamp};
 use mudling_core::plugin::luau::Value;
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
@@ -73,6 +73,57 @@ fn the_login_prompts_are_each_answered_once() {
     assert_eq!(banner.trim(), "");
     assert!(!banner.is_empty(), "the banner wants a blank line");
     assert_eq!(answer(b"Your Password: "), "", "a second ask is a refusal");
+}
+
+/// One connection as `name`, reading `text`; what's saved stays in `folder`.
+fn play_as(name: &str, folder: &Path, text: &'static [u8]) -> Vec<(String, String)> {
+    let plugin = mudling_plugin_avatar::load();
+    let config = SessionConfig {
+        enabled: vec![plugin.id().clone()],
+        plugins: vec![plugin],
+        credentials: Some(Credentials {
+            name: name.to_owned(),
+            password: "pass-word".to_owned(),
+        }),
+        ..SessionConfig::new(folder, HOST, 4000)
+    };
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let typing = Arc::new(Mutex::new(Typing::default()));
+    let mut engine = Engine::open(config, hub, typing).unwrap();
+    engine.start_connection().unwrap();
+    let now = Timestamp(0);
+    engine.receive(Bytes::from_static(text), now).unwrap();
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+    engine.finish().unwrap();
+    let database = Database::open(&folder.join("servers"), HOST).unwrap();
+    let stats = database.reader().unwrap().characters().unwrap().stats;
+    stats
+        .into_iter()
+        .filter(|stat| stat.key.starts_with("worn.") && stat.key.ends_with(".item"))
+        .map(|stat| (stat.character_id, stat.value))
+        .collect()
+}
+
+#[test]
+fn each_character_keeps_what_it_wears() {
+    let folder = tempfile::tempdir().unwrap();
+    play_as(
+        "Fen",
+        folder.path(),
+        b"You are using:\r\n<worn on head>      a red hat\r\n(1h-1m-1v-1)(-/-)\r\n",
+    );
+    let saved = play_as(
+        "Ash",
+        folder.path(),
+        b"You are using:\r\n<worn on feet>      blue boots\r\n(1h-1m-1v-1)(-/-)\r\n",
+    );
+    assert_eq!(
+        saved,
+        [
+            ("ash".to_owned(), "\"blue boots\"".to_owned()),
+            ("fen".to_owned(), "\"a red hat\"".to_owned()),
+        ]
+    );
 }
 
 #[test]
