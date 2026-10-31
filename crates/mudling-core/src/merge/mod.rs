@@ -10,6 +10,9 @@
 //! in each server's `tombstones.json` for 90 days. A device offline for longer
 //! brings back what was deleted while it was away.
 //!
+//! Rooms with no game number are named by the device that found them, so one
+//! room can reach a merge under two ids. `rooms.rs` says when they're united.
+//!
 //! Files with no records are merged file by file against the commit both sides
 //! share. `secrets.vault` has a merge of its own, which needs no keys.
 //!
@@ -52,6 +55,7 @@
 
 mod files;
 mod records;
+mod rooms;
 mod secrets;
 
 pub(crate) use files::three_way;
@@ -62,9 +66,10 @@ mod tests;
 
 use crate::git::{self, GitError, Oid};
 use crate::persist::{self, Batch, Database, Writer};
-use crate::repo::format::tombstone_cutoff;
+use crate::repo::format::{ServerRows, tombstone_cutoff};
 use crate::repo::{self, AppSettings, Repo};
 use crate::vault;
+use records::merge_server;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -120,8 +125,8 @@ pub fn pull(
 }
 
 /// Brings this device's data into the repo just set, which may already hold
-/// another device's: the repo's records go into SQLite first, keeping whatever
-/// is newer, and the export that follows writes the union. So no file is lost
+/// another device's: SQLite and the repo's records merge as two sides do, into
+/// SQLite first, and the export that follows writes the result. So no file is lost
 /// to an export that hasn't seen it, and the only records that go are the ones
 /// a tombstone says were deleted on purpose. `stores` holds a database for
 /// every server on this device, and an empty one for each server only the repo
@@ -132,7 +137,15 @@ pub fn join(
     settings: &AppSettings,
     stores: &[Store<'_>],
 ) -> Result<Joined, Error> {
-    import(repo, stores)?;
+    for store in stores {
+        if let Some(held) = repo.server_rows(store.server_id)? {
+            let local = ServerRows::load(&store.database.reader()?)?;
+            store
+                .writer
+                .submit(merge_server(local, held).into_batch())?;
+            store.writer.flush()?;
+        }
+    }
     let held = repo.settings()?;
     let settings = if held.updated > settings.updated {
         held

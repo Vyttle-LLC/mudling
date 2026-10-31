@@ -4,7 +4,7 @@
 use super::buildings::MapDoor;
 use super::geometry::{Direction, GridPoint};
 use super::info::RoomInfo;
-use super::layout::{Layout, Step, UNNUMBERED_IDS};
+use super::layout::{Layout, Step, draw_id_prefix, first_id, id_prefix, is_id_prefix};
 use super::mobs::{MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
 use super::route::{WalkStep, route};
@@ -19,6 +19,8 @@ use std::sync::Arc;
 /// Meta keys the map keeps its own state under.
 const CURRENT_ROOM: &str = "map.current-room";
 pub(crate) const ISLANDS: &str = "map.islands";
+/// This device's own: it never syncs, because it's what sets devices apart.
+const ID_PREFIX: &str = "map.id-prefix";
 
 /// One server's map, shared by every character on it, kept up to date from
 /// GMCP, the game's text and the player's commands.
@@ -38,6 +40,7 @@ pub struct LiveMap {
     /// The map as last committed.
     committed: Layout,
     committed_whereabouts: Whereabouts,
+    id_prefix_saved: bool,
     revision: u64,
     derived: Option<Derived>,
     area_names: HashMap<String, AreaName>,
@@ -107,7 +110,7 @@ pub struct Building {
 
 impl LiveMap {
     pub fn new(rules: Box<dyn MapRules>) -> LiveMap {
-        let layout = Layout::new(first_id(&*rules));
+        let layout = Layout::new(first_id(draw_id_prefix()));
         LiveMap::with_layout(rules, layout, MobMemory::default())
     }
 
@@ -119,21 +122,27 @@ impl LiveMap {
         marks: &[MobMark],
         meta: &[Meta],
     ) -> LiveMap {
-        let first = first_id(&*rules);
-        let mut layout = Layout::new(first);
-        for room in read_rooms(map, &*rules) {
-            layout.next_id = layout.next_id.max(room.id + 1);
-            layout.insert(room);
-        }
         let value = |key: &str| {
             meta.iter()
                 .find(|entry| entry.key == key)
                 .and_then(|entry| entry.value.parse::<i64>().ok())
         };
+        let saved_prefix = value(ID_PREFIX).filter(|prefix| is_id_prefix(*prefix));
+        let prefix = saved_prefix.unwrap_or_else(draw_id_prefix);
+        let mut layout = Layout::new(first_id(prefix));
+        for room in read_rooms(map, &*rules) {
+            // Rooms from other devices have prefixes of their own.
+            if id_prefix(room.id) == prefix {
+                layout.next_id = layout.next_id.max(room.id + 1);
+            }
+            layout.insert(room);
+        }
         layout.current = value(CURRENT_ROOM).filter(|id| layout.contains(*id));
         layout.islands = value(ISLANDS).unwrap_or(0);
         layout.clear_dirty();
-        LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks))
+        let mut map = LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks));
+        map.id_prefix_saved = saved_prefix.is_some();
+        map
     }
 
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {
@@ -147,6 +156,7 @@ impl LiveMap {
             maze_line: false,
             committed: layout,
             committed_whereabouts: Whereabouts::default(),
+            id_prefix_saved: false,
             revision: 0,
             derived: None,
             area_names: HashMap::new(),
@@ -504,6 +514,11 @@ impl LiveMap {
             }
             change.marks.push(mark);
         }
+        // With the first rows, so no room outlives the prefix that named it.
+        if !self.id_prefix_saved && !batch.is_empty() {
+            meta(&mut batch, ID_PREFIX, id_prefix(layout.next_id), now);
+            self.id_prefix_saved = true;
+        }
 
         // While unsure, every explanation's changes count from the last
         // sure map, so the marks stay until the map is sure again.
@@ -533,13 +548,6 @@ impl LiveMap {
         let mut batch = Batch::new();
         batch.save_map_version(kind, label, now);
         batch
-    }
-}
-
-fn first_id(rules: &dyn MapRules) -> RoomId {
-    match rules.identity() {
-        RoomIdentity::Number => UNNUMBERED_IDS,
-        RoomIdentity::Text => 1,
     }
 }
 

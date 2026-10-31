@@ -190,7 +190,7 @@ pub(crate) struct ServerRows {
 }
 
 impl ServerRows {
-    pub(super) fn load(reader: &Reader) -> Result<ServerRows, Error> {
+    pub(crate) fn load(reader: &Reader) -> Result<ServerRows, Error> {
         let cutoff = tombstone_cutoff();
         let mut tombstones = reader.tombstones()?;
         tombstones.retain(|tombstone| tombstone.deleted >= cutoff && syncs(&tombstone.key));
@@ -442,7 +442,7 @@ impl ServerRows {
     /// The batch that brings a database up to these rows without overruling
     /// anything newer in it. Deletes go first and parents before children,
     /// so a record meets the tombstones and rows it depends on.
-    pub(super) fn into_batch(self) -> Batch {
+    pub(crate) fn into_batch(self) -> Batch {
         let mut batch = Batch::new();
         for tombstone in self.tombstones {
             batch.bury(tombstone);

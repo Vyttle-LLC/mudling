@@ -201,6 +201,27 @@ impl Repo {
         })
     }
 
+    /// The records the folder holds for a server, or `None` if it isn't listed.
+    pub(crate) fn server_rows(&self, server_id: &str) -> Result<Option<ServerRows>, Error> {
+        let list = self.server_list()?;
+        let Some((listed, folder)) = list
+            .with_folders()
+            .find(|(entry, _)| entry.server.id == server_id)
+        else {
+            return Ok(None);
+        };
+        let mut files = Vec::new();
+        for relative in self.server_files(&folder)? {
+            let path = self.root.join(&folder).join(&relative);
+            let bytes = fs::read(&path).map_err(|error| Error::io(&path, error))?;
+            files.push((relative, bytes));
+        }
+        let held = files
+            .iter()
+            .map(|(path, bytes)| (path.as_path(), &bytes[..]));
+        ServerRows::parse(listed, held).map(Some)
+    }
+
     /// Writes `files` to the folder and removes `gone`, for a merge. Paths
     /// are relative to the repo's root.
     pub(crate) fn replace_files(

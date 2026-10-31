@@ -17,9 +17,12 @@
 //!   other things in a MUD
 //! - a prompt with nothing after the word and no `enter`, `type` or `your`
 //!   before it, such as `^Password required`
-//! - in a file that isn't JSON or `notes.txt`, a value without quotes
-//! - anything in the game's text (map, characters, gear, mobs), in
-//!   `settings.json`'s shortcuts, or in a file that isn't UTF-8
+//! - in a file that isn't strict JSON or `notes.txt`, a value without quotes,
+//!   or a quoted key, as in JSON with comments or a byte order mark, a Luau
+//!   `["password"] = "x"`, or YAML
+//! - anything in the game's text (map, characters, gear, mobs), which includes
+//!   the notes a player types on a room, in `settings.json`'s shortcuts, or in
+//!   a file that isn't UTF-8
 //!
 //! A field named for a password that holds a number trips it too, such as
 //! `password_length`, which would need renaming before it could be pushed.

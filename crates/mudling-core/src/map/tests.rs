@@ -991,9 +991,10 @@ fn an_attacker_marks_its_whole_kind_and_the_room() {
     let commit = walk.map.commit(walk.now()).unwrap();
     let rows = written(&commit.batch);
     assert!(rows.contains(r#"Upsert(MobMark(MobMark { name: "wolf", mark: "aggressive""#));
-    assert!(
-        rows.contains(r#"Upsert(RoomFeature(RoomFeature { room_id: 1, feature: "aggressive-mob""#)
-    );
+    let room_id = walk.current().id;
+    assert!(rows.contains(&format!(
+        r#"Upsert(RoomFeature(RoomFeature {{ room_id: {room_id}, feature: "aggressive-mob""#
+    )));
 }
 
 #[test]
@@ -1166,7 +1167,8 @@ fn a_move_writes_only_the_rows_it_changed() {
         1,
         "the meadow's own row is unchanged:\n{rows}"
     );
-    assert!(rows.contains("Upsert(Room(Room { id: 2, name: \"A barn\""));
+    let barn = walk.id_of("A barn");
+    assert!(rows.contains(&format!("Upsert(Room(Room {{ id: {barn}, name: \"A barn\"")));
     assert_eq!(count(&rows, "Upsert(Link("), 2, "the link each way");
     assert_eq!(count(&rows, "Upsert(Exit("), 1, "the barn's exit");
     assert_eq!(commit.change.rooms.len(), 2);
@@ -1356,7 +1358,9 @@ fn a_cleared_note_is_deleted() {
     let commit = walk.map.commit(walk.now()).unwrap();
     let written = written(&commit.batch);
     assert!(
-        written.starts_with("Batch { changes: [Delete { key: RoomNote(1),"),
+        written.starts_with(&format!(
+            "Batch {{ changes: [Delete {{ key: RoomNote({meadow}),"
+        )),
         "{written}"
     );
     assert_eq!(commit.batch.changes.len(), 1);

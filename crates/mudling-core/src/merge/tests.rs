@@ -2,6 +2,7 @@
 //! here can reach a real remote.
 
 use super::*;
+use crate::map::{LiveMap, MapRules, RoomIdentity};
 use crate::persist::{
     Batch, Exit, GearCopy, Key, Meta, NOTEPAD, Room, Server, Sighting, Timestamp, Tombstone,
 };
@@ -199,6 +200,428 @@ fn remote_tip(world: &World) -> Option<Oid> {
         .unwrap()
         .refname_to_id("refs/heads/main")
         .ok()
+}
+
+/// A game that gives its rooms no numbers.
+struct NoNumbers;
+
+impl MapRules for NoNumbers {
+    fn identity(&self) -> RoomIdentity {
+        RoomIdentity::Text
+    }
+}
+
+/// A step of a walk: how the player got there, then the room's name and exits.
+type Step<'a> = (Option<&'a str>, &'a str, &'a [&'a str]);
+
+impl Device {
+    fn with_server(root: &Path, name: &str) -> Device {
+        let device = Device::new(root, name);
+        device.apply(|batch| {
+            batch.upsert(server("{}"));
+        });
+        device
+    }
+
+    fn map(&self) -> LiveMap {
+        let reader = self.database.reader().unwrap();
+        LiveMap::load(
+            Box::new(NoNumbers),
+            &reader.map().unwrap(),
+            &reader.mob_marks().unwrap(),
+            &reader.meta().unwrap(),
+        )
+    }
+
+    /// Plays a walk through the real map, as a session writes it.
+    fn walk(&self, steps: &[Step<'_>]) {
+        let mut map = self.map();
+        for (direction, name, exits) in steps {
+            let now = Timestamp::now();
+            if let Some(direction) = direction {
+                map.sent(direction, now);
+            }
+            let exits: Vec<String> = exits
+                .iter()
+                .map(|exit| format!("\"{exit}\": \"O\""))
+                .collect();
+            let info = format!(
+                r#"{{"name": "{name}", "zone": "The Meadow", "environment": "field",
+                    "exits": {{{}}}, "details": []}}"#,
+                exits.join(", ")
+            );
+            map.room_info(&info, now).unwrap();
+            if let Some(commit) = map.commit(now) {
+                self.writer.submit(commit.batch).unwrap();
+            }
+        }
+        self.writer.flush().unwrap();
+    }
+
+    fn sorted_rooms(&self) -> Vec<String> {
+        let mut names = self.room_names();
+        names.sort();
+        names
+    }
+
+    /// Links by the names of the rooms they join.
+    fn links(&self) -> Vec<(String, String)> {
+        let map = self.database.reader().unwrap().map().unwrap();
+        let name = |id: i64| {
+            let room = map.rooms.iter().find(|room| room.id == id).unwrap();
+            room.name.clone()
+        };
+        let mut links: Vec<(String, String)> = map
+            .links
+            .iter()
+            .map(|link| (name(link.room_id), name(link.to_room)))
+            .collect();
+        links.sort();
+        links
+    }
+}
+
+fn two_explorers() -> (TempDir, Device, Device) {
+    let folder = TempDir::new().unwrap();
+    Repository::init_bare(folder.path().join("remote.git")).unwrap();
+    let mac = Device::with_server(folder.path(), "mac");
+    let ipad = Device::with_server(folder.path(), "ipad");
+    (folder, mac, ipad)
+}
+
+/// Syncs until a round changes nothing, so a merge that keeps rewriting
+/// itself fails here.
+fn converge(mac: &Device, ipad: &Device) {
+    for _ in 0..4 {
+        mac.sync();
+        ipad.sync();
+    }
+    let settled = (
+        mac.git.branch_tip(BRANCH).unwrap(),
+        ipad.git.branch_tip(BRANCH).unwrap(),
+    );
+    assert_eq!(settled.0, settled.1);
+    mac.sync();
+    ipad.sync();
+    assert_eq!(mac.git.branch_tip(BRANCH).unwrap(), settled.0, "churn");
+}
+
+#[test]
+fn devices_give_different_rooms_different_ids_and_keep_them_all() {
+    let (_folder, mac, ipad) = two_explorers();
+    mac.walk(&[
+        (None, "The Mac's hill", &["e"]),
+        (Some("e"), "A barn", &["w"]),
+    ]);
+    ipad.walk(&[
+        (None, "The iPad's lake", &["e"]),
+        (Some("e"), "A pier", &["w"]),
+    ]);
+
+    converge(&mac, &ipad);
+
+    let names = ["A barn", "A pier", "The Mac's hill", "The iPad's lake"];
+    assert_eq!(mac.sorted_rooms(), names);
+    assert_eq!(ipad.sorted_rooms(), names);
+    assert_eq!(mac.links(), ipad.links());
+    assert_eq!(mac.links().len(), 4);
+}
+
+#[test]
+fn devices_that_found_the_same_rooms_end_with_one_copy() {
+    let (_folder, mac, ipad) = two_explorers();
+    let walk: &[Step<'_>] = &[
+        (None, "A quiet road", &["n"]),
+        (Some("n"), "A hill", &["s"]),
+    ];
+    mac.walk(walk);
+    ipad.walk(walk);
+
+    converge(&mac, &ipad);
+
+    assert_eq!(mac.sorted_rooms(), ["A hill", "A quiet road"]);
+    assert_eq!(ipad.sorted_rooms(), ["A hill", "A quiet road"]);
+    assert_eq!(mac.rooms(), ipad.rooms());
+    let road_and_hill = vec![
+        ("A hill".to_owned(), "A quiet road".to_owned()),
+        ("A quiet road".to_owned(), "A hill".to_owned()),
+    ];
+    assert_eq!(mac.links(), road_and_hill);
+    assert_eq!(ipad.links(), road_and_hill);
+}
+
+#[test]
+fn a_mix_of_shared_and_new_rooms_keeps_every_room_and_way_between_them() {
+    let (_folder, mac, ipad) = two_explorers();
+    let road: &[&str] = &["n", "e"];
+    mac.walk(&[
+        (None, "A quiet road", road),
+        (Some("n"), "The Mac's hill", &["s"]),
+    ]);
+    ipad.walk(&[
+        (None, "A quiet road", road),
+        (Some("e"), "The iPad's lake", &["w"]),
+    ]);
+
+    converge(&mac, &ipad);
+
+    let names = ["A quiet road", "The Mac's hill", "The iPad's lake"];
+    assert_eq!(mac.sorted_rooms(), names);
+    assert_eq!(ipad.sorted_rooms(), names);
+    assert_eq!(mac.links(), ipad.links());
+    assert_eq!(mac.links().len(), 4);
+}
+
+#[test]
+fn what_hung_off_the_retired_id_moves_to_the_room_that_stays() {
+    let (_folder, mac, ipad) = two_explorers();
+    let walk: &[Step<'_>] = &[(None, "A quiet road", &["n"])];
+    mac.walk(walk);
+    ipad.walk(walk);
+    for device in [&mac, &ipad] {
+        let mut map = device.map();
+        let id = device.rooms()[0].id;
+        let name = if std::ptr::eq(device, &mac) {
+            "water"
+        } else {
+            "shop"
+        };
+        map.set_feature(id, name, true);
+        device.apply(|batch| {
+            *batch = map.commit(Timestamp::now()).unwrap().batch;
+            batch.upsert(sighting(id, name));
+        });
+    }
+
+    converge(&mac, &ipad);
+
+    for device in [&mac, &ipad] {
+        let map = device.database.reader().unwrap().map().unwrap();
+        let [room] = map.rooms.as_slice() else {
+            panic!("one room");
+        };
+        assert_eq!(map.exits.len(), 1);
+        assert_eq!(map.features.len(), 2);
+        assert_eq!(map.sightings.len(), 2);
+        for sighting in &map.sightings {
+            assert_eq!(sighting.room_id, room.id);
+        }
+    }
+}
+
+#[test]
+fn a_device_that_played_on_keeps_what_it_added_to_a_room_since_retired() {
+    let (_folder, mac, ipad) = two_explorers();
+    let walk: &[Step<'_>] = &[(None, "A quiet road", &["n"])];
+    let lower_and_higher = {
+        mac.walk(walk);
+        ipad.walk(walk);
+        if mac.rooms()[0].id < ipad.rooms()[0].id {
+            (&mac, &ipad)
+        } else {
+            (&ipad, &mac)
+        }
+    };
+    let (lower, higher) = lower_and_higher;
+    higher.sync();
+    lower.sync();
+    let id = higher.rooms()[0].id;
+    higher.apply(|batch| {
+        batch.upsert(sighting(id, "a heron"));
+    });
+
+    converge(&mac, &ipad);
+
+    for device in [&mac, &ipad] {
+        assert_eq!(device.rooms().len(), 1);
+        let sightings = device.database.reader().unwrap().map().unwrap().sightings;
+        assert_eq!(sightings.len(), 1, "the heron moved with its room");
+    }
+}
+
+#[test]
+fn look_alikes_all_stay_when_either_side_has_more_than_one() {
+    let (_folder, mac, ipad) = two_explorers();
+    let tunnel: &[&str] = &["e", "w"];
+    mac.walk(&[
+        (None, "A dark tunnel", tunnel),
+        (Some("e"), "A dark tunnel", tunnel),
+    ]);
+    ipad.walk(&[(None, "A dark tunnel", tunnel)]);
+
+    converge(&mac, &ipad);
+
+    assert_eq!(mac.rooms().len(), 3);
+    assert_eq!(ipad.rooms().len(), 3);
+    assert_eq!(mac.rooms(), ipad.rooms());
+}
+
+#[test]
+fn a_room_with_a_game_number_is_never_united() {
+    let (_folder, mac, ipad) = two_explorers();
+    mac.apply(|batch| {
+        batch.upsert(room(1, "A quiet road", T2));
+    });
+    ipad.apply(|batch| {
+        batch.upsert(room(2, "A quiet road", T2));
+    });
+
+    converge(&mac, &ipad);
+
+    assert_eq!(mac.rooms().len(), 2);
+}
+
+#[test]
+fn a_room_deleted_on_purpose_is_not_brought_back_by_a_union() {
+    let (_folder, mac, ipad) = two_explorers();
+    let walk: &[Step<'_>] = &[(None, "A quiet road", &["n"])];
+    mac.walk(walk);
+    ipad.walk(walk);
+    mac.apply(|batch| {
+        batch.delete(Key::Room(mac.rooms()[0].id));
+    });
+
+    converge(&mac, &ipad);
+
+    assert_eq!(mac.sorted_rooms(), ipad.sorted_rooms());
+    assert_eq!(mac.rooms().len(), 1, "the iPad's copy was never deleted");
+}
+
+#[test]
+fn a_devices_id_prefix_stays_on_the_device_and_survives_a_merge() {
+    let (_folder, mac, ipad) = two_explorers();
+    mac.walk(&[(None, "The Mac's hill", &["e"])]);
+    ipad.walk(&[(None, "The iPad's lake", &["e"])]);
+    let prefix_of = |id: i64| id >> 28;
+    let ours = prefix_of(mac.rooms()[0].id);
+    assert_ne!(ours, prefix_of(ipad.rooms()[0].id));
+
+    converge(&mac, &ipad);
+    mac.walk(&[
+        (None, "The Mac's hill", &["e"]),
+        (Some("e"), "A barn", &["w"]),
+    ]);
+
+    let barn = mac.rooms().into_iter().find(|room| room.name == "A barn");
+    assert_eq!(prefix_of(barn.unwrap().id), ours);
+    assert!(mac.rooms().iter().all(|room| room.id < 1 << 53));
+    let tip = mac.git.branch_tip(BRANCH).unwrap().unwrap();
+    for bytes in mac.git.files_at(tip).unwrap().values() {
+        assert!(!String::from_utf8_lossy(bytes).contains("map.id-prefix"));
+    }
+}
+
+#[test]
+fn undoing_a_restore_keeps_a_sighting_through_a_real_merge() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.save_map_version("manual", "Before the heron", T1);
+        batch.upsert(sighting(1, "a heron"));
+        batch.save_map_version("manual", "With the heron", T2);
+    });
+    settle(&world);
+    let versions = world.mac.database.reader().unwrap().map_versions().unwrap();
+    let id_of = |label: &str| versions.iter().find(|v| v.label == label).unwrap().id;
+    let (without, with) = (id_of("Before the heron"), id_of("With the heron"));
+
+    world.mac.apply(|batch| {
+        batch.restore_map_version(without, Timestamp::now());
+    });
+    world.mac.sync();
+    world.ipad.sync();
+    assert!(
+        world
+            .ipad
+            .database
+            .reader()
+            .unwrap()
+            .map()
+            .unwrap()
+            .sightings
+            .is_empty()
+    );
+    world.mac.apply(|batch| {
+        batch.restore_map_version(with, Timestamp::now());
+    });
+    world.ipad.apply(|batch| {
+        batch.upsert(room(2, "iPad's lake", Timestamp::now()));
+    });
+
+    settle(&world);
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        let map = device.database.reader().unwrap().map().unwrap();
+        assert_eq!(map.sightings.len(), 1, "{:?}", map.rooms);
+        assert_eq!(map.rooms.len(), 2);
+    }
+}
+
+#[test]
+fn undoing_a_restore_brings_back_a_room_with_its_sightings() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.save_map_version("manual", "Before the hill", T1);
+        batch.upsert(room(2, "A hill", T2));
+        batch.upsert(sighting(2, "a heron"));
+        batch.save_map_version("manual", "With the hill", T2);
+    });
+    world.mac.sync();
+    let versions = world.mac.database.reader().unwrap().map_versions().unwrap();
+    let id_of = |label: &str| versions.iter().find(|v| v.label == label).unwrap().id;
+    let (without, with) = (id_of("Before the hill"), id_of("With the hill"));
+
+    world.mac.apply(|batch| {
+        batch.restore_map_version(without, Timestamp::now());
+    });
+    world.mac.apply(|batch| {
+        batch.restore_map_version(with, Timestamp::now());
+    });
+    world.ipad.apply(|batch| {
+        batch.upsert(room(3, "iPad's lake", T2));
+    });
+
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        let map = device.database.reader().unwrap().map().unwrap();
+        assert_eq!(map.rooms.len(), 3);
+        assert_eq!(map.sightings.len(), 1);
+    }
+}
+
+#[test]
+fn setting_a_repo_keeps_a_devices_own_rooms_and_unites_the_shared_ones() {
+    let folder = TempDir::new().unwrap();
+    Repository::init_bare(folder.path().join("remote.git")).unwrap();
+    let mac = Device::with_server(folder.path(), "mac");
+    mac.walk(&[
+        (None, "A quiet road", &["e"]),
+        (Some("e"), "The Mac's hill", &["w"]),
+    ]);
+    mac.sync();
+
+    let ipad = Device::with_server(folder.path(), "ipad");
+    ipad.walk(&[(None, "A dark cave", &["n"])]);
+    ipad.walk(&[(None, "A quiet road", &["e"])]);
+    let theirs = ipad.fetch().unwrap();
+    pull(&ipad.git, &ipad.repo, theirs, &[]).unwrap();
+    let joined = join(
+        &ipad.git,
+        &ipad.repo,
+        &AppSettings::default(),
+        &ipad.stores(),
+    )
+    .unwrap();
+
+    let names = ["A dark cave", "A quiet road", "The Mac's hill"];
+    assert_eq!(ipad.sorted_rooms(), names);
+    assert!(joined.commit.is_some());
+
+    ipad.git.push(REMOTE, BRANCH).unwrap();
+    converge(&mac, &ipad);
+    assert_eq!(mac.sorted_rooms(), names);
+    assert_eq!(mac.rooms(), ipad.rooms());
 }
 
 #[test]
@@ -474,6 +897,7 @@ fn a_tombstone_past_its_life_leaves_the_repo_and_then_the_database() {
     });
 
     world.mac.sync();
+    world.mac.writer.flush().unwrap();
 
     let file = world.mac.folder.join(SERVER).join("tombstones.json");
     assert!(!fs::read_to_string(file).unwrap().contains("\"room\""));

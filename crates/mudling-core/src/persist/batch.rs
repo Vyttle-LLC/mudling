@@ -499,6 +499,9 @@ fn save_map_version(
 /// Clears the live map and copies a version back in. A version that
 /// doesn't exist fails the batch rather than leave the map empty. Rows the
 /// version doesn't hold are deletes like any other, so they get tombstones.
+/// A sighting brought back keeps its time unless a tombstone for it or its
+/// room is newer, which another device may hold too: bringing it back is a
+/// change of its own, so it takes that tombstone's time and outranks it.
 fn restore_map_version(
     tx: &Transaction<'_>,
     version_id: i64,
@@ -529,13 +532,18 @@ fn restore_map_version(
             live,
             version,
             columns,
+            key_json,
             restore_stamps_updated,
             ..
         } = table;
         let updated = if restore_stamps_updated {
-            "?2"
+            "?2".to_owned()
         } else {
-            "updated"
+            let deleted = |key: &str| {
+                format!("coalesce((SELECT deleted FROM tombstones WHERE key = {key}), 0)")
+            };
+            let (own, room) = (deleted(key_json), deleted("json_object('room', room_id)"));
+            format!("max(updated, {own}, {room})")
         };
         let mut insert = tx.prepare_cached(&format!(
             "INSERT INTO {live} ({columns}, updated) SELECT {columns}, {updated} FROM {version} WHERE version_id = ?1"
