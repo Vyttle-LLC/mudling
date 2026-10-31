@@ -218,7 +218,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .filter_map(|button| button.title.as_deref())
                 .collect()
         });
-        let room_buttons = ["Go north", "Open the door and go east", "Get a rock"];
+        let room_buttons = ["Go north", "Open the door and go east", "Get a stone"];
         checks.push(Check {
             name: "the Room panel's buttons carry their names",
             passed: room_buttons.iter().all(|name| named_buttons.contains(name)),

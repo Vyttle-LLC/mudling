@@ -699,16 +699,16 @@ mod tests {
         ];
         let enabled = [plugins[0].id().clone(), plugins[1].id().clone()];
         let verbs = Verbs::of(&plugins, &enabled);
-        assert_eq!(verbs.command("kill", "rat"), "slay rat");
-        assert_eq!(verbs.command("get", "rock"), "take rock");
-        assert_eq!(verbs.command("look", "rat"), "look rat");
+        assert_eq!(verbs.command("kill", "wolf"), "slay wolf");
+        assert_eq!(verbs.command("get", "stone"), "take stone");
+        assert_eq!(verbs.command("look", "wolf"), "look wolf");
     }
 
     #[test]
     fn a_name_from_the_server_cant_add_a_command() {
         let verbs = Verbs::default();
-        assert_eq!(verbs.command("get", "rock;drop all"), "get rock");
-        assert_eq!(verbs.command("get", "rock\nquit"), "get rock");
+        assert_eq!(verbs.command("get", "stone;drop all"), "get stone");
+        assert_eq!(verbs.command("get", "stone\nquit"), "get stone");
     }
 
     #[test]
@@ -716,7 +716,7 @@ mod tests {
         let mut titles: Vec<(String, i64)> = (0..MOST_SIGHTINGS as i64)
             .map(|n| (format!("mob {n}"), n + 1))
             .collect();
-        titles.push(("(Glowing) a giant Rat".to_owned(), 100));
+        titles.push(("(Marked) a grey Wolf".to_owned(), 100));
         titles.push(("forgotten".to_owned(), 0));
         let borrowed: Vec<(&str, i64)> = titles.iter().map(|(t, w)| (t.as_str(), *w)).collect();
         let room = room_with(&borrowed, r#"{"num": 1, "name": "A road"}"#);
@@ -726,14 +726,14 @@ mod tests {
             set: true,
         };
         let mobs = MobsState::default().with_changes(&[
-            mark("rat", Mark::Aggressive),
-            mark("a giant rat", Mark::Gear),
-            mark("gian", Mark::Aggressive),
+            mark("wolf", Mark::Aggressive),
+            mark("a grey wolf", Mark::Gear),
+            mark("gre", Mark::Aggressive),
         ]);
 
         let seen = sightings(&room, &mobs);
         assert_eq!(seen.len(), MOST_SIGHTINGS);
-        assert_eq!(seen[0].name, "(Glowing) a giant Rat");
+        assert_eq!(seen[0].name, "(Marked) a grey Wolf");
         assert_eq!(seen[0].marks, [Mark::Aggressive, Mark::Gear]);
         assert!(!seen.iter().any(|mob| mob.name == "forgotten"));
     }
@@ -775,18 +775,18 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("Go north").is_some());
         assert!(
-            cx.debug_bounds("Kill A bright spirit of friendship")
+            cx.debug_bounds("Kill A traveller resting by the wall")
                 .is_none()
         );
-        assert!(cx.debug_bounds("Get a rock").is_none());
+        assert!(cx.debug_bounds("Get a stone").is_none());
 
         panel.update(cx, |panel, cx| panel.show_contents(contents, cx));
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("Kill A bright spirit of friendship")
+            cx.debug_bounds("Kill A traveller resting by the wall")
                 .is_some()
         );
-        assert!(cx.debug_bounds("Get a rock").is_some());
+        assert!(cx.debug_bounds("Get a stone").is_some());
     }
 
     #[gpui::test]
@@ -810,15 +810,15 @@ mod tests {
         let (panel, cx, sent) = panel_window(cx);
         fill(&panel, cx);
         for name in [
-            "Look at A bright spirit of friendship",
-            "Kill A bright spirit of friendship",
-            "Get some leaves",
+            "Look at A traveller resting by the wall",
+            "Kill A traveller resting by the wall",
+            "Get some coins",
         ] {
             let button = cx.debug_bounds(name).unwrap().center();
             cx.simulate_click(button, Modifiers::none());
         }
         let commands: Vec<_> = sent.borrow().iter().map(|(c, _)| c.clone()).collect();
-        assert_eq!(commands, ["look spirit", "kill spirit", "get leaves"]);
+        assert_eq!(commands, ["look traveller", "kill traveller", "get coins"]);
     }
 
     #[gpui::test]

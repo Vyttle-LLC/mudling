@@ -51,15 +51,15 @@ const SCROLL_STEP: f32 = 30.;
 /// A filled Room panel's room, what the map remembers and what's in it.
 pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
     let mut map = LiveMap::new(Box::new(PlainRules));
-    let info = r#"{"num": 1, "name": "Donation Room", "zone": "The Mudschool",
+    let info = r#"{"num": 1, "name": "A Stone Hall", "zone": "The Old Town",
         "exits": {"n": 2, "s": 3, "e": "closed"}}"#;
     map.room_info(info, Timestamp(0));
-    map.note_sightings(&["(Glowing) a giant rat".to_owned()], Timestamp(0));
+    map.note_sightings(&["(Marked) a grey wolf".to_owned()], Timestamp(0));
     let room = map
         .commit(Timestamp(0))
         .and_then(|commit| commit.change.rooms.first().map(Arc::clone));
     let mobs = MobsState::default().with_changes(&[mudling_core::map::MarkChange {
-        name: "rat".to_owned(),
+        name: "wolf".to_owned(),
         mark: mudling_core::map::Mark::Aggressive,
         set: true,
     }]);
@@ -70,15 +70,15 @@ pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
     };
     let contents = RoomContents {
         occupants: vec![Occupant {
-            name: "A bright spirit of friendship".into(),
-            target: "spirit".to_owned(),
+            name: "A traveller resting by the wall".into(),
+            target: "traveller".to_owned(),
         }],
         items: vec![
-            item("the Village Idiot's paper crown", "crown", 3),
-            item("some leaves", "leaves", 4),
-            item("a shrub", "shrub", 2),
-            item("a rock", "rock", 2),
-            item("some tree bark", "bark", 1),
+            item("a worn leather satchel with a strap", "satchel", 3),
+            item("some coins", "coins", 4),
+            item("a blanket", "blanket", 2),
+            item("a stone", "stone", 2),
+            item("some rope", "rope", 1),
         ],
     };
     let room = RoomState {

@@ -255,8 +255,12 @@ impl Shell {
         }
     }
 
+    /// With echo off the server is asking for a password, and a command sent
+    /// now would go as one, so it's refused, as core refuses a hook's.
     fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
-        self.submit(&sent.command, cx);
+        if !self.copies.settings.value().echo_off {
+            self.submit(&sent.command, cx);
+        }
         if !sent.by_keyboard {
             window.focus(&self.input.focus_handle(cx), cx);
         }
@@ -589,13 +593,23 @@ mod tests {
             self.cx.run_until_parked();
         }
 
+        fn fill_room(&mut self) {
+            self.shell.update(self.cx, |shell, cx| {
+                let (_, _, contents) = crate::measure::sample_room();
+                shell
+                    .room_panel
+                    .update(cx, |panel, cx| panel.show_contents(contents, cx));
+            });
+            self.cx.run_until_parked();
+        }
+
         fn click(&mut self, selector: &'static str) {
             let bounds = self.cx.debug_bounds(selector).expect(selector);
             self.cx.simulate_click(bounds.center(), Modifiers::none());
         }
 
         /// The next line the server reads, past any telnet the client put
-        /// ahead of it, which is the only part that isn't ASCII.
+        /// ahead of it, which is the only part that isn't printable.
         fn heard_command(&mut self) -> String {
             let mut heard = Vec::new();
             let mut byte = [0];
@@ -603,8 +617,9 @@ mod tests {
                 self.server.read_exact(&mut byte).unwrap();
                 heard.push(byte[0]);
             }
-            let command = heard.rsplit(|byte| !byte.is_ascii()).next().unwrap();
-            String::from_utf8_lossy(command).trim().to_owned()
+            let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
+            let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
+            String::from_utf8_lossy(command.unwrap()).into_owned()
         }
 
         fn chat_lines(&mut self) -> Vec<String> {
@@ -1049,20 +1064,33 @@ mod tests {
     fn a_verb_goes_out_in_the_games_word_and_typing_stays_with_the_bar(cx: &mut TestAppContext) {
         let mut played = play_with(cx, vec![game_plugin()]);
         played.enter_room();
-        played.shell.update(played.cx, |shell, cx| {
-            let (_, _, contents) = crate::measure::sample_room();
-            shell
-                .room_panel
-                .update(cx, |panel, cx| panel.show_contents(contents, cx));
-        });
-        played.cx.run_until_parked();
+        played.fill_room();
 
-        played.click("Get a rock");
-        assert_eq!(played.heard_command(), "take rock");
+        played.click("Get a stone");
+        assert_eq!(played.heard_command(), "take stone");
         played.cx.simulate_input("look");
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.input.read(cx).content(), "look");
         });
+    }
+
+    #[gpui::test]
+    fn the_panel_sends_nothing_to_a_password_prompt(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.fill_room();
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("the mask", |shell, cx| shell.input.read(cx).is_masked());
+        played.cx.simulate_input("hunter2");
+
+        played.click("Go north");
+        played.click("Get a stone");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "hunter2");
+        });
+
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard_command(), "hunter2", "the verbs went nowhere");
     }
 
     #[gpui::test]
