@@ -31,7 +31,7 @@ const fn row(
     }
 }
 
-pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
+pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
     (
         "Window",
         &[
@@ -51,6 +51,7 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
                 &["main-3"],
                 &["shell::FocusRoomPanel"],
             ),
+            row("Go to the hotbar", &["main-4"], &["shell::FocusHotbar"]),
             row(
                 "Search the scrollback",
                 &["main-f"],
@@ -93,6 +94,7 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
             row("Complete a word", &["tab"], &["command_input::Complete"]),
             row("Copy", &["main-c"], &["command_input::Copy"]),
             row("Paste", &["main-v"], &["command_input::Paste"]),
+            row("Pin to the hotbar", &["main-p"], &["shell::PinCommand"]),
             row(
                 "Move the caret",
                 &["left", "right", "home", "end"],
@@ -108,6 +110,28 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
                 &["backspace", "delete"],
                 &["command_input::Backspace", "command_input::Delete"],
             ),
+        ],
+    ),
+    (
+        "Hotbar",
+        &[
+            row(
+                "Move between chips",
+                &["left", "right"],
+                &["hotbar::PreviousChip", "hotbar::NextChip"],
+            ),
+            row(
+                "Move a chip",
+                &["shift-left", "shift-right"],
+                &["hotbar::MoveChipLeft", "hotbar::MoveChipRight"],
+            ),
+            row("Edit a chip", &["e"], &["hotbar::EditChip"]),
+            row(
+                "Remove a chip",
+                &["delete", "backspace"],
+                &["hotbar::RemoveChip"],
+            ),
+            row("Stop editing a chip", &["escape"], &["hotbar::CancelEdit"]),
         ],
     ),
     (

@@ -43,8 +43,8 @@ pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;
 pub(crate) use saved::UNNAMED_CHARACTER;
 pub use saved::{
-    SERVERS_FOLDER, SavedCharacter, SavedServer, SavedServers, enabled_plugins,
-    save_enabled_plugins, save_server, saved_servers,
+    OtherServersRows, SERVERS_FOLDER, SavedCharacter, SavedServer, SavedServers, enabled_plugins,
+    other_servers_rows, save_enabled_plugins, save_server, saved_servers, write_to_server,
 };
 pub use schema::LATEST_VERSION;
 pub use writer::{Failures, Writer};

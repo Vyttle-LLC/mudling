@@ -17,7 +17,7 @@
 //! pending partial line, often a prompt; see [`LinePipeline::pending`]. It
 //! can't grow past [`MAX_LINE_BYTES`].
 
-use crate::ansi::{AnsiParser, Span};
+use crate::ansi::{AnsiParser, Span, Style};
 use std::sync::Arc;
 
 /// The most server bytes one line may hold. A server that sends more
@@ -111,6 +111,25 @@ impl Line {
     /// line the server sent without any.
     pub fn colored(&self, styled: &[Span]) -> Self {
         Line::build(self.raw(), self.plain(), styled, self.end(), self.kind())
+    }
+
+    /// This line drawn in `style` from byte `at` of its plain text on, over
+    /// the styles it had there, for a trigger's highlight.
+    pub fn highlighted(&self, at: usize, style: Style) -> Self {
+        let offset = at as u32;
+        let before = self.styled().iter().filter(|span| span.start < offset);
+        let mut styled: Vec<Span> = before
+            .map(|span| Span {
+                end: span.end.min(offset),
+                ..*span
+            })
+            .collect();
+        styled.push(Span {
+            start: offset,
+            end: self.plain().len() as u32,
+            style,
+        });
+        Line::build(self.raw(), self.plain(), &styled, self.end(), self.kind())
     }
 
     /// This line from byte `at` of its plain text on, for showing what

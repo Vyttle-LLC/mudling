@@ -13,12 +13,14 @@ use crate::assets::UI_FONT;
 use crate::chat::{self, Chat, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
+use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
+use crate::sound::Speaker;
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
 use crate::title_bar::{
@@ -28,16 +30,17 @@ use crate::title_bar::{
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Subscription, Task, Window,
-    actions, deferred, div, prelude::*,
+    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription,
+    Task, Window, actions, deferred, div, prelude::*,
 };
 use mudling_core::completion::Completion;
+use mudling_core::defaults::hotbar;
 use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
-use mudling_core::session::Session;
+use mudling_core::session::{RuleEdit, Session};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, TargetState,
-    Versioned, VitalsState,
+    CharactersState, ConnectionStatus, CuesState, MobsState, RoomState, RulesState, SettingsState,
+    StoreHub, TargetState, Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
@@ -49,6 +52,8 @@ actions!(
         ToggleRightPanel,
         FocusCommandBar,
         FocusRoomPanel,
+        FocusHotbar,
+        PinCommand,
         FocusNext
     ]
 );
@@ -58,10 +63,13 @@ const SHEET_PRIORITY: usize = 4;
 
 pub fn bind_keys(cx: &mut App) {
     chat::bind_keys(cx);
+    crate::hotbar::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
         KeyBinding::new(secondary!("3"), FocusRoomPanel, None),
+        KeyBinding::new(secondary!("4"), FocusHotbar, None),
+        KeyBinding::new(secondary!("p"), PinCommand, None),
         KeyBinding::new(secondary!("l"), FocusCommandBar, None),
         KeyBinding::new("tab", FocusNext, Some(room_panel::CONTEXT)),
         KeyBinding::new("escape", FocusCommandBar, Some(room_panel::CONTEXT)),
@@ -104,10 +112,15 @@ struct Copies {
     target: Versioned<TargetState>,
     room: Versioned<RoomState>,
     mobs: Versioned<MobsState>,
+    rules: Versioned<RulesState>,
 }
 
 impl Copies {
     fn of(stores: Option<&StoreHub>) -> Copies {
+        // Sounds are only ever read from a batch, so they need no copy.
+        if let Some(stores) = stores {
+            stores.subscribe::<CuesState>();
+        }
         Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
@@ -115,6 +128,7 @@ impl Copies {
             target: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            rules: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         }
     }
 }
@@ -143,6 +157,7 @@ pub struct Shell {
     empty_state: Entity<EmptyState>,
     title_bar: Entity<TitleBar>,
     hud: Entity<Hud>,
+    hotbar: Entity<Hotbar>,
     input: Entity<CommandInput>,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
@@ -153,7 +168,9 @@ pub struct Shell {
     focus_before_settings: Option<FocusHandle>,
     /// Keeps the player's choices, if there's a folder to keep them in.
     saved_settings: Option<SavedSettings>,
-    _subscriptions: [Subscription; 10],
+    /// Opened with the first sound: most sessions may never ring one.
+    speaker: Option<Speaker>,
+    _subscriptions: [Subscription; 12],
     _woken: Task<()>,
 }
 
@@ -175,6 +192,11 @@ impl Shell {
         let typing = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
             shell.on_typing(event, window, cx);
         });
+        let edited = cx.observe(&input, |shell, _, cx| shell.show_alias_preview(cx));
+        let hotbar = cx.new(Hotbar::new);
+        let chips = cx.subscribe_in(&hotbar, window, |shell, _, event, window, cx| {
+            shell.on_hotbar(event, window, cx);
+        });
         let verbs = game.as_ref().map(|game| game.verbs.clone());
         let room_panel = cx.new(|cx| RoomPanel::new(verbs.unwrap_or_default(), cx));
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
@@ -195,7 +217,7 @@ impl Shell {
         });
         let plugins = game.as_ref().map(|game| game.plugins.clone());
         let settings = cx.new(|cx| {
-            let mut sheet = SettingsSheet::new(cx);
+            let mut sheet = SettingsSheet::new(window, cx);
             sheet.show_plugins(plugins.unwrap_or_default(), cx);
             sheet
         });
@@ -207,6 +229,8 @@ impl Shell {
                     SheetEvent::Closed => shell.close_settings(window, cx),
                     SheetEvent::Chose(choice) => shell.apply_choice(*choice, window, cx),
                     SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
+                    SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
+                    SheetEvent::TrySound(sound) => shell.play_sound(sound),
                 },
             );
         let quitting = cx.on_app_quit(|shell, cx| {
@@ -277,6 +301,7 @@ impl Shell {
             empty_state,
             title_bar,
             hud,
+            hotbar,
             input,
             left_dock,
             right_dock,
@@ -285,8 +310,11 @@ impl Shell {
             settings_open: false,
             focus_before_settings: None,
             saved_settings: None,
+            speaker: None,
             _subscriptions: [
                 typing,
+                edited,
+                chips,
                 verb_sent,
                 focus_lost,
                 appearance,
@@ -301,6 +329,7 @@ impl Shell {
         };
         shell.show_status(cx);
         shell.show_room(cx);
+        shell.show_rules(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
         shell
     }
@@ -385,6 +414,7 @@ impl Shell {
         self.settings
             .update(cx, |sheet, cx| sheet.show_plugins(game.plugins.clone(), cx));
         self.show_room(cx);
+        self.show_rules(cx);
         game.session.connect();
         self.game = Some(game);
         self.input.update(cx, |input, cx| {
@@ -575,6 +605,15 @@ impl Shell {
             let masked = self.copies.settings.value().echo_off;
             self.input
                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
+            self.hotbar
+                .update(cx, |hotbar, cx| hotbar.set_locked(masked, cx));
+        }
+        if let Some(rules) = &batch.rules {
+            self.copies.rules.apply_diff(rules);
+            self.show_rules(cx);
+        }
+        if let Some(cues) = batch.cues.as_ref().filter(|_| !self.is_replaying()) {
+            cues.change.iter().for_each(|sound| self.play_sound(sound));
         }
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
@@ -597,6 +636,89 @@ impl Shell {
         }
         if batch.room.is_some() || batch.mobs.is_some() {
             self.show_room(cx);
+        }
+    }
+
+    fn show_rules(&mut self, cx: &mut Context<Shell>) {
+        let rules = self.copies.rules.value();
+        self.hotbar
+            .update(cx, |hotbar, cx| hotbar.show(&rules.hotbar, cx));
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_rules(rules, cx));
+        self.show_alias_preview(cx);
+    }
+
+    fn is_replaying(&self) -> bool {
+        self.game.as_ref().is_some_and(Game::is_replay)
+    }
+
+    fn play_sound(&mut self, sound: &str) {
+        self.speaker.get_or_insert_with(Speaker::start).play(sound);
+    }
+
+    fn edit_rules(&self, edit: RuleEdit) {
+        if let Some(game) = &self.game {
+            game.session.edit(edit);
+        }
+    }
+
+    /// Fills the bar's alias slot from what's typed. A password shows nothing
+    /// and asks nothing.
+    fn show_alias_preview(&mut self, cx: &mut Context<Shell>) {
+        let Some(game) = &self.game else { return };
+        let input = self.input.read(cx);
+        let typed = input.content();
+        let one_line = !input.is_masked() && !typed.contains('\n');
+        let preview = one_line
+            .then(|| game.session.alias_preview(typed))
+            .flatten()
+            .map(SharedString::from);
+        self.input
+            .update(cx, |input, cx| input.set_alias_preview(preview, cx));
+    }
+
+    fn on_hotbar(&mut self, event: &HotbarEvent, window: &mut Window, cx: &mut Context<Shell>) {
+        match event {
+            HotbarEvent::Pressed {
+                command,
+                by_keyboard,
+            } => {
+                self.press(command, cx);
+                if !by_keyboard {
+                    window.focus(&self.input.focus_handle(cx), cx);
+                }
+            }
+            HotbarEvent::Changed(chips) => self.edit_rules(RuleEdit::SetHotbar(chips.clone())),
+            HotbarEvent::Left => window.focus(&self.input.focus_handle(cx), cx),
+        }
+    }
+
+    /// What's typed goes on the hotbar, and stays typed.
+    fn pin_typed(&mut self, typed: &str, cx: &mut Context<Shell>) {
+        let mut chips = self.hotbar.read(cx).chips().to_vec();
+        if hotbar::pin(&mut chips, typed) {
+            self.hotbar.update(cx, |hotbar, cx| hotbar.show(&chips, cx));
+            self.edit_rules(RuleEdit::SetHotbar(chips));
+        }
+    }
+
+    /// Runs a command pressed rather than typed. The session refuses it while
+    /// the server asks for a password; with no server connected the chat shows
+    /// it here, as it does what's typed.
+    fn press(&mut self, command: &str, cx: &mut Context<Shell>) {
+        let settings = self.copies.settings.value();
+        if settings.echo_off {
+            return;
+        }
+        match &self.game {
+            Some(game)
+                if settings.connection == ConnectionStatus::Connected && !game.is_replay() =>
+            {
+                game.session.press(command);
+            }
+            _ => self
+                .chat
+                .update(cx, |chat, cx| chat.echo_unsent(command, cx)),
         }
     }
 
@@ -666,9 +788,10 @@ impl Shell {
     }
 
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
-        if let InputEvent::Submitted(command) = event {
-            self.submit(command, cx);
-            return;
+        match event {
+            InputEvent::Submitted(command) => return self.submit(command, cx),
+            InputEvent::Pin(typed) => return self.pin_typed(typed, cx),
+            _ => {}
         }
         let Some(game) = &self.game else { return };
         let at_the_end = |line: String| Completion {
@@ -676,7 +799,7 @@ impl Shell {
             line,
         };
         let shown = match event {
-            InputEvent::Submitted(_) => None,
+            InputEvent::Submitted(_) | InputEvent::Pin(_) => None,
             InputEvent::Older { line, prefix } => game.session.older(line, prefix).map(at_the_end),
             InputEvent::Newer { line } => game.session.newer(line).map(at_the_end),
             InputEvent::Complete { line, cursor } => game.session.complete(line, *cursor),
@@ -782,9 +905,34 @@ impl Shell {
         .detach();
     }
 
+    /// Moves the keyboard to the hotbar, opening nothing: it's always there.
+    fn focus_hotbar(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        if !self.on_empty_state() {
+            self.hotbar
+                .update(cx, |hotbar, cx| hotbar.focus(window, cx));
+        }
+    }
+
+    pub fn hotbar(&self) -> Entity<Hotbar> {
+        self.hotbar.clone()
+    }
+
     #[cfg(test)]
     pub fn settings_sheet(&self) -> Entity<SettingsSheet> {
         self.settings.clone()
+    }
+
+    #[cfg(test)]
+    pub fn show_sample_rules(&self, rules: RulesState, cx: &mut Context<Shell>) {
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_rules(&rules, cx));
+    }
+
+    #[cfg(test)]
+    pub fn show_sample_alias_preview(&self, preview: &'static str, cx: &mut Context<Shell>) {
+        self.input.update(cx, |input, cx| {
+            input.set_alias_preview(Some(preview.into()), cx)
+        });
     }
 
     #[cfg(test)]
@@ -965,6 +1113,7 @@ impl Render for Shell {
                     .pb_4()
                     .child(self.session_bar.clone())
                     .child(self.status.clone())
+                    .child(self.hotbar.clone())
                     .child(command_bar),
             );
         let on_empty_state = self.on_empty_state();
@@ -1017,6 +1166,12 @@ impl Render for Shell {
                     shell.hud.update(cx, |hud, cx| hud.use_shortcut(window, cx));
                 }
             }))
+            .on_action(cx.listener(|shell, _: &FocusHotbar, window, cx| {
+                shell.focus_hotbar(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &PinCommand, _, cx| {
+                shell.input.update(cx, |input, cx| input.pin(cx));
+            }))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
             .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
@@ -1044,6 +1199,7 @@ pub mod tests {
     use gpui::{
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
     };
+    use mudling_core::defaults::aliases::AliasRule;
     use mudling_core::defaults::hud::Vital;
     use mudling_core::persist;
     use mudling_core::plugin::Plugin;
@@ -2581,5 +2737,223 @@ pub mod tests {
         played.server.read_to_end(&mut rest).unwrap();
         let again = played.shell.update(played.cx, |shell, cx| shell.leave(cx));
         assert!(again.is_none());
+    }
+
+    impl Played<'_> {
+        fn pin(&mut self, typed: &str) {
+            self.cx.simulate_input(typed);
+            self.cx.simulate_keystrokes(secondary!("p"));
+            self.shell.update_in(self.cx, |shell, window, cx| {
+                shell.type_sample("", window, cx);
+            });
+            let typed = typed.to_owned();
+            self.frames_until("the chip", move |shell, cx| {
+                shell.hotbar.read(cx).chips().contains(&typed)
+            });
+        }
+
+        fn chips(&mut self) -> Vec<String> {
+            self.shell
+                .read_with(self.cx, |shell, cx| shell.hotbar.read(cx).chips().to_vec())
+        }
+
+        fn saved_chips(&mut self) -> Vec<String> {
+            self.shell.read_with(self.cx, |shell, _| {
+                shell.copies.rules.value().hotbar.clone()
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn a_typed_command_pins_and_its_chip_sends_it(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.click("hotbar-chip-0");
+        assert_eq!(played.heard_command(), "look");
+        played.cx.simulate_input("score");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "score", "typing stays");
+        });
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_the_chips_and_moves_them(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.pin("score");
+        played.cx.run_until_parked();
+
+        played.cx.simulate_keystrokes(secondary!("4"));
+        played.cx.simulate_keystrokes("shift-right");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["score", "look"]);
+        played.frames_until("the saved order", |shell, _| {
+            shell
+                .copies
+                .rules
+                .value()
+                .hotbar
+                .first()
+                .is_some_and(|chip| chip == "score")
+        });
+        assert_eq!(played.saved_chips(), ["score", "look"]);
+
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "look", "focus went with the chip");
+
+        played.cx.simulate_keystrokes("left");
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "score");
+
+        played.cx.simulate_keystrokes("delete");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look"]);
+
+        played.cx.simulate_keystrokes("escape");
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn a_chip_edits_in_place_and_letters_stay_letters(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.cx.run_until_parked();
+
+        played.cx.simulate_keystrokes(secondary!("4"));
+        played.cx.simulate_keystrokes("e");
+        played.cx.run_until_parked();
+        played.cx.simulate_input(" here");
+        played.cx.simulate_keystrokes("enter");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look here"]);
+
+        played.cx.simulate_input("score");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "score", "back at the bar");
+        });
+    }
+
+    #[gpui::test]
+    fn chips_hold_their_places_while_one_is_edited(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.pin("inv");
+        played.pin("score");
+        played.cx.run_until_parked();
+
+        // Right-click inv; its editor takes the place the others' bounds keep.
+        let inv = played.cx.debug_bounds("hotbar-chip-1").unwrap().center();
+        let mods = Modifiers::none();
+        played.cx.simulate_mouse_down(inv, MouseButton::Right, mods);
+        played.cx.simulate_mouse_up(inv, MouseButton::Right, mods);
+        played.cx.run_until_parked();
+
+        let from = played.cx.debug_bounds("hotbar-chip-0").unwrap().center();
+        let to = played.cx.debug_bounds("hotbar-chip-2").unwrap().center();
+        played.cx.simulate_mouse_down(from, MouseButton::Left, mods);
+        played.cx.simulate_mouse_move(to, MouseButton::Left, mods);
+        played.cx.run_until_parked();
+        played.cx.simulate_mouse_up(to, MouseButton::Left, mods);
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look", "inv", "score"], "the drag waits");
+
+        // Tab leaves the editor for a chip, whose keys wait too.
+        played.cx.simulate_keystrokes("tab");
+        played.cx.simulate_keystrokes("shift-right");
+        played.cx.simulate_keystrokes("delete");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look", "inv", "score"], "so do the keys");
+    }
+
+    #[gpui::test]
+    fn esc_leaves_an_edit_without_changing_the_chip(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.cx.run_until_parked();
+
+        played.cx.simulate_keystrokes(secondary!("4"));
+        played.cx.simulate_keystrokes("e");
+        played.cx.run_until_parked();
+        played.cx.simulate_input(" here");
+        played.cx.simulate_keystrokes("escape");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look"]);
+    }
+
+    #[gpui::test]
+    fn dragging_a_chip_puts_it_where_it_lands(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.pin("score");
+        played.cx.run_until_parked();
+
+        let from = played.cx.debug_bounds("hotbar-chip-0").unwrap().center();
+        let to = played.cx.debug_bounds("hotbar-chip-1").unwrap().center();
+        let button = MouseButton::Left;
+        let mods = Modifiers::none();
+        played.cx.simulate_mouse_down(from, button, mods);
+        played.cx.simulate_mouse_move(to, button, mods);
+        played.cx.run_until_parked();
+        played.cx.simulate_mouse_up(to, button, mods);
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["score", "look"]);
+    }
+
+    #[gpui::test]
+    fn no_chip_and_no_pin_work_at_a_password_prompt(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("the mask", |shell, cx| shell.input.read(cx).is_masked());
+        played.cx.simulate_input("hunter2");
+
+        played.click("hotbar-chip-0");
+        played.cx.simulate_keystrokes(secondary!("p"));
+        played.cx.run_until_parked();
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "hunter2");
+        });
+        assert_eq!(played.chips(), ["look"], "the password wasn't pinned");
+
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard_command(), "hunter2", "the chip went nowhere");
+    }
+
+    #[gpui::test]
+    fn the_bar_previews_an_alias_as_it_is_typed_but_never_a_password(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.shell.read_with(played.cx, |shell, _| {
+            let alias = AliasRule::new("k", "kill $1;kick $1");
+            shell.edit_rules(RuleEdit::SaveAlias(alias));
+        });
+        played.frames_until("the alias", |shell, _| {
+            !shell.copies.rules.value().aliases.is_empty()
+        });
+        let hint = |played: &mut Played<'_>| {
+            played
+                .shell
+                .read_with(played.cx, |shell, cx| shell.input.read(cx).hint())
+        };
+
+        played.cx.simulate_input("k rat");
+        played.cx.run_until_parked();
+        assert_eq!(hint(&mut played).as_deref(), Some("kill rat; kick rat"));
+
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("the mask", |shell, cx| shell.input.read(cx).is_masked());
+        played.cx.simulate_input("k rat");
+        played.cx.run_until_parked();
+        assert_eq!(hint(&mut played), None);
     }
 }

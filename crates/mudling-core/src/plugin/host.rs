@@ -25,6 +25,11 @@
 //!
 //! The matchers are compiled when the set of enabled plugins changes, and
 //! only then.
+//!
+//! **The player's triggers** join the line rules, last in run order, so they
+//! cost no pass of their own. Setting them rebuilds the line matcher alone,
+//! which leaves open tables as they are. A line's matches are read back from
+//! [`PluginHost::triggered`].
 
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
@@ -138,6 +143,10 @@ pub struct PluginHost {
     cuts: Vec<PluginEvent>,
     matched: Vec<usize>,
     matched_rows: Vec<usize>,
+    /// The player's patterns, as last set.
+    triggers: Vec<Pattern>,
+    /// Which of them the last line read matched, in order.
+    triggered: Vec<usize>,
 }
 
 struct OpenTable {
@@ -188,7 +197,7 @@ impl PluginHost {
                 cost: CostLog::default(),
             });
         }
-        let compiled = Compiled::build(&installed)?;
+        let compiled = Compiled::build(&installed, &[])?;
         Ok(PluginHost {
             installed,
             compiled,
@@ -200,7 +209,28 @@ impl PluginHost {
             cuts: Vec::new(),
             matched: Vec::new(),
             matched_rows: Vec::new(),
+            triggers: Vec::new(),
+            triggered: Vec::new(),
         })
+    }
+
+    /// Replaces the player's triggers. On an error the old ones stay.
+    pub fn set_triggers(&mut self, patterns: Vec<Pattern>) -> Result<(), PluginError> {
+        let lines = &self.compiled.lines;
+        let plugin_rules = self.compiled.plugin_rules.last();
+        let first_trigger = plugin_rules.map_or(0, |rules| rules.end);
+        let rules = (lines.rules[..first_trigger].iter().cloned())
+            .chain(trigger_rules(&patterns))
+            .collect();
+        self.compiled.lines = line_matcher(rules)?;
+        self.triggers = patterns;
+        Ok(())
+    }
+
+    /// Which triggers the last line read matched, as indexes into what was
+    /// given to [`PluginHost::set_triggers`], in order.
+    pub fn triggered(&self) -> &[usize] {
+        &self.triggered
     }
 
     /// Times each plugin on its own every `every` lines; 0 turns it off.
@@ -311,6 +341,7 @@ impl PluginHost {
         sink: &mut impl PluginSink,
     ) -> Vec<Span> {
         self.cuts.drain(..).for_each(|cut| sink.event(cut));
+        self.triggered.clear();
         let text = &line.plain()[start..];
         self.compiled
             .lines
@@ -333,6 +364,7 @@ impl PluginHost {
             let rule = &lines.rules[id];
             match &rule.action {
                 Action::Event {
+                    plugin,
                     point,
                     name,
                     hook,
@@ -342,7 +374,7 @@ impl PluginHost {
                         continue;
                     };
                     sink.event(PluginEvent {
-                        plugin: rule.plugin.clone(),
+                        plugin: plugin.clone(),
                         point: *point,
                         name: name.clone(),
                         captures: shifted(captures, start),
@@ -367,6 +399,7 @@ impl PluginHost {
                         );
                     }
                 }
+                Action::Trigger { index } => self.triggered.push(*index),
                 Action::Color { .. } | Action::Prompt | Action::TableStart { .. } => {}
             }
         }
@@ -601,7 +634,7 @@ impl PluginHost {
                     Action::Color { group, .. } => {
                         std::hint::black_box(rule.pattern.spans(text, group).count());
                     }
-                    Action::Prompt => {}
+                    Action::Prompt | Action::Trigger { .. } => {}
                 }
             }
             self.installed[index].cost.record(started.elapsed());
@@ -617,7 +650,7 @@ impl PluginHost {
     /// Builds the matchers again. Open tables can't carry over, as they index
     /// the old build: each is cut, and its hook hears at the next read.
     fn recompile(&mut self) -> Result<(), PluginError> {
-        let compiled = Compiled::build(&self.installed)?;
+        let compiled = Compiled::build(&self.installed, &self.triggers)?;
         for open in self.open.drain(..) {
             let table = &self.compiled.tables[open.table];
             table.send(
@@ -735,14 +768,16 @@ struct LineRules {
     rules: Vec<LineRule>,
 }
 
+#[derive(Clone)]
 struct LineRule {
-    plugin: PluginId,
     pattern: Pattern,
     action: Action,
 }
 
+#[derive(Clone)]
 enum Action {
     Event {
+        plugin: PluginId,
         point: Point,
         name: Arc<str>,
         hook: Option<HookName>,
@@ -754,6 +789,8 @@ enum Action {
     Prompt,
     /// Opens [`Compiled::tables`]`[table]`.
     TableStart { table: usize },
+    /// The player's trigger at `index`.
+    Trigger { index: usize },
 }
 
 impl LineRule {
@@ -781,7 +818,7 @@ fn shifted(captures: Box<[Capture]>, start: usize) -> Box<[Capture]> {
 }
 
 impl Compiled {
-    fn build(installed: &[Installed]) -> Result<Compiled, PluginError> {
+    fn build(installed: &[Installed], triggers: &[Pattern]) -> Result<Compiled, PluginError> {
         let mut order: Vec<usize> = (0..installed.len())
             .filter(|&index| installed[index].enabled)
             .collect();
@@ -803,7 +840,6 @@ impl Compiled {
                 let table = tables.len();
                 tables.push(Table::new(slot, plugin.id().clone(), point, reader));
                 let line_rule = |pattern: &Pattern| LineRule {
-                    plugin: plugin.id().clone(),
                     pattern: pattern.clone(),
                     action: Action::TableStart { table },
                 };
@@ -818,8 +854,8 @@ impl Compiled {
             }
             plugin_rules.push(first..rules.len());
         }
-        let sources: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
-        let lines = matcher(&sources, DfaCache::Large)?;
+        rules.extend(trigger_rules(triggers));
+        let lines = line_matcher(rules)?;
         let sources: Vec<&str> = row_rules.iter().map(|rule| rule.pattern.as_str()).collect();
         let rows = matcher(&sources, DfaCache::Default)?;
 
@@ -844,10 +880,7 @@ impl Compiled {
 
         Ok(Compiled {
             order,
-            lines: LineRules {
-                matcher: lines,
-                rules,
-            },
+            lines,
             pending,
             pending_rules,
             plugin_rules,
@@ -857,6 +890,22 @@ impl Compiled {
             settings,
         })
     }
+}
+
+fn line_matcher(rules: Vec<LineRule>) -> Result<LineRules, PluginError> {
+    let sources: Vec<&str> = rules.iter().map(|rule| rule.pattern.as_str()).collect();
+    let matcher = matcher(&sources, DfaCache::Large)?;
+    Ok(LineRules { matcher, rules })
+}
+
+fn trigger_rules(patterns: &[Pattern]) -> impl Iterator<Item = LineRule> {
+    patterns
+        .iter()
+        .enumerate()
+        .map(|(index, pattern)| LineRule {
+            pattern: pattern.clone(),
+            action: Action::Trigger { index },
+        })
 }
 
 fn matcher(sources: &[&str], cache: DfaCache) -> Result<Matcher, PluginError> {
@@ -869,7 +918,6 @@ fn matcher(sources: &[&str], cache: DfaCache) -> Result<Matcher, PluginError> {
 /// A plugin's prompt shapes, its event rules, then its color rules.
 fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
     let rule = |pattern: &Pattern, action| LineRule {
-        plugin: plugin.id().clone(),
         pattern: pattern.clone(),
         action,
     };
@@ -886,6 +934,7 @@ fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
             rule(
                 &event.pattern,
                 Action::Event {
+                    plugin: plugin.id().clone(),
                     point,
                     name: event.name.shared(),
                     hook: event.hook.clone(),

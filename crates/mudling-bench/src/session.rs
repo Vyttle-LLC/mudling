@@ -17,10 +17,11 @@
 //!   come with any line.
 
 use crate::plugin_host::{PLUGIN_BUDGET_US, realistic_plugins};
+use mudling_core::defaults::triggers::{Highlight, TriggerRule};
 use mudling_core::map::Mark;
 use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::{Layer, Plugin};
-use mudling_core::session::{Engine, SessionConfig, Typing};
+use mudling_core::session::{Engine, RuleEdit, SessionConfig, Typing};
 use mudling_core::stats::Summary;
 use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsState};
 use mudling_core::telnet::command::{GA, IAC};
@@ -43,11 +44,19 @@ const WANDER_MOVES: i64 = 5_000;
 const SIGHTINGS: i64 = 20_000;
 /// Kinds of aggressive mob a long-played map has learned.
 const AGGRESSIVE_MARKS: i64 = 500;
+/// The player's triggers the whole-line measure runs with.
+const PLAYER_TRIGGERS: usize = 200;
+/// One trigger in this many is a regular expression, and one in this many of
+/// the rest is a word from the source, so that some lines match.
+const REGEX_EVERY: usize = 4;
+const MATCHING_EVERY: usize = 5;
 
 #[derive(Serialize)]
 pub struct Report {
     pub lines: usize,
+    /// With [`PLAYER_TRIGGERS`] of the player's triggers on.
     pub whole_line: Summary,
+    pub without_triggers: Summary,
     pub without_game_plugin: Summary,
     pub with_game_plugin: Summary,
     pub one_more_plugin_p99_us: f64,
@@ -71,7 +80,8 @@ pub fn run(source: &[String]) -> Report {
         .map(|(index, line)| read(index, line))
         .collect();
 
-    let whole_line = measure_lines(&reads);
+    let without_triggers = measure_lines(&reads, &[]);
+    let whole_line = measure_lines(&reads, &player_triggers(source));
     let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
     let (mapping, wandering, sighting) = measure_moves();
@@ -83,6 +93,7 @@ pub fn run(source: &[String]) -> Report {
             && wandering.p99_us <= MOVE_BUDGET_US
             && sighting.p99_us <= LINE_BUDGET_US,
         whole_line,
+        without_triggers,
         without_game_plugin,
         with_game_plugin,
         one_more_plugin_p99_us,
@@ -109,10 +120,14 @@ pub fn print(report: &Report) {
         report.lines
     );
     println!(
-        "  whole line: {}; budget p99 ≤ {} µs: {}",
+        "  whole line, {PLAYER_TRIGGERS} player triggers: {}; budget p99 ≤ {} µs: {}",
         summary(&report.whole_line),
         report.line_budget_us,
         verdict(report.whole_line.p99_us <= report.line_budget_us)
+    );
+    println!(
+        "  whole line, no player triggers: {}",
+        summary(&report.without_triggers)
     );
     println!(
         "  one more plugin: {} without, {} with; +{:.2} µs p99; budget ≤ {} µs: {}",
@@ -158,6 +173,37 @@ fn read(index: usize, line: &str) -> Bytes {
         bytes.extend_from_slice(&[IAC, GA]);
     }
     bytes.into()
+}
+
+/// What a player with a full list has: mostly phrases, some regular
+/// expressions, and enough words from `source` that lines keep matching.
+fn player_triggers(source: &[String]) -> Vec<TriggerRule> {
+    let mut words = source
+        .iter()
+        .flat_map(|line| line.split_whitespace())
+        .filter(|word| word.len() > 4 && word.chars().all(char::is_alphabetic))
+        .cycle();
+    (0..PLAYER_TRIGGERS)
+        .map(|number| {
+            if number % REGEX_EVERY == 0 {
+                let pattern = format!(r"^\w+ (tells|asks) group{number} '(.*)'$");
+                return TriggerRule {
+                    regex: true,
+                    ..TriggerRule::new(pattern)
+                };
+            }
+            let word = (number % MATCHING_EVERY == 0)
+                .then(|| words.next())
+                .flatten();
+            match word {
+                Some(word) => TriggerRule {
+                    color: Some(Highlight::Yellow),
+                    ..TriggerRule::new(word)
+                },
+                None => TriggerRule::new(format!("a phrase of the game {number}")),
+            }
+        })
+        .collect()
 }
 
 /// A connected session with a shell subscribed, in a folder of its own.
@@ -249,8 +295,12 @@ fn save_marks(folder: &Path, marks: i64) {
     writer.flush().expect("the marks reach the disk");
 }
 
-fn measure_lines(reads: &[Bytes]) -> Summary {
+fn measure_lines(reads: &[Bytes], triggers: &[TriggerRule]) -> Summary {
     let mut bench = Bench::new(true);
+    for trigger in triggers {
+        let edit = RuleEdit::SaveTrigger(trigger.clone());
+        bench.engine.edit(edit, Timestamp(0));
+    }
     let mut samples = Vec::with_capacity(reads.len());
     for (index, read) in reads.iter().enumerate() {
         samples.push(bench.read(read.clone()));

@@ -9,6 +9,7 @@
 //! - [`prompt`]: the prompt, from the text after GMCP `Char.Vitals`;
 //! - [`hud`]: which `Char.Vitals` fields hold which vitals;
 //! - [`commands`]: chaining with the game's separator, and speedwalk;
+//! - [`aliases`], [`triggers`] and [`hotbar`]: what the player sets up;
 //! - [`TablePager`]: answering the pager while a table is read;
 //! - [`detect`]: which game plugin to suggest for a server.
 //!
@@ -30,10 +31,13 @@
 //! one [`crate::line::LinePipeline`], so each new pipeline gets a fresh one:
 //! see [`crate::session`], which makes both for every connection.
 
+pub mod aliases;
 pub mod commands;
 pub mod detect;
+pub mod hotbar;
 pub mod hud;
 pub mod prompt;
+pub mod triggers;
 
 use crate::line::{Line, Pending};
 use crate::plugin::{PendingKind, Plugin};
