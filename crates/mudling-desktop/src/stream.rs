@@ -13,6 +13,19 @@ use std::time::{Duration, Instant};
 /// Lines in one read from the recording, about what a socket read holds.
 const LINES_PER_READ: usize = 32;
 
+/// Source lines joined into one by [`long_lines`]: enough to wrap to about
+/// four rows of the column.
+const LINES_PER_LONG_LINE: usize = 6;
+
+/// A feed of the same text whose lines wrap, the costliest kind to lay out.
+/// Lines overlap, so the feed keeps nearly its length.
+pub fn long_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .windows(LINES_PER_LONG_LINE.min(lines.len()))
+        .map(|lines| lines.join(" "))
+        .collect()
+}
+
 /// `lines` as reads, as a socket would hand them over.
 pub fn reads(lines: &[impl AsRef<str>]) -> Vec<Bytes> {
     lines
@@ -56,4 +69,15 @@ pub fn stream(
             sent = due;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_lines_join_the_lines_of_even_a_short_feed() {
+        let lines = ["a".to_owned(), "b".to_owned()];
+        assert_eq!(long_lines(&lines), ["a b"]);
+    }
 }

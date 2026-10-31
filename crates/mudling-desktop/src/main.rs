@@ -3,8 +3,8 @@
 //! ```text
 //! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
-//!                 [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>]]
-//!                 [--ax-check]
+//!                 [--long-lines] [--rate <lines/s>]
+//!                 [--measure [--seconds <n>] [--report <path>]] [--ax-check]
 //! ```
 //!
 //! `--host` and `--port` connect to a server. `--plugin` installs a plugin
@@ -13,7 +13,8 @@
 //!
 //! A replay runs the same window through `Session::replay`: 100,000 lines of
 //! history, then new lines at `--rate` (50 a second by default; 0 turns it
-//! off), with its data in a throwaway folder. `--measure` records frame times
+//! off), with its data in a throwaway folder. `--long-lines` joins its lines
+//! into ones that wrap. `--measure` records frame times
 //! and writes a JSON report (see `measure`). `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`).
 
@@ -67,8 +68,8 @@ const REPLAY_HOST: &str = "replay";
 /// hook or disk can lose what's unsaved, but can't keep the app from quitting.
 const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
-                     [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--rate <lines/s>] \
-                     [--measure [--seconds <n>] [--report <path>]] [--ax-check]";
+                     [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
+                     [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -80,6 +81,7 @@ struct Options {
     data: Option<PathBuf>,
     replay: Vec<PathBuf>,
     synthetic: bool,
+    long_lines: bool,
     lines_per_second: f64,
     measure: bool,
     measured_run: bool,
@@ -305,6 +307,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         data: None,
         replay: Vec::new(),
         synthetic: false,
+        long_lines: false,
         lines_per_second: 50.0,
         measure: false,
         measured_run: false,
@@ -325,6 +328,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--data" => options.data = Some(PathBuf::from(value()?)),
             "--replay" => {}
             "--synthetic" => options.synthetic = true,
+            "--long-lines" => options.long_lines = true,
             "--rate" => {
                 options.lines_per_second = value()?.parse().map_err(|_| "--rate needs a number")?
             }
@@ -347,6 +351,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         return Err("use either --replay or --synthetic".into());
     }
     let replaying = options.synthetic || !options.replay.is_empty();
+    if options.long_lines && !replaying {
+        return Err("--long-lines needs --replay <logs> or --synthetic".into());
+    }
     if options.host.is_some() != options.port.is_some() {
         return Err("--host and --port go together".into());
     }
@@ -377,5 +384,10 @@ fn load_feed(options: &Options) -> Result<Option<ReplayFeed>, String> {
     if lines.is_empty() {
         return Err("the logs hold no server text".into());
     }
+    let lines = if options.long_lines {
+        stream::long_lines(&lines)
+    } else {
+        lines
+    };
     Ok(Some(ReplayFeed::new(lines)))
 }
