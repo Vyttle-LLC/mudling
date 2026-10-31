@@ -366,6 +366,7 @@ impl RoomPanel {
                 let name = SharedString::from(occupant.name.clone());
                 div()
                     .id(("occupant", index))
+                    .debug_selector(move || format!("occupant-{index}"))
                     .role(Role::ListItem)
                     .aria_label(name.clone())
                     .flex()
@@ -749,6 +750,23 @@ mod tests {
             panel.show_contents(contents, cx);
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_occupant_with_no_word_to_target_shows_with_no_verbs(cx: &mut TestAppContext) {
+        let (panel, cx, _) = panel_window(cx);
+        let (room, mobs, mut contents) = sample_room();
+        contents.occupants[0].target = None;
+        panel.update(cx, |panel, cx| {
+            panel.show_room(&room, &mobs, cx);
+            panel.show_contents(contents, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("occupant-0").is_some());
+        assert!(
+            cx.debug_bounds("Kill A traveller resting by the wall")
+                .is_none()
+        );
     }
 
     #[gpui::test]
