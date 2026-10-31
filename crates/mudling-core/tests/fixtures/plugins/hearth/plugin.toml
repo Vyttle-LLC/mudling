@@ -15,6 +15,7 @@ mssp_names = ["Hearth"]
 [points]
 connection = "connection.toml"
 text = "text.toml"
+map = "map.toml"
 mobs = "mobs.toml"
 commands = "commands.toml"
 

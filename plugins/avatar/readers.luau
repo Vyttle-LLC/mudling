@@ -1,29 +1,37 @@
--- Framing for the tables Avatar prints. One table is read at a time: its
--- start pattern opens a reader, its rows add store writes to it, and the
--- next prompt or the next table's start ends it, sending the writes
--- together. A table left at an unanswered pager (its line followed by a
--- prompt, with no row, blank or rule line between) was cut short and sends
--- nothing; nor does a start
--- with no rows after it, which was some other line.
+-- What Avatar's table hooks share. The host frames each table; a hook here
+-- collects its rows as store writes, and the table's end sends them
+-- together. A table cut short sends nothing; nor does a start with no rows
+-- after it, which was some other line.
 
 local reading = nil
 
 Readers = {}
 
--- Opens a reader called `name`, ending the one before. `finish`, if
--- given, runs at the end, before the writes go out.
-function Readers.open(name, finish)
-    Readers.finish()
-    reading = { name = name, writes = {}, rows = 0, paged = false, finish = finish }
-    return reading
-end
-
--- The reader open, if it's `name`'s.
-function Readers.get(name)
-    if reading and reading.name == name then
-        return reading
+-- Follows the table an event belongs to: `name`'s, whose `finish`, if
+-- given, runs at its end, before the writes go out. Returns the event's kind
+-- (start, row or gap) and the table's reader, or nothing once it's over. One
+-- more start before any row is the same table. The event queue can drop
+-- events, so what's open may not be `name`'s; a stray row is ignored.
+function Readers.step(event, name, finish)
+    local kind = string.match(event.name, "[^.]+$")
+    local open = reading and reading.name == name
+    if kind == "start" and not open then
+        reading = { name = name, writes = {}, rows = 0, finish = finish }
+        open = true
+    elseif kind == "end" then
+        Readers.finish()
+        open = false
+    elseif kind == "cut" then
+        reading = nil
+        open = false
     end
-    return nil
+    if not open then
+        return nil
+    end
+    if kind == "gap" then
+        reading.after_row = false
+    end
+    return kind, reading
 end
 
 -- A `finish` that writes how many rows the table had to `store`'s `key`,
@@ -39,17 +47,15 @@ function Readers.write(reader, store, key, value)
     table.insert(reader.writes, { store, key, value })
 end
 
--- Counts a row read, which shows the pager was answered.
 function Readers.row(reader)
     reader.rows += 1
-    reader.paged = false
 end
 
--- Ends the open table, sending its writes unless it was cut short.
+-- Ends the open table, sending its writes.
 function Readers.finish()
     local reader = reading
     reading = nil
-    if not reader or reader.paged or reader.rows == 0 then
+    if not reader or reader.rows == 0 then
         return
     end
     if reader.finish then
@@ -60,7 +66,7 @@ function Readers.finish()
     end
 end
 
--- The text after a prompt or pager prompt glued to the front of a line.
+-- The text after a pager prompt glued to the front of a line.
 function Readers.body(event)
     return string.match(event.plain, "%[C%]ontinue: ?(.*)$") or event.plain
 end
@@ -74,23 +80,4 @@ function Readers.plain(name)
         table.insert(words, word)
     end
     return string.lower(table.concat(words, " "))
-end
-
-function on_prompt(event)
-    Readers.finish()
-end
-
-function on_pager(event)
-    if reading then
-        reading.paged = true
-    end
-end
-
--- A blank or rule line: the pager was answered, even by a last page with
--- no rows, and slist's wrapped rows have ended.
-function on_blank(event)
-    if reading then
-        reading.paged = false
-        reading.after_row = false
-    end
 end

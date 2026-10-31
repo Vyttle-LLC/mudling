@@ -20,13 +20,13 @@
 //! connection learned (the prompt, the HUD fields, hook state) goes with it;
 //! the map and what plugins wrote are saved in the data folder.
 //!
-//! Each extension point's matches reach the engine as [`PluginEvent`]s, read
-//! in one place, so when the host runs more points than Text their events
-//! arrive the same way.
+//! Every extension point's matches reach the engine as [`PluginEvent`]s, read
+//! in one place.
 //!
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 
 mod engine;
+mod inventory;
 mod login;
 mod map_rules;
 mod values;
@@ -314,8 +314,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
             input = inputs.recv() => match input {
                 Some(Input::Connect) if socket.is_none() => {
                     if let Err(error) = engine.start_connection() {
-                        let reason = DisconnectReason::Failed(error.to_string());
-                        engine.close_connection(reason, Timestamp::now());
+                        engine.fail_connection(error, Timestamp::now());
                         continue;
                     }
                     let options = ConnectOptions {
@@ -344,8 +343,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                     net::Event::Connected => engine.connected(),
                     net::Event::Received(bytes) => {
                         if let Err(error) = engine.receive(bytes, now) {
-                            let reason = DisconnectReason::Failed(error.to_string());
-                            engine.close_connection(reason, now);
+                            engine.fail_connection(error, now);
                             socket = None;
                         }
                     }
@@ -390,15 +388,14 @@ async fn close(mut socket: Socket, engine: &mut Engine) {
 /// A recording, as one connection: the same calls a socket's events make.
 fn replay(engine: &mut Engine, chunks: Vec<Bytes>) {
     if let Err(error) = engine.start_connection() {
-        let reason = DisconnectReason::Failed(error.to_string());
-        engine.close_connection(reason, Timestamp::now());
+        engine.fail_connection(error, Timestamp::now());
         return;
     }
     engine.connected();
     for chunk in chunks {
         let now = Timestamp::now();
         if let Err(error) = engine.receive(chunk, now) {
-            engine.close_connection(DisconnectReason::Failed(error.to_string()), now);
+            engine.fail_connection(error, now);
             return;
         }
         engine.settle(now);

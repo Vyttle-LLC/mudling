@@ -2,6 +2,7 @@
 //! stores, database writes and bytes to send out. [`crate::session::Session`]
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
+use super::inventory::{self, Inventory};
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
@@ -11,19 +12,22 @@ use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_
 use crate::defaults::detect::{ServerSignals, suggest};
 use crate::defaults::hud::{self, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
-use crate::line::{Encoding, Line, LinePipeline};
-use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, mob_name};
+use crate::line::{Encoding, Line, LineEnd, LinePipeline};
+use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
 use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
 use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
-use crate::plugin::{Layer, Plugin, PluginEvent, PluginHost, PluginSink, ServerInfo};
+use crate::plugin::{
+    Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
+};
 use crate::store::{
     CharactersState, ConnectionStatus, GearState, MapState, Memo, MobsState, RoomState,
     SettingsState, StoreHub, TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -46,9 +50,13 @@ struct Link {
     parser: telnet::Parser,
     pipeline: LinePipeline,
     defaults: Defaults,
+    inventory: Inventory,
+    inventory_asked: bool,
     login: Option<Login>,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
+    /// Plugins already reported for hook events dropped on a full queue.
+    drops_noticed: HashSet<PluginId>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
 }
@@ -184,8 +192,7 @@ impl Engine {
             HookOutputs(outputs),
         )?;
         for (plugin, error) in hooks.failed_to_load() {
-            let notice = format!("{plugin}'s hooks didn't load: {error}");
-            self.settings.notices.push(notice);
+            self.notice(format!("{plugin}'s hooks didn't load: {error}"));
         }
         for plugin in &self.config.approved {
             hooks.set_approved(plugin, true);
@@ -194,9 +201,12 @@ impl Engine {
             parser: telnet::Parser::new(),
             pipeline: LinePipeline::new(self.encoding()),
             defaults: Defaults::default(),
+            inventory: Inventory::default(),
+            inventory_asked: false,
             login: self.new_login(),
             hooks,
             hook_outputs,
+            drops_noticed: HashSet::new(),
             mssp_name: None,
             gmcp_enabled: false,
         });
@@ -249,8 +259,7 @@ impl Engine {
             return;
         }
         if self.settings.echo_off {
-            let bytes = self.encoding().encode(typed);
-            telnet::encode_line(&bytes, &mut self.output);
+            write_line(typed, self.encoding(), &mut self.output);
             return;
         }
         let mut typing = lock(&self.typing);
@@ -266,13 +275,23 @@ impl Engine {
     /// rows for the database. A move's map work finishes here.
     pub fn settle(&mut self, now: Timestamp) {
         self.take_hook_outputs(now);
+        let mut notices = Vec::new();
         if let Some(link) = &mut self.link {
             for (plugin, turned_off) in link.hooks.turn_off_overrunning(&mut self.plugins) {
                 if let Err(error) = turned_off {
-                    let notice = format!("{plugin} couldn't be turned off: {error}");
-                    self.settings.notices.push(notice);
+                    notices.push(format!("{plugin} couldn't be turned off: {error}"));
                 }
             }
+            for plugin in link.hooks.dropped().keys() {
+                if link.drops_noticed.insert(plugin.clone()) {
+                    notices.push(format!(
+                        "{plugin} is missing lines: its hooks fell behind the server"
+                    ));
+                }
+            }
+        }
+        for notice in notices {
+            self.notice(notice);
         }
         if let Some(commit) = self.map.commit(now) {
             self.publish_map(commit.change);
@@ -304,7 +323,7 @@ impl Engine {
     }
 
     /// Acts on what a hook did.
-    pub fn hook_output(&mut self, output: HookOutput, now: Timestamp) {
+    pub(super) fn hook_output(&mut self, output: HookOutput, now: Timestamp) {
         match output {
             HookOutput::StoreWrite(write) => self.plugin_store_write(write, now),
             HookOutput::SendCommand(send) => {
@@ -313,6 +332,11 @@ impl Engine {
                 if self.link.is_some() && !self.settings.echo_off {
                     self.terminal.push(Line::command(&send.command));
                     self.issue(&send.command, now);
+                }
+            }
+            HookOutput::RefreshInventory => {
+                if self.link.as_ref().is_some_and(|link| link.gmcp_enabled) {
+                    gmcp::encode(inventory::ASK, "", &mut self.output);
                 }
             }
             HookOutput::HookFailed(failed) => self.notice(format!(
@@ -332,15 +356,27 @@ impl Engine {
     /// read is lost; that can wait on a slow hook, so call it on a core
     /// thread.
     pub fn close_connection(&mut self, reason: DisconnectReason, now: Timestamp) {
+        // First, so a half row flushed next can't pass for the table's end;
+        // again, as that half line may start a table.
+        self.plugins.cut_tables(&mut self.events);
+        self.route_events(now);
         self.quiet(now);
+        self.plugins.cut_tables(&mut self.events);
+        self.route_events(now);
         if let Some(link) = &mut self.link {
             link.hooks.wait_until_idle();
         }
         self.settle(now);
         self.link = None;
+        self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
         self.publish_settings();
+    }
+
+    /// The connection can't go on: closes it, saying why.
+    pub(super) fn fail_connection(&mut self, error: impl fmt::Display, now: Timestamp) {
+        self.close_connection(DisconnectReason::Failed(error.to_string()), now);
     }
 
     /// Ends the session, waiting for every write to reach the disk.
@@ -366,8 +402,13 @@ impl Engine {
             }
             Event::PromptEnd => {
                 let Some(link) = &mut self.link else { return };
-                self.lines.extend(link.pipeline.prompt_end());
+                let line = link.pipeline.prompt_end();
+                self.lines.extend(line.clone());
                 self.read_lines(now);
+                if let Some(line) = line {
+                    self.plugins.end_tables_at_signal(&line, &mut self.events);
+                    self.route_events(now);
+                }
             }
             Event::Gmcp { package, data } => self.gmcp(&package, &data, now),
             Event::GmcpEnabled => {
@@ -392,39 +433,36 @@ impl Engine {
         }
     }
 
-    /// Reads each finished line once: plugins, defaults, login, the map,
-    /// then the terminal.
+    /// Reads each finished line once: defaults, plugins, login, the map, the
+    /// plugins' events, then the terminal. A prompt it opens with ends the
+    /// open tables, and the plugins read what's glued after it.
     fn read_lines(&mut self, now: Timestamp) {
         let encoding = self.encoding();
         let mut lines = std::mem::take(&mut self.lines);
         for line in lines.drain(..) {
             let Some(link) = &mut self.link else { return };
-            let coloring = self.plugins.read_line(&line, &mut self.events);
-            for event in self.events.drain(..) {
-                match &*event.name {
-                    "map.failed_move" => self.map.move_failed(now),
-                    "map.darkness" => self.map.darkness(),
-                    "map.flee" => {
-                        if let Some(direction) = event.capture("dir").and_then(Direction::parse) {
-                            self.map.fled(direction, now);
-                        }
-                    }
-                    "mobs.aggro" => {
-                        if let Some(name) = event.capture("name") {
-                            self.map.aggressor(name);
-                        }
-                    }
-                    _ => {}
-                }
-                link.hooks.event(event);
-            }
-            let prompt = link.defaults.read_line(&line);
             let text = line.plain();
+            let at_signal = line.end() == LineEnd::PromptEnd;
+            let prompt = if at_signal && self.plugins.settings().is_pager(text) {
+                link.defaults.read_pager_line();
+                None
+            } else {
+                link.defaults.read_line(&line)
+            };
+            if prompt.is_some() {
+                self.plugins.end_tables(&line, &mut self.events);
+            }
+            let output_at = prompt.filter(|&at| at < text.len()).unwrap_or(0);
+            let coloring = self
+                .plugins
+                .read_line_from(&line, output_at, &mut self.events);
             answer_login(&mut link.login, text, encoding, &mut self.output);
             let body = &text[prompt.unwrap_or(0)..];
             if prompt.is_none() || !body.is_empty() {
                 self.map.line(body, now);
             }
+            self.route_events(now);
+            let Some(link) = &self.link else { return };
             let hide = link.defaults.hide_prompts && link.defaults.hud.has_learned();
             let shown = if coloring.is_empty() {
                 line.clone()
@@ -433,12 +471,36 @@ impl Engine {
             };
             match prompt.filter(|_| hide) {
                 Some(at) if at == text.len() => {}
-                Some(at) => self.terminal.push(shown.from_plain_offset(at)),
+                Some(at) => self.terminal.push(shown.after(at)),
                 None => self.terminal.push(shown),
             }
         }
         // The buffer is kept: it's reused for every read.
         self.lines = lines;
+    }
+
+    /// Sends what the plugins matched to the map and to the hooks.
+    fn route_events(&mut self, now: Timestamp) {
+        let Some(link) = &mut self.link else { return };
+        for event in self.events.drain(..) {
+            match event.map_signal {
+                Some(MapSignal::Exits) => self.map.exits_line(),
+                Some(MapSignal::FailedMove) => self.map.move_failed(now),
+                Some(MapSignal::Darkness) => self.map.darkness(),
+                Some(MapSignal::Flee) => {
+                    if let Some(direction) = event.capture("dir").and_then(Direction::parse) {
+                        self.map.fled(direction, now);
+                    }
+                }
+                Some(MapSignal::Aggressor) => {
+                    if let Some(name) = event.capture("name") {
+                        self.map.aggressor(name);
+                    }
+                }
+                None => {}
+            }
+            link.hooks.event(event);
+        }
     }
 
     /// Looks at the text the server hasn't ended. Call it after every read.
@@ -450,11 +512,17 @@ impl Engine {
         };
         let kind = self.plugins.read_pending(&pending);
         answer_login(&mut link.login, pending.plain, encoding, &mut self.output);
+        if self.plugins.table_open() {
+            link.defaults.pager.begin_table_read();
+        } else {
+            link.defaults.pager.end_table_read();
+        }
         let action = link.defaults.read_pending(&pending, kind);
         match action {
             PendingAction::Wait => {}
             PendingAction::Send(key) => {
-                telnet::encode_line(&encoding.encode(&key), &mut self.output);
+                write_line(&key, encoding, &mut self.output);
+                self.plugins.pager_answered();
             }
             PendingAction::EndPrompt => {
                 self.lines.extend(link.pipeline.prompt_end());
@@ -466,6 +534,14 @@ impl Engine {
     fn gmcp(&mut self, package: &str, json: &str, now: Timestamp) {
         let Some(link) = &mut self.link else { return };
         link.defaults.gmcp_arrived(package, json);
+        if let Some(entries) = link.inventory.read(package, json) {
+            self.hub.write::<CharactersState>(CharactersState(entries));
+        }
+        // The first room means the character is in the game.
+        if !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info") {
+            link.inventory_asked = true;
+            gmcp::encode(inventory::ASK, "", &mut self.output);
+        }
         let learned = link.defaults.hud.has_learned();
         let hud = &link.defaults.hud;
         let plugins = &self.plugins;
@@ -609,7 +685,7 @@ impl Engine {
     fn issue(&mut self, typed: &str, now: Timestamp) {
         let encoding = self.encoding();
         if typed.trim().is_empty() {
-            telnet::encode_line(b"", &mut self.output);
+            write_line("", encoding, &mut self.output);
             return;
         }
         let mut commands = Vec::new();
@@ -632,7 +708,7 @@ impl Engine {
         }
         let separator = self.plugins.settings().separator.as_deref();
         for line in chain_lines(&commands, separator) {
-            telnet::encode_line(&encoding.encode(&line), &mut self.output);
+            write_line(&line, encoding, &mut self.output);
         }
     }
 
@@ -709,7 +785,7 @@ impl Engine {
             for title in room.sightings.keys() {
                 typing
                     .known
-                    .add_words(MAP_WORDS, words_of(&mob_name(title)));
+                    .add_words(MAP_WORDS, words_of(&self.map.mobs().name(title)));
             }
         }
     }
@@ -783,11 +859,16 @@ impl Engine {
 fn answer_login(login: &mut Option<Login>, text: &str, encoding: Encoding, output: &mut Vec<u8>) {
     let Some(prompts) = login else { return };
     if let Some(reply) = prompts.answer(text) {
-        telnet::encode_line(&encoding.encode(reply), output);
+        write_line(reply, encoding, output);
     }
     if prompts.is_done() {
         *login = None;
     }
+}
+
+/// Puts a line of text on the wire, in the server's encoding.
+fn write_line(text: &str, encoding: Encoding, output: &mut Vec<u8>) {
+    telnet::encode_line(&encoding.encode(text), output);
 }
 
 fn lock(typing: &Mutex<Typing>) -> MutexGuard<'_, Typing> {

@@ -52,17 +52,16 @@ impl Reader {
         }
     }
 
-    /// The reader an event opens a read of. "You are not affected by any"
-    /// is a whole read on its own line, so it opens none.
+    /// The reader an event opens a read of.
     fn started_by(event: &str) -> Option<Reader> {
         Some(match event {
-            "character.score.start" => Reader::Score,
-            "character.practice.start" => Reader::Practice,
-            "character.slist.start" => Reader::Slist,
-            "character.affects.start" => Reader::Affects,
-            "gear.equipment.start" => Reader::Equipment,
-            "gear.identify.named" | "gear.identify.object" => Reader::Identify,
-            "gear.examine.item" => Reader::Examine,
+            "score.start" => Reader::Score,
+            "practice.start" => Reader::Practice,
+            "slist.start" => Reader::Slist,
+            "affects.start" => Reader::Affects,
+            "equipment.start" => Reader::Equipment,
+            "identify.start" => Reader::Identify,
+            "examine.start" => Reader::Examine,
             _ => return None,
         })
     }
@@ -80,17 +79,6 @@ impl Reader {
             _ => return None,
         })
     }
-
-    /// A start line that continues the read open rather than starting
-    /// another: practice's sessions line then its header; a shop's name
-    /// line then its object.
-    fn continues(self, event: &str) -> bool {
-        matches!(
-            (self, event),
-            (Reader::Practice, "character.practice.start")
-                | (Reader::Identify, "gear.identify.object")
-        )
-    }
 }
 
 /// A read begun and not yet finished.
@@ -99,7 +87,6 @@ struct Open {
     first_line: String,
     /// A row was read: until then, the start may have been another line.
     rows: bool,
-    paged: bool,
 }
 
 #[derive(Default)]
@@ -159,57 +146,30 @@ impl Replay {
                 HookOutput::HookFailed(_) | HookOutput::PluginDisabled(_) => {
                     self.tally.hook_failures += 1
                 }
-                HookOutput::SendCommand(_) => {}
+                HookOutput::SendCommand(_) | HookOutput::RefreshInventory => {}
             }
         }
         if let Some(reader) = Reader::started_by(name) {
-            let continuing = self
-                .open
-                .as_ref()
-                .is_some_and(|open| open.reader == reader && reader.continues(name));
-            if !continuing {
-                if let Some(open) = self.open.take() {
-                    self.tally
-                        .unfinished(open, &format!("interrupted by {}", reader.name()));
-                }
+            // One more start before any row is the same table.
+            if self.open.is_none() {
                 self.open = Some(Open {
                     reader,
                     first_line: event.line.plain().to_owned(),
                     rows: false,
-                    paged: false,
                 });
             }
-        }
-        match name {
-            "pager" => {
-                if let Some(open) = &mut self.open {
-                    open.paged = true;
-                }
+        } else if name.ends_with(".row") {
+            if let Some(open) = &mut self.open {
+                open.rows = true;
             }
-            "blank" => {
-                if let Some(open) = &mut self.open {
-                    open.paged = false;
-                }
+        } else if name.ends_with(".cut") {
+            if let Some(open) = self.open.take() {
+                self.tally.unfinished(open, "cut short");
             }
-            name if Reader::started_by(name).is_none()
-                && (name.ends_with(".row") || name.starts_with("gear.identify.")) =>
-            {
-                if let Some(open) = &mut self.open {
-                    open.rows = true;
-                    open.paged = false;
-                }
-            }
-            _ => {}
-        }
-        if name == "prompt"
+        } else if name.ends_with(".end")
             && let Some(open) = self.open.take()
         {
-            let why = if open.paged {
-                "pager not answered"
-            } else {
-                "not finished by the prompt"
-            };
-            self.tally.unfinished(open, why);
+            self.tally.unfinished(open, "not finished by its end");
         }
     }
 }

@@ -138,6 +138,7 @@ impl LiveMap {
 
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {
         let tracker = Tracker::new(layout.clone());
+        let mobs = mobs.named_by(rules.mob_namer());
         let mut map = LiveMap {
             rules,
             tracker,
@@ -177,7 +178,8 @@ impl LiveMap {
     pub fn room_info(&mut self, json: &str, now: Timestamp) -> Option<Arrived> {
         let info = RoomInfo::parse(json, &*self.rules)?;
         let dark = std::mem::take(&mut self.dark_line) || self.rules.dark_room(&info);
-        let maze = std::mem::take(&mut self.maze_line) || self.rules.maze_area(&info.zone);
+        let maze =
+            std::mem::take(&mut self.maze_line) || self.rules.maze_room(&info.zone, &info.name);
         let description = self.text.take_description(&info.name, &*self.rules);
         let numbered = self.rules.identity() == RoomIdentity::Number;
         let step = Step {
@@ -233,6 +235,19 @@ impl LiveMap {
         if let Some(mob) = self.rules.arrival(line) {
             self.note_sightings(&[mob], now);
         }
+    }
+
+    /// The line last read listed the room's exits.
+    pub fn exits_line(&mut self) {
+        self.text.exits_read();
+    }
+
+    /// The connection ended: no answer is coming to anything still waiting
+    /// for one, so the next connection's first room is no move's result.
+    pub fn connection_lost(&mut self) {
+        self.tracker.lose_track();
+        self.dark_line = false;
+        self.maze_line = false;
     }
 
     /// The game refused a move.

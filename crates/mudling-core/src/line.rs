@@ -53,7 +53,8 @@ impl Encoding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnd {
     Newline,
-    /// GA or EOR from the server, or a reader that recognized a prompt.
+    /// GA or EOR from the server, the connection going quiet, or a reader
+    /// that recognized a prompt.
     PromptEnd,
     /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next,
     /// including an escape sequence the cut fell inside.
@@ -69,8 +70,10 @@ pub enum LineKind {
     Command,
 }
 
-/// A link or action over a byte range of a line's plain text. Nothing
-/// produces these yet; MXP and plugins will.
+/// A link or action over a byte range of a line's plain text. Plugins' link
+/// rules find them on request, through
+/// [`crate::plugin::PluginHost::links`]; nothing sets them on a line yet,
+/// which MXP will.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub start: u32,
@@ -111,7 +114,7 @@ impl Line {
     /// This line from byte `at` of its plain text on, for showing what
     /// follows a prompt. Escape codes aren't kept: the raw text is the plain
     /// text that's left.
-    pub fn from_plain_offset(&self, at: usize) -> Self {
+    pub fn after(&self, at: usize) -> Self {
         let offset = at as u32;
         let styled: Vec<Span> = self
             .styled()
@@ -240,9 +243,16 @@ impl LinePipeline {
         self.append(rest, lines);
     }
 
+    /// Reads `text` as a whole line, for text something else already split.
+    pub fn push_line(&mut self, text: &[u8], lines: &mut Vec<Line>) {
+        self.push(text, lines);
+        self.push(b"\n", lines);
+    }
+
     /// The server marked a prompt (GA or EOR): the pending text is a whole
-    /// line. A reader that recognizes the pending text as a prompt (servers
-    /// that send no GA) calls this too. Returns `None` if nothing is pending.
+    /// line. The connection going quiet ends it the same way, as does a
+    /// reader that recognizes the pending text as a prompt (servers that send
+    /// no GA). Returns `None` if nothing is pending.
     pub fn prompt_end(&mut self) -> Option<Line> {
         if self.raw.is_empty() && self.utf8_tail.is_empty() {
             return None;
@@ -612,9 +622,9 @@ mod tests {
     }
 
     #[test]
-    fn a_line_from_a_plain_offset_keeps_only_what_follows() {
+    fn a_line_after_an_offset_keeps_only_what_follows() {
         let (lines, _) = lines_and_pending(&[b"<1hp> \x1b[31mred\x1b[0m rest\n"]);
-        let rest = lines[0].from_plain_offset("<1hp> ".len());
+        let rest = lines[0].after("<1hp> ".len());
         assert_eq!((rest.raw(), rest.plain()), ("red rest", "red rest"));
         assert_eq!((rest.styled()[0].start, rest.styled()[0].end), (0, 3));
     }

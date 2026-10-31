@@ -20,40 +20,12 @@ local SLOTS = {
     ["held"] = "held",
 }
 
--- Words that start an item's name or join its parts, never its noun.
-local ARTICLES = { a = true, an = true, the = true, some = true }
-local PHRASE_ENDS = { of = true, that = true, with = true }
-
--- The word a command should name an item by: the noun ending its first
--- phrase. "a pixie crossbow" → "crossbow", "a sash of the captain's
--- guard" → "sash". The game doesn't take possessives ("remove captain's"
--- fails), so one is never chosen while there's another word.
-local function keyword(name)
-    local words = {}
-    for word in string.gmatch(Readers.plain(name), "[%a']+") do
-        if PHRASE_ENDS[word] and #words > 0 then
-            break
-        end
-        if not ARTICLES[word] then
-            table.insert(words, word)
-        end
-    end
-    for index = #words, 1, -1 do
-        if not string.find(words[index], "'", 1, true) then
-            return words[index]
-        end
-    end
-    -- Only possessives: the name they're made of.
-    local last = words[#words]
-    return last and (string.match(last, "^(.-)'") or last)
-end
-
 local function note_item(write, item, slot)
     local plain = Readers.plain(item)
     if slot then
         write("gear", "slot." .. plain, slot)
     end
-    local word = keyword(item)
+    local word = mud.keyword(plain)
     if word then
         write("gear", "keyword." .. plain, word)
     end
@@ -64,13 +36,9 @@ end
 local finish_equipment = Readers.count_rows("equipment", "count")
 
 function read_equipment(event)
-    if event.name == "gear.equipment.start" then
-        Readers.open("equipment", finish_equipment)
-        return
-    end
-    local reader = Readers.get("equipment")
+    local kind, reader = Readers.step(event, "equipment", finish_equipment)
     local slot = SLOTS[event.captures.slot]
-    if not reader or not slot then
+    if kind ~= "row" or not slot then
         return
     end
     Readers.row(reader)
@@ -109,8 +77,14 @@ local function slot_worn(event)
     return "wield"
 end
 
+-- Avatar sends no Char.Items when gear goes on or comes off, so ask again.
 function on_wore(event)
     note_item(mud.store, event.captures.item, slot_worn(event))
+    mud.refresh_inventory()
+end
+
+function on_removed(event)
+    mud.refresh_inventory()
 end
 
 -- ---- identify ----
@@ -174,17 +148,13 @@ end
 
 function read_identify(event)
     local captures = event.captures
-    if event.name == "gear.identify.named" then
+    local kind, reader = Readers.step(event, "identify", finish_identify)
+    if kind == "start" and captures.item then
         -- A shop names the item on its own line, before the object.
-        Readers.open("identify", finish_identify).item = captures.item
+        reader.item = captures.item
         return
     end
-    if event.name == "gear.identify.object" then
-        local reader = Readers.get("identify")
-        if not reader or reader.keywords then
-            -- The spell's identify, or the next of several.
-            reader = Readers.open("identify", finish_identify)
-        end
+    if kind == "start" then
         reader.keywords = string.match(captures.keywords, "^%s*(.-)%s*$")
         reader.type = captures.type
         -- "glow magic"; a plain item says "none".
@@ -198,8 +168,7 @@ function read_identify(event)
         reader.base, reader.added = {}, {}
         return
     end
-    local reader = Readers.get("identify")
-    if not reader or not reader.keywords then
+    if kind ~= "row" or not reader.keywords then
         return
     end
     Readers.row(reader)
@@ -245,12 +214,14 @@ local function slot_meant(meant)
 end
 
 function read_examine(event)
-    if event.name == "gear.examine.item" then
-        Readers.open("examine").item = event.captures.item
+    local kind, reader = Readers.step(event, "examine")
+    if kind == "start" then
+        reader.item = event.captures.item
+        return
+    elseif kind ~= "row" then
         return
     end
-    local reader = Readers.get("examine")
-    local slot = reader and slot_meant(event.captures.meant)
+    local slot = slot_meant(event.captures.meant)
     if slot then
         Readers.row(reader)
         Readers.write(reader, "gear", "slot." .. Readers.plain(reader.item), slot)

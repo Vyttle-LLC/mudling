@@ -290,6 +290,44 @@ fn a_read_ending_at_a_shorter_shape_waits_for_the_longer_one() {
     );
 }
 
+/// The prompt grew while its old shape had been seen more: the new one still
+/// takes the whole prompt, at once and with output glued after it.
+#[test]
+fn the_longest_matching_shape_opens_a_line() {
+    let learner = PromptLearner::learning(["<1hp> ", "<1hp> ", "<1hp> <2mv> "]);
+    assert_eq!(learner.prefix_len("<5hp> <6mv> "), Some(12));
+    assert_eq!(learner.prefix_len("<5hp> <6mv> You rest."), Some(12));
+    assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+
+    for tail in ["[Fighting] ", "[In Combat] "] {
+        let line = format!("<1hp> {tail}");
+        let learner = PromptLearner::learning(["<1hp> ", "<1hp> ", "<1hp> ", &line]);
+        assert_eq!(learner.prefix_len(&line), Some(line.len()), "{tail:?}");
+    }
+}
+
+/// Output learned glued to a prompt stays output on a newline-ended line,
+/// however often it's seen.
+#[test]
+fn a_shape_with_output_glued_never_hides_the_output() {
+    let learner = PromptLearner::learning([
+        "<1hp> ",
+        "<1hp> ",
+        "<1hp> ",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+        "<1hp> You rest.",
+    ]);
+    assert_eq!(learner.prefix_len("<5hp> You rest."), Some(6));
+
+    let with_a_number = PromptLearner::learning(["<1hp> ", "<1hp> You have 5 gold."]);
+    assert_eq!(with_a_number.prefix_len("<5hp> You have 9 gold."), Some(6));
+
+    let suffixed = PromptLearner::learning(["<1hp>", "<1hp>", "<1hp>[-|-]"]);
+    assert_eq!(suffixed.prefix_len("<5hp>[-|-]"), Some(10));
+}
+
 /// Learned once with output glued on, the prompt still leaves that output to
 /// be read once the bare prompt is seen.
 #[test]

@@ -21,6 +21,9 @@
 //!
 //! [hooks]                 # optional: the Luau files defining hooks
 //! files = ["skills.luau"]
+//!
+//! [fragments]             # optional: regex shared by this plugin's patterns
+//! prompt = '''<\d+hp>'''  # written `{prompt}`; `^{prompt}?You` is optional
 //! ```
 //!
 //! Loading validates everything, every pattern included, and reports the
@@ -28,11 +31,13 @@
 
 use super::luau::{self, Script};
 use super::points::{
-    Character, Commands, Connection, Gear, Hud, Map, Mobs, Point, Points, Text, Ui,
+    Character, Commands, Connection, Gear, Hud, Map, Mobs, Pattern, Point, Points, Text, Ui,
+    with_fragments,
 };
 use crate::line::Encoding;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::path::{Component, Path};
@@ -222,6 +227,9 @@ pub struct Manifest {
     pub permissions: Vec<Permission>,
     #[serde(default)]
     pub hooks: HookFiles,
+    /// Regex shared by the plugin's patterns, each written `{name}`.
+    #[serde(default)]
+    pub fragments: BTreeMap<String, String>,
 }
 
 /// The Luau files a plugin's hooks are in, loaded in order into one VM.
@@ -236,7 +244,8 @@ pub struct HookFiles {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub enum Permission {
-    /// Read the state view the caller supplies.
+    /// Read the state view the caller supplies, and ask for the inventory in
+    /// it again.
     ReadState,
     /// Write to the named store.
     WriteStore(String),
@@ -318,6 +327,18 @@ impl Manifest {
             check_relative(file, "luau")
                 .map_err(|problem| format!("hooks.files: \"{file}\": {problem}"))?;
         }
+        for (name, fragment) in &self.fragments {
+            // A name of digits would be a repeat, as in `a{2}`.
+            let named = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !named {
+                return Err(format!(
+                    "`{name}` isn't a fragment name: use letters, digits and `_`, not starting with a digit"
+                ));
+            }
+            Pattern::new(fragment)
+                .map_err(|error| format!("the fragment `{name}` doesn't compile: {error}"))?;
+        }
         Ok(())
     }
 }
@@ -376,17 +397,22 @@ impl Plugin {
                 .map(|file| Ok((file.to_owned(), read_file(&mut read, file)?)))
                 .transpose()
         };
-        let points = Points {
-            connection: point::<Connection>(load(Point::Connection)?)?,
-            commands: point::<Commands>(load(Point::Commands)?)?,
-            text: point_checked(load(Point::Text)?, Text::validate)?,
-            hud: point::<Hud>(load(Point::Hud)?)?,
-            map: point::<Map>(load(Point::Map)?)?,
-            character: point_checked(load(Point::Character)?, Character::validate)?,
-            gear: point::<Gear>(load(Point::Gear)?)?,
-            mobs: point::<Mobs>(load(Point::Mobs)?)?,
-            ui: point::<Ui>(load(Point::Ui)?)?,
-        };
+        let points = with_fragments(&manifest.fragments, || {
+            Ok::<_, PluginError>(Points {
+                connection: point::<Connection>(load(Point::Connection)?)?,
+                commands: point::<Commands>(load(Point::Commands)?)?,
+                text: point_checked(load(Point::Text)?, Text::validate)?,
+                hud: point::<Hud>(load(Point::Hud)?)?,
+                map: point::<Map>(load(Point::Map)?)?,
+                character: point::<Character>(load(Point::Character)?)?,
+                gear: point::<Gear>(load(Point::Gear)?)?,
+                mobs: point_checked(load(Point::Mobs)?, Mobs::validate)?,
+                ui: point::<Ui>(load(Point::Ui)?)?,
+            })
+        })?;
+        points.validate().map_err(|problem| {
+            PluginError::invalid(files.character.as_deref().unwrap_or_default(), problem)
+        })?;
         let mut scripts = Vec::with_capacity(manifest.hooks.files.len());
         for file in &manifest.hooks.files {
             let source = read_file(&mut read, file)?;

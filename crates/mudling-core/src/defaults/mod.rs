@@ -119,13 +119,24 @@ impl Defaults {
         self.prompt.read_line(line)
     }
 
+    /// A line ended at a prompt signal that is the pager's prompt, read in
+    /// place of [`Defaults::read_line`]: it holds no prompt.
+    pub fn read_pager_line(&mut self) {
+        self.prompt.pager_line();
+    }
+
     /// The pending text, and what the plugin host made of it.
     pub fn read_pending(
         &mut self,
         pending: &Pending<'_>,
         kind: Option<PendingKind>,
     ) -> PendingAction {
-        let learned = self.prompt.read_pending(pending);
+        let learned = if matches!(kind, Some(PendingKind::Pager { .. })) {
+            self.prompt.pager_pending(pending);
+            false
+        } else {
+            self.prompt.read_pending(pending)
+        };
         match kind {
             Some(PendingKind::Pager { key }) if self.pager.answer(pending.number) => {
                 PendingAction::Send(key)

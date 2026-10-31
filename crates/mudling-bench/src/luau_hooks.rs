@@ -302,8 +302,7 @@ fn rows() -> Vec<Line> {
                 )
             })
             .collect();
-        pipeline.push(cells.as_bytes(), &mut lines);
-        pipeline.push(b"\n", &mut lines);
+        pipeline.push_line(cells.as_bytes(), &mut lines);
     }
     lines
 }
