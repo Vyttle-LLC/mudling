@@ -146,8 +146,11 @@ impl SyncConfig {
     }
 }
 
+/// The sessions a merge may have to hold. It's shared, not sent to the thread,
+/// because a session opened during a sync must be seen by that sync's merge.
+type Sessions = Arc<Mutex<Vec<SessionLink>>>;
+
 enum Command {
-    Attach(SessionLink),
     Connected,
     /// Carries the signal that the session's last rows are in the database.
     Disconnected(Receiver<()>),
@@ -165,6 +168,7 @@ enum Command {
 pub struct Syncer {
     hub: Arc<StoreHub>,
     commands: Sender<Command>,
+    sessions: Sessions,
     /// Raised at quit, so a network step in progress stops waiting.
     quitting: Arc<AtomicBool>,
     stopped: Arc<Mutex<Receiver<()>>>,
@@ -205,7 +209,13 @@ impl Syncer {
         let quitting = Arc::new(AtomicBool::new(false));
         let (done, stopped) = mpsc::channel();
         let quit_wait = config.quit_wait;
-        let thread = run::Thread::new(config, Arc::clone(&hub), Arc::clone(&quitting));
+        let sessions = Sessions::default();
+        let thread = run::Thread::new(
+            config,
+            Arc::clone(&hub),
+            Arc::clone(&sessions),
+            Arc::clone(&quitting),
+        );
         thread::Builder::new()
             .name("mudling-sync".to_owned())
             .spawn(move || {
@@ -215,6 +225,7 @@ impl Syncer {
         Ok(Syncer {
             hub,
             commands,
+            sessions,
             quitting,
             stopped: Arc::new(Mutex::new(stopped)),
             quit_wait,
@@ -263,8 +274,12 @@ impl Syncer {
         }
     }
 
+    /// Call before the session loads its map: see [`Sessions`].
     pub(crate) fn attach(&self, session: SessionLink) {
-        self.send(Command::Attach(session));
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session);
     }
 
     pub(crate) fn connected(&self) {

@@ -1,6 +1,6 @@
 //! One sync, start to finish. Everything here runs on the sync thread.
 
-use super::{RepoSettings, kill, summary, vault};
+use super::{RepoSettings, Sessions, kill, summary, vault};
 use crate::git::{self, GitError, Limit, Oid};
 use crate::merge::{self, Retired, Store};
 use crate::persist::{self, Database, Writer};
@@ -10,12 +10,15 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 /// How long to wait for a session to stop writing. A session that doesn't
 /// answer puts the merge off to the next sync.
 const HOLD_WAIT: Duration = Duration::from_secs(5);
+/// The commit that replaces those a removed password was in.
+const PASSWORD_REMOVED: &str = "This device's sessions, with a password taken out";
 
 /// How far a sync goes. Each goes as far as the one before it, and further.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -110,10 +113,6 @@ impl Repository {
         &self.settings.folder
     }
 
-    pub(super) fn into_folder(self) -> PathBuf {
-        self.settings.folder
-    }
-
     pub(super) fn locks(&self) -> Vec<PathBuf> {
         self.git.locks()
     }
@@ -132,11 +131,10 @@ impl Repository {
         &mut self,
         pass: Pass,
         settings: &mut AppSettings,
-        sessions: &mut Vec<SessionLink>,
+        sessions: &Sessions,
         session_began: Option<Instant>,
         limit: &Limit,
     ) -> Result<Done, Failure> {
-        sessions.retain(SessionLink::is_alive);
         let mut stores = self.open_stores()?;
         let branch = self.git.current_branch()?;
 
@@ -186,7 +184,17 @@ impl Repository {
         kill::point("pass: squashed");
         self.mark_seen(&views(&stores), &branch)?;
         if self.git.has_remote(&remote) {
-            self.git.push_within(&remote, &branch, limit)?;
+            match self.git.push_within(&remote, &branch, limit) {
+                Err(GitError::PasswordInFile { .. })
+                    if self
+                        .git
+                        .fold_out_password(&remote, &branch, PASSWORD_REMOVED)? =>
+                {
+                    self.mark_seen(&views(&stores), &branch)?;
+                    self.git.push_within(&remote, &branch, limit)?;
+                }
+                pushed => pushed?,
+            }
             kill::point("pass: pushed");
             // Only a fetch shows the push here. Missing it costs a stale badge
             // until the next sync.
@@ -253,7 +261,7 @@ impl Repository {
         &self,
         stores: &[Store<'_>],
         settings: &mut AppSettings,
-        sessions: &[SessionLink],
+        sessions: &Sessions,
         branch: &str,
     ) -> Result<(), Failure> {
         let tip = self.git.branch_tip(branch)?;
@@ -300,7 +308,7 @@ impl Repository {
         theirs: Oid,
         stores: &[Store<'_>],
         settings: &mut AppSettings,
-        sessions: &[SessionLink],
+        sessions: &Sessions,
     ) -> Result<bool, Failure> {
         let Some(merging) = merge::prepare(&self.git, &self.files, theirs)? else {
             return Ok(false);
@@ -393,14 +401,19 @@ struct Held {
 impl Held {
     /// Asks the sessions on `servers` to hold, and waits until what they'd
     /// already queued is on the disk, so none of it can land on a merge. A
-    /// session too busy to answer puts the merge off to the next try.
-    fn hold(sessions: &[SessionLink], servers: &[&str]) -> Result<Held, Failure> {
+    /// session too busy to answer puts the merge off to the next try. The list
+    /// is read here, right before the merge touches anything: a session is on
+    /// it before it loads its map, so none can load a map this misses.
+    fn hold(sessions: &Sessions, servers: &[&str]) -> Result<Held, Failure> {
+        let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        sessions.retain(SessionLink::is_alive);
         let (done, drained) = mpsc::sync_channel(sessions.len().max(1));
         let held: Vec<HeldSession> = sessions
             .iter()
             .filter(|session| servers.contains(&session.server()))
             .filter_map(|session| session.hold(done.clone()))
             .collect();
+        drop(sessions);
         drop(done);
         let held = Held { sessions: held };
         for _ in &held.sessions {

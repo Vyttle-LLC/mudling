@@ -191,6 +191,7 @@ fn a_push_that_loses_a_race_on_the_server_is_told_as_the_remote_being_ahead() {
     let lost = [
         "cannot lock ref 'refs/heads/main': is at 1 but expected 2",
         "failed to update ref",
+        "failed to lock file 'remote.git/refs/heads/main.lock' for writing",
         "fetch first",
     ];
     for reason in lost {

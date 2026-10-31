@@ -1,11 +1,10 @@
 //! The sync thread: when to run a pass, and what to do when one fails.
 
 use super::pass::{Failure, Pass, Repository};
-use super::{Command, RepoSettings, SyncConfig, SyncState, vault};
+use super::{Command, RepoSettings, Sessions, SyncConfig, SyncState, vault};
 use crate::git::{GitError, Limit};
 use crate::merge;
 use crate::persist::Timestamp;
-use crate::session::SessionLink;
 use crate::store::{StoreHub, Versioned};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,7 +28,7 @@ pub(super) struct Thread {
     hub: Arc<StoreHub>,
     quitting: Arc<AtomicBool>,
     repo: Option<Repository>,
-    sessions: Vec<SessionLink>,
+    sessions: Sessions,
     /// Connections open now.
     playing: usize,
     /// When the session being played began, for its squashed commit.
@@ -37,23 +36,32 @@ pub(super) struct Thread {
     next_commit: Option<Instant>,
     wanted: Option<Pass>,
     retry: Option<(Instant, Pass)>,
+    /// The furthest pass that failed and hasn't worked since. A shorter pass
+    /// working says nothing about it, so its problem stays on show.
+    unfinished: Option<Pass>,
     /// Passes failed in a row, for spacing out tries.
     failures: u32,
 }
 
 impl Thread {
-    pub(super) fn new(config: SyncConfig, hub: Arc<StoreHub>, quitting: Arc<AtomicBool>) -> Thread {
+    pub(super) fn new(
+        config: SyncConfig,
+        hub: Arc<StoreHub>,
+        sessions: Sessions,
+        quitting: Arc<AtomicBool>,
+    ) -> Thread {
         Thread {
             config,
             hub,
             quitting,
             repo: None,
-            sessions: Vec::new(),
+            sessions,
             playing: 0,
             session_began: None,
             next_commit: None,
             wanted: None,
             retry: None,
+            unfinished: None,
             failures: 0,
         }
     }
@@ -93,7 +101,6 @@ impl Thread {
     /// Acts on `command`. Returns whether it's time to stop.
     fn obey(&mut self, command: Command) -> bool {
         match command {
-            Command::Attach(session) => self.sessions.push(session),
             Command::Connected => {
                 self.playing += 1;
                 self.session_began.get_or_insert_with(Instant::now);
@@ -115,8 +122,11 @@ impl Thread {
                 self.want(Pass::Full);
             }
             Command::SetRepo(repo) => {
-                self.config.repo = Some(repo.clone());
-                self.open_repo(repo);
+                if self.bring_vault_home() {
+                    self.forget_failures();
+                    self.config.repo = Some(repo.clone());
+                    self.open_repo(repo);
+                }
             }
             Command::ClearRepo => self.clear_repo(),
             Command::Settings(settings) => self.config.settings = settings,
@@ -167,19 +177,43 @@ impl Thread {
     }
 
     fn clear_repo(&mut self) {
-        let folder = self.repo.take().map(Repository::into_folder);
+        if !self.bring_vault_home() {
+            return;
+        }
+        self.repo = None;
         self.config.repo = None;
-        self.retry = None;
+        self.forget_failures();
         self.wanted = None;
-        let moved = folder.map_or(Ok(()), |folder| {
-            vault::bring_home(&folder, &self.config.data_folder)
-        });
         self.publish(|state| {
-            state.problem = moved.err().map(|error| error.to_string());
+            state.problem = None;
             state.syncing = false;
             state.unsynced = 0;
         });
         self.publish_vault_file();
+    }
+
+    /// Copies the vault out of the repo being left, whether or not it opened,
+    /// so the next place can take it in. Returns whether the player can go on:
+    /// if not, the store says why and the repo stays set.
+    fn bring_vault_home(&self) -> bool {
+        let Some(repo) = &self.config.repo else {
+            return true;
+        };
+        let moved = vault::bring_home(&repo.folder, &self.config.data_folder);
+        let failed = moved.as_ref().err().map(|error| {
+            format!("The vault couldn't be moved out of the repo, so it stays set: {error}.")
+        });
+        let stayed = failed.is_some();
+        if stayed {
+            self.publish(|state| state.problem = failed);
+        }
+        !stayed
+    }
+
+    fn forget_failures(&mut self) {
+        self.retry = None;
+        self.unfinished = None;
+        self.failures = 0;
     }
 
     fn run_pass(&mut self, pass: Pass, limit: Limit) {
@@ -199,7 +233,7 @@ impl Thread {
             outcome = repo.run(
                 pass,
                 &mut self.config.settings,
-                &mut self.sessions,
+                &self.sessions,
                 self.session_began,
                 &limit,
             );
@@ -216,15 +250,24 @@ impl Thread {
         self.repo = Some(repo);
         match outcome {
             Ok(done) => {
-                self.failures = 0;
-                self.retry = None;
+                let finished = self.unfinished.is_none_or(|failed| pass >= failed);
+                if finished {
+                    self.forget_failures();
+                } else if done.reached_remote
+                    && let Some((_, waiting)) = self.retry.take()
+                {
+                    // The remote answered, so what's waiting needn't.
+                    self.want(waiting);
+                }
                 if pass == Pass::Full && self.playing == 0 {
                     self.session_began = None;
                 }
                 let settings = self.config.settings.clone();
                 self.publish(|state| {
                     state.syncing = false;
-                    state.problem = None;
+                    if finished {
+                        state.problem = None;
+                    }
                     state.last_sync = done.reached_remote.then(Timestamp::now).or(state.last_sync);
                     state.changed = done.changed.or(state.changed.take());
                     state.unsynced = unsynced;
@@ -242,7 +285,14 @@ impl Thread {
     fn failed(&mut self, failure: &Failure, pass: Pass) {
         self.failures += 1;
         let wait = self.wait_before_retry(failure);
-        self.retry = wait.map(|wait| (Instant::now() + wait, pass));
+        let pass = self.unfinished.map_or(pass, |earlier| earlier.max(pass));
+        self.unfinished = Some(pass);
+        // A shorter pass failing must not cancel a further one still waiting.
+        let waiting = self.retry.map(|(at, _)| at);
+        self.retry = wait
+            .map(|wait| Instant::now() + wait)
+            .or(waiting)
+            .map(|at| (at, pass));
         let settings = self.config.settings.clone();
         let locks = self
             .repo

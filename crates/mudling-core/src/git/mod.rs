@@ -57,12 +57,14 @@ const SOCKET_TIMEOUT_MS: i32 = 30_000;
 /// How often a wait for a network step looks at its limit.
 const LIMIT_POLL: Duration = Duration::from_millis(20);
 /// How a server words a push that lost a race: another push moved the branch
-/// after this one read it, so the server's update of the ref failed.
-const LOST_RACE: [&str; 4] = [
+/// after this one read it, or holds the branch's lock right now, so the
+/// server's update of the ref failed.
+const LOST_RACE: [&str; 5] = [
     "non-fast-forward",
     "fetch first",
     "cannot lock ref",
     "failed to update ref",
+    "failed to lock",
 ];
 
 /// Sets what must be set while no other thread can see it: libgit2's socket
@@ -458,18 +460,51 @@ impl Repo {
     fn refuse_passwords(&self, remote: &str, branch: &str) -> Result<()> {
         let mut seen = HashSet::new();
         for id in self.unpushed(remote, branch)? {
-            let tree = self.repo.find_commit(id)?.tree()?;
-            self.for_each_file(&tree, Path::new(""), &mut seen, &mut |path, bytes| {
-                match merge::find_password(&path, bytes) {
-                    Some(field) => Err(GitError::PasswordInFile {
-                        path: path.display().to_string(),
-                        field,
-                    }),
-                    None => Ok(()),
-                }
-            })?;
+            self.refuse_passwords_in(id, &mut seen)?;
         }
         Ok(())
+    }
+
+    fn refuse_passwords_in(&self, commit: Oid, seen: &mut HashSet<(PathBuf, Oid)>) -> Result<()> {
+        let tree = self.repo.find_commit(commit)?.tree()?;
+        self.for_each_file(
+            &tree,
+            Path::new(""),
+            seen,
+            &mut |path, bytes| match merge::find_password(&path, bytes) {
+                Some(field) => Err(GitError::PasswordInFile {
+                    path: path.display().to_string(),
+                    field,
+                }),
+                None => Ok(()),
+            },
+        )
+    }
+
+    /// Takes a password the player has removed out of what `remote` would
+    /// receive: if `branch` holds none now, every commit the remote lacks
+    /// becomes one, so no old commit still holds it. The sessions among them
+    /// fold together, which only this costs. Returns whether it did. The old
+    /// commits stay on this device until git cleans them up, and are never
+    /// pushed.
+    pub fn fold_out_password(&self, remote: &str, branch: &str, message: &str) -> Result<bool> {
+        let tip = self.existing_tip(branch)?;
+        match self.refuse_passwords_in(tip, &mut HashSet::new()) {
+            Err(GitError::PasswordInFile { .. }) => return Ok(false),
+            result => result?,
+        }
+        let tree = self.repo.find_commit(tip)?.tree()?;
+        let parent = self
+            .tracked_tip(remote, branch)?
+            .map(|id| self.repo.find_commit(id))
+            .transpose()?;
+        let parents: Vec<&Commit> = parent.iter().collect();
+        let signature = self.signature()?;
+        let folded = self
+            .repo
+            .commit(None, &signature, &signature, message, &tree, &parents)?;
+        self.move_branch(branch, Some(tip), folded)?;
+        Ok(true)
     }
 
     /// Calls `visit` for every file under `tree`, skipping any object already

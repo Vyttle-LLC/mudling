@@ -479,6 +479,156 @@ fn a_refused_push_names_the_field_and_never_the_value() {
     assert_eq!(remote_commits(&world.remote), before);
 }
 
+/// Whether any commit on the bare repo's `main` holds `text` in any file.
+fn remote_ever_held(remote: &Path, text: &str) -> bool {
+    let repository = Repository::open_bare(remote).unwrap();
+    let mut walk = repository.revwalk().unwrap();
+    walk.push_ref("refs/heads/main").unwrap();
+    walk.any(|id| {
+        let tree = repository.find_commit(id.unwrap()).unwrap().tree().unwrap();
+        let mut found = false;
+        tree.walk(git2::TreeWalkMode::PreOrder, |_, entry| {
+            if let Ok(blob) = repository.find_blob(entry.id()) {
+                found |= blob
+                    .content()
+                    .windows(text.len())
+                    .any(|w| w == text.as_bytes());
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .unwrap();
+        found
+    })
+}
+
+#[test]
+fn removing_a_refused_password_lets_the_next_sync_push_without_it() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(Server {
+            updated: Timestamp::now(),
+            ..server(r#"{"login":{"password":"hunter2"}}"#)
+        });
+    });
+    assert!(world.mac.sync().problem.is_some());
+
+    world.mac.apply(|batch| {
+        batch.upsert(Server {
+            updated: Timestamp::now(),
+            ..server("{}")
+        });
+        batch.upsert(room(2, "A hill", "The Meadow"));
+    });
+    let state = world.mac.sync();
+
+    assert_eq!(state.problem, None);
+    assert_eq!(state.unsynced, 0);
+    assert!(!remote_ever_held(&world.remote, "hunter2"));
+    assert!(remote_ever_held(&world.remote, "A hill"));
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(world.ipad.rooms(), ["A hill", "A quiet road"]);
+}
+
+#[test]
+fn a_password_in_the_very_first_push_can_be_removed_too() {
+    let folder = TempDir::new().unwrap();
+    let remote = folder.path().join("remote.git");
+    Repository::init_bare(&remote).unwrap();
+    let device = Device::new(folder.path(), "mac", remote.to_str().unwrap());
+    device.apply(|batch| {
+        batch.upsert(server(r#"{"login":{"password":"hunter2"}}"#));
+    });
+    assert!(device.sync().problem.is_some());
+
+    device.apply(|batch| {
+        batch.upsert(Server {
+            updated: Timestamp::now(),
+            ..server("{}")
+        });
+    });
+
+    assert_eq!(device.sync().problem, None);
+    assert!(!remote_ever_held(&remote, "hunter2"));
+}
+
+#[test]
+fn a_password_still_there_stays_refused() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(Server {
+            updated: Timestamp::now(),
+            ..server(r#"{"login":{"password":"hunter2"}}"#)
+        });
+    });
+
+    assert!(world.mac.sync().problem.is_some());
+    assert!(world.mac.sync().problem.is_some());
+    assert!(!remote_ever_held(&world.remote, "hunter2"));
+}
+
+#[test]
+fn a_shorter_pass_working_leaves_a_failed_push_waiting_and_on_show() {
+    let world = two_devices();
+    let url = world.remote.to_str().unwrap().to_owned();
+    world.mac.set_remote(&format!("{url}-gone"));
+    world.mac.apply(|batch| {
+        batch.upsert(room(2, "A hill", "The Meadow"));
+    });
+    let sync = Syncer::start(
+        SyncConfig {
+            first_retry: Duration::from_millis(400),
+            commit_every: Duration::from_millis(20),
+            ..world.mac.config()
+        },
+        || {},
+    )
+    .unwrap();
+    wait_for(&sync, |state| state.problem.is_some());
+    sync.connected();
+
+    // Timed commits work throughout, and none of them may clear this.
+    let git = Repository::open(&world.mac.repo).unwrap();
+    let tip = git.refname_to_id("refs/heads/main").unwrap();
+    world.mac.apply(|batch| {
+        batch.upsert(room(3, "A dale", "The Meadow"));
+    });
+    wait_until(|| git.refname_to_id("refs/heads/main").unwrap() != tip);
+    assert!(state_of(&sync).problem.is_some());
+
+    world.mac.set_remote(&url);
+    wait_for(&sync, |state| state.problem.is_none());
+    sync.quit().wait();
+    assert!(remote_ever_held(&world.remote, "A dale"));
+}
+
+#[test]
+fn a_pull_that_reaches_the_remote_sends_the_waiting_push_at_once() {
+    let world = two_devices();
+    let url = world.remote.to_str().unwrap().to_owned();
+    world.mac.set_remote(&format!("{url}-gone"));
+    world.mac.apply(|batch| {
+        batch.upsert(room(2, "A hill", "The Meadow"));
+    });
+    let sync = Syncer::start(
+        SyncConfig {
+            first_retry: PATIENCE * 10,
+            ..world.mac.config()
+        },
+        || {},
+    )
+    .unwrap();
+    wait_for(&sync, |state| state.problem.is_some());
+
+    world.mac.set_remote(&url);
+    sync.foreground();
+
+    wait_for(&sync, |state| {
+        state.problem.is_none() && state.unsynced == 0
+    });
+    sync.quit();
+    assert!(remote_ever_held(&world.remote, "A hill"));
+}
+
 #[test]
 fn a_session_of_checkpoints_reaches_the_remote_as_one_commit() {
     let world = two_devices();
@@ -845,6 +995,59 @@ fn setting_a_repo_moves_the_local_vault_into_it_and_clearing_brings_it_home() {
 }
 
 #[test]
+fn choosing_another_repo_takes_the_vault_along() {
+    let world = two_devices();
+    fs::create_dir_all(&world.mac.data).unwrap();
+    let local = world.mac.data.join(FILE_NAME);
+    let bytes = {
+        let _vault = vault_with(&local, SERVER);
+        fs::read(&local).unwrap()
+    };
+    assert_eq!(world.mac.sync().problem, None);
+    assert!(!local.exists());
+    let second = world.folder.path().join("second");
+
+    let sync = Syncer::start(world.mac.config(), || {}).unwrap();
+    sync.set_repo(RepoSettings::new(&second));
+    let state = wait_for(&sync, |state| state.repo.as_ref() == Some(&second));
+    sync.quit().wait();
+
+    assert_eq!(state.vault_file, second.join(FILE_NAME));
+    assert_eq!(fs::read(second.join(FILE_NAME)).unwrap(), bytes);
+    assert_eq!(fs::read(world.mac.repo.join(FILE_NAME)).unwrap(), bytes);
+    assert!(!local.exists());
+}
+
+#[test]
+fn clearing_a_repo_that_would_not_open_still_brings_the_vault_home() {
+    let folder = TempDir::new().unwrap();
+    let data = folder.path().join("data");
+    let repo = folder.path().join("not-a-repo");
+    fs::create_dir_all(&repo).unwrap();
+    let held = repo.join(FILE_NAME);
+    let bytes = {
+        let _vault = vault_with(&held, SERVER);
+        fs::read(&held).unwrap()
+    };
+    let sync = Syncer::start(
+        SyncConfig {
+            repo: Some(RepoSettings::new(&repo)),
+            ..SyncConfig::new(&data)
+        },
+        || {},
+    )
+    .unwrap();
+    wait_for(&sync, |state| state.problem.is_some());
+
+    sync.clear_repo();
+
+    let state = wait_for(&sync, |state| state.problem.is_none());
+    sync.quit();
+    assert_eq!(state.vault_file, data.join(FILE_NAME));
+    assert_eq!(fs::read(data.join(FILE_NAME)).unwrap(), bytes);
+}
+
+#[test]
 fn a_kill_while_moving_the_vault_leaves_it_in_both_places_and_the_next_sync_finishes() {
     let world = two_devices();
     fs::create_dir_all(&world.mac.data).unwrap();
@@ -926,7 +1129,10 @@ fn a_session_syncs_at_its_end_and_its_map_follows_a_merge() {
     session.replay(hearth_recording());
     wait_until(|| map_rooms(&session) > 0);
     let played = world.mac.rooms();
-    wait_until(|| holds_any(&world.remote, &played));
+    wait_until(|| {
+        let pushed = |room: &String| remote_ever_held(&world.remote, room);
+        played.len() > 1 && played.iter().all(pushed)
+    });
 
     // The other device deletes the room both hold.
     assert_eq!(world.ipad.sync().problem, None);
@@ -947,6 +1153,42 @@ fn a_session_syncs_at_its_end_and_its_map_follows_a_merge() {
     sync.quit().wait();
 }
 
-fn holds_any(remote: &Path, played: &[String]) -> bool {
-    played.len() > 1 && remote_files(remote).len() > 4
+/// The merge is big enough to run while the session opens. A session that
+/// opens after it, or before, sees the same result, so this can't fail by
+/// chance; it fails when the merge misses a session that opened during it.
+#[test]
+fn a_session_opened_while_a_sync_runs_follows_that_syncs_merge() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        for id in 10..3_000 {
+            batch.upsert(room(id, "A road", "The Long Road"));
+        }
+    });
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+    world.ipad.apply(|batch| {
+        batch.delete(crate::persist::Key::Room(1));
+        batch.upsert(room(5_000, "A new road", "The Long Road"));
+    });
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let sync = Syncer::start(world.mac.config(), || {}).unwrap();
+    wait_for(&sync, |state| state.syncing);
+    let session = Session::open(
+        SessionConfig {
+            sync: Some(sync.clone()),
+            ..SessionConfig::new(&world.mac.data, SERVER, 4000)
+        },
+        || {},
+    )
+    .unwrap();
+    wait_for(&sync, |state| state.last_sync.is_some() && !state.syncing);
+
+    wait_until(|| {
+        session.stores().read(|map: &Versioned<MapState>| {
+            map.value().room(1).is_none() && map.value().room(5_000).is_some()
+        })
+    });
+    session.quit().wait().unwrap();
+    sync.quit().wait();
 }
