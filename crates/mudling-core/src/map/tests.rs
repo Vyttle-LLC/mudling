@@ -997,6 +997,18 @@ fn an_attacker_marks_its_whole_kind_and_the_room() {
 }
 
 #[test]
+fn a_door_closing_in_place_shows_without_a_room_info() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A hall", &["n"]);
+    let now = walk.now();
+    walk.map.gmcp("Char.Status", r#"{"hp": "12"}"#, now);
+    assert!(!walk.current().exits.get(Direction::North).unwrap().closed);
+    walk.map
+        .gmcp("Char.Status", r#"{"room_exits": {"North": "C"}}"#, now);
+    assert!(walk.current().exits.get(Direction::North).unwrap().closed);
+}
+
+#[test]
 fn unmarking_undoes_a_learned_guess() {
     let mut mobs = MobMemory::default();
     mobs.learn_aggressor("The old goat");

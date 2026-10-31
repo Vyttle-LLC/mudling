@@ -1,9 +1,13 @@
-//! GMCP `Room.Info`: where the player is, as the game reports it.
+//! GMCP `Room.Info`: where the player is, as the game reports it, and the
+//! other messages that say something about that room.
 
 use super::geometry::{DirMap, Direction};
 use super::rules::MapRules;
 use crate::telnet::gmcp;
 use serde_json::Value;
+
+/// Char.Status's key for the room's exits.
+pub(super) const ROOM_EXITS: &str = "room_exits";
 
 /// A Room.Info, read.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -29,6 +33,26 @@ pub struct ExitInfo {
     pub to: Option<i64>,
 }
 
+fn exits(value: Option<&Value>, rules: &dyn MapRules) -> DirMap<ExitInfo> {
+    value
+        .and_then(Value::as_object)
+        .map(|exits| {
+            exits
+                .iter()
+                .filter_map(|(key, value)| Some((Direction::parse(key)?, exit(value, rules))))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The room's exits in a Char.Status, sent when a door changes in place.
+/// `None` when it doesn't list them.
+pub(super) fn status_exits(json: &str, rules: &dyn MapRules) -> Option<DirMap<ExitInfo>> {
+    let status: Value = gmcp::from_json(json)?;
+    let listed = status.get(ROOM_EXITS)?;
+    Some(exits(Some(listed), rules))
+}
+
 impl RoomInfo {
     /// Reads a Room.Info payload. `None` when it isn't a JSON object.
     pub fn parse(json: &str, rules: &dyn MapRules) -> Option<RoomInfo> {
@@ -40,16 +64,7 @@ impl RoomInfo {
                 .unwrap_or_default()
                 .to_owned()
         };
-        let exits = object
-            .get("exits")
-            .and_then(Value::as_object)
-            .map(|exits| {
-                exits
-                    .iter()
-                    .filter_map(|(key, value)| Some((Direction::parse(key)?, exit(value, rules))))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let exits = exits(object.get("exits"), rules);
         let details = object
             .get("details")
             .and_then(Value::as_array)

@@ -2,8 +2,8 @@
 //! write come out.
 
 use super::buildings::MapDoor;
-use super::geometry::{Direction, GridPoint};
-use super::info::RoomInfo;
+use super::geometry::{DirMap, Direction, GridPoint};
+use super::info::{self, ExitInfo, RoomInfo};
 use super::layout::{Layout, Step, UNNUMBERED_IDS};
 use super::mobs::{MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
@@ -163,13 +163,28 @@ impl LiveMap {
     /// A GMCP message from the telnet layer. Returns what arriving in a
     /// room revealed, for a Room.Info.
     pub fn gmcp(&mut self, package: &str, json: &str, now: Timestamp) -> Option<Arrived> {
-        if package.eq_ignore_ascii_case("Room.Info") {
-            self.room_info(json, now)
-        } else {
-            if package.eq_ignore_ascii_case("Room.WrongDir") {
-                self.tracker.move_failed(now);
-            }
-            None
+        let is = |name: &str| package.eq_ignore_ascii_case(name);
+        if is("Room.Info") {
+            return self.room_info(json, now);
+        }
+        if is("Room.WrongDir") {
+            self.tracker.move_failed(now);
+        } else if is("Char.Status") {
+            self.status(json);
+        }
+        None
+    }
+
+    /// A door changed in place, which brings no Room.Info.
+    fn status(&mut self, json: &str) {
+        // Most Char.Status are vitals: don't parse them for this.
+        if !json.contains(info::ROOM_EXITS) {
+            return;
+        }
+        if let Some(exits) = info::status_exits(json, &*self.rules) {
+            let exits = exit_states(&exits);
+            self.tracker
+                .update_current_rooms(|room| room.note_exits(exits.clone()));
         }
     }
 
@@ -186,19 +201,7 @@ impl LiveMap {
             direction: None,
             number: info.number.filter(|_| numbered),
             indoor: self.rules.indoor(&info.environment),
-            exits: info
-                .exits
-                .iter()
-                .map(|(direction, exit)| {
-                    (
-                        direction,
-                        ExitState {
-                            state: exit.state.clone(),
-                            closed: exit.closed,
-                        },
-                    )
-                })
-                .collect(),
+            exits: exit_states(&info.exits),
             targets: info
                 .exits
                 .iter()
@@ -591,6 +594,21 @@ impl LiveMap {
         batch.save_map_version(kind, label, now);
         batch
     }
+}
+
+fn exit_states(exits: &DirMap<ExitInfo>) -> DirMap<ExitState> {
+    exits
+        .iter()
+        .map(|(direction, exit)| {
+            (
+                direction,
+                ExitState {
+                    state: exit.state.clone(),
+                    closed: exit.closed,
+                },
+            )
+        })
+        .collect()
 }
 
 fn first_id(rules: &dyn MapRules) -> RoomId {
