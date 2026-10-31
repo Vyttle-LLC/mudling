@@ -601,6 +601,8 @@ impl Render for RoomPanel {
             .debug_selector(|| "room-panel".to_owned())
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
+            // The mouse never moves focus here: typing stays with the bar.
+            .capture_any_mouse_down(|_, window, _| window.prevent_default())
             .role(Role::Group)
             .aria_label("Room")
             .size_full()

@@ -89,7 +89,7 @@ pub struct Shell {
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
     room_panel: Entity<RoomPanel>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
     _woken: Task<()>,
 }
 
@@ -121,6 +121,14 @@ impl Shell {
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
             shell.on_room_verb(sent, window, cx);
         });
+        // A panel that hides or changes tab takes its focus with it. Deferred
+        // past the draw this runs in, which wouldn't redraw for the new focus,
+        // and the bar only takes text once it's drawn focused.
+        let focus_lost = cx.on_focus_lost(window, |_, window, cx| {
+            cx.defer_in(window, |shell, window, cx| {
+                window.focus(&shell.input.focus_handle(cx), cx);
+            });
+        });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             cx.set_global(Theme::for_appearance(window.appearance()));
             window.refresh();
@@ -148,7 +156,7 @@ impl Shell {
             left_dock: cx.new(|_| Dock::new(Side::Left)),
             right_dock: cx.new(|_| Dock::new(Side::Right)),
             room_panel,
-            _subscriptions: [typing, verb_sent, appearance, quitting],
+            _subscriptions: [typing, verb_sent, focus_lost, appearance, quitting],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
         shell.show_status(cx);
@@ -435,7 +443,9 @@ mod tests {
     use crate::chat::LINE_HEIGHT;
     use crate::room_panel::press_key;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
-    use gpui::{Modifiers, Pixels, TestAppContext, VisualTestContext, point, px, size};
+    use gpui::{
+        Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
+    };
     use mudling_core::defaults::hud::Vital;
     use mudling_core::plugin::Plugin;
     use mudling_core::session::SessionConfig;
@@ -1049,6 +1059,44 @@ mod tests {
 
         played.click("Get a rock");
         assert_eq!(played.heard_command(), "take rock");
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn a_mouse_press_in_the_panel_leaves_typing_with_the_bar(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+
+        played.click("room-map");
+        let north = played.cx.debug_bounds("Go north").unwrap().center();
+        let map = played.cx.debug_bounds("room-map").unwrap().center();
+        played
+            .cx
+            .simulate_mouse_down(north, MouseButton::Left, Modifiers::none());
+        played
+            .cx
+            .simulate_mouse_up(map, MouseButton::Left, Modifiers::none());
+
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_the_panel_with_focus_in_it_hands_typing_to_the_bar(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.cx.simulate_keystrokes("shift-tab");
+
+        played.shell.update(played.cx, |shell, cx| {
+            shell.toggle_dock(Side::Right, cx);
+        });
+        played.cx.run_until_parked();
+
         played.cx.simulate_input("look");
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.input.read(cx).content(), "look");
