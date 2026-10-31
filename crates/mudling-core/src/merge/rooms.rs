@@ -9,10 +9,9 @@
 //! Two rooms unite only if all of this holds:
 //! - Their whole identity (name, zone, description and exits) matches, exactly
 //!   one room on each side has it, and each id is on one side only.
-//! - Something beyond that says they're one: the same stored position on the
-//!   same sheet, on a square a walk reached and not where an island starts, or
-//!   a shared link, the same direction to or from one room or a pair that
-//!   unites too.
+//! - They share a link: the same direction to or from one room, or a pair that
+//!   unites too. Coordinates can't say this, because each device counts them
+//!   from its own first room.
 //! - No direction leads to two rooms that stay apart.
 //! - No room would come to reach another by two different directions, which
 //!   the two sides don't each show. A maze gets no pass.
@@ -26,11 +25,14 @@
 //! nothing changes. Nothing depends on the order of rooms or of the two sides,
 //! so both devices reach one result.
 //!
-//! Devices that started in different places have different coordinates, so a
-//! room both found with no link in common stays a duplicate.
+//! After a first sync, devices share rooms, and a new room off one has a link
+//! to prove it. Two devices that have never synced share no room, so a first
+//! [`join`](super::join) of two separate maps keeps both copies of any room
+//! they both found. A union runs only while the copies are on one side each, so
+//! such a duplicate stays until the player joins the two rooms by hand.
 
-use crate::map::{GridPoint, RoomId, UNNUMBERED_IDS, is_island_start};
-use crate::persist::{Key, MapRows, Room, Timestamp, Tombstone};
+use crate::map::{RoomId, UNNUMBERED_IDS};
+use crate::persist::{Key, MapRows, Timestamp, Tombstone};
 use crate::repo::format::ServerRows;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -100,7 +102,6 @@ type Links<'a> = HashMap<RoomId, Vec<(&'a str, RoomId)>>;
 
 /// What one side knows of its map, for looking rooms up by id.
 struct Side<'a> {
-    rooms: HashMap<RoomId, &'a Room>,
     /// Each room's links, as direction and the room at the far end.
     out_of: Links<'a>,
     /// The links into each room, as direction and where they start.
@@ -110,7 +111,6 @@ struct Side<'a> {
 impl Side<'_> {
     fn new(rows: &ServerRows) -> Side<'_> {
         let mut side = Side {
-            rooms: rows.map.rooms.iter().map(|room| (room.id, room)).collect(),
             out_of: Links::new(),
             into: Links::new(),
         };
@@ -250,31 +250,7 @@ fn has_evidence(
                 })
         })
     };
-    same_square(pair, united, ours, theirs)
-        || shares(&ours.out_of, &theirs.out_of)
-        || shares(&ours.into, &theirs.into)
-}
-
-/// The same position on the same sheet: both outdoors, or in one building. A
-/// wing's first room is its own building, so that pair's sheet is its own. Only
-/// a square a walk reached counts: where an island starts proves nothing,
-/// because any device's first room there lands on it.
-fn same_square(
-    pair: Pair,
-    united: &HashMap<RoomId, RoomId>,
-    ours: &Side<'_>,
-    theirs: &Side<'_>,
-) -> bool {
-    let (Some(a), Some(b)) = (ours.rooms.get(&pair.ours), theirs.rooms.get(&pair.theirs)) else {
-        return false;
-    };
-    let same_sheet = match (a.building, b.building) {
-        (None, None) => true,
-        (Some(x), Some(y)) => (x == a.id && y == b.id) || one_id(united, x) == one_id(united, y),
-        _ => false,
-    };
-    let square = GridPoint::new(a.x, a.y, a.z);
-    same_sheet && square == GridPoint::new(b.x, b.y, b.z) && !is_island_start(square)
+    shares(&ours.out_of, &theirs.out_of) || shares(&ours.into, &theirs.into)
 }
 
 fn links_of<'s, 'a>(links: &'s Links<'a>, id: RoomId) -> &'s [(&'a str, RoomId)] {

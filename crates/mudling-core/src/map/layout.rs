@@ -39,15 +39,6 @@ pub(super) fn id_prefix(id: RoomId) -> i64 {
     id >> COUNT_BITS
 }
 
-/// How far apart separate islands of rooms start.
-const ISLAND_SPACING: i64 = 1000;
-
-/// Whether `square` is where an island starts, the first being the origin.
-/// Every device puts its first rooms on these, whatever those rooms are.
-pub(crate) fn is_island_start(square: GridPoint) -> bool {
-    square.x >= 0 && square.x % ISLAND_SPACING == 0 && square.y == 0 && square.z == 0
-}
-
 type Map<K, V> = imbl::HashMap<K, V>;
 
 #[derive(Clone, Debug, Default)]
@@ -419,8 +410,7 @@ impl Layout {
             return (spot, None);
         }
         self.islands += 1;
-        let start = (self.islands - 1) * ISLAND_SPACING;
-        (GridPoint::new(start, 0, 0), None)
+        (GridPoint::new((self.islands - 1) * 1000, 0, 0), None)
     }
 
     fn new_id(&mut self, step: &Step) -> RoomId {

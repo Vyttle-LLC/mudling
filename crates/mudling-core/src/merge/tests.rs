@@ -306,6 +306,22 @@ fn converge(mac: &Device, ipad: &Device) {
     assert_eq!(mac.git.branch_tip(BRANCH).unwrap(), settled.0, "churn");
 }
 
+/// Two devices that share one room, "A hub", under one id.
+fn two_explorers_at_a_hub(exits: &[&str]) -> (TempDir, Device, Device) {
+    let (folder, mac, ipad) = two_explorers();
+    mac.walk(&[(None, "A hub", exits)]);
+    mac.sync();
+    ipad.sync();
+    assert_eq!(mac.rooms(), ipad.rooms());
+    (folder, mac, ipad)
+}
+
+fn road_of(device: &Device) -> i64 {
+    let rooms = device.rooms();
+    let road = rooms.iter().find(|room| room.name == "A quiet road");
+    road.unwrap().id
+}
+
 #[test]
 fn devices_give_different_rooms_different_ids_and_keep_them_all() {
     let (_folder, mac, ipad) = two_explorers();
@@ -328,52 +344,18 @@ fn devices_give_different_rooms_different_ids_and_keep_them_all() {
 }
 
 #[test]
-fn devices_that_found_the_same_rooms_end_with_one_copy() {
-    let (_folder, mac, ipad) = two_explorers();
-    let walk: &[Step<'_>] = &[
-        (None, "A quiet road", &["n"]),
-        (Some("n"), "A hill", &["s"]),
-    ];
-    mac.walk(walk);
-    ipad.walk(walk);
-
-    converge(&mac, &ipad);
-
-    assert_eq!(mac.sorted_rooms(), ["A hill", "A quiet road"]);
-    assert_eq!(ipad.sorted_rooms(), ["A hill", "A quiet road"]);
-    assert_eq!(mac.rooms(), ipad.rooms());
-    let road_and_hill = vec![
-        ("A hill".to_owned(), "A quiet road".to_owned()),
-        ("A quiet road".to_owned(), "A hill".to_owned()),
-    ];
-    assert_eq!(mac.links(), road_and_hill);
-    assert_eq!(ipad.links(), road_and_hill);
-}
-
-#[test]
 fn a_mix_of_shared_and_new_rooms_keeps_every_room_and_way_between_them() {
-    let (_folder, mac, ipad) = two_explorers();
-    let road: &[&str] = &["n", "e", "s"];
-    let shared: [Step<'_>; 2] = [(None, "A quiet road", road), (Some("s"), "A gate", &["n"])];
+    let hub: &[&str] = &["n", "e", "s"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let shared: [Step<'_>; 2] = [(None, "A hub", hub), (Some("s"), "A gate", &["n"])];
     mac.walk(&shared);
     ipad.walk(&shared);
-    mac.walk(&[
-        (None, "A quiet road", road),
-        (Some("n"), "The Mac's hill", &["s"]),
-    ]);
-    ipad.walk(&[
-        (None, "A quiet road", road),
-        (Some("e"), "The iPad's lake", &["w"]),
-    ]);
+    mac.walk(&[(None, "A hub", hub), (Some("n"), "The Mac's hill", &["s"])]);
+    ipad.walk(&[(None, "A hub", hub), (Some("e"), "The iPad's lake", &["w"])]);
 
     converge(&mac, &ipad);
 
-    let names = [
-        "A gate",
-        "A quiet road",
-        "The Mac's hill",
-        "The iPad's lake",
-    ];
+    let names = ["A gate", "A hub", "The Mac's hill", "The iPad's lake"];
     assert_eq!(mac.sorted_rooms(), names);
     assert_eq!(ipad.sorted_rooms(), names);
     assert_eq!(mac.links(), ipad.links());
@@ -382,21 +364,11 @@ fn a_mix_of_shared_and_new_rooms_keeps_every_room_and_way_between_them() {
 
 #[test]
 fn what_hung_off_the_retired_id_moves_to_the_room_that_stays() {
-    let (_folder, mac, ipad) = two_explorers();
-    let walk: &[Step<'_>] = &[
-        (None, "A quiet road", &["n"]),
-        (Some("n"), "A hill", &["s"]),
-    ];
+    let hub: &[&str] = &["n"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let walk: &[Step<'_>] = &[(None, "A hub", hub), (Some("n"), "A quiet road", &["s"])];
     mac.walk(walk);
     ipad.walk(walk);
-    let road_of = |device: &Device| {
-        let rooms = device.rooms();
-        rooms
-            .iter()
-            .find(|room| room.name == "A quiet road")
-            .unwrap()
-            .id
-    };
     for (device, name) in [(&mac, "water"), (&ipad, "shop")] {
         let mut map = device.map();
         let id = road_of(device);
@@ -423,24 +395,19 @@ fn what_hung_off_the_retired_id_moves_to_the_room_that_stays() {
 
 #[test]
 fn a_device_that_played_on_keeps_what_it_added_to_a_room_since_retired() {
-    let (_folder, mac, ipad) = two_explorers();
-    let walk: &[Step<'_>] = &[
-        (None, "A quiet road", &["n"]),
-        (Some("n"), "A hill", &["s"]),
-    ];
-    let lower_and_higher = {
-        mac.walk(walk);
-        ipad.walk(walk);
-        if mac.rooms()[0].id < ipad.rooms()[0].id {
-            (&mac, &ipad)
-        } else {
-            (&ipad, &mac)
-        }
+    let hub: &[&str] = &["n"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let walk: &[Step<'_>] = &[(None, "A hub", hub), (Some("n"), "A quiet road", &["s"])];
+    mac.walk(walk);
+    ipad.walk(walk);
+    let (lower, higher) = if road_of(&mac) < road_of(&ipad) {
+        (&mac, &ipad)
+    } else {
+        (&ipad, &mac)
     };
-    let (lower, higher) = lower_and_higher;
     higher.sync();
     lower.sync();
-    let id = higher.rooms()[0].id;
+    let id = road_of(higher);
     higher.apply(|batch| {
         batch.upsert(sighting(id, "a heron"));
     });
@@ -452,16 +419,6 @@ fn a_device_that_played_on_keeps_what_it_added_to_a_room_since_retired() {
         let sightings = device.database.reader().unwrap().map().unwrap().sightings;
         assert_eq!(sightings.len(), 1, "the heron moved with its room");
     }
-}
-
-/// Two devices that share one room, "A hub", under one id.
-fn two_explorers_at_a_hub(exits: &[&str]) -> (TempDir, Device, Device) {
-    let (folder, mac, ipad) = two_explorers();
-    mac.walk(&[(None, "A hub", exits)]);
-    mac.sync();
-    ipad.sync();
-    assert_eq!(mac.rooms(), ipad.rooms());
-    (folder, mac, ipad)
 }
 
 const CORRIDOR: &[&str] = &["n", "s"];
@@ -522,91 +479,64 @@ fn reading_alike_with_links_that_agree_on_nothing_is_no_evidence() {
 }
 
 #[test]
-fn rooms_where_an_island_starts_are_no_evidence_of_one_room() {
-    // Every device's first rooms land on these squares, so sharing one proves
-    // nothing: the first island is the origin, and a jump starts the next.
+fn rooms_that_land_on_one_square_are_no_evidence_of_one_room() {
+    // Each device counts squares from its own first room, so both corridors
+    // here sit at (1, 0), and their links have nothing to disagree about.
     let hall: &[&str] = &["e", "w"];
-    let start: [(&[Step<'_>], &[Step<'_>], i64); 2] = [
-        (&[], &[], 0),
-        (
-            &[(None, "The Mac's hill", &["s"])],
-            &[(None, "The iPad's lake", &["s"])],
-            1000,
-        ),
-    ];
-    for (mac_start, ipad_start, x) in start {
-        for mac_syncs_first in [true, false] {
-            let (_folder, mac, ipad) = two_explorers();
-            mac.walk(mac_start);
-            ipad.walk(ipad_start);
-            mac.walk(&[(None, "A corridor", hall), (Some("e"), "A barn", &["w"])]);
-            ipad.walk(&[(None, "A corridor", hall), (Some("w"), "A pond", &["e"])]);
-            for device in [&mac, &ipad] {
-                let rooms = device.rooms();
-                let corridor = rooms.iter().find(|room| room.name == "A corridor");
-                assert_eq!(corridor.unwrap().x, x);
-            }
+    for mac_syncs_first in [true, false] {
+        let (_folder, mac, ipad) = two_explorers();
+        mac.walk(&[(None, "An inn", &["e"]), (Some("e"), "A corridor", hall)]);
+        ipad.walk(&[
+            (None, "A temple", &["n"]),
+            (Some("n"), "A yard", &["s", "e"]),
+            (Some("e"), "A lane", &["w", "e"]),
+            (Some("e"), "A square", &["w", "s"]),
+            (Some("s"), "A gate", &["n", "w"]),
+            (Some("w"), "A corridor", hall),
+        ]);
 
-            if mac_syncs_first {
-                converge(&mac, &ipad);
-            } else {
-                converge(&ipad, &mac);
-            }
-
-            let corridors = mac.room_names();
-            let corridors = corridors.iter().filter(|name| *name == "A corridor");
-            assert_eq!(corridors.count(), 2);
-            assert_eq!(mac.rooms(), ipad.rooms());
-            assert_eq!(mac.links().len(), 4);
+        if mac_syncs_first {
+            converge(&mac, &ipad);
+        } else {
+            converge(&ipad, &mac);
         }
+
+        assert_eq!(mac.rooms().len(), 8);
+        assert_eq!(mac.rooms(), ipad.rooms());
     }
 }
 
 #[test]
-fn a_walk_from_one_first_room_unites_by_its_neighbours_and_then_its_links() {
-    // The first rooms sit at the origin, and the hall's square proves the
-    // hall, whose link then proves them. The cellar has only the link: it was
-    // drawn elsewhere, so it unites through the hall.
-    let (_folder, mac, ipad) = two_explorers();
+fn devices_that_never_synced_keep_both_copies_of_a_room() {
     let walk: &[Step<'_>] = &[
         (None, "A quiet road", &["n"]),
-        (Some("n"), "A hall", &["s", "d"]),
-        (Some("d"), "A cellar", &["u"]),
+        (Some("n"), "A hill", &["s"]),
     ];
-    mac.walk(walk);
-    ipad.walk(walk);
-    draw_elsewhere(&ipad, &["A cellar"]);
+    for mac_syncs_first in [true, false] {
+        let (_folder, mac, ipad) = two_explorers();
+        mac.walk(walk);
+        ipad.walk(walk);
 
-    converge(&mac, &ipad);
-
-    assert_eq!(mac.sorted_rooms(), ["A cellar", "A hall", "A quiet road"]);
-    assert_eq!(mac.rooms(), ipad.rooms());
-    assert_eq!(mac.links().len(), 4);
-}
-
-/// Moves rooms as if the device had started somewhere else, so only a link
-/// can tell that they're the other device's rooms.
-fn draw_elsewhere(device: &Device, names: &[&str]) {
-    device.apply(|batch| {
-        for room in device.rooms() {
-            if names.contains(&room.name.as_str()) {
-                batch.upsert(Room {
-                    x: room.x + 100,
-                    ..room
-                });
-            }
+        if mac_syncs_first {
+            converge(&mac, &ipad);
+        } else {
+            converge(&ipad, &mac);
         }
-    });
+
+        let names = ["A hill", "A hill", "A quiet road", "A quiet road"];
+        assert_eq!(mac.sorted_rooms(), names);
+        assert_eq!(mac.rooms(), ipad.rooms());
+        assert_eq!(mac.links().len(), 4);
+    }
 }
 
 #[test]
-fn a_true_repeat_with_a_shared_link_unites_wherever_it_was_drawn() {
+fn a_new_room_off_a_shared_room_found_on_both_devices_unites() {
     let hub: &[&str] = &["n"];
     let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
     let walk: &[Step<'_>] = &[(None, "A hub", hub), (Some("n"), "A corridor", &["s"])];
     mac.walk(walk);
     ipad.walk(walk);
-    draw_elsewhere(&ipad, &["A corridor"]);
 
     converge(&mac, &ipad);
 
@@ -628,7 +558,6 @@ fn a_chain_unites_from_one_anchor() {
     ];
     mac.walk(walk);
     ipad.walk(walk);
-    draw_elsewhere(&ipad, &halls);
 
     converge(&mac, &ipad);
 
@@ -638,27 +567,26 @@ fn a_chain_unites_from_one_anchor() {
 }
 
 #[test]
-fn one_position_with_links_that_disagree_stays_two_rooms() {
-    let (_folder, mac, ipad) = two_explorers();
+fn a_shared_link_with_links_that_disagree_stays_two_rooms() {
+    let hub: &[&str] = &["n"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let corridor: Step<'_> = (Some("n"), "A corridor", CORRIDOR);
     mac.walk(&[
-        (None, "A quiet road", &["n"]),
+        (None, "A hub", hub),
+        corridor,
         (Some("n"), "A hill", &["s"]),
     ]);
     ipad.walk(&[
-        (None, "A quiet road", &["n"]),
+        (None, "A hub", hub),
+        corridor,
         (Some("n"), "A lake", &["s"]),
     ]);
-    let road = |device: &Device| (device.rooms()[0].x, device.rooms()[0].y);
-    assert_eq!(road(&mac), road(&ipad));
 
     converge(&mac, &ipad);
 
-    assert_eq!(
-        mac.sorted_rooms(),
-        ["A hill", "A lake", "A quiet road", "A quiet road"]
-    );
+    let names = ["A corridor", "A corridor", "A hill", "A hub", "A lake"];
+    assert_eq!(mac.sorted_rooms(), names);
     assert_eq!(mac.rooms(), ipad.rooms());
-    assert_eq!(mac.links().len(), 4);
 }
 
 fn rows_with(rooms: Vec<Room>, links: &[(i64, &str, i64)]) -> ServerRows {
@@ -687,17 +615,10 @@ fn ids_after_merge(ours: ServerRows, theirs: ServerRows) -> Vec<i64> {
 
 #[test]
 fn a_union_never_makes_one_room_reach_another_two_ways() {
-    let rooms = |id: i64| {
-        vec![
-            room(HUB, "A hub", T1),
-            Room {
-                x: 5,
-                ..room(id, "A maze", T1)
-            },
-        ]
-    };
-    let ours = || rows_with(rooms(OURS), &[(HUB, "n", OURS)]);
-    let theirs = || rows_with(rooms(THEIRS), &[(HUB, "e", THEIRS)]);
+    // The way back south proves the rooms, but the hub leaves by two ways.
+    let rooms = |id: i64| vec![room(HUB, "A hub", T1), room(id, "A maze", T1)];
+    let ours = || rows_with(rooms(OURS), &[(HUB, "n", OURS), (OURS, "s", HUB)]);
+    let theirs = || rows_with(rooms(THEIRS), &[(HUB, "e", THEIRS), (THEIRS, "s", HUB)]);
 
     assert_eq!(ids_after_merge(ours(), theirs()), [HUB, OURS, THEIRS]);
     assert_eq!(ids_after_merge(theirs(), ours()), [HUB, OURS, THEIRS]);
@@ -705,39 +626,26 @@ fn a_union_never_makes_one_room_reach_another_two_ways() {
 
 #[test]
 fn a_pair_that_falls_takes_the_pair_that_leaned_on_it() {
-    // The halls match only through the rooms past them, and those can't unite,
-    // because they lead north to rooms that stay apart.
-    let rooms = |hall: i64, end: i64, far: &str, far_id: i64| {
-        vec![
-            room(hall, "A hall", T1),
-            Room {
-                x: 5,
-                ..room(end, "An end", T1)
-            },
-            Room {
-                y: 9,
-                ..room(far_id, far, T1)
-            },
-        ]
-    };
-    let ours = || {
+    // The ends share the way south to the hub, but lead north to rooms that
+    // stay apart. The halls have only the ends to prove them.
+    let side = |hall: i64, far: &str| {
+        let end = hall + 10;
+        let far_id = hall + 20;
         rows_with(
-            rooms(OURS, OURS + 10, "A hill", OURS + 20),
-            &[(OURS, "n", OURS + 10), (OURS + 10, "n", OURS + 20)],
+            vec![
+                room(HUB, "A hub", T1),
+                room(hall, "A hall", T1),
+                room(end, "An end", T1),
+                room(far_id, far, T1),
+            ],
+            &[(end, "s", HUB), (end, "n", far_id), (hall, "e", end)],
         )
     };
-    let theirs = || {
-        let mut rows = rows_with(
-            rooms(THEIRS, THEIRS + 10, "A lake", THEIRS + 20),
-            &[(THEIRS, "n", THEIRS + 10), (THEIRS + 10, "n", THEIRS + 20)],
-        );
-        rows.map.rooms[0].x = 7;
-        rows.map.rooms[1].x = 8;
-        rows
-    };
+    let ours = || side(OURS, "A hill");
+    let theirs = || side(THEIRS, "A lake");
 
-    assert_eq!(ids_after_merge(ours(), theirs()).len(), 6);
-    assert_eq!(ids_after_merge(theirs(), ours()).len(), 6);
+    assert_eq!(ids_after_merge(ours(), theirs()).len(), 7);
+    assert_eq!(ids_after_merge(theirs(), ours()).len(), 7);
 }
 
 #[test]
@@ -892,39 +800,51 @@ fn undoing_a_restore_brings_back_a_room_with_its_sightings() {
 }
 
 #[test]
-fn setting_a_repo_keeps_a_devices_own_rooms_and_unites_the_shared_ones() {
+fn a_first_join_of_two_separate_maps_keeps_both_copies() {
     let folder = TempDir::new().unwrap();
     Repository::init_bare(folder.path().join("remote.git")).unwrap();
     let mac = Device::with_server(folder.path(), "mac");
     mac.walk(&[
         (None, "A quiet road", &["e"]),
-        (Some("e"), "The Mac's hill", &["w"]),
+        (Some("e"), "A hill", &["w"]),
     ]);
     mac.sync();
 
     let ipad = Device::with_server(folder.path(), "ipad");
-    ipad.walk(&[
-        (None, "A quiet road", &["e"]),
-        (Some("e"), "The Mac's hill", &["w"]),
-    ]);
     ipad.walk(&[(None, "A dark cave", &["n"])]);
+    ipad.walk(&[(None, "A quiet road", &["e"])]);
     let theirs = ipad.fetch().unwrap();
     pull(&ipad.git, &ipad.repo, theirs, &[]).unwrap();
-    let joined = join(
-        &ipad.git,
-        &ipad.repo,
-        &AppSettings::default(),
-        &ipad.stores(),
-    )
-    .unwrap();
+    let settings = AppSettings::default();
+    let joined = join(&ipad.git, &ipad.repo, &settings, &ipad.stores()).unwrap();
 
-    let names = ["A dark cave", "A quiet road", "The Mac's hill"];
+    let names = ["A dark cave", "A hill", "A quiet road", "A quiet road"];
     assert_eq!(ipad.sorted_rooms(), names);
     assert!(joined.commit.is_some());
 
     ipad.git.push(REMOTE, BRANCH).unwrap();
     converge(&mac, &ipad);
     assert_eq!(mac.sorted_rooms(), names);
+    assert_eq!(mac.rooms(), ipad.rooms());
+}
+
+#[test]
+fn a_join_unites_a_room_found_off_a_shared_room() {
+    let hub: &[&str] = &["n"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let walk: &[Step<'_>] = &[(None, "A hub", hub), (Some("n"), "A corridor", &["s"])];
+    mac.walk(walk);
+    mac.sync();
+    ipad.walk(walk);
+
+    let theirs = ipad.fetch().unwrap();
+    pull(&ipad.git, &ipad.repo, theirs, &[]).unwrap();
+    let settings = AppSettings::default();
+    join(&ipad.git, &ipad.repo, &settings, &ipad.stores()).unwrap();
+
+    assert_eq!(ipad.sorted_rooms(), ["A corridor", "A hub"]);
+    ipad.git.push(REMOTE, BRANCH).unwrap();
+    converge(&mac, &ipad);
     assert_eq!(mac.rooms(), ipad.rooms());
 }
 
