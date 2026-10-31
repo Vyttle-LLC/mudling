@@ -31,12 +31,14 @@ macro_rules! secondary {
 mod assets;
 mod chat;
 mod dock;
+mod dpad;
 mod hud;
 mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 mod measure;
 mod motion;
+mod room_panel;
 mod shell;
 mod status;
 mod stream;
@@ -53,6 +55,7 @@ use gpui::{
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
+use room_panel::Verbs;
 use shell::{Game, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -254,6 +257,7 @@ fn open_game(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
+    let verbs = Verbs::of(&plugins, &enabled);
     let config = SessionConfig {
         plugins,
         enabled: enabled.clone(),
@@ -266,6 +270,7 @@ fn open_game(
         session,
         replay_folder,
         enabled,
+        verbs,
     }))
 }
 
