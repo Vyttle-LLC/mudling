@@ -17,7 +17,7 @@ const ROWS: [[Option<Direction>; 3]; 3] = [
 ];
 
 fn letter(direction: Direction) -> String {
-    direction.name()[..1].to_uppercase()
+    direction.letter().to_uppercase()
 }
 
 fn door_edge(key: Stateful<Div>, direction: Direction) -> Stateful<Div> {

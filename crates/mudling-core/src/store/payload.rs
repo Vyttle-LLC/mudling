@@ -11,10 +11,12 @@ use crate::defaults::hud::Vital;
 use crate::line::Line;
 use crate::map::{MapChange, MapRoom, Mark, MarkChange, RoomId, Whereabouts};
 use crate::net::DisconnectReason;
-use crate::plugin::luau::Value;
+use crate::plugin::PluginCost;
+use crate::plugin::luau::{PluginDisabled, Value};
 use crate::scrollback::Scrollback;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How many lines the terminal store holds (PRD §6: 100,000 lines).
 pub const TERMINAL_CAPACITY: usize = 100_000;
@@ -97,7 +99,7 @@ impl MapState {
         self.whereabouts
     }
 
-    /// The core map's revision: what [`crate::map::Derived`] is computed at.
+    /// The core map's revision.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -167,17 +169,65 @@ named_value_stores! {
     /// The HUD's values, from GMCP.
     VitalsState(Vital => i64),
     /// What plugins read about the character: skills, affects, score. Each
-    /// key is `<plugin store>.<key>`.
+    /// key is `<plugin store>.<key>`. The core adds what GMCP says under
+    /// [`CHARACTER_NAME`], [`CHARACTER_LEVEL`] and [`CHARACTER_POSITION`].
     CharactersState(String => Value),
     /// What plugins read about gear, keyed like [`CharactersState`].
     GearState(String => Value),
 }
+
+/// The character's name, in [`CharactersState`].
+pub const CHARACTER_NAME: &str = "character.name";
+/// The character's level, as a number.
+pub const CHARACTER_LEVEL: &str = "character.level";
+/// What the character is doing as the game words it; empty off the game.
+pub const CHARACTER_POSITION: &str = "character.position";
 
 /// The player's room, as the map last placed them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoomState {
     pub room: Option<Arc<MapRoom>>,
     pub whereabouts: Whereabouts,
+    pub contents: RoomContents,
+}
+
+/// Who and what the server says is in the player's room now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoomContents {
+    pub occupants: Vec<Occupant>,
+    pub items: Vec<Item>,
+}
+
+/// Someone in the room. `name` is the line the game shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Occupant {
+    pub name: String,
+    /// One word the game knows them by, made only of letters, so it's safe
+    /// to put in a command. `None` when their line gives no word to guess:
+    /// they're still here, with nothing to aim a command at.
+    pub target: Option<String>,
+}
+
+/// Something on the ground, `count` of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub name: String,
+    /// As [`Occupant::target`].
+    pub target: String,
+    pub count: u32,
+}
+
+/// Who the character is fighting; `None` out of a fight.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetState(pub Option<Target>);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Target {
+    pub name: String,
+    pub level: Option<i64>,
+    pub health: Option<i64>,
+    /// What `health` is out of, when the game says.
+    pub max_health: Option<i64>,
 }
 
 /// The mobs the map remembers: kinds that attack, and mobs the player marked.
@@ -213,9 +263,13 @@ pub enum ConnectionStatus {
 }
 
 /// What a shell shows about the session around the game.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsState {
     pub connection: ConnectionStatus,
+    /// How long the game takes to answer: the median of the last few
+    /// commands. It stands while nothing is sent; `None` until the first
+    /// answer and off a connection.
+    pub latency: Option<Duration>,
     /// The host of this connection, or the last one.
     pub server: Option<String>,
     /// The game plugin detection suggests for this server, and what named
@@ -223,9 +277,15 @@ pub struct SettingsState {
     pub suggestion: Option<Suggestion>,
     /// The server turned echo off: what's typed now is a password.
     pub echo_off: bool,
-    /// Things gone wrong that the player should see, newest last: a plugin
-    /// turned off, a failed write.
+    /// Things gone wrong that the player should see, newest last: a failed
+    /// hook, a failed write. A plugin turned off is in `turned_off` instead.
     pub notices: Vec<String>,
+    /// Each plugin's sampled cost per line, in the order added. Refreshed
+    /// every few seconds while connected.
+    pub plugin_costs: Vec<PluginCost>,
+    /// The plugins the core turned off, and why, until
+    /// [`crate::session::Session::turn_plugin_on`] brings one back.
+    pub turned_off: Vec<PluginDisabled>,
 }
 
 /// Declares stores whose change is the whole new state, so a write that
@@ -250,7 +310,7 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, SettingsState);
+whole_value_stores!(RoomState, MobsState, TargetState, SettingsState);
 
 #[cfg(test)]
 mod tests {

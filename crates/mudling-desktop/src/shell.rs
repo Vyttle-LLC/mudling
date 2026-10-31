@@ -36,8 +36,8 @@ use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, Versioned,
-    VitalsState,
+    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, StoreHub, TargetState,
+    Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
@@ -101,6 +101,7 @@ struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
     characters: Versioned<CharactersState>,
+    target: Versioned<TargetState>,
     room: Versioned<RoomState>,
     mobs: Versioned<MobsState>,
 }
@@ -111,6 +112,7 @@ impl Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            target: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         }
@@ -204,6 +206,7 @@ impl Shell {
                 |shell, _, event, window, cx| match event {
                     SheetEvent::Closed => shell.close_settings(window, cx),
                     SheetEvent::Chose(choice) => shell.apply_choice(*choice, window, cx),
+                    SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
                 },
             );
         let quitting = cx.on_app_quit(|shell, cx| {
@@ -562,7 +565,14 @@ impl Shell {
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
         }
-        if batch.vitals.is_some() || batch.settings.is_some() || batch.characters.is_some() {
+        if let Some(target) = &batch.target {
+            self.copies.target.apply_diff(target);
+        }
+        if batch.vitals.is_some()
+            || batch.settings.is_some()
+            || batch.characters.is_some()
+            || batch.target.is_some()
+        {
             self.show_status(cx);
         }
         if let Some(room) = &batch.room {
@@ -578,26 +588,27 @@ impl Shell {
 
     fn show_room(&mut self, cx: &mut Context<Shell>) {
         let (room, mobs) = (self.copies.room.value(), self.copies.mobs.value());
-        self.room_panel
-            .update(cx, |panel, cx| panel.show_room(room, mobs, cx));
+        self.room_panel.update(cx, |panel, cx| {
+            panel.show_room(room, mobs, cx);
+            panel.show_contents(room.contents.clone(), cx);
+        });
     }
 
     fn show_status(&mut self, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
-        self.show_problems(settings.server.as_deref(), &settings.notices, cx);
+        self.show_problems(settings, cx);
         let lines = lines_for(settings);
-        // The core publishes no latency yet.
-        let latency = None;
         let characters = self.copies.characters.value();
-        let session = SessionLabel::of(settings, characters, game.is_replay(), latency);
+        let session = SessionLabel::of(settings, characters, game.is_replay(), settings.latency);
         let launcher = self.launcher.as_ref();
         let offers = Offers::of(settings, &game.enabled, game.is_replay(), launcher);
         self.status.update(cx, |status, cx| status.show(lines, cx));
         self.session_bar.update(cx, |bar, cx| bar.show(offers, cx));
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
         self.hud.update(cx, |hud, cx| {
-            hud.show(self.copies.vitals.value(), cx);
+            let target = self.copies.target.value();
+            hud.show(self.copies.vitals.value(), characters, target, cx);
         });
     }
 
@@ -626,11 +637,18 @@ impl Shell {
         cx.notify();
     }
 
-    fn show_problems(&self, server: Option<&str>, notices: &[String], cx: &mut Context<Shell>) {
+    fn show_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
         self.settings
-            .update(cx, |sheet, cx| sheet.show_session(server, notices, cx));
+            .update(cx, |sheet, cx| sheet.show_session(settings, cx));
+        let problems = settings.notices.len() + settings.turned_off.len();
         self.title_bar
-            .update(cx, |bar, cx| bar.show_problems(notices.len(), cx));
+            .update(cx, |bar, cx| bar.show_problems(problems, cx));
+    }
+
+    fn turn_plugin_on(&self, plugin: &PluginId) {
+        if let Some(game) = &self.game {
+            game.session.turn_plugin_on(plugin.clone());
+        }
     }
 
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
@@ -659,7 +677,13 @@ impl Shell {
     /// now would go as one, so it's refused, as core refuses a hook's.
     fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
         if !self.copies.settings.value().echo_off {
-            self.submit(&sent.command, cx);
+            self.send_with(
+                &sent.command,
+                |session, command| {
+                    session.send_action(command);
+                },
+                cx,
+            );
         }
         if !sent.by_keyboard {
             window.focus(&self.input.focus_handle(cx), cx);
@@ -670,11 +694,15 @@ impl Shell {
     /// unless it's a password. With no server connected they go nowhere, so
     /// the chat shows them here.
     fn submit(&mut self, typed: &str, cx: &mut Context<Shell>) {
+        self.send_with(typed, |session, command| session.send(command), cx);
+    }
+
+    fn send_with(&mut self, typed: &str, send: impl Fn(&Session, &str), cx: &mut Context<Shell>) {
         let settings = self.copies.settings.value();
         let connected = settings.connection == ConnectionStatus::Connected;
         for command in typed.split('\n') {
             match &self.game {
-                Some(game) if connected && !game.is_replay() => game.session.send(command),
+                Some(game) if connected && !game.is_replay() => send(&game.session, command),
                 _ if settings.echo_off => {}
                 _ => self
                     .chat
@@ -746,13 +774,16 @@ impl Shell {
     }
 
     #[cfg(test)]
-    pub fn show_sample_notices(&self, notices: &[String], cx: &mut Context<Shell>) {
-        self.show_problems(Some("mud.example"), notices, cx);
+    pub fn show_sample_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
+        self.show_problems(settings, cx);
     }
 
     #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
-        self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
+        let characters = CharactersState::default();
+        self.hud.update(cx, |hud, cx| {
+            hud.show(vitals, &characters, &TargetState::default(), cx);
+        });
     }
 
     #[cfg(test)]
