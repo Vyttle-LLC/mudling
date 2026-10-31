@@ -100,6 +100,13 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
     );
 }
 
+fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::fill_room_panel(shell, None, cx);
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
 /// Opens the window at `window_size`, lets `arrange` set it up, and saves what
 /// it draws as `<name>.png`.
 fn render(
@@ -219,4 +226,6 @@ fn window_images() {
     render("title-bar-menu-light", Light, WIDE, |shell, window, cx| {
         shell.open_session_menu(window, cx);
     });
+    render("room-panel-dark", Dark, WIDE, open_room_panel);
+    render("room-panel-light", Light, WIDE, open_room_panel);
 }

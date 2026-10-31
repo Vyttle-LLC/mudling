@@ -31,12 +31,14 @@ macro_rules! secondary {
 mod assets;
 mod chat;
 mod dock;
+mod dpad;
 mod hud;
 mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 mod measure;
 mod motion;
+mod room_panel;
 mod shell;
 mod status;
 mod stream;
@@ -54,6 +56,7 @@ use gpui::{
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
+use room_panel::Verbs;
 use shell::{Game, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -138,6 +141,10 @@ fn main() -> ExitCode {
     {
         measure::mark(&format!("info source_lines={}", feed.source_len()));
     }
+    let fullest_room = options
+        .measured_run
+        .then(|| measure::fullest_room(&options.replay))
+        .flatten();
 
     let application = gpui_platform::application().with_assets(assets::Assets);
     application.run(move |cx: &mut App| {
@@ -196,6 +203,9 @@ fn main() -> ExitCode {
             #[cfg(target_os = "macos")]
             _ if options.ax_check => macos::run_ax_check(shell, cx),
             Some(feed) if options.measured_run => {
+                shell.update(cx, |shell, cx| {
+                    measure::fill_room_panel(shell, fullest_room, cx);
+                });
                 measure::drive(
                     window.into(),
                     shell,
@@ -258,6 +268,7 @@ fn open_game(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
+    let verbs = Verbs::of(&plugins, &enabled);
     let config = SessionConfig {
         plugins,
         enabled: enabled.clone(),
@@ -270,6 +281,7 @@ fn open_game(
         session,
         replay_folder,
         enabled,
+        verbs,
     }))
 }
 

@@ -21,19 +21,32 @@
 //!
 //! Lines go through `Session::replay` on the core thread, and reach the chat
 //! the way a server's do: as a store diff, applied on a later frame.
+//!
+//! The Room panel stays filled throughout. A replay's logs fill it with their
+//! [`fullest_room`]: a paced replay is many short connections with no GMCP in
+//! them, so the room is read from the logs' GMCP once, before the window
+//! opens. Otherwise it's [`sample_room`], which is made up.
 
 use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
+use mudling_core::map::{LiveMap, PlainRules};
+use mudling_core::persist::Timestamp;
 use mudling_core::replay::ReplayFeed;
+use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
+use mudling_core::store::{
+    Item, MobsState, Occupant, RoomContents, RoomState, StoreHub, Versioned,
+};
+use mudling_core::telnet::gmcp;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MARKER: &str = "mudling-measure: ";
@@ -46,6 +59,91 @@ const REWRAP_DURATION: Duration = Duration::from_secs(5);
 const REWRAP_DRAG: f32 = 60.;
 /// Scrolled per display frame: about a line and a half.
 const SCROLL_STEP: f32 = 30.;
+
+/// A filled Room panel's room, what the map remembers and what's in it.
+pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    let info = r#"{"num": 1, "name": "A Stone Hall", "zone": "The Old Town",
+        "exits": {"n": 2, "s": 3, "e": "closed"}}"#;
+    map.room_info(info, Timestamp(0));
+    map.note_sightings(&["(Marked) a grey wolf".to_owned()], Timestamp(0));
+    let room = map
+        .commit(Timestamp(0))
+        .and_then(|commit| commit.change.rooms.first().map(Arc::clone));
+    let mobs = MobsState::default().with_changes(&[mudling_core::map::MarkChange {
+        name: "wolf".to_owned(),
+        mark: mudling_core::map::Mark::Aggressive,
+        set: true,
+    }]);
+    let item = |name: &str, target: &str, count| Item {
+        name: name.into(),
+        target: target.to_owned(),
+        count,
+    };
+    let contents = RoomContents {
+        occupants: vec![Occupant {
+            name: "A traveller resting by the wall".into(),
+            target: "traveller".to_owned(),
+        }],
+        items: vec![
+            item("a worn leather satchel with a strap", "satchel", 3),
+            item("some coins", "coins", 4),
+            item("a blanket", "blanket", 2),
+            item("a stone", "stone", 2),
+            item("some rope", "rope", 1),
+        ],
+    };
+    let room = RoomState {
+        room,
+        whereabouts: Default::default(),
+        contents: contents.clone(),
+    };
+    (room, mobs, contents)
+}
+
+/// The room with the most in it across `logs`, their GMCP read through an
+/// engine as one connection would be. `None` if they list nothing in a room.
+pub fn fullest_room(logs: &[PathBuf]) -> Option<RoomState> {
+    let size = |room: &RoomState| room.contents.occupants.len() + room.contents.items.len();
+    let folder = tempfile::tempdir().ok()?;
+    let hub = Arc::new(StoreHub::new(|| {}));
+    let config = SessionConfig::new(folder.path(), "measure.example", 4000);
+    let mut engine = Engine::open(config, Arc::clone(&hub), Arc::default()).ok()?;
+    engine.start_connection().ok()?;
+    let mut fullest: Option<RoomState> = None;
+    for log in logs {
+        let bytes = std::fs::read(log).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        for message in text.lines().filter_map(|line| line.strip_prefix("[GMCP] ")) {
+            let (package, data) = message.split_once(' ').unwrap_or((message, ""));
+            let mut frame = Vec::new();
+            gmcp::encode(package, data, &mut frame);
+            engine.receive(frame.into(), Timestamp(0)).ok()?;
+            engine.settle(Timestamp(0));
+            drop(engine.take_output());
+            let room = hub.read(|room: &Versioned<RoomState>| room.value().clone());
+            if size(&room) > fullest.as_ref().map_or(0, size) {
+                fullest = Some(room);
+            }
+        }
+    }
+    let room = fullest?;
+    mark(&format!(
+        "info room_occupants={}",
+        room.contents.occupants.len()
+    ));
+    mark(&format!("info room_items={}", room.contents.items.len()));
+    Some(room)
+}
+
+pub fn fill_room_panel(shell: &Shell, room: Option<RoomState>, cx: &mut App) {
+    let (sample, mobs, _) = sample_room();
+    let room = room.unwrap_or(sample);
+    shell.room_panel().update(cx, |panel, cx| {
+        panel.show_room(&room, &mobs, cx);
+        panel.show_contents(room.contents.clone(), cx);
+    });
+}
 
 /// Prints one marker for the measuring parent.
 pub fn mark(message: &str) {
@@ -284,7 +382,7 @@ pub fn run_parent(
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat, command bar and both side panels open, their slots empty; no split yet",
+        scope: "chat, command bar and both side panels open, the Room panel filled; no split yet",
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),

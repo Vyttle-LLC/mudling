@@ -3,7 +3,7 @@
 
 use mudling_core::defaults::detect::Source;
 use mudling_core::defaults::hud::Vital;
-use mudling_core::map::Mark;
+use mudling_core::map::{Mark, feature};
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{Database, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, Value};
@@ -814,6 +814,22 @@ fn room_players_note_mobs_on_the_map_by_their_lines() {
 
     driven.gmcp(r#"Room.AddPlayer {"8": {"name": "8", "fullname": "A brown bear stands here."}}"#);
     assert_eq!(seen(&driven).sightings.len(), 2);
+}
+
+#[test]
+fn a_mob_of_a_marked_kind_marks_the_room() {
+    let mut driven = Driven::configured("mud.hearth.example", |config| {
+        config.plugins = vec![hearth()];
+        config.enabled = vec![hearth_id()];
+    });
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 1, "name": "A road", "exits": {"n": 2}}"#);
+    driven.say(b"A grey wolf lunges at you!\r\n");
+    driven.gmcp(r#"Room.Info {"num": 2, "name": "A gate", "exits": {"s": 1}}"#);
+    driven.gmcp(r#"Room.Players {"7": {"name": "7", "fullname": "A lean wolf sits here."}}"#);
+    let room = room_state(&driven).room.unwrap();
+    assert_eq!(room.name, "A gate");
+    assert!(room.features.contains(feature::AGGRESSIVE_MOB));
 }
 
 /// A game plugin whose `go` hook never ends, and which links the word `exit`.
