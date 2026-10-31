@@ -171,7 +171,15 @@ fn main() -> ExitCode {
         .then(|| measure::fullest_room(&options.replay))
         .flatten();
 
+    // A check must never come forward: the player may be working.
+    let in_background = options.measured_run || options.ax_check;
     let application = gpui_platform::application().with_assets(assets::Assets);
+    // Set before launch, as an accessory app: no Dock icon, no ⌘-Tab entry.
+    #[cfg(target_os = "macos")]
+    let application = match in_background {
+        true => application.with_windowing(gpui::WindowingRequest::Headless),
+        false => application,
+    };
     application.run(move |cx: &mut App| {
         assets::load_fonts(cx);
         motion::follow_os(cx);
@@ -187,6 +195,9 @@ fn main() -> ExitCode {
             window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.), px(400.))),
+            focus: !in_background,
+            // macOS shows it only once `macos::show_unseen` has hidden it.
+            show: !(in_background && cfg!(target_os = "macos")),
             // A measured run draws every frame even if another app has focus.
             inactive_frame_interval: if options.measured_run {
                 None
@@ -225,7 +236,13 @@ fn main() -> ExitCode {
             move |cx, _| shut_down(&shell, cx)
         })
         .detach();
-        cx.activate(true);
+        if in_background {
+            #[cfg(target_os = "macos")]
+            macos::show_unseen(cx);
+            measure::fail_if_frames_stop(window.into(), cx);
+        } else {
+            cx.activate(true);
+        }
 
         let feed = feed.map(|(feed, history)| {
             shell.read(cx).replay(history);

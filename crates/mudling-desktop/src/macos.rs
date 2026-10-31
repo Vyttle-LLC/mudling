@@ -11,13 +11,13 @@
 use crate::launcher::Launcher;
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{App, Entity, px};
+use gpui::{App, AsyncApp, Entity, px};
 use mudling_core::persist;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
 use objc2_app_kit::NSApplication;
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSPoint, NSString};
 use serde::Serialize;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -112,14 +112,73 @@ fn window_tree() -> Option<AxElement> {
     content_view().map(|view| AxElement::read(&view))
 }
 
-/// The element the window reports as focused. (The app-level query answers
-/// with the window when the app isn't frontmost, as in a scripted run.)
-fn focused_element() -> Option<AxElement> {
-    let view = content_view()?;
-    // SAFETY: the getter returns nil or an accessibility element.
-    let focused: Option<Retained<AnyObject>> =
-        unsafe { getter(&view, sel!(accessibilityFocusedUIElement)) };
-    focused.map(|element| AxElement::read(&element))
+/// Keeps the window out of the player's way for a check: off the screen but for
+/// a sliver at its right edge, letting every click through, above other windows
+/// and on every Space. gpui stops drawing a window that's covered, so one that's
+/// merely behind others would lose its frames. A clear window keeps them, but
+/// macOS holds its drawables back, which skews the frames being measured.
+///
+/// It's clear only while it's shown: macOS moves a window onto the screen as it
+/// shows one, so it can only leave once it's there.
+pub fn show_unseen(cx: &App) {
+    let Some(screen) = cx.primary_display().map(|display| display.bounds()) else {
+        return;
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(window) = NSApplication::sharedApplication(mtm)
+        .windows()
+        .firstObject()
+    else {
+        return;
+    };
+    let sliver = NSPoint::new(
+        f64::from(f32::from(screen.size.width)) - SLIVER_WIDTH,
+        SLIVER_HEIGHT - window.frame().size.height,
+    );
+    // SAFETY: all of these are NSWindow's own methods, called on the main thread.
+    unsafe {
+        let _: () = msg_send![&window, setAlphaValue: 0.0_f64];
+        let _: () = msg_send![&window, setIgnoresMouseEvents: true];
+        let _: () = msg_send![&window, setLevel: FLOATING_LEVEL];
+        let _: () = msg_send![&window, setCollectionBehavior: ON_EVERY_SPACE];
+        let _: () = msg_send![&window, orderFront: std::ptr::null::<AnyObject>()];
+    }
+    window.setFrameOrigin(sliver);
+    // SAFETY: as above.
+    let _: () = unsafe { msg_send![&window, setAlphaValue: 1.0_f64] };
+}
+
+/// The role and label of what has focus in the app, from gpui's own AccessKit
+/// tree. A background window has no focus as far as macOS is concerned, and
+/// AppKit's focus queries answer with the window, so this is what can tell
+/// right from wrong while another app is in front.
+fn app_focus(cx: &AsyncApp) -> Option<(String, String)> {
+    let tree = cx.update(|cx| {
+        let window = *cx.windows().first()?;
+        window
+            .update(cx, |_, window, _| window.debug_a11y_tree_json())
+            .ok()
+    })?;
+    focused_accesskit_node(&tree?)
+}
+
+/// Whether the app's focus is on `label`, shown to macOS as `native_role`.
+fn focus_is_on(
+    focus: Option<&(String, String)>,
+    tree: Option<&AxElement>,
+    (role, native_role): (&str, &str),
+    label: &str,
+) -> bool {
+    let reaches_macos = |tree: &AxElement| {
+        !tree
+            .find(|e| e.is(native_role, None) && e.title.as_deref() == Some(label))
+            .is_empty()
+    };
+    focus
+        .is_some_and(|(focused_role, focused_label)| focused_role == role && focused_label == label)
+        && tree.is_some_and(reaches_macos)
 }
 
 /// Whether the player turned on Reduce Motion in System Settings.
@@ -176,6 +235,19 @@ const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Right panel",
     "Settings",
 ];
+
+/// How much of a check's window stays on the screen, in points.
+const SLIVER_WIDTH: f64 = 2.;
+const SLIVER_HEIGHT: f64 = 100.;
+/// `NSFloatingWindowLevel`.
+const FLOATING_LEVEL: isize = 3;
+/// `NSWindowCollectionBehavior`'s `CanJoinAllSpaces`, `Stationary` and
+/// `FullScreenAuxiliary`: it stays put, on every Space, over full-screen apps.
+const ON_EVERY_SPACE: usize = 1 << 0 | 1 << 4 | 1 << 8;
+
+/// The same control as AccessKit and macOS each call it.
+const TEXT_FIELD: (&str, &str) = ("TextInput", "AXTextField");
+const BUTTON: (&str, &str) = ("Button", "AXButton");
 
 /// The saved server the empty state's walk shows. Synthetic: no real game.
 const SAMPLE_SERVER: &str = "mud.example";
@@ -235,13 +307,11 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 chat.read_with(cx, |c, _| c.len())
             ),
         });
-        let focused = focused_element();
+        let focused = app_focus(cx);
         checks.push(Check {
             name: "focus is on a text field named Command",
-            passed: focused.as_ref().is_some_and(|f| {
-                f.is("AXTextField", None) && f.title.as_deref() == Some("Command")
-            }),
-            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+            passed: focus_is_on(focused.as_ref(), tree.as_ref(), TEXT_FIELD, "Command"),
+            detail: format!("{focused:?}"),
         });
 
         let unnamed: Vec<_> = TITLE_BAR_CONTROLS
@@ -358,15 +428,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("{:?}", chips.iter().map(|c| &c.title).collect::<Vec<_>>()),
         });
 
-        let accesskit_tree = cx
-            .update(|cx| {
-                cx.windows().first().and_then(|w| {
-                    w.update(cx, |_, window, _| window.debug_a11y_tree_json())
-                        .ok()
-                })
-            })
-            .flatten();
-        let accesskit_focus = accesskit_tree.as_deref().and_then(focused_accesskit_node);
+        let accesskit_focus = app_focus(cx);
         checks.push(Check {
             name: "AccessKit tree (shared with NVDA and Orca) focuses a TextInput named Command",
             passed: accesskit_focus
@@ -409,15 +471,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: unread.is_empty(),
             detail: format!("not found: {unread:?}"),
         });
-        let accesskit_tree = cx
-            .update(|cx| {
-                cx.windows().first().and_then(|w| {
-                    w.update(cx, |_, window, _| window.debug_a11y_tree_json())
-                        .ok()
-                })
-            })
-            .flatten();
-        let accesskit_focus = accesskit_tree.as_deref().and_then(focused_accesskit_node);
+        let accesskit_focus = app_focus(cx);
         checks.push(Check {
             name: "AccessKit tree moves focus to a section tab when settings opens",
             passed: accesskit_focus.as_ref().is_some_and(|(role, label)| {
@@ -468,13 +522,16 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: unread.is_empty(),
             detail: format!("not found: {unread:?}"),
         });
-        let focused = focused_element();
+        let focused = app_focus(cx);
         checks.push(Check {
             name: "focus starts on the first card's Connect",
-            passed: focused.as_ref().is_some_and(|f| {
-                f.is("AXButton", None) && f.title.as_deref() == Some(EMPTY_STATE_CONTROLS[0])
-            }),
-            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+            passed: focus_is_on(
+                focused.as_ref(),
+                tree.as_ref(),
+                BUTTON,
+                EMPTY_STATE_CONTROLS[0],
+            ),
+            detail: format!("{focused:?}"),
         });
         cx.update(|cx| {
             let window = cx.windows().into_iter().next()?;
@@ -495,13 +552,16 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: missing.is_empty(),
             detail: format!("not found: {missing:?}"),
         });
-        let focused = focused_element();
+        let focused = app_focus(cx);
         checks.push(Check {
             name: "the Add form takes focus in its text field",
-            passed: focused.as_ref().is_some_and(|f| {
-                f.is("AXTextField", None) && f.title.as_deref() == Some(ADD_FORM_CONTROLS[0])
-            }),
-            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+            passed: focus_is_on(
+                focused.as_ref(),
+                tree.as_ref(),
+                TEXT_FIELD,
+                ADD_FORM_CONTROLS[0],
+            ),
+            detail: format!("{focused:?}"),
         });
 
         let passed = checks.iter().all(|check| check.passed);

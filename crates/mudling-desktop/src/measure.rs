@@ -33,6 +33,11 @@
 //! them, so the room is read from the logs' GMCP once, before the window
 //! opens. Otherwise it's [`sample_room`], which is made up.
 //!
+//! A check runs beside whatever the player is doing: the app never activates,
+//! and on macOS it has no Dock icon and its window sits off the screen (see
+//! `macos::show_unseen`). If its frames stop, the check ends with an error
+//! rather than wait for them ([`fail_if_frames_stop`]).
+//!
 //! `--sample-map <rooms>` gives the session a made-up map of that many rooms
 //! ([`save_sample_map`]), so `rss_mb_after_load` can be held against the PRD's
 //! 200 MB with a 10,000-room map.
@@ -52,10 +57,12 @@ use mudling_core::store::{
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -63,6 +70,11 @@ const MARKER: &str = "mudling-measure: ";
 const FRAME_PREFIX: &str = "frame duration: ";
 const FRAME_BUDGET_US: f64 = 8_000.0;
 const SETTLE: Duration = Duration::from_secs(1);
+/// Longer than a busy machine holds up the display, and than a quit waits.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(15);
+const NO_FRAMES: &str = "no frames for 15 seconds, so this check can't finish: macOS sends a \
+                         window none while the screen is locked or asleep";
+const NO_FRAMES_EXIT: i32 = 3;
 const SCROLL_DURATION: Duration = Duration::from_secs(5);
 const REWRAP_DURATION: Duration = Duration::from_secs(5);
 /// How far the panel is dragged: about what the column has to give.
@@ -337,6 +349,42 @@ impl Pacer {
     }
 }
 
+/// Calls `stalled` once `limit` has gone by since `last_frame`.
+fn watch_frames(
+    last_frame: Rc<Cell<Instant>>,
+    limit: Duration,
+    stalled: impl FnOnce() + 'static,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        while executor.now().duration_since(last_frame.get()) < limit {
+            executor.timer(limit / 4).await;
+        }
+        stalled();
+    })
+    .detach();
+}
+
+/// Ends a check that can't finish, since its frames have stopped. Both kinds
+/// of check are paced by frames, so without this they'd wait forever.
+pub fn fail_if_frames_stop(window: AnyWindowHandle, cx: &mut App) {
+    fn note_frames(last_frame: Rc<Cell<Instant>>, window: &mut Window, cx: &mut App) {
+        last_frame.set(cx.background_executor().now());
+        window.on_next_frame(move |window, cx| note_frames(last_frame, window, cx));
+    }
+    let last_frame = Rc::new(Cell::new(cx.background_executor().now()));
+    let noted = Rc::clone(&last_frame);
+    window
+        .update(cx, |_, window, cx| note_frames(noted, window, cx))
+        .expect("the window is open");
+    let stalled = || {
+        eprintln!("{NO_FRAMES}");
+        std::process::exit(NO_FRAMES_EXIT);
+    };
+    watch_frames(last_frame, FRAME_TIMEOUT, stalled, cx);
+}
+
 /// Runs the measured phases in the child's window, then closes it, which
 /// quits the app the way a player's close does.
 pub fn drive(
@@ -563,6 +611,37 @@ fn parse_debug_duration(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    const LIMIT: Duration = Duration::from_secs(4);
+
+    /// The last frame being watched, and whether the watch has given up.
+    fn watched(cx: &mut TestAppContext) -> (Rc<Cell<Instant>>, Rc<Cell<bool>>) {
+        let last_frame = Rc::new(Cell::new(cx.executor().now()));
+        let stalled = Rc::new(Cell::new(false));
+        let (frame, noted) = (Rc::clone(&last_frame), Rc::clone(&stalled));
+        cx.update(|cx| watch_frames(frame, LIMIT, move || noted.set(true), cx));
+        (last_frame, stalled)
+    }
+
+    #[gpui::test]
+    fn a_check_with_no_frames_is_given_up_on(cx: &mut TestAppContext) {
+        let (_last_frame, stalled) = watched(cx);
+        cx.executor().advance_clock(LIMIT / 2);
+        assert!(!stalled.get(), "gave up early");
+        cx.executor().advance_clock(LIMIT);
+        assert!(stalled.get());
+    }
+
+    #[gpui::test]
+    fn frames_arriving_keep_the_watch_quiet(cx: &mut TestAppContext) {
+        let (last_frame, stalled) = watched(cx);
+        for _ in 0..8 {
+            cx.executor().advance_clock(LIMIT / 2);
+            last_frame.set(cx.executor().now());
+        }
+        assert!(!stalled.get());
+    }
 
     #[test]
     fn parses_each_duration_unit() {
