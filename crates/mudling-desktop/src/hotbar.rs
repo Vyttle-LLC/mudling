@@ -187,9 +187,11 @@ impl Hotbar {
         }
     }
 
+    /// The chip the keyboard is on. None during an edit, which goes by a
+    /// chip's place: Tab can leave the editor, and the place must hold.
     fn focused_chip(&self, window: &Window) -> Option<usize> {
         self.focused_stop(window)
-            .filter(|&at| at < self.chips.len())
+            .filter(|&at| self.editing.is_none() && at < self.chips.len())
     }
 
     fn move_focused(&mut self, by: isize, window: &mut Window, cx: &mut Context<Hotbar>) {
@@ -314,7 +316,7 @@ impl Hotbar {
             .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedChip>(move |style, _, _, _| style.border_color(ring))
             .on_drop(cx.listener(move |hotbar, dragged: &DraggedChip, _, cx| {
-                if dragged.from != at {
+                if dragged.from != at && hotbar.editing.is_none() {
                     hotbar.move_chip(dragged.from, at, cx);
                 }
             }))

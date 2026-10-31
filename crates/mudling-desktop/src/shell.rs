@@ -2424,6 +2424,39 @@ pub mod tests {
     }
 
     #[gpui::test]
+    fn chips_hold_their_places_while_one_is_edited(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.pin("look");
+        played.pin("inv");
+        played.pin("score");
+        played.cx.run_until_parked();
+
+        // Right-click inv; its editor takes the place the others' bounds keep.
+        let inv = played.cx.debug_bounds("hotbar-chip-1").unwrap().center();
+        let mods = Modifiers::none();
+        played.cx.simulate_mouse_down(inv, MouseButton::Right, mods);
+        played.cx.simulate_mouse_up(inv, MouseButton::Right, mods);
+        played.cx.run_until_parked();
+
+        let from = played.cx.debug_bounds("hotbar-chip-0").unwrap().center();
+        let to = played.cx.debug_bounds("hotbar-chip-2").unwrap().center();
+        played.cx.simulate_mouse_down(from, MouseButton::Left, mods);
+        played.cx.simulate_mouse_move(to, MouseButton::Left, mods);
+        played.cx.run_until_parked();
+        played.cx.simulate_mouse_up(to, MouseButton::Left, mods);
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look", "inv", "score"], "the drag waits");
+
+        // Tab leaves the editor for a chip, whose keys wait too.
+        played.cx.simulate_keystrokes("tab");
+        played.cx.simulate_keystrokes("shift-right");
+        played.cx.simulate_keystrokes("delete");
+        played.cx.run_until_parked();
+        assert_eq!(played.chips(), ["look", "inv", "score"], "so do the keys");
+    }
+
+    #[gpui::test]
     fn esc_leaves_an_edit_without_changing_the_chip(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.connected();

@@ -1,6 +1,6 @@
 //! The Triggers & aliases section: a table of what a line matches, what to do
 //! and who it applies to, and the same for aliases and the hotbar. One rule is
-//! edited at a time, in a form above its table. Every change goes to the
+//! edited at a time, in a form below its table. Every change goes to the
 //! session, which saves it and publishes the rules this section shows.
 
 use super::{
@@ -42,8 +42,9 @@ const THIS_CHARACTER: &str = "This character";
 enum Draft {
     Trigger(TriggerRule),
     Alias(AliasRule),
-    /// A chip of the hotbar, or a new one.
-    Chip(Option<usize>),
+    /// A chip of the hotbar, by its command: the table's buttons stay live
+    /// under the form, so its place can change. `None` is a new one.
+    Chip(Option<String>),
 }
 
 /// A choice made in the form.
@@ -236,15 +237,16 @@ impl SettingsSheet {
                 fill(&expansion, rule.expansion.clone(), window, cx);
                 name
             }
-            Draft::Chip(at) => {
-                let saved = at.and_then(|at| self.rules.hotbar.get(at));
-                fill(&chip, saved.cloned().unwrap_or_default(), window, cx);
+            Draft::Chip(command) => {
+                fill(&chip, command.clone().unwrap_or_default(), window, cx);
                 chip
             }
         };
         self.form.draft = Some(draft);
         self.form.problem = None;
-        window.focus(&first.focus_handle(cx), cx);
+        let field = first.focus_handle(cx);
+        window.focus(&field, cx);
+        self.reveal = Some(field);
         cx.notify();
     }
 
@@ -267,32 +269,54 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// Saves the form, or says why it can't.
+    /// Saves the form, or says why it can't. The table's buttons work while
+    /// the form is open: a rule switched there stays as it was switched, and
+    /// one removed there stays removed.
     pub(super) fn save_draft(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         let Some(draft) = self.form.draft.clone() else {
             return;
         };
         let (problem, edit) = match draft {
             Draft::Trigger(rule) => {
+                let saved = self.rules.triggers.iter().find(|saved| saved.id == rule.id);
+                if !rule.id.is_empty() && saved.is_none() {
+                    return self.close_draft(window, cx);
+                }
+                let enabled = saved.map_or(rule.enabled, |saved| saved.enabled);
                 let pattern = self.form.pattern.read(cx).content().to_owned();
-                let rule = TriggerRule { pattern, ..rule };
+                let rule = TriggerRule {
+                    pattern,
+                    enabled,
+                    ..rule
+                };
                 (rule.problem(), RuleEdit::SaveTrigger(rule))
             }
             Draft::Alias(rule) => {
+                let saved = self.rules.aliases.iter().find(|saved| saved.id == rule.id);
+                if !rule.id.is_empty() && saved.is_none() {
+                    return self.close_draft(window, cx);
+                }
+                let enabled = saved.map_or(rule.enabled, |saved| saved.enabled);
                 let name = self.form.name.read(cx).content().trim().to_owned();
                 let expansion = self.form.expansion.read(cx).content().to_owned();
                 let rule = AliasRule {
                     name,
                     expansion,
+                    enabled,
                     ..rule
                 };
                 (rule.problem(), RuleEdit::SaveAlias(rule))
             }
-            Draft::Chip(at) => {
+            Draft::Chip(command) => {
                 let typed = self.form.chip.read(cx).content().trim().to_owned();
                 let mut chips = self.rules.hotbar.clone();
-                match at.and_then(|at| chips.get_mut(at)) {
-                    Some(chip) => typed.clone_into(chip),
+                match command {
+                    Some(command) => {
+                        let Some(chip) = chips.iter_mut().find(|chip| **chip == command) else {
+                            return self.close_draft(window, cx);
+                        };
+                        typed.clone_into(chip);
+                    }
                     None => {
                         hotbar::pin(&mut chips, &typed);
                     }
@@ -660,13 +684,14 @@ impl SettingsSheet {
                 );
             }
             let (edit, remove) = (pane.stop(cx), pane.stop(cx));
+            let edited = command.clone();
             let mut without = chips.clone();
             without.remove(at);
             pane.row(
                 row.child(
                     row_button(format!("chip-edit-{at}"), "Edit", command, &edit, theme).on_click(
                         cx.listener(move |sheet, _, window, cx| {
-                            sheet.open_draft(Draft::Chip(Some(at)), window, cx);
+                            sheet.open_draft(Draft::Chip(Some(edited.clone())), window, cx);
                         }),
                     ),
                 )

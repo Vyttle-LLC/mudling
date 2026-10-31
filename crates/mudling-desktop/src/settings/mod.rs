@@ -284,6 +284,8 @@ pub struct SettingsSheet {
     tabs: [FocusHandle; Section::ALL.len()],
     close: FocusHandle,
     stops: Stops,
+    /// A stop to bring into view at the next draw, once its row exists.
+    reveal: Option<FocusHandle>,
     scroll: ScrollHandle,
 }
 
@@ -312,6 +314,7 @@ impl SettingsSheet {
             tabs: std::array::from_fn(|_| cx.focus_handle()),
             close: cx.focus_handle(),
             stops: Stops::default(),
+            reveal: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -516,6 +519,11 @@ impl SettingsSheet {
             Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
             Section::Shortcuts => shortcuts::fill(&mut pane, theme),
             section => pane.row(muted_line(section.not_yet().unwrap_or_default(), theme)),
+        }
+        if let Some(wanted) = self.reveal.take()
+            && let Some(at) = pane.stops.in_use().iter().position(|stop| *stop == wanted)
+        {
+            self.scroll.scroll_to_item(pane.stops.rows[at]);
         }
         self.stops = pane.stops;
         let title = self.section.title();
@@ -1002,6 +1010,97 @@ mod tests {
         let edits = edits.borrow();
         assert_eq!(chips(&edits[0]), ["score", "look"]);
         assert_eq!(chips(&edits[1]), ["look"]);
+    }
+
+    /// Applies what the sheet asked for, as the session's store would.
+    fn echo_chips(
+        shell: &Entity<Shell>,
+        edits: &Rc<RefCell<Vec<RuleEdit>>>,
+        cx: &mut VisualTestContext,
+    ) {
+        let Some(RuleEdit::SetHotbar(hotbar)) = edits.borrow().last().cloned() else {
+            panic!("a hotbar edit");
+        };
+        let echoed = RulesState { hotbar, ..rules() };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(echoed, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_chip_moved_under_its_form_is_the_one_saved(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("chip-edit-1", cx);
+        click("chip-Earlier-1", cx);
+        echo_chips(&shell, &edits, cx);
+        click("Hotbar command", cx);
+        cx.simulate_input(" all");
+        click("form-save", cx);
+        echo_chips(&shell, &edits, cx);
+        let chips = shell.read_with(cx, |shell, cx| {
+            shell.settings_sheet().read(cx).rules.hotbar.clone()
+        });
+        assert_eq!(chips, ["score all", "look"]);
+    }
+
+    #[gpui::test]
+    fn a_chip_removed_under_its_form_stays_removed(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("chip-edit-1", cx);
+        click("chip-remove-1", cx);
+        echo_chips(&shell, &edits, cx);
+        let before = edits.borrow().len();
+        click("form-save", cx);
+        assert_eq!(edits.borrow().len(), before, "nothing came back");
+        assert!(cx.debug_bounds("form-save").is_none(), "the form closes");
+    }
+
+    #[gpui::test]
+    fn a_trigger_switched_under_its_form_stays_switched(cx: &mut TestAppContext) {
+        let (shell, cx, edits) = open_rules(cx);
+        click("trigger-edit-0", cx);
+        let off = RulesState {
+            triggers: vec![TriggerRule {
+                enabled: false,
+                ..rules().triggers[0].clone()
+            }],
+            ..rules()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(off, cx));
+        cx.run_until_parked();
+        click("form-save", cx);
+        let edits = edits.borrow();
+        let [RuleEdit::SaveTrigger(saved)] = edits.as_slice() else {
+            panic!("one save, not {edits:?}");
+        };
+        assert!(!saved.enabled);
+    }
+
+    #[gpui::test]
+    fn opening_the_form_brings_it_into_view(cx: &mut TestAppContext) {
+        let (shell, cx, _edits) = open_rules(cx);
+        let many = RulesState {
+            triggers: (0..40)
+                .map(|number| TriggerRule {
+                    id: number.to_string(),
+                    ..TriggerRule::new(format!("line {number}"))
+                })
+                .collect(),
+            ..rules()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(many, cx));
+        cx.run_until_parked();
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.scroll.offset().y),
+            px(0.)
+        );
+
+        click("trigger-edit-0", cx);
+        cx.run_until_parked();
+        let (offset, pane) = sheet.read_with(cx, |sheet, _| {
+            (sheet.scroll.offset().y, sheet.scroll.bounds().size.height)
+        });
+        assert!(offset < -pane, "scrolled past the first page: {offset:?}");
     }
 
     #[gpui::test]
