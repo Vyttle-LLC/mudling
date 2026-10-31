@@ -28,8 +28,8 @@ use crate::title_bar::{
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Subscription, Task, Window,
-    actions, deferred, div, prelude::*,
+    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription,
+    Task, Window, actions, deferred, div, prelude::*,
 };
 use mudling_core::completion::Completion;
 use mudling_core::persist::SavedServers;
@@ -40,6 +40,10 @@ use mudling_core::store::{
     VitalsState,
 };
 use mudling_core::telnet::Bytes;
+use std::collections::VecDeque;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 
 actions!(
@@ -55,6 +59,11 @@ actions!(
 
 /// Above everything else that floats.
 const SHEET_PRIORITY: usize = 4;
+/// How long ending a session may wait for the disk. A stuck hook or disk can
+/// lose what's unsaved, but can't hold up the window or the quit.
+pub const QUIT_WAIT: Duration = Duration::from_secs(5);
+const STUCK_SESSION: &str = "The last session didn't finish saving in time, so its newest \
+                             changes may be lost.";
 
 pub fn bind_keys(cx: &mut App) {
     chat::bind_keys(cx);
@@ -87,13 +96,39 @@ impl Game {
         self.replay_folder.is_some()
     }
 
-    /// Ends the session. This blocks until it's on the disk.
-    fn finish(self) {
-        if let Err(error) = self.session.quit().wait() {
-            eprintln!("couldn't finish saving the session: {error}");
+    /// Ends the session and says what the player should hear about it, if
+    /// anything. This blocks until it's on the disk, up to [`QUIT_WAIT`]. One
+    /// stuck past that finishes by itself, if it can, on a thread of its own.
+    fn finish(self) -> Option<String> {
+        let Game {
+            session,
+            replay_folder,
+            ..
+        } = self;
+        let ended = within(QUIT_WAIT, move || {
+            let ended = session.quit().wait();
+            drop(replay_folder);
+            ended
+        });
+        match ended {
+            Some(Ok(())) => None,
+            Some(Err(error)) => Some(format!("Couldn't finish saving the session: {error}")),
+            None => Some(STUCK_SESSION.to_owned()),
         }
-        drop(self.replay_folder);
     }
+}
+
+/// Runs `work` on a thread of its own and waits up to `limit` for its result.
+/// Past that, it's left to finish alone.
+fn within<T: Send + 'static>(
+    limit: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    finished.recv_timeout(limit).ok()
 }
 
 /// The shell's copies of the stores it shows, other than the terminal.
@@ -117,11 +152,32 @@ impl Copies {
     }
 }
 
+/// What the player can ask for that takes a job off the UI thread.
+enum Request {
+    Open {
+        target: Target,
+        turn_on: Option<PluginId>,
+    },
+    ChooseServer,
+    Save(Target),
+    Remove(String),
+}
+
+impl Request {
+    /// Whether it says where the window goes. Only the newest such ask counts.
+    fn moves_the_window(&self) -> bool {
+        matches!(self, Request::Open { .. } | Request::ChooseServer)
+    }
+}
+
 /// What a job off the UI thread comes back with.
+#[derive(Default)]
 struct Outcome {
     game: Option<Game>,
     saved: SavedServers,
     problem: Option<String>,
+    /// A server the player added that couldn't be saved.
+    unsaved: Option<Target>,
 }
 
 pub struct Shell {
@@ -130,6 +186,10 @@ pub struct Shell {
     /// The one job running off the UI thread: a session ending, another
     /// opening, a server being saved.
     job: Option<Task<()>>,
+    /// What the player asked for while a job ran, to run in turn.
+    waiting: VecDeque<Request>,
+    /// What the last job ran into, for a window on a game.
+    trouble: Option<String>,
     /// One session is ending and the next opening, so the window stays on the
     /// chat rather than flash the empty state.
     switching: bool,
@@ -204,6 +264,9 @@ impl Shell {
                 |shell, _, event, window, cx| match event {
                     SheetEvent::Closed => shell.close_settings(window, cx),
                     SheetEvent::Chose(choice) => shell.apply_choice(*choice, window, cx),
+                    SheetEvent::RemoveServer(host) => {
+                        shell.ask(Request::Remove(host.clone()), window, cx);
+                    }
                 },
             );
         let quitting = cx.on_app_quit(|shell, cx| {
@@ -227,8 +290,8 @@ impl Shell {
             &title_bar,
             window,
             |shell, _, event, window, cx| match event {
-                TitleBarEvent::Open(target) => shell.open(target.clone(), None, window, cx),
-                TitleBarEvent::ChooseServer => shell.choose_server(window, cx),
+                TitleBarEvent::Open(target) => shell.ask_to_open(target, window, cx),
+                TitleBarEvent::ChooseServer => shell.ask(Request::ChooseServer, window, cx),
             },
         );
         let offers = cx.subscribe_in(
@@ -236,7 +299,7 @@ impl Shell {
             window,
             |shell, _, event, window, cx| match event {
                 SessionBarEvent::Reconnect => shell.reconnect(window, cx),
-                SessionBarEvent::ChooseServer => shell.choose_server(window, cx),
+                SessionBarEvent::ChooseServer => shell.ask(Request::ChooseServer, window, cx),
                 SessionBarEvent::TurnOn(plugin) => shell.turn_on(plugin.clone(), window, cx),
             },
         );
@@ -244,14 +307,18 @@ impl Shell {
             &empty_state,
             window,
             |shell, _, event, window, cx| match event {
-                EmptyStateEvent::Connect(target) => shell.open(target.clone(), None, window, cx),
-                EmptyStateEvent::Add(target) => shell.add_server(target.clone(), window, cx),
+                EmptyStateEvent::Connect(target) => shell.ask_to_open(target, window, cx),
+                EmptyStateEvent::Add(target) => {
+                    shell.ask(Request::Save(target.clone()), window, cx);
+                }
             },
         );
         let mut shell = Shell {
             game,
             launcher: None,
             job: None,
+            waiting: VecDeque::new(),
+            trouble: None,
             switching: false,
             copies,
             left: false,
@@ -300,9 +367,8 @@ impl Shell {
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(
             |launcher| Outcome {
-                game: None,
                 saved: launcher.saved(),
-                problem: None,
+                ..Outcome::default()
             },
             window,
             cx,
@@ -335,15 +401,19 @@ impl Shell {
         if self.left {
             return;
         }
+        self.trouble = outcome.problem.clone();
         self.empty_state.update(cx, |empty_state, cx| {
             empty_state.show(&outcome.saved, cx);
-            if let Some(problem) = outcome.problem {
+            if let Some(problem) = outcome.problem.clone() {
                 empty_state.show_problem(problem, cx);
+            }
+            if let Some(target) = outcome.unsaved {
+                empty_state.keep_address(&target, window, cx);
             }
         });
         self.settings.update(cx, |sheet, cx| {
             let servers = outcome.saved.servers.iter().map(SavedServer::from);
-            sheet.show_servers(servers.collect(), cx);
+            sheet.show_servers(servers.collect(), outcome.problem, cx);
         });
         if let Some(game) = outcome.game {
             self.play(game, window, cx);
@@ -352,6 +422,38 @@ impl Shell {
         if self.on_empty_state() {
             self.empty_state
                 .update(cx, |empty_state, cx| empty_state.focus(window, cx));
+        }
+        while self.job.is_none()
+            && let Some(request) = self.waiting.pop_front()
+        {
+            self.start(request, window, cx);
+        }
+    }
+
+    fn ask_to_open(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Shell>) {
+        let target = target.clone();
+        let turn_on = None;
+        self.ask(Request::Open { target, turn_on }, window, cx);
+    }
+
+    /// Does what the player asked now, or once the running job is done.
+    fn ask(&mut self, request: Request, window: &mut Window, cx: &mut Context<Shell>) {
+        if self.job.is_none() {
+            self.start(request, window, cx);
+            return;
+        }
+        if request.moves_the_window() {
+            self.waiting.retain(|waiting| !waiting.moves_the_window());
+        }
+        self.waiting.push_back(request);
+    }
+
+    fn start(&mut self, request: Request, window: &mut Window, cx: &mut Context<Shell>) {
+        match request {
+            Request::Open { target, turn_on } => self.open(target, turn_on, window, cx),
+            Request::ChooseServer => self.choose_server(window, cx),
+            Request::Save(target) => self.add_server(target, window, cx),
+            Request::Remove(host) => self.remove_server(host, window, cx),
         }
     }
 
@@ -384,7 +486,8 @@ impl Shell {
 
     /// Ends the session running, if any, and opens one on `target`. `turn_on`
     /// is a game plugin the player just turned on: a session reads its
-    /// plugins when it opens, so this is also how that takes effect.
+    /// plugins when it opens, so this is also how that takes effect. A repeat
+    /// of what's already running, such as a double click, does nothing.
     fn open(
         &mut self,
         target: Target,
@@ -392,7 +495,14 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
-        if self.job.is_some() || self.launcher.is_none() {
+        let running = self.game.as_ref().is_some_and(|game| {
+            game.target == target
+                && !game.session.has_stopped()
+                && turn_on
+                    .as_ref()
+                    .is_none_or(|plugin| game.enabled.contains(plugin))
+        });
+        if running || self.launcher.is_none() {
             return;
         }
         let leaving = self.game.take();
@@ -402,9 +512,7 @@ impl Shell {
             .update(cx, |bar, cx| bar.show(connecting, cx));
         self.off_the_ui_thread(
             move |launcher| {
-                if let Some(game) = leaving {
-                    game.finish();
-                }
+                let stuck = leaving.and_then(Game::finish);
                 let opened = launcher.open(&target, turn_on.as_ref());
                 let (game, problem) = match opened {
                     Ok(game) => (Some(game), None),
@@ -413,7 +521,8 @@ impl Shell {
                 Outcome {
                     game,
                     saved: launcher.saved(),
-                    problem,
+                    problem: problem.or(stuck),
+                    ..Outcome::default()
                 }
             },
             window,
@@ -423,21 +532,13 @@ impl Shell {
 
     /// Ends the session and goes back to the empty state.
     fn choose_server(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
-        if self.job.is_some() {
-            return;
-        }
         let leaving = self.game.take();
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(
-            move |launcher| {
-                if let Some(game) = leaving {
-                    game.finish();
-                }
-                Outcome {
-                    game: None,
-                    saved: launcher.saved(),
-                    problem: None,
-                }
+            move |launcher| Outcome {
+                problem: leaving.and_then(Game::finish),
+                saved: launcher.saved(),
+                ..Outcome::default()
             },
             window,
             cx,
@@ -445,14 +546,36 @@ impl Shell {
     }
 
     fn add_server(&mut self, target: Target, window: &mut Window, cx: &mut Context<Shell>) {
-        if self.job.is_some() {
-            return;
-        }
+        self.off_the_ui_thread(
+            move |launcher| {
+                let problem = launcher.save(&target).err();
+                Outcome {
+                    unsaved: problem.is_some().then_some(target),
+                    problem,
+                    saved: launcher.saved(),
+                    ..Outcome::default()
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Takes a server off the list, unless the game running is on it: its
+    /// session would write the server back.
+    fn remove_server(&mut self, host: String, window: &mut Window, cx: &mut Context<Shell>) {
+        let playing = self
+            .game
+            .as_ref()
+            .is_some_and(|game| game.target.host == host);
         self.off_the_ui_thread(
             move |launcher| Outcome {
-                game: None,
-                problem: launcher.save(&target).err(),
+                problem: match playing {
+                    true => Some(format!("{host} is in play, so it stays on the list.")),
+                    false => launcher.remove(&host).err(),
+                },
                 saved: launcher.saved(),
+                ..Outcome::default()
             },
             window,
             cx,
@@ -466,7 +589,8 @@ impl Shell {
         let Some(game) = &self.game else { return };
         if game.session.has_stopped() {
             let target = game.target.clone();
-            self.open(target, None, window, cx);
+            let turn_on = None;
+            self.ask(Request::Open { target, turn_on }, window, cx);
         } else {
             game.session.connect();
             window.focus(&self.input.focus_handle(cx), cx);
@@ -476,7 +600,8 @@ impl Shell {
     fn turn_on(&mut self, plugin: PluginId, window: &mut Window, cx: &mut Context<Shell>) {
         if let Some(game) = &self.game {
             let target = game.target.clone();
-            self.open(target, Some(plugin), window, cx);
+            let turn_on = Some(plugin);
+            self.ask(Request::Open { target, turn_on }, window, cx);
         }
     }
 
@@ -586,7 +711,8 @@ impl Shell {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
         self.show_problems(settings.server.as_deref(), &settings.notices, cx);
-        let lines = lines_for(settings);
+        let trouble = self.trouble.clone().map(SharedString::from);
+        let lines = trouble.into_iter().chain(lines_for(settings)).collect();
         // The core publishes no latency yet.
         let latency = None;
         let characters = self.copies.characters.value();
@@ -615,6 +741,8 @@ impl Shell {
             .collect();
         let can_choose_server = self.game.is_some() && self.launcher.is_some();
         let bare = self.on_empty_state();
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_playing(current, cx));
         self.title_bar.update(cx, |bar, cx| {
             bar.show_saved(elsewhere, can_choose_server, cx);
             bar.set_bare(bare, cx);
@@ -832,6 +960,24 @@ impl Shell {
         self.room_panel.clone()
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn empty_state(&self) -> Entity<EmptyState> {
+        self.empty_state.clone()
+    }
+
+    /// Goes from a replay to the empty state of `launcher`, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn leave_for_empty_state(
+        &mut self,
+        launcher: Launcher,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        self.settings_open = false;
+        self.use_launcher(launcher, window, cx);
+        self.ask(Request::ChooseServer, window, cx);
+    }
+
     /// Ends the session, off this thread. The task finishes once everything
     /// reached the disk. `None` if the shell already left.
     pub fn leave(&mut self, cx: &mut Context<Shell>) -> Option<Task<()>> {
@@ -846,8 +992,8 @@ impl Shell {
             if let Some(job) = job {
                 job.await;
             }
-            if let Some(game) = game {
-                game.finish();
+            if let Some(problem) = game.and_then(Game::finish) {
+                eprintln!("{problem}");
             }
         }))
     }
@@ -954,6 +1100,7 @@ pub mod tests {
     use super::*;
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::room_panel::press_key;
+    use crate::settings::Section;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
@@ -1929,6 +2076,12 @@ pub mod tests {
             }
         }
 
+        fn cards(&self) -> usize {
+            self.shell.read_with(self.cx, |shell, cx| {
+                shell.empty_state.read(cx).cards().len()
+            })
+        }
+
         fn click(&mut self, id: &'static str) {
             let bounds = self.cx.debug_bounds(id).expect("the control is drawn");
             self.cx.simulate_click(bounds.center(), Modifiers::none());
@@ -2186,6 +2339,158 @@ pub mod tests {
             std::io::copy(&mut &first, &mut std::io::sink()).ok(),
             Some(0)
         );
+    }
+
+    fn saved_hosts(folder: &Path) -> Vec<String> {
+        let servers = persist::saved_servers(folder).servers;
+        servers.into_iter().map(|server| server.host).collect()
+    }
+
+    fn target(host: &str, port: u16) -> Target {
+        let host = host.to_owned();
+        Target { host, port }
+    }
+
+    #[test]
+    fn work_that_sticks_is_left_behind_at_the_limit() {
+        assert_eq!(within(WAIT, || 7), Some(7));
+
+        let (_held_open, never) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let stuck = within(Duration::from_millis(20), move || never.recv().ok());
+        assert_eq!(stuck, None);
+        assert!(started.elapsed() < WAIT);
+    }
+
+    #[gpui::test]
+    fn trouble_ending_a_session_reaches_the_player_in_the_next_one(cx: &mut TestAppContext) {
+        let played = play(cx);
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            let problem = Some(STUCK_SESSION.to_owned());
+            let outcome = Outcome {
+                problem,
+                ..Outcome::default()
+            };
+            shell.job_done(outcome, window, cx);
+        });
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.status.read(cx).lines(), [STUCK_SESSION]);
+        });
+    }
+
+    #[gpui::test]
+    fn servers_added_while_a_job_runs_are_saved_in_turn(cx: &mut TestAppContext) {
+        let mut launched = launch(&[], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask(Request::Save(target("one.example", 1)), window, cx);
+            shell.ask(Request::Save(target("two.example", 2)), window, cx);
+            assert_eq!(shell.waiting.len(), 1);
+        });
+        launched.frames_until("both cards", |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == 2
+        });
+        let hosts = saved_hosts(launched.folder.path());
+        assert_eq!(hosts, ["one.example", "two.example"]);
+    }
+
+    #[gpui::test]
+    fn only_the_newest_ask_to_go_somewhere_waits(cx: &mut TestAppContext) {
+        let launched = launch(&[], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask(Request::Save(target("one.example", 1)), window, cx);
+            shell.ask_to_open(&target("first.example", 1), window, cx);
+            shell.ask(Request::Save(target("two.example", 2)), window, cx);
+            shell.ask_to_open(&target("second.example", 2), window, cx);
+
+            let waiting: Vec<_> = shell
+                .waiting
+                .iter()
+                .map(Request::moves_the_window)
+                .collect();
+            assert_eq!(waiting, [false, true]);
+            shell.waiting.clear();
+        });
+    }
+
+    #[gpui::test]
+    fn connecting_twice_in_a_row_opens_one_session(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask_to_open(&target("127.0.0.1", port), window, cx);
+            shell.ask_to_open(&target("127.0.0.1", port), window, cx);
+        });
+        launched.cx.run_until_parked();
+        let (_socket, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+
+        launched.cx.run_until_parked();
+        server.set_nonblocking(true).unwrap();
+        assert!(server.accept().is_err(), "a second connection");
+    }
+
+    #[gpui::test]
+    fn an_address_that_could_not_be_saved_goes_back_in_the_field(cx: &mut TestAppContext) {
+        let launched = launch(&[], cx);
+        std::fs::write(launched.folder.path().join(persist::SERVERS_FOLDER), "").unwrap();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask(Request::Save(target("mud.example", 4000)), window, cx);
+        });
+        launched.cx.run_until_parked();
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let kept = shell.empty_state.read(cx).address_being_added(cx);
+            assert_eq!(kept.as_deref(), Some("mud.example:4000"));
+        });
+    }
+
+    fn open_servers(launched: &mut Launched<'_>) {
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            shell
+                .settings
+                .update(cx, |sheet, cx| sheet.select(Section::Servers, cx));
+        });
+        launched.cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn removing_a_server_asks_first_and_keeps_its_database(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000), ("typo.example", 23)], cx);
+        open_servers(&mut launched);
+
+        launched.click("remove-server-1");
+        launched.click("keep-server-1");
+        assert_eq!(launched.cards(), 2);
+
+        launched.click("remove-server-1");
+        launched.click("confirm-remove-server-1");
+        launched.frames_until("one card", |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == 1
+        });
+        assert_eq!(saved_hosts(launched.folder.path()), ["mud.example"]);
+        let servers = launched.folder.path().join(persist::SERVERS_FOLDER);
+        assert!(servers.join("typo.example.sqlite").exists());
+    }
+
+    #[gpui::test]
+    fn playing_on_a_removed_server_lists_it_again(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        persist::remove_server(launched.folder.path(), "127.0.0.1").unwrap();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask_to_open(&target("127.0.0.1", port), window, cx);
+        });
+        launched.cx.run_until_parked();
+        let (_socket, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert_eq!(saved_hosts(launched.folder.path()), ["127.0.0.1"]);
+    }
+
+    #[gpui::test]
+    fn the_server_in_play_offers_no_remove(cx: &mut TestAppContext) {
+        let (mut launched, _socket) = launch_playing(game_plugin(), cx);
+        open_servers(&mut launched);
+        assert!(launched.cx.debug_bounds("remove-server-0").is_none());
     }
 
     #[gpui::test]

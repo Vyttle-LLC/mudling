@@ -286,6 +286,13 @@ impl EmptyState {
         &self.cards
     }
 
+    /// What the Add form holds, while it's open.
+    #[cfg(test)]
+    pub fn address_being_added(&self, cx: &App) -> Option<String> {
+        self.adding
+            .then(|| self.address.read(cx).content().to_owned())
+    }
+
     pub fn show_problem(&mut self, problem: String, cx: &mut Context<EmptyState>) {
         self.problem = Some(problem.into());
         cx.notify();
@@ -307,6 +314,20 @@ impl EmptyState {
         }
     }
 
+    /// Puts an address that couldn't be saved back where the player typed it.
+    pub fn keep_address(
+        &mut self,
+        target: &Target,
+        window: &mut Window,
+        cx: &mut Context<EmptyState>,
+    ) {
+        let typed = target.to_string();
+        let end = typed.len();
+        self.address
+            .update(cx, |address, cx| address.show(typed, end, window, cx));
+        self.start_adding(window, cx);
+    }
+
     fn quick_connect(&mut self, typed: &str, cx: &mut Context<EmptyState>) {
         let parsed = parse_address(typed);
         self.quick_error = parsed.as_ref().err().copied();
@@ -326,7 +347,7 @@ impl EmptyState {
         }
     }
 
-    fn start_adding(&mut self, window: &mut Window, cx: &mut Context<EmptyState>) {
+    pub fn start_adding(&mut self, window: &mut Window, cx: &mut Context<EmptyState>) {
         self.adding = true;
         window.focus(&self.address.focus_handle(cx), cx);
         cx.notify();

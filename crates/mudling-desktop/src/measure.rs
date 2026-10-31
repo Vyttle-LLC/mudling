@@ -30,6 +30,10 @@
 //!
 //! The Room panel has [`sample_room`] in it throughout, so the frames measured
 //! carry a filled panel. The sample is made up: it comes from no real session.
+//!
+//! `--sample-map <rooms>` gives the session a made-up map of that many rooms
+//! ([`save_sample_map`]), so `rss_mb_after_load` can be held against the PRD's
+//! 200 MB with a 10,000-room map.
 
 use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side};
@@ -38,7 +42,7 @@ use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
 use mudling_core::map::{LiveMap, PlainRules};
-use mudling_core::persist::Timestamp;
+use mudling_core::persist::{self, Batch, Database, Exit, Link, Room, Timestamp};
 use mudling_core::replay::ReplayFeed;
 use mudling_core::stats::Summary;
 use mudling_core::store::{MobsState, RoomState};
@@ -62,6 +66,10 @@ const REWRAP_DRAG: f32 = 60.;
 const SCROLL_STEP: f32 = 30.;
 /// How far back the split opens: more than a window of history.
 const SPLIT_DISTANCE: f32 = 2_000.;
+/// About as long as a real room's description.
+const SAMPLE_DESCRIPTION: &str = "Tall grass sways on either side of the path, which bends \
+    away between low stones furred with moss. A cold wind comes down from the hills to the \
+    north, smelling of rain and old smoke, and somewhere ahead a bird calls twice and stops.";
 
 /// A filled Room panel's room, what the map remembers and what's in it.
 pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
@@ -109,6 +117,58 @@ pub fn fill_room_panel(shell: &Shell, cx: &mut App) {
         panel.show_room(&room, &mobs, cx);
         panel.show_contents(contents, cx);
     });
+}
+
+/// Saves a made-up square grid of `rooms` rooms as `host`'s map, each room
+/// linked to its neighbours and worded like a real one, so a replay can
+/// measure the memory of a large map. Its data folder is a throwaway one.
+pub fn save_sample_map(folder: &Path, host: &str, rooms: i64) -> Result<(), persist::Error> {
+    let side = (rooms as f64).sqrt().ceil() as i64;
+    let updated = Timestamp::now();
+    let mut batch = Batch::new();
+    for id in 1..=rooms {
+        batch.upsert(Room {
+            id,
+            name: format!("A winding path, part {id}"),
+            area: format!("Area {}", id / 250),
+            environment: "field".to_owned(),
+            description: format!("{SAMPLE_DESCRIPTION} The stones here are marked {id}."),
+            x: (id - 1) % side,
+            y: (id - 1) / side,
+            z: 0,
+            building: None,
+            tangled: false,
+            maze: false,
+            updated,
+        });
+        let mut link = |direction: &str, back: &str, to: i64| {
+            for (room_id, way, to_room) in [(id, direction, to), (to, back, id)] {
+                let direction = way.to_owned();
+                batch.upsert(Exit {
+                    room_id,
+                    direction: direction.clone(),
+                    state: "open".to_owned(),
+                    updated,
+                });
+                batch.upsert(Link {
+                    room_id,
+                    direction,
+                    to_room,
+                    updated,
+                });
+            }
+        };
+        if id % side != 0 && id < rooms {
+            link("east", "west", id + 1);
+        }
+        if id + side <= rooms {
+            link("north", "south", id + side);
+        }
+    }
+    let database = Database::open(&folder.join(persist::SERVERS_FOLDER), host)?;
+    let writer = database.writer()?;
+    writer.submit(batch)?;
+    writer.flush()
 }
 
 /// Prints one marker for the measuring parent.

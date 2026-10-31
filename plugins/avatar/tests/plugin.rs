@@ -27,6 +27,7 @@ fn loads_with_every_pattern_compiled_and_every_hook_defined() {
     }));
     // A host compiles every pattern together; a session loads every hook.
     PluginHost::new([plugin]).unwrap_or_else(|error| panic!("{error}"));
+    PluginHost::new([mudling_plugin_avatar::bundled()]).unwrap_or_else(|error| panic!("{error}"));
     mudling_plugin_avatar::Session::new();
 }
 

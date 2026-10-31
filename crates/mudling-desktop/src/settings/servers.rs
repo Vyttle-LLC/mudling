@@ -1,13 +1,18 @@
 //! The Servers & characters section, drawn from a small view model that the
 //! shell fills from the saved servers.
+//!
+//! Removing a server asks first, in its row. The question's first stop is
+//! Keep, which takes the place of the Remove button, so focus lands on the
+//! choice that loses nothing.
 
-use super::{Pane, muted_line};
+use super::{Pane, SettingsSheet, SheetEvent, muted_line, text_button};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
-use gpui::{FontWeight, Role, SharedString, div, prelude::*, px};
+use gpui::{Context, FontWeight, Role, SharedString, div, prelude::*, px};
 use mudling_core::persist;
 
 const NOTHING_SAVED: &str = "No saved servers yet.";
+const PLAYING: &str = "Playing now";
 
 /// A saved server and its characters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,37 +50,136 @@ impl SavedServer {
             false => format!("{address} · {characters}"),
         }
     }
+
+    /// Says what goes and what stays: see [`persist::remove_server`].
+    fn removal_question(&self) -> String {
+        format!(
+            "Remove {} from your list? Its map, notes and characters stay on this device, \
+             and come back if you add the server again.",
+            self.name
+        )
+    }
 }
 
-pub(super) fn fill(pane: &mut Pane, servers: &[SavedServer], theme: &Theme) {
-    if servers.is_empty() {
-        pane.row(muted_line(NOTHING_SAVED, theme));
+impl SettingsSheet {
+    pub(super) fn fill_servers(
+        &mut self,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        if self.servers.is_empty() {
+            pane.row(muted_line(NOTHING_SAVED, theme));
+        }
+        if let Some(problem) = self.servers_problem.clone() {
+            pane.row(
+                muted_line(problem, theme)
+                    .debug_selector(|| "servers-problem".to_owned())
+                    .role(Role::Alert)
+                    .text_color(theme.error),
+            );
+        }
+        for (number, server) in self.servers.clone().iter().enumerate() {
+            let row = self.server_row(number, server, pane, theme, cx);
+            pane.row(row);
+        }
     }
-    for (number, server) in servers.iter().enumerate() {
+
+    fn server_row(
+        &self,
+        number: usize,
+        server: &SavedServer,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
         let summary = server.summary();
-        pane.row(
+        let playing = self.playing.as_ref() == Some(&server.host);
+        let asking = !playing && self.removing.as_ref() == Some(&server.host);
+        let about = div()
+            .id(("saved-server", number))
+            .role(Role::Label)
+            .aria_value(format!("{}: {summary}", server.name))
+            .flex_1()
+            .min_w_0()
+            .font_family(UI_FONT)
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(server.name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child(summary),
+            );
+        let remove = (!playing && !asking).then(|| {
+            let id = SharedString::from(format!("remove-server-{number}"));
+            let host = server.host.clone();
+            text_button(id, "Remove", &pane.stop(cx), theme)
+                .aria_label(format!("Remove {}", server.name))
+                .on_click(cx.listener(move |sheet, _, _, cx| {
+                    sheet.removing = Some(host.clone());
+                    cx.notify();
+                }))
+        });
+        let in_play = playing.then(|| {
             div()
-                .id(("saved-server", number))
-                .role(Role::Label)
-                .aria_value(format!("{}: {summary}", server.name))
-                .py_3()
-                .border_b_1()
-                .border_color(theme.divider)
+                .flex_none()
                 .font_family(UI_FONT)
+                .text_size(px(13.))
+                .text_color(theme.text_muted)
+                .child(PLAYING)
+        });
+        let question = asking.then(|| {
+            let keep = SharedString::from(format!("keep-server-{number}"));
+            let confirm = SharedString::from(format!("confirm-remove-server-{number}"));
+            let host = server.host.clone();
+            div()
+                .pt_2()
                 .child(
-                    div()
-                        .text_size(px(15.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(server.name.clone()),
+                    muted_line(server.removal_question(), theme)
+                        .role(Role::Alert)
+                        .text_color(theme.text),
                 )
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .text_color(theme.text_muted)
-                        .child(summary),
-                ),
-        );
+                        .flex()
+                        .gap_2()
+                        .child(text_button(keep, "Keep", &pane.stop(cx), theme).on_click(
+                            cx.listener(|sheet, _, _, cx| {
+                                sheet.removing = None;
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            text_button(confirm, "Remove", &pane.stop(cx), theme)
+                                .aria_label(format!("Remove {}", server.name))
+                                .on_click(cx.listener(move |sheet, _, _, cx| {
+                                    sheet.removing = None;
+                                    cx.emit(SheetEvent::RemoveServer(host.to_string()));
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
+        div()
+            .py_3()
+            .border_b_1()
+            .border_color(theme.divider)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(about)
+                    .children(remove)
+                    .children(in_play),
+            )
+            .children(question)
     }
 }
 

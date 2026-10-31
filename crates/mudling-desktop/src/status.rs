@@ -21,6 +21,11 @@ impl StatusLines {
             cx.notify();
         }
     }
+
+    #[cfg(test)]
+    pub fn lines(&self) -> &[SharedString] {
+        &self.lines
+    }
 }
 
 /// What the lines say.

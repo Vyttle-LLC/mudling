@@ -1,16 +1,18 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input, the live region, the title bar, the Room panel's buttons and
-//! the settings sheet. Reading another app's tree with `AXUIElement` needs the
-//! Accessibility permission; this needs none.
+//! chat, the input, the live region, the title bar, the Room panel's buttons,
+//! the settings sheet and the empty state. Reading another app's tree with
+//! `AXUIElement` needs the Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
+use crate::launcher::Launcher;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{App, Entity, px};
+use mudling_core::persist;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -18,6 +20,7 @@ use objc2_app_kit::NSApplication;
 use objc2_foundation::{NSArray, NSString};
 use serde::Serialize;
 use std::time::Duration;
+use tempfile::TempDir;
 
 /// One element as an accessibility client sees it.
 #[derive(Debug, Serialize)]
@@ -173,6 +176,26 @@ const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Right panel",
     "Settings",
 ];
+
+/// The saved server the empty state's walk shows. Synthetic: no real game.
+const SAMPLE_SERVER: &str = "mud.example";
+/// What a screen reader must find on "Where to today?", the first card's
+/// Connect first.
+const EMPTY_STATE_CONTROLS: [&str; 5] = [
+    "Connect to mud.example",
+    "Add a server",
+    "Quick connect",
+    "Connect",
+    "Settings",
+];
+/// Text the empty state shows, read from its nodes' values.
+const EMPTY_STATE_TEXT: [&str; 3] = [
+    "Where to today?",
+    "Pick a character to log back in",
+    "stay on this Mac",
+];
+/// What the Add form adds, its field first.
+const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
 /// Runs the checks, prints a JSON report and exits: 0 if all passed.
 pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
@@ -403,6 +426,84 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("{accesskit_focus:?}"),
         });
 
+        // Throwaway, like the replay's: the check never reads the player's list.
+        let sample_data = TempDir::new().expect("a folder for the sample server");
+        persist::save_server(sample_data.path(), SAMPLE_SERVER, 4000)
+            .expect("the sample server saves");
+        let launcher = Launcher::new(sample_data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let reached_empty_state = cx.update(|cx| {
+            let window = cx.windows().into_iter().next()?;
+            window
+                .update(cx, |_, window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        shell.leave_for_empty_state(launcher, window, cx);
+                    });
+                })
+                .ok()
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let named_here = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
+            let unnamed = |name: &&'static str| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            };
+            names.iter().copied().filter(unnamed).collect()
+        };
+        let missing = named_here(&tree, &EMPTY_STATE_CONTROLS);
+        checks.push(Check {
+            name: "the empty state names its cards and controls",
+            passed: reached_empty_state.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        let unread: Vec<_> = EMPTY_STATE_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the empty state's text reaches the tree",
+            passed: unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
+        });
+        let focused = focused_element();
+        checks.push(Check {
+            name: "focus starts on the first card's Connect",
+            passed: focused.as_ref().is_some_and(|f| {
+                f.is("AXButton", None) && f.title.as_deref() == Some(EMPTY_STATE_CONTROLS[0])
+            }),
+            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+        });
+        cx.update(|cx| {
+            let window = cx.windows().into_iter().next()?;
+            window
+                .update(cx, |_, window, cx| {
+                    let empty_state = shell.read(cx).empty_state();
+                    empty_state.update(cx, |empty_state, cx| {
+                        empty_state.start_adding(window, cx);
+                    });
+                })
+                .ok()
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_here(&tree, &ADD_FORM_CONTROLS);
+        checks.push(Check {
+            name: "the Add form names its field and buttons",
+            passed: missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        let focused = focused_element();
+        checks.push(Check {
+            name: "the Add form takes focus in its text field",
+            passed: focused.as_ref().is_some_and(|f| {
+                f.is("AXTextField", None) && f.title.as_deref() == Some(ADD_FORM_CONTROLS[0])
+            }),
+            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+        });
+
         let passed = checks.iter().all(|check| check.passed);
         let report = serde_json::json!({ "passed": passed, "checks": checks });
         println!(
@@ -413,6 +514,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         if let Some(saved) = shell.update(cx, |shell, cx| shell.leave(cx)) {
             crate::wait_for_save(saved, cx).await;
         }
+        drop(sample_data);
         std::process::exit(if passed { 0 } else { 1 });
     })
     .detach();

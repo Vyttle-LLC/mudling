@@ -4,21 +4,23 @@
 //! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
-//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]]
-//!                 [--ax-check]
+//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
+//!                 [--sample-map <rooms>]] [--ax-check]
 //! ```
 //!
 //! With no arguments the window shows the saved servers ("Where to today?").
-//! `--host` and `--port` connect to a server at once. The plugins in the data
-//! folder are installed, off, as is any `--plugin` folder, so game detection
-//! can suggest them; `--enable` turns one on and lets it send commands.
+//! `--host` and `--port` connect to a server at once. The plugins bundled with
+//! the app are installed, off, as are those in the data folder and any
+//! `--plugin` folder, so game detection can suggest them; `--enable` turns one
+//! on and lets it send commands. A plugin in a folder replaces a bundled one
+//! with its id.
 //!
 //! A replay runs the same window through `Session::replay`: 100,000 lines of
 //! history, then new lines at `--rate` (50 a second by default; 0 turns it
 //! off), with its data in a throwaway folder. `--long-lines` joins its lines
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
-//! sheet open. `--ax-check` (macOS) checks the accessibility tree and exits
+//! sheet open, and `--sample-map` with a made-up map. `--ax-check` (macOS) checks the accessibility tree and exits
 //! (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
@@ -61,13 +63,13 @@ use gpui::{
     App, AppContext, AsyncApp, Bounds, Entity, KeyBinding, Task, TitlebarOptions, WindowBounds,
     WindowDecorations, WindowOptions, actions, px, size,
 };
-use launcher::{Launcher, Target, installed_plugins};
+use launcher::{Launcher, Target, bundled_plugins, installed_plugins, replaced};
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
 use room_panel::Verbs;
 use settings::{PluginRow, SavedSettings};
-use shell::{Game, Shell};
+use shell::{Game, QUIT_WAIT, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -77,13 +79,10 @@ use theme::Appearance;
 const SCROLLBACK_LINES: usize = 100_000;
 /// A replay has no server; its data folder holds this one's database.
 const REPLAY_HOST: &str = "replay";
-/// How long a closed window waits for the session to reach the disk. A stuck
-/// hook or disk can lose what's unsaved, but can't keep the app from quitting.
-const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open]] [--ax-check]";
+                     [--settings-open] [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -102,6 +101,7 @@ struct Options {
     stream_for: Duration,
     report: PathBuf,
     settings_open: bool,
+    sample_map: Option<i64>,
     ax_check: bool,
 }
 
@@ -311,6 +311,10 @@ fn open_replay(
     let enabled = enabled_plugins(&plugins, &options.enable)?;
     let verbs = Verbs::of(&plugins, &enabled);
     let plugin_rows = PluginRow::for_session(&plugins, &enabled, REPLAY_HOST);
+    if let Some(rooms) = options.sample_map {
+        measure::save_sample_map(folder.path(), REPLAY_HOST, rooms)
+            .map_err(|error| format!("couldn't save the sample map: {error}"))?;
+    }
     let config = SessionConfig {
         plugins,
         enabled: enabled.clone(),
@@ -332,8 +336,8 @@ fn open_replay(
     })
 }
 
-/// Opens games on real servers, with the data folder's plugins and those the
-/// command line names.
+/// Opens games on real servers, with the bundled plugins, the data folder's
+/// and those the command line names, each replacing the last.
 fn launcher_for(
     options: &Options,
     waker: impl Fn() + Send + Sync + 'static,
@@ -341,9 +345,8 @@ fn launcher_for(
     let folder = data_folder(options)?;
     let named = command_line_plugins(options)?;
     let enabled = enabled_plugins(&named, &options.enable)?;
-    let mut plugins = installed_plugins(&folder);
-    plugins.retain(|plugin| !named.iter().any(|named| named.id() == plugin.id()));
-    plugins.extend(named);
+    let plugins = replaced(bundled_plugins(), installed_plugins(&folder));
+    let plugins = replaced(plugins, named);
     Ok(Launcher::new(folder, plugins, enabled, waker))
 }
 
@@ -395,6 +398,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         stream_for: Duration::from_secs(20),
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
+        sample_map: None,
         ax_check: false,
     };
     let mut args = args.iter();
@@ -422,6 +426,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 )
             }
             "--report" => options.report = PathBuf::from(value()?),
+            "--sample-map" => {
+                options.sample_map = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "--sample-map needs a whole number")?,
+                )
+            }
             "--settings-open" => options.settings_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
@@ -436,6 +447,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let replaying = options.synthetic || !options.replay.is_empty();
     if options.long_lines && !replaying {
         return Err("--long-lines needs --replay <logs> or --synthetic".into());
+    }
+    if options.sample_map.is_some() && !replaying {
+        return Err("--sample-map needs --replay <logs> or --synthetic".into());
     }
     if options.host.is_some() != options.port.is_some() {
         return Err("--host and --port go together".into());
@@ -473,4 +487,94 @@ fn load_feed(options: &Options) -> Result<Option<ReplayFeed>, String> {
         lines
     };
     Ok(Some(ReplayFeed::new(lines)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use launcher::bundled_plugins;
+
+    fn parse(args: &str) -> Result<Options, String> {
+        let args: Vec<String> = args.split_whitespace().map(str::to_owned).collect();
+        parse_options(&args)
+    }
+
+    fn refusal(args: &str) -> String {
+        parse(args).err().expect("the options are refused")
+    }
+
+    #[test]
+    fn no_options_is_the_saved_servers_with_nothing_to_replay() {
+        let options = parse("").unwrap();
+        assert_eq!(options.host, None);
+        assert!(options.replay.is_empty() && !options.synthetic && !options.measure);
+    }
+
+    #[test]
+    fn a_server_and_plugins_are_read_from_their_flags() {
+        let options =
+            parse("--host mud.example --port 4000 --plugin a --plugin b --enable c").unwrap();
+        assert_eq!(options.host.as_deref(), Some("mud.example"));
+        assert_eq!(options.port, Some(4000));
+        assert_eq!(options.plugins, [PathBuf::from("a"), PathBuf::from("b")]);
+        assert_eq!(options.enable, ["c"]);
+    }
+
+    #[test]
+    fn a_bare_path_is_a_recording_and_the_replay_flag_only_reads_better() {
+        let options = parse("--replay one.log two.log --rate 10").unwrap();
+        let logs = [PathBuf::from("one.log"), PathBuf::from("two.log")];
+        assert_eq!(options.replay, logs);
+        assert_eq!(options.lines_per_second, 10.0);
+    }
+
+    #[test]
+    fn a_measured_run_needs_lines_and_a_positive_rate() {
+        assert!(parse("--measure --synthetic --seconds 3").is_ok());
+        assert!(refusal("--measure").contains("--measure needs"));
+        assert!(refusal("--measure --synthetic --rate 0").contains("--rate"));
+    }
+
+    #[test]
+    fn options_that_cannot_go_together_are_refused() {
+        assert!(refusal("--host mud.example").contains("go together"));
+        assert!(refusal("--port 4000").contains("go together"));
+        assert!(refusal("--synthetic one.log").contains("either"));
+        assert!(refusal("--host a --port 1 --synthetic").contains("either"));
+        assert!(refusal("--long-lines").contains("--long-lines needs"));
+    }
+
+    #[test]
+    fn bad_values_are_refused_by_name() {
+        assert!(refusal("--port").contains("--port needs a value"));
+        assert!(refusal("--port many").contains("port number"));
+        assert!(refusal("--rate fast").contains("--rate needs"));
+        assert!(refusal("--seconds 1.5").contains("whole number"));
+        assert!(refusal("--nonsense").contains("unknown option --nonsense"));
+    }
+
+    #[test]
+    fn enabling_a_plugin_nothing_installs_is_refused() {
+        let plugins = bundled_plugins();
+        let id = plugins[0].id().clone();
+        let enabled = enabled_plugins(&plugins, &[id.as_str().to_owned()]).unwrap();
+        assert_eq!(enabled, [id]);
+        let refused = enabled_plugins(&plugins, &["nothing".to_owned()]).unwrap_err();
+        assert!(refused.contains("--enable nothing"));
+    }
+
+    #[test]
+    fn a_replay_opens_in_a_throwaway_folder() {
+        let game = open_replay(&parse("--synthetic").unwrap(), || {}).unwrap();
+        assert_eq!(game.target.host, REPLAY_HOST);
+        assert!(game.replay_folder.is_some());
+        game.session.quit().wait().unwrap();
+    }
+
+    #[test]
+    fn a_replay_can_only_enable_a_plugin_it_was_given() {
+        let options = parse("--synthetic --enable nothing").unwrap();
+        let refused = open_replay(&options, || {}).err().unwrap();
+        assert!(refused.contains("--enable nothing"));
+    }
 }

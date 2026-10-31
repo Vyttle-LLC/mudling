@@ -2,11 +2,12 @@
 //! shell to list where they can go, before any session opens.
 //!
 //! The servers folder is the list: a server is saved once its database
-//! exists. Each call opens databases, so call it from a core thread or
-//! another thread that may wait on the disk, never the UI thread.
+//! exists, unless the player removed it. Each call opens databases, so call it
+//! from a core thread or another thread that may wait on the disk, never the
+//! UI thread.
 
 use super::records::{Meta, Server};
-use super::{Batch, Database, Error, Timestamp};
+use super::{Batch, Database, Error, Key, Timestamp};
 use crate::map::CURRENT_ROOM;
 use std::path::Path;
 
@@ -17,6 +18,8 @@ const EXTENSION: &str = "sqlite";
 /// The `meta` key the game plugins the player turned on are kept under, as a
 /// JSON list of plugin ids.
 const ENABLED_PLUGINS: &str = "session.enabled-plugins";
+/// The `meta` key that hides a server the player removed from their list.
+pub(crate) const REMOVED: &str = "server.removed";
 /// Who a session plays when no credentials name a character.
 pub(crate) const UNNAMED_CHARACTER: &str = "player";
 /// Stat keys: a hook's `character` store, as the engine saves it.
@@ -83,11 +86,14 @@ pub fn saved_servers(data_folder: &Path) -> SavedServers {
 
 fn read_server(folder: &Path, name: &str) -> Result<Option<SavedServer>, Error> {
     let reader = Database::open(folder, name)?.reader()?;
+    let meta = reader.meta()?;
+    if meta.iter().any(|meta| meta.key == REMOVED) {
+        return Ok(None);
+    }
     let Some(server) = reader.servers()?.into_iter().next() else {
         return Ok(None);
     };
-    let last_room = reader
-        .meta()?
+    let last_room = meta
         .iter()
         .find(|meta| meta.key == CURRENT_ROOM)
         .and_then(|meta| meta.value.parse().ok())
@@ -123,7 +129,8 @@ fn read_server(folder: &Path, name: &str) -> Result<Option<SavedServer>, Error> 
     }))
 }
 
-/// Saves a server the player added. It blocks until the row is on the disk.
+/// Saves a server the player added. A server they removed comes back with
+/// everything it had. It blocks until the row is on the disk.
 pub fn save_server(data_folder: &Path, host: &str, port: u16) -> Result<(), Error> {
     let folder = data_folder.join(SERVERS_FOLDER);
     let mut batch = Batch::new();
@@ -133,6 +140,24 @@ pub fn save_server(data_folder: &Path, host: &str, port: u16) -> Result<(), Erro
         host: host.to_owned(),
         port,
         settings: "{}".to_owned(),
+        updated: Timestamp::now(),
+    });
+    batch.delete(Key::Meta(REMOVED.to_owned()));
+    let writer = Database::open(&folder, host)?.writer()?;
+    writer.submit(batch)?;
+    writer.flush()
+}
+
+/// Takes `host` off the player's list. Its map, notes and characters stay in
+/// its database: deleting the server's row would take the characters with it,
+/// and adding the server or connecting to it again brings it all back. It
+/// blocks until that's on the disk.
+pub fn remove_server(data_folder: &Path, host: &str) -> Result<(), Error> {
+    let folder = data_folder.join(SERVERS_FOLDER);
+    let mut batch = Batch::new();
+    batch.upsert(Meta {
+        key: REMOVED.to_owned(),
+        value: "true".to_owned(),
         updated: Timestamp::now(),
     });
     let writer = Database::open(&folder, host)?.writer()?;

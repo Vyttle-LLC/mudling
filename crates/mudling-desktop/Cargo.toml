@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 mudling-core.workspace = true
+mudling-plugin-avatar = { path = "../../plugins/avatar" }
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true

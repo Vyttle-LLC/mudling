@@ -41,9 +41,10 @@ mod writer;
 pub use batch::{Batch, Key, Record};
 pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;
+pub(crate) use saved::REMOVED;
 pub(crate) use saved::UNNAMED_CHARACTER;
 pub use saved::{
-    SERVERS_FOLDER, SavedCharacter, SavedServer, SavedServers, enabled_plugins,
+    SERVERS_FOLDER, SavedCharacter, SavedServer, SavedServers, enabled_plugins, remove_server,
     save_enabled_plugins, save_server, saved_servers,
 };
 pub use schema::LATEST_VERSION;
