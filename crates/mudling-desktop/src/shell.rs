@@ -14,6 +14,7 @@ use crate::chat::{COLUMN_PADDING, COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
+use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::status::{StatusLines, lines_for};
 use crate::theme::Theme;
 use crate::title_bar::{self, FocusPreviousControl, SessionLabel, TitleBar};
@@ -27,18 +28,28 @@ use mudling_core::completion::Completion;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, SettingsState, Versioned, VitalsState,
+    CharactersState, ConnectionStatus, MobsState, RoomState, SettingsState, Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
 
-actions!(shell, [ToggleLeftPanel, ToggleRightPanel, FocusCommandBar]);
+actions!(
+    shell,
+    [
+        ToggleLeftPanel,
+        ToggleRightPanel,
+        FocusCommandBar,
+        FocusNext
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
         KeyBinding::new(secondary!("l"), FocusCommandBar, None),
+        KeyBinding::new("tab", FocusNext, Some(room_panel::CONTEXT)),
+        KeyBinding::new("escape", FocusCommandBar, Some(room_panel::CONTEXT)),
     ]);
 }
 
@@ -48,6 +59,8 @@ pub struct Game {
     /// A recording's throwaway data folder, or `None` for a real server.
     pub replay_folder: Option<TempDir>,
     pub enabled: Vec<PluginId>,
+    /// The game's words for what the panels send.
+    pub verbs: Verbs,
 }
 
 impl Game {
@@ -61,6 +74,8 @@ struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
     characters: Versioned<CharactersState>,
+    room: Versioned<RoomState>,
+    mobs: Versioned<MobsState>,
 }
 
 pub struct Shell {
@@ -74,7 +89,8 @@ pub struct Shell {
     input: Entity<CommandInput>,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
-    _subscriptions: [Subscription; 3],
+    room_panel: Entity<RoomPanel>,
+    _subscriptions: [Subscription; 5],
     _woken: Task<()>,
 }
 
@@ -94,15 +110,30 @@ impl Shell {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         };
         let chat = cx.new(|_| Chat::new(terminal));
         let input = cx.new(CommandInput::new);
         let typing = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
             shell.on_typing(event, window, cx);
         });
+        let verbs = game.as_ref().map(|game| game.verbs.clone());
+        let room_panel = cx.new(|cx| RoomPanel::new(verbs.unwrap_or_default(), cx));
+        let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
+            shell.on_room_verb(sent, window, cx);
+        });
+        // A panel that hides or changes tab takes its focus with it. Deferred
+        // past the draw this runs in, which wouldn't redraw for the new focus,
+        // and the bar only takes text once it's drawn focused.
+        let focus_lost = cx.on_focus_lost(window, |_, window, cx| {
+            cx.defer_in(window, |shell, window, cx| {
+                window.focus(&shell.input.focus_handle(cx), cx);
+            });
+        });
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             cx.set_global(Theme::for_appearance(window.appearance()));
-            cx.notify();
+            window.refresh();
         });
         let quitting = cx.on_app_quit(|shell, cx| {
             let saved = shell.leave(cx);
@@ -129,10 +160,13 @@ impl Shell {
             input,
             left_dock,
             right_dock,
-            _subscriptions: [typing, appearance, quitting],
+            room_panel,
+            _subscriptions: [typing, verb_sent, focus_lost, appearance, quitting],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
         shell.show_status(cx);
+        shell.show_room(cx);
+        shell.mount(Slot::Room, shell.room_panel.clone(), cx);
         shell
     }
 
@@ -179,6 +213,21 @@ impl Shell {
         if batch.vitals.is_some() || batch.settings.is_some() || batch.characters.is_some() {
             self.show_status(cx);
         }
+        if let Some(room) = &batch.room {
+            self.copies.room.apply_diff(room);
+        }
+        if let Some(mobs) = &batch.mobs {
+            self.copies.mobs.apply_diff(mobs);
+        }
+        if batch.room.is_some() || batch.mobs.is_some() {
+            self.show_room(cx);
+        }
+    }
+
+    fn show_room(&mut self, cx: &mut Context<Shell>) {
+        let (room, mobs) = (self.copies.room.value(), self.copies.mobs.value());
+        self.room_panel
+            .update(cx, |panel, cx| panel.show_room(room, mobs, cx));
     }
 
     fn show_status(&mut self, cx: &mut Context<Shell>) {
@@ -218,6 +267,17 @@ impl Shell {
         }
     }
 
+    /// With echo off the server is asking for a password, and a command sent
+    /// now would go as one, so it's refused, as core refuses a hook's.
+    fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
+        if !self.copies.settings.value().echo_off {
+            self.submit(&sent.command, cx);
+        }
+        if !sent.by_keyboard {
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
+    }
+
     /// Sends what was typed, a command to each line; the session echoes them,
     /// unless it's a password. With no server connected they go nowhere, so
     /// the chat shows them here.
@@ -236,7 +296,6 @@ impl Shell {
     }
 
     /// Puts `view` in a panel slot: how later tickets fill the panels.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mount(&self, slot: Slot, view: impl Into<AnyView>, cx: &mut Context<Shell>) {
         let view = view.into();
         self.dock(slot.side())
@@ -311,6 +370,10 @@ impl Shell {
 
     pub fn chat(&self) -> Entity<Chat> {
         self.chat.clone()
+    }
+
+    pub fn room_panel(&self) -> Entity<RoomPanel> {
+        self.room_panel.clone()
     }
 
     /// Ends the session, off this thread. The task finishes once everything
@@ -392,6 +455,7 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
                 window.focus(&shell.input.focus_handle(cx), cx);
             }))
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
             .capture_any_mouse_down(|event, window, cx| {
                 if title_bar::resize_from_edge(event.position, window) {
@@ -416,9 +480,13 @@ impl Render for Shell {
 mod tests {
     use super::*;
     use crate::chat::{LINE_HEIGHT, min_column_width};
+    use crate::room_panel::press_key;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
-    use gpui::{Modifiers, Pixels, TestAppContext, VisualTestContext, point, px, size};
+    use gpui::{
+        Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
+    };
     use mudling_core::defaults::hud::Vital;
+    use mudling_core::plugin::Plugin;
     use mudling_core::session::SessionConfig;
     use mudling_core::store::TerminalState;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
@@ -435,13 +503,20 @@ mod tests {
 
     /// gpui's test scheduler fails on a wake from another thread, so the
     /// tests wake the shell themselves.
-    fn open_game(folder: &Path, port: u16) -> Game {
-        let config = SessionConfig::new(folder, "127.0.0.1", port);
+    fn open_game(folder: &Path, port: u16, plugins: Vec<Plugin>) -> Game {
+        let enabled: Vec<PluginId> = plugins.iter().map(|plugin| plugin.id().clone()).collect();
+        let verbs = Verbs::of(&plugins, &enabled);
+        let config = SessionConfig {
+            plugins,
+            enabled: enabled.clone(),
+            ..SessionConfig::new(folder, "127.0.0.1", port)
+        };
         let session = Session::open(config, || {}).expect("the session starts");
         Game {
             session,
             replay_folder: None,
-            enabled: Vec::new(),
+            enabled,
+            verbs,
         }
     }
 
@@ -455,12 +530,20 @@ mod tests {
     }
 
     fn play(cx: &mut TestAppContext) -> Played<'_> {
-        cx.update(crate::input::bind_keys);
+        play_with(cx, Vec::new())
+    }
+
+    fn play_with(cx: &mut TestAppContext, plugins: Vec<Plugin>) -> Played<'_> {
+        cx.update(|cx| {
+            crate::input::bind_keys(cx);
+            bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
         let folder = TempDir::new().unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let (wake, woken) = unbounded();
-        let game = open_game(folder.path(), port);
+        let game = open_game(folder.path(), port, plugins);
         let (shell, cx) =
             cx.add_window_view(|window, cx| Shell::new(Some(game), woken, window, cx));
         let (server, _) = listener.accept().unwrap();
@@ -523,6 +606,57 @@ mod tests {
                 }
             }
             String::from_utf8_lossy(&heard).trim().to_owned()
+        }
+
+        fn gmcp(&mut self, message: &str) {
+            self.say(&[IAC, WILL, GMCP]);
+            self.say(&[IAC, SB, GMCP]);
+            self.say(message.as_bytes());
+            self.say(&[IAC, SE]);
+        }
+
+        /// Walks into a room with an open exit north and a door east, with
+        /// the Room panel open.
+        fn enter_room(&mut self) {
+            self.connected();
+            self.gmcp(
+                r#"Room.Info {"num": 1, "name": "A hall", "exits": {"n": 2, "e": "closed"}}"#,
+            );
+            self.frames_until("the room", |shell, cx| {
+                shell.room_panel.read(cx).room_name() == Some("A hall")
+            });
+            self.shell
+                .update(self.cx, |shell, cx| shell.open_panels(cx));
+            self.cx.run_until_parked();
+        }
+
+        fn fill_room(&mut self) {
+            self.shell.update(self.cx, |shell, cx| {
+                let (_, _, contents) = crate::measure::sample_room();
+                shell
+                    .room_panel
+                    .update(cx, |panel, cx| panel.show_contents(contents, cx));
+            });
+            self.cx.run_until_parked();
+        }
+
+        fn click(&mut self, selector: &'static str) {
+            let bounds = self.cx.debug_bounds(selector).expect(selector);
+            self.cx.simulate_click(bounds.center(), Modifiers::none());
+        }
+
+        /// The next line the server reads, past any telnet the client put
+        /// ahead of it, which is the only part that isn't printable.
+        fn heard_command(&mut self) -> String {
+            let mut heard = Vec::new();
+            let mut byte = [0];
+            while byte != *b"\n" {
+                self.server.read_exact(&mut byte).unwrap();
+                heard.push(byte[0]);
+            }
+            let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
+            let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
+            String::from_utf8_lossy(command.unwrap()).into_owned()
         }
 
         fn chat_lines(&mut self) -> Vec<String> {
@@ -933,6 +1067,155 @@ mod tests {
             let session = &shell.game.as_ref().unwrap().session;
             assert_eq!(session.older("", "").as_deref(), Some("look"));
             assert_eq!(session.older("look", ""), None, "only look is in history");
+        });
+    }
+
+    /// A game with its own words for the panel's commands.
+    fn game_plugin() -> Plugin {
+        Plugin::from_files(|file| {
+            Ok(match file {
+                "plugin.toml" => "id = \"game\"\nname = \"Game\"\nversion = \"0.1.0\"\n\
+                                  api = 1\nlicense = \"MIT\"\nlayer = \"game\"\n\
+                                  [servers]\nhosts = [\"game.example\"]\n[points]\ncommands = \"commands.toml\"\n"
+                    .to_owned(),
+                _ => "[verbs]\nget = \"take\"\n[doors]\nopen = \"pry {dir}\"\n".to_owned(),
+            })
+        })
+        .expect("the plugin loads")
+    }
+
+    #[gpui::test]
+    fn the_room_store_reaches_the_panel_only_on_a_frame(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.gmcp(r#"Room.Info {"num": 1, "name": "A hall", "exits": {"n": 2}}"#);
+        let room_in_core = |shell: &Shell| {
+            let stores = shell.game.as_ref().unwrap().session.stores();
+            stores.read(|room: &Versioned<RoomState>| room.value().room.is_some())
+        };
+        let started = Instant::now();
+        while !played.shell.read_with(played.cx, |s, _| room_in_core(s)) {
+            assert!(started.elapsed() < WAIT, "timed out waiting for the room");
+            sleep(Duration::from_millis(1));
+        }
+
+        played.wake.unbounded_send(()).unwrap();
+        played.cx.run_until_parked();
+        let shown = |played: &mut Played| {
+            played.shell.read_with(played.cx, |shell, cx| {
+                shell.room_panel.read(cx).room_name().map(str::to_owned)
+            })
+        };
+        assert_eq!(shown(&mut played), None, "no frame has run");
+        played.frame();
+        assert_eq!(shown(&mut played).as_deref(), Some("A hall"));
+    }
+
+    #[gpui::test]
+    fn exits_send_moves_and_a_closed_door_uses_the_games_command(cx: &mut TestAppContext) {
+        let mut played = play_with(cx, vec![game_plugin()]);
+        played.enter_room();
+
+        played.click("Go north");
+        assert_eq!(played.heard_command(), "north");
+        played.click("dpad-east");
+        assert_eq!(played.heard_command(), "pry east");
+        assert_eq!(played.heard_command(), "east");
+    }
+
+    #[gpui::test]
+    fn a_verb_goes_out_in_the_games_word_and_typing_stays_with_the_bar(cx: &mut TestAppContext) {
+        let mut played = play_with(cx, vec![game_plugin()]);
+        played.enter_room();
+        played.fill_room();
+
+        played.click("Get a stone");
+        assert_eq!(played.heard_command(), "take stone");
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn the_panel_sends_nothing_to_a_password_prompt(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.fill_room();
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("the mask", |shell, cx| shell.input.read(cx).is_masked());
+        played.cx.simulate_input("hunter2");
+
+        played.click("Go north");
+        played.click("Get a stone");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "hunter2");
+        });
+
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard_command(), "hunter2", "the verbs went nowhere");
+    }
+
+    #[gpui::test]
+    fn a_mouse_press_in_the_panel_leaves_typing_with_the_bar(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+
+        played.click("room-map");
+        let north = played.cx.debug_bounds("Go north").unwrap().center();
+        let map = played.cx.debug_bounds("room-map").unwrap().center();
+        played
+            .cx
+            .simulate_mouse_down(north, MouseButton::Left, Modifiers::none());
+        played
+            .cx
+            .simulate_mouse_up(map, MouseButton::Left, Modifiers::none());
+
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_the_panel_with_focus_in_it_hands_typing_to_the_bar(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.cx.simulate_keystrokes("shift-tab");
+
+        played.shell.update(played.cx, |shell, cx| {
+            shell.toggle_dock(Side::Right, cx);
+        });
+        played.cx.run_until_parked();
+
+        played.cx.simulate_input("look");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "look");
+        });
+    }
+
+    #[gpui::test]
+    fn the_keyboard_reaches_the_panel_from_the_command_bar_and_comes_back(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.cx.simulate_input("get lantern");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard_command(), "get lantern");
+
+        played.cx.simulate_keystrokes("shift-tab");
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "open east");
+        assert_eq!(played.heard_command(), "east");
+
+        played.cx.simulate_keystrokes("tab");
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "north");
+
+        played.cx.simulate_keystrokes("escape");
+        played.cx.simulate_input("get la");
+        played.cx.simulate_keystrokes("tab");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "get lantern");
         });
     }
 

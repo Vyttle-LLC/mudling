@@ -16,7 +16,7 @@ use crate::chat::min_column_width;
 use crate::theme::Theme;
 use gpui::{
     AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role, SharedString,
-    Stateful, Window, deferred, div, prelude::*, px,
+    Stateful, StyleRefinement, Window, deferred, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
 
@@ -425,14 +425,25 @@ impl Dock {
 
     /// The panel at its full width, whatever the slide has uncovered so far,
     /// so its content slides rather than reflows.
-    fn render_panel(&self, theme: &Theme, cx: &mut Context<Dock>) -> impl IntoElement {
+    fn render_panel(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Dock>,
+    ) -> impl IntoElement {
         let view = self
             .mounted
             .iter()
             .find(|(slot, _)| *slot == self.selected)
             .map(|(_, view)| view.clone());
         let content = match view {
-            Some(view) => view.into_any_element(),
+            // A cached view leaves its nodes out of the accessibility tree,
+            // so a screen reader always gets the panel drawn afresh.
+            Some(view) if window.is_a11y_active() => view.into_any_element(),
+            // The chat draws every frame, and a panel only when it changes.
+            Some(view) => view
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
             None => div()
                 .font_family(HEADING_FONT)
                 .font_weight(FontWeight::SEMIBOLD)
@@ -517,7 +528,7 @@ impl Render for Dock {
             .when(self.side == Side::Right, |dock| dock.border_l_1())
             .map(|dock| match showing {
                 DockState::Open => dock
-                    .child(self.render_panel(&theme, cx))
+                    .child(self.render_panel(&theme, window, cx))
                     .when(self.state == DockState::Open, |dock| {
                         dock.child(self.render_resize_handle(&theme, cx))
                     }),

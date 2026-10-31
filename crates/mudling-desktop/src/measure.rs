@@ -21,19 +21,27 @@
 //!
 //! Lines go through `Session::replay` on the core thread, and reach the chat
 //! the way a server's do: as a store diff, applied on a later frame.
+//!
+//! The Room panel has [`sample_room`] in it throughout, so the frames measured
+//! carry a filled panel. The sample is made up: it comes from no real session.
 
 use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side};
+use crate::room_panel::{Item, Occupant, RoomContents};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
+use mudling_core::map::{LiveMap, PlainRules};
+use mudling_core::persist::Timestamp;
 use mudling_core::replay::ReplayFeed;
 use mudling_core::stats::Summary;
+use mudling_core::store::{MobsState, RoomState};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MARKER: &str = "mudling-measure: ";
@@ -46,6 +54,54 @@ const REWRAP_DURATION: Duration = Duration::from_secs(5);
 const REWRAP_DRAG: f32 = 60.;
 /// Scrolled per display frame: about a line and a half.
 const SCROLL_STEP: f32 = 30.;
+
+/// A filled Room panel's room, what the map remembers and what's in it.
+pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    let info = r#"{"num": 1, "name": "A Stone Hall", "zone": "The Old Town",
+        "exits": {"n": 2, "s": 3, "e": "closed"}}"#;
+    map.room_info(info, Timestamp(0));
+    map.note_sightings(&["(Marked) a grey wolf".to_owned()], Timestamp(0));
+    let room = map
+        .commit(Timestamp(0))
+        .and_then(|commit| commit.change.rooms.first().map(Arc::clone));
+    let mobs = MobsState::default().with_changes(&[mudling_core::map::MarkChange {
+        name: "wolf".to_owned(),
+        mark: mudling_core::map::Mark::Aggressive,
+        set: true,
+    }]);
+    let item = |name: &'static str, target: &str, count| Item {
+        name: name.into(),
+        target: target.to_owned(),
+        count,
+    };
+    let contents = RoomContents {
+        occupants: vec![Occupant {
+            name: "A traveller resting by the wall".into(),
+            target: "traveller".to_owned(),
+        }],
+        items: vec![
+            item("a worn leather satchel with a strap", "satchel", 3),
+            item("some coins", "coins", 4),
+            item("a blanket", "blanket", 2),
+            item("a stone", "stone", 2),
+            item("some rope", "rope", 1),
+        ],
+    };
+    let room = RoomState {
+        room,
+        whereabouts: Default::default(),
+    };
+    (room, mobs, contents)
+}
+
+pub fn fill_room_panel(shell: &Shell, cx: &mut App) {
+    let (room, mobs, contents) = sample_room();
+    shell.room_panel().update(cx, |panel, cx| {
+        panel.show_room(&room, &mobs, cx);
+        panel.show_contents(contents, cx);
+    });
+}
 
 /// Prints one marker for the measuring parent.
 pub fn mark(message: &str) {
@@ -187,7 +243,10 @@ pub fn drive(
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
     };
-    pacer.shell.update(cx, |shell, cx| shell.open_panels(cx));
+    pacer.shell.update(cx, |shell, cx| {
+        shell.open_panels(cx);
+        fill_room_panel(shell, cx);
+    });
     mark(&format!(
         "info window_active={}",
         u8::from(cx.active_window().is_some())
@@ -284,7 +343,7 @@ pub fn run_parent(
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat, command bar and both side panels open, their slots empty; no split yet",
+        scope: "chat, command bar and both side panels open, the Room panel filled; no split yet",
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),

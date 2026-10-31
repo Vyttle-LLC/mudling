@@ -51,6 +51,8 @@ pub struct Theme {
     pub accent_hover: Hsla,
     /// Text and icons on a filled accent.
     pub on_accent: Hsla,
+    /// What can't be taken back, such as Kill.
+    pub danger: Hsla,
     pub placeholder: Hsla,
     pub hud_hp: Hsla,
     pub hud_mana: Hsla,
@@ -81,6 +83,7 @@ impl Theme {
                 accent: rgb(MOSS).into(),
                 accent_hover: rgb(MOSS_BRIGHT).into(),
                 on_accent: rgb(NIGHT).into(),
+                danger: rgb(ANSI_ON_NIGHT[9]).into(),
                 placeholder: rgb(0x8A928D).into(),
                 hud_hp: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_mana: rgb(ANSI_ON_NIGHT[12]).into(),
@@ -105,6 +108,7 @@ impl Theme {
                 accent: rgb(MOSS_DEEP).into(),
                 accent_hover: rgb(MOSS_DIM).into(),
                 on_accent: rgb(PARCHMENT).into(),
+                danger: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 placeholder: rgb(0x636C67).into(),
                 hud_hp: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_mana: rgb(ANSI_ON_PARCHMENT[12]).into(),
@@ -177,6 +181,7 @@ mod tests {
                     theme.text,
                     theme.text_muted,
                     theme.accent,
+                    theme.danger,
                     theme.placeholder,
                 ] {
                     assert!(

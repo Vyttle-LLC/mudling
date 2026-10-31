@@ -1,8 +1,9 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input, the live region and the title bar. Reading another app's
-//! tree with `AXUIElement` needs the Accessibility permission; this needs none.
+//! chat, the input, the live region, the title bar and the Room panel's
+//! buttons. Reading another app's tree with `AXUIElement` needs the
+//! Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
@@ -235,6 +236,24 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 "{:?}",
                 statuses.iter().map(|s| &s.value).collect::<Vec<_>>()
             ),
+        });
+        shell.update(cx, |shell, cx| {
+            crate::measure::fill_room_panel(shell, cx);
+            shell.open_panels(cx);
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let named_buttons = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXButton", None))
+                .into_iter()
+                .filter_map(|button| button.title.as_deref())
+                .collect()
+        });
+        let room_buttons = ["Go north", "Open the door and go east", "Get a stone"];
+        checks.push(Check {
+            name: "the Room panel's buttons carry their names",
+            passed: room_buttons.iter().all(|name| named_buttons.contains(name)),
+            detail: format!("{named_buttons:?}"),
         });
         let accesskit_tree = cx
             .update(|cx| {
