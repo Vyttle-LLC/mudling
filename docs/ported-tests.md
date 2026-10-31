@@ -39,10 +39,9 @@ All four are fixed, each with its test as proof.
 
 ## Gaps reported, in areas this ticket doesn't own
 
-- **Avatar can't auto-login.** Its plugin has no Connection point, so it names no login prompts and credentials do nothing. The prototype knew them. Ported on a made-up game in `core::login`.
-- **Doors don't update in place.** The prototype refreshed a room's exits from `Char.Status`, so opening a door showed at once. Nothing in `map/` does that between Room.Infos, so a route still says "open" for a door already open.
-- **Marking a mob by a line with no "is" or "are" marks the wrong word.** `MobMemory::set_aggressive` takes the last word of "A myconoid shaman sways here, spores drifting.", which is "drifting". The prototype took the noun by `TargetKeyword`, which is VYT-249's.
 - **The `[[alias]]` Commands point is declared but never run.** VYT-212 brings aliases.
+
+Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors updating in place from `Char.Status`, and marking a mob by a line with no "is" or "are".
 
 ## Differences that are intended
 
