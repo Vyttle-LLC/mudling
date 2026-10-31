@@ -17,9 +17,9 @@
 //! - **Text already pending when `Char.Vitals` arrives** came before it, so
 //!   only what follows it on that line is the prompt.
 //!
-//! A game with no GMCP sends no `Char.Vitals`. A line ended at a signal is
-//! learned there if it holds a number and its shape comes twice running, so
-//! a line that merely stalled isn't taken for a prompt.
+//! A game with no GMCP sends no `Char.Vitals`. Until one comes, a line ended
+//! at a signal is learned if it holds a number and its shape comes twice
+//! running, so a line that merely stalled isn't taken for a prompt.
 //!
 //! Each shape is counted. When the store is full, the rarest shape goes, ties
 //! going to the longest.
@@ -50,6 +50,8 @@ pub struct PromptLearner {
     /// The shape of the last line ended at a signal with no `Char.Vitals`
     /// before it.
     last_signaled: Option<Vec<String>>,
+    /// A `Char.Vitals` has come, so only it teaches prompts from here on.
+    vitals_seen: bool,
 }
 
 /// What's known of the prompt a `Char.Vitals` announced.
@@ -64,15 +66,23 @@ struct AwaitedPrompt {
 impl PromptLearner {
     /// A learner that already knows `prompts`, each seen once.
     pub fn learning<'a>(prompts: impl IntoIterator<Item = &'a str>) -> PromptLearner {
-        let mut learner = PromptLearner::default();
+        let mut learner = PromptLearner {
+            vitals_seen: true,
+            ..PromptLearner::default()
+        };
         for prompt in prompts {
             learner.learn(prompt);
         }
         learner
     }
 
-    /// A `Char.Vitals` arrived: the next text is a prompt.
+    /// A `Char.Vitals` arrived: the next text is a prompt. The first one
+    /// shows the game has GMCP, so what repetition taught before it goes:
+    /// that was a login menu or the like, not a prompt.
     pub fn vitals_arrived(&mut self) {
+        if !std::mem::replace(&mut self.vitals_seen, true) {
+            self.shapes.clear();
+        }
         self.gmcp_arrived();
         self.awaited = Some(AwaitedPrompt {
             before: self.pending_len,
@@ -126,7 +136,7 @@ impl PromptLearner {
                     });
                 }
             }
-            None if at_signal => self.learn_if_repeated(text),
+            None if at_signal && !self.vitals_seen => self.learn_if_repeated(text),
             None => {}
         }
         if at_signal

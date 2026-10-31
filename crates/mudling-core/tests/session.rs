@@ -832,6 +832,58 @@ fn a_grown_prompt_is_hidden_whole() {
     }
 }
 
+/// On a game with `Char.Vitals`, only it teaches prompts: a numbered question
+/// or pager line ended at a signal stays visible however often it repeats.
+#[test]
+fn repeated_numbered_lines_stay_visible_with_vitals() {
+    let signaled = |driven: &mut Driven, line: &str| {
+        driven.say(line.as_bytes());
+        driven.say(&[IAC, GA]);
+    };
+    let question = "Choose a class (1-5): ";
+    for between_vitals in [false, true] {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, "<{}hp> ");
+        for _ in 0..3 {
+            signaled(&mut driven, question);
+            if between_vitals {
+                prompts(&mut driven, "<{}hp> ");
+            }
+        }
+        signaled(&mut driven, "--More-- (20%) ");
+        signaled(&mut driven, "--More-- (45%) ");
+        assert_eq!(
+            driven.terminal(),
+            [
+                question,
+                question,
+                question,
+                "--More-- (20%) ",
+                "--More-- (45%) "
+            ],
+            "Vitals between: {between_vitals}"
+        );
+    }
+}
+
+/// A menu repeated at login, before the first `Char.Vitals`, isn't a prompt
+/// once the game turns out to have GMCP.
+#[test]
+fn shapes_repeated_before_the_first_vitals_are_forgotten() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    let question = "Choose a class (1-5): ";
+    for _ in 0..2 {
+        driven.say(question.as_bytes());
+        driven.say(&[IAC, GA]);
+    }
+    prompts(&mut driven, "<{}hp> ");
+    driven.say(question.as_bytes());
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.terminal(), [question, question, question]);
+}
+
 /// Ended by a newline, output after a prompt shows, even with a shape learned
 /// from that same text at a signal.
 #[test]
