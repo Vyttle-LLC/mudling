@@ -305,6 +305,9 @@ fn render(
             cx.set_global(Theme::for_appearance(appearance));
             fill_with_sample(shell, cx);
             arrange(shell, window, cx);
+            // A choice made in `arrange` wears the headless window's own ground.
+            let choice = cx.global::<Theme>().choice;
+            cx.set_global(Theme::chosen(choice, appearance));
             window.refresh();
         })
         .expect("the window is open");
