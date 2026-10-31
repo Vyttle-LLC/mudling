@@ -255,7 +255,8 @@ impl Dock {
         cx.notify();
     }
 
-    fn select(&mut self, slot: Slot, cx: &mut Context<Dock>) {
+    /// Shows `slot`'s panel, opening the dock if it isn't.
+    pub fn select(&mut self, slot: Slot, cx: &mut Context<Dock>) {
         self.selected = slot;
         self.move_to(DockState::Open, cx);
         cx.notify();

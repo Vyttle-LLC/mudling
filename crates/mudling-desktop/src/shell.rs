@@ -39,6 +39,7 @@ actions!(
         ToggleLeftPanel,
         ToggleRightPanel,
         FocusCommandBar,
+        FocusRoomPanel,
         FocusNext
     ]
 );
@@ -47,6 +48,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
+        KeyBinding::new(secondary!("3"), FocusRoomPanel, None),
         KeyBinding::new(secondary!("l"), FocusCommandBar, None),
         KeyBinding::new("tab", FocusNext, Some(room_panel::CONTEXT)),
         KeyBinding::new("escape", FocusCommandBar, Some(room_panel::CONTEXT)),
@@ -323,6 +325,24 @@ impl Shell {
         self.dock(side).update(cx, |dock, cx| dock.toggle(cx));
     }
 
+    /// Shows the Room panel, opening the right panel if it's closed, and
+    /// moves the keyboard into it. A task, which runs after the draw that
+    /// shows the panel: it can't take focus before it's drawn.
+    fn focus_room_panel(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.dock(Side::Right)
+            .update(cx, |dock, cx| dock.select(Slot::Room, cx));
+        cx.spawn_in(window, async move |shell, cx| {
+            shell
+                .update_in(cx, |shell, window, cx| {
+                    shell
+                        .room_panel
+                        .update(cx, |panel, cx| panel.focus(window, cx));
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
         self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
@@ -454,6 +474,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
                 window.focus(&shell.input.focus_handle(cx), cx);
+            }))
+            .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
+                shell.focus_room_panel(window, cx);
             }))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
@@ -1181,7 +1204,7 @@ mod tests {
     fn hiding_the_panel_with_focus_in_it_hands_typing_to_the_bar(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.enter_room();
-        played.cx.simulate_keystrokes("shift-tab");
+        played.cx.simulate_keystrokes(secondary!("3"));
 
         played.shell.update(played.cx, |shell, cx| {
             shell.toggle_dock(Side::Right, cx);
@@ -1202,14 +1225,14 @@ mod tests {
         played.cx.simulate_keystrokes("enter");
         assert_eq!(played.heard_command(), "get lantern");
 
-        played.cx.simulate_keystrokes("shift-tab");
+        played.cx.simulate_keystrokes(secondary!("3"));
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "north");
+
+        played.cx.simulate_keystrokes("tab tab");
         press_key("enter", played.cx);
         assert_eq!(played.heard_command(), "open east");
         assert_eq!(played.heard_command(), "east");
-
-        played.cx.simulate_keystrokes("tab");
-        press_key("enter", played.cx);
-        assert_eq!(played.heard_command(), "north");
 
         played.cx.simulate_keystrokes("escape");
         played.cx.simulate_input("get la");
@@ -1217,6 +1240,25 @@ mod tests {
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.input.read(cx).content(), "get lantern");
         });
+    }
+
+    #[gpui::test]
+    fn the_room_shortcut_opens_a_closed_panel_and_takes_the_keyboard_into_it(
+        cx: &mut TestAppContext,
+    ) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.shell.update(played.cx, |shell, cx| {
+            shell.toggle_dock(Side::Right, cx);
+        });
+        played.cx.run_until_parked();
+
+        played.cx.simulate_keystrokes(secondary!("3"));
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.dock(Side::Right).read(cx).state(), DockState::Open);
+        });
+        press_key("enter", played.cx);
+        assert_eq!(played.heard_command(), "north");
     }
 
     #[gpui::test]

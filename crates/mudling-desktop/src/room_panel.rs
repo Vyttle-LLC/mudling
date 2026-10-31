@@ -246,6 +246,16 @@ impl RoomPanel {
         cx.notify();
     }
 
+    /// Moves the keyboard to the panel's first button, or to the panel itself
+    /// when it has none.
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<RoomPanel>) {
+        window.focus(&self.focus_handle, cx);
+        window.focus_next(cx);
+        if !self.focus_handle.contains_focused(window, cx) {
+            window.focus(&self.focus_handle, cx);
+        }
+    }
+
     #[cfg(test)]
     pub fn room_name(&self) -> Option<&str> {
         self.place.as_ref().map(|place| place.name.as_str())
