@@ -20,14 +20,15 @@ use gpui::{
 };
 use mudling_core::LinePipeline;
 use mudling_core::defaults::hud::Vital;
-use mudling_core::store::{Diff, Revision, TerminalChange, VitalsState};
+use mudling_core::store::{Diff, Revision, TerminalChange, TerminalState, VitalsState};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 const WIDE: Size<Pixels> = size(px(1434.), px(897.));
-const DEFAULT: Size<Pixels> = size(px(1100.), px(800.));
+const DEFAULT: Size<Pixels> = size(px(1300.), px(800.));
 const NARROW: Size<Pixels> = size(px(760.), px(640.));
+const UNDER_80_COLUMNS: Size<Pixels> = size(px(560.), px(640.));
 
 const SAMPLE_CHAT: [&str; 11] = [
     "\x1b[36mYou are carrying:\x1b[0m",
@@ -43,6 +44,23 @@ const SAMPLE_CHAT: [&str; 11] = [
     "\x1b[32mYou donate 50 standard bolts.\x1b[0m",
 ];
 
+/// A ruler of exactly 80 columns, a table and a map that fit them, and prose
+/// and a word too long for the column.
+const WRAPPING_CHAT: [&str; 10] = [
+    "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+    "\x1b[33mThe goblin swings a rusty sword at you and misses, stumbling past the \
+     torch and down the quiet stone path, then over the old bridge and away towards \
+     the river, where it trips on a root and drops its lantern.\x1b[0m",
+    "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+    "| Name   | Lvl | Class  |",
+    "| Mira   |  12 | Mage   |",
+    "| Oskar  |   7 | Ranger |",
+    "    N",
+    "  W-+-E    [ ]--[ ]",
+    "    S       |",
+    "           [*]",
+];
+
 fn images_folder() -> PathBuf {
     std::env::var_os("MUDLING_WINDOW_IMAGES").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-images"),
@@ -50,18 +68,21 @@ fn images_folder() -> PathBuf {
     )
 }
 
-fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
+fn server_lines(texts: &[&str]) -> Diff<TerminalState> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::new();
-    for line in SAMPLE_CHAT {
+    for line in texts {
         pipeline.push(format!("{line}\n").as_bytes(), &mut lines);
     }
-    let diff = Diff {
+    Diff {
         revision: Revision::default(),
         change: TerminalChange::Append(lines),
-    };
+    }
+}
+
+fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.chat().update(cx, |chat, cx| {
-        chat.apply(&diff, cx);
+        chat.apply(&server_lines(&SAMPLE_CHAT), cx);
         chat.echo_unsent("get bracelet", cx);
     });
     let vitals = VitalsState(BTreeMap::from([
@@ -142,6 +163,27 @@ fn window_images() {
         DEFAULT,
         |shell, _, cx| {
             shell.open_panels(cx);
+        },
+    );
+    render("wrapped-dark", Dark, DEFAULT, |shell, _, cx| {
+        shell.chat().update(cx, |chat, cx| {
+            chat.apply(&server_lines(&WRAPPING_CHAT), cx);
+            chat.echo_unsent(
+                "say a command long enough to wrap beside the marker that starts it, \
+                 because a player can always type more than a server would ever send",
+                cx,
+            );
+        });
+        shell.open_panels(cx);
+    });
+    render(
+        "wrapped-narrow-dark",
+        Dark,
+        UNDER_80_COLUMNS,
+        |shell, _, cx| {
+            shell
+                .chat()
+                .update(cx, |chat, cx| chat.apply(&server_lines(&WRAPPING_CHAT), cx));
         },
     );
     render("rails-dark", Dark, WIDE, |shell, _, cx| {

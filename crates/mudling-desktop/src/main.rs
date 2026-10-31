@@ -148,7 +148,7 @@ fn main() -> ExitCode {
         title_bar::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 
-        let bounds = Bounds::centered(None, size(px(1100.), px(800.)), cx);
+        let bounds = Bounds::centered(None, size(px(1300.), px(800.)), cx);
         let options_for_window = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("MUDling".into()),

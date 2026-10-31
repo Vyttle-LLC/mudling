@@ -10,7 +10,7 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 use crate::assets::UI_FONT;
-use crate::chat::{COLUMN_WIDTH, Chat};
+use crate::chat::{COLUMN_PADDING, COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
@@ -362,7 +362,7 @@ impl Render for Shell {
                     .min_h_0()
                     .w_full()
                     .max_w(COLUMN_WIDTH)
-                    .px_8()
+                    .px(COLUMN_PADDING)
                     .pt_4()
                     .child(self.chat.clone()),
             )
@@ -415,7 +415,7 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::LINE_HEIGHT;
+    use crate::chat::{LINE_HEIGHT, min_column_width};
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{Modifiers, Pixels, TestAppContext, VisualTestContext, point, px, size};
     use mudling_core::defaults::hud::Vital;
@@ -430,6 +430,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
+    /// What `main` opens the window at.
+    const DEFAULT_WINDOW_WIDTH: Pixels = px(1300.);
 
     /// gpui's test scheduler fails on a wake from another thread, so the
     /// tests wake the shell themselves.
@@ -822,7 +824,7 @@ mod tests {
     #[gpui::test]
     fn every_vital_shows_at_the_default_window_with_both_panels_open(cx: &mut TestAppContext) {
         let (shell, cx) = empty_window(cx);
-        cx.simulate_resize(size(px(1100.), px(800.)));
+        cx.simulate_resize(size(DEFAULT_WINDOW_WIDTH, px(800.)));
         let vitals = VitalsState(
             [
                 (Vital::Hp, 30),
@@ -848,6 +850,32 @@ mod tests {
                 "{meter:?} outside {bar:?}"
             );
             assert!(meter.top() >= bar.top() && meter.bottom() <= bar.bottom());
+        }
+    }
+
+    #[gpui::test]
+    fn the_default_window_docks_both_panels_beside_80_columns(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(DEFAULT_WINDOW_WIDTH, px(800.)));
+        drag_panels_wide(&shell, DEFAULT_WINDOW_WIDTH, cx);
+        cx.run_until_parked();
+
+        let left = cx.debug_bounds("left-dock").unwrap();
+        let right = cx.debug_bounds("right-dock").unwrap();
+        let area = cx.debug_bounds("chat-area").unwrap();
+        assert!(left.right() <= area.left() && area.right() <= right.left());
+        cx.update(|_, cx| assert!(area.size.width >= min_column_width(cx)));
+    }
+
+    #[gpui::test]
+    fn panels_never_narrow_the_column_below_80_columns(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        shell.update(cx, |shell, cx| shell.open_panels(cx));
+        for width in [1_250., 1_000., 800.] {
+            cx.simulate_resize(size(px(width), px(800.)));
+            cx.run_until_parked();
+            let column = cx.debug_bounds("chat-area").unwrap().size.width;
+            cx.update(|_, cx| assert!(column >= min_column_width(cx), "{column:?} at {width}"));
         }
     }
 

@@ -11,6 +11,9 @@
 //! 2. `stream`: lines arrive at the replay pace, pinned to the newest line.
 //! 3. `scroll`: the view scrolls back through history while lines still
 //!    arrive, so every frame lays out lines it hasn't shown before.
+//! 4. `rewrap`: the right panel closes, leaving the column room to change
+//!    width, and the left one is dragged back and forth while lines still
+//!    arrive, so every frame wraps the chat to a new width.
 //!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
@@ -19,7 +22,8 @@
 //! Lines go through `Session::replay` on the core thread, and reach the chat
 //! the way a server's do: as a store diff, applied on a later frame.
 
-use crate::chat::Chat;
+use crate::chat::{COLUMN_WIDTH, Chat};
+use crate::dock::{Dock, DockState, Side};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
@@ -37,6 +41,9 @@ const FRAME_PREFIX: &str = "frame duration: ";
 const FRAME_BUDGET_US: f64 = 8_000.0;
 const SETTLE: Duration = Duration::from_secs(1);
 const SCROLL_DURATION: Duration = Duration::from_secs(5);
+const REWRAP_DURATION: Duration = Duration::from_secs(5);
+/// How far the panel is dragged: about what the column has to give.
+const REWRAP_DRAG: f32 = 60.;
 /// Scrolled per display frame: about a line and a half.
 const SCROLL_STEP: f32 = 30.;
 
@@ -60,6 +67,7 @@ enum Phase {
     Settle,
     Stream,
     Scroll,
+    Rewrap,
 }
 
 struct Pacer {
@@ -103,6 +111,8 @@ impl Pacer {
             Phase::Stream
         } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION {
             Phase::Scroll
+        } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION + REWRAP_DURATION {
+            Phase::Rewrap
         } else {
             mark_rss("rss_mb_end");
             mark("phase end");
@@ -115,7 +125,12 @@ impl Pacer {
                 Phase::Load | Phase::Settle => "phase startup",
                 Phase::Stream => "phase stream",
                 Phase::Scroll => "phase scroll",
+                Phase::Rewrap => "phase rewrap",
             });
+            if phase == Phase::Rewrap {
+                self.dock(Side::Right, cx)
+                    .update(cx, |dock, cx| dock.move_to(DockState::Hidden, cx));
+            }
         }
         if phase != Phase::Settle {
             let stream_started = *self.stream_started.get_or_insert_with(Instant::now);
@@ -124,6 +139,14 @@ impl Pacer {
                 let reads = stream::next_reads(&mut self.feed, due - self.lines_sent);
                 self.shell.read(cx).replay(reads);
             }
+            if phase == Phase::Rewrap {
+                let there_and_back = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
+                let window_width = window.viewport_size().width;
+                let panel_width = window_width - COLUMN_WIDTH + px(REWRAP_DRAG * there_and_back);
+                self.dock(Side::Left, cx).update(cx, |dock, cx| {
+                    dock.resize_to(panel_width, window_width, cx);
+                });
+            }
             if phase == Phase::Scroll {
                 self.chat
                     .update(cx, |chat, cx| chat.scroll_back(px(SCROLL_STEP), cx));
@@ -131,6 +154,10 @@ impl Pacer {
             self.lines_sent = due;
         }
         window.on_next_frame(move |window, cx| self.on_frame(window, cx));
+    }
+
+    fn dock(&self, side: Side, cx: &App) -> Entity<Dock> {
+        self.shell.read(cx).dock(side).clone()
     }
 }
 
