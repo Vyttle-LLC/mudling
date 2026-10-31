@@ -11,6 +11,7 @@
 
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
+use crate::hud::HudPlacement;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
@@ -197,6 +198,37 @@ fn split_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
             chat.apply(&server_lines(&LOOT), cx);
         }
     });
+}
+
+/// The HUD's sample at `placement`, over a fight whose prompts the game sent.
+fn sample_fight(
+    placement: HudPlacement,
+    open: bool,
+    shell: &mut Shell,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    const FIGHT: [&str; 4] = [
+        "<3120hp 1040m 810mv>",
+        "You slash the goblin. It winces.",
+        "The goblin scratches you.",
+        "<3098hp 1040m 810mv>",
+    ];
+    let Diff { change, revision } = server_lines(&FIGHT);
+    let TerminalChange::Append(lines) = change;
+    let lines = lines.into_iter().map(|line| {
+        if line.plain().starts_with('<') {
+            line.with_prompt(line.plain().len())
+        } else {
+            line
+        }
+    });
+    let change = TerminalChange::Append(lines.collect());
+    let fight = Diff { change, revision };
+    shell.chat().update(cx, |chat, cx| chat.apply(&fight, cx));
+    let (vitals, characters, target) = crate::measure::sample_hud(0);
+    shell.show_sample_hud(&vitals, &characters, &target, cx);
+    shell.place_hud(placement, open, window, cx);
 }
 
 /// Opens the window at `window_size`, lets `arrange` set it up, and saves what
@@ -388,4 +420,20 @@ fn window_images() {
     render("settings-narrow-dark", Dark, NARROW, |shell, window, cx| {
         open_sheet(shell, Section::Plugins, window, cx);
     });
+    for (place, placement, open) in [
+        ("attached", HudPlacement::Attached, false),
+        ("attached-open", HudPlacement::Attached, true),
+        ("floating", HudPlacement::Floating, false),
+        ("top-strip", HudPlacement::TopStrip, false),
+        ("hidden", HudPlacement::Hidden, false),
+    ] {
+        for (ground, appearance) in [("dark", Dark), ("light", Light)] {
+            render(
+                &format!("hud-{place}-{ground}"),
+                appearance,
+                DEFAULT,
+                move |shell, window, cx| sample_fight(placement, open, shell, window, cx),
+            );
+        }
+    }
 }

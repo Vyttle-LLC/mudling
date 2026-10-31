@@ -13,7 +13,7 @@ use crate::assets::UI_FONT;
 use crate::chat::{self, Chat, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
-use crate::hud::Hud;
+use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
@@ -153,7 +153,7 @@ pub struct Shell {
     focus_before_settings: Option<FocusHandle>,
     /// Keeps the player's choices, if there's a folder to keep them in.
     saved_settings: Option<SavedSettings>,
-    _subscriptions: [Subscription; 9],
+    _subscriptions: [Subscription; 10],
     _woken: Task<()>,
 }
 
@@ -251,6 +251,19 @@ impl Shell {
                 EmptyStateEvent::Add(target) => shell.add_server(target.clone(), window, cx),
             },
         );
+        let hud = cx.new(Hud::new);
+        let card_moves = cx.subscribe_in(&hud, window, |shell, _, event, window, cx| {
+            let HudEvent::CardMoved(at) = event;
+            let choice = cx.global::<Theme>().choice;
+            shell.apply_choice(
+                Appearance {
+                    card: Some(*at),
+                    ..choice
+                },
+                window,
+                cx,
+            );
+        });
         let mut shell = Shell {
             game,
             launcher: None,
@@ -263,7 +276,7 @@ impl Shell {
             session_bar,
             empty_state,
             title_bar,
-            hud: cx.new(|_| Hud::default()),
+            hud,
             input,
             left_dock,
             right_dock,
@@ -282,6 +295,7 @@ impl Shell {
                 offers,
                 places,
                 sheet_events,
+                card_moves,
             ],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
@@ -781,9 +795,40 @@ impl Shell {
     #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
         let characters = CharactersState::default();
-        self.hud.update(cx, |hud, cx| {
-            hud.show(vitals, &characters, &TargetState::default(), cx);
-        });
+        self.show_sample_hud(vitals, &characters, &TargetState::default(), cx);
+    }
+
+    /// Fills the HUD with no session behind it: how a measured run, whose
+    /// recording holds no GMCP, draws one.
+    pub fn show_sample_hud(
+        &self,
+        vitals: &VitalsState,
+        characters: &CharactersState,
+        target: &TargetState,
+        cx: &mut App,
+    ) {
+        self.hud
+            .update(cx, |hud, cx| hud.show(vitals, characters, target, cx));
+    }
+
+    pub fn hud(&self) -> Entity<Hud> {
+        self.hud.clone()
+    }
+
+    /// Puts the HUD at `placement`, opened or not, as the sheet would.
+    pub fn place_hud(
+        &self,
+        placement: HudPlacement,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let choice = Appearance {
+            hud: placement,
+            ..cx.global::<Theme>().choice
+        };
+        self.apply_choice(choice, window, cx);
+        self.hud.update(cx, |hud, cx| hud.set_open(open, cx));
     }
 
     #[cfg(test)]
@@ -893,6 +938,7 @@ impl Render for Shell {
             cx,
         );
         let theme = *cx.global::<Theme>();
+        let hud_at = |place: HudPlacement| (theme.choice.hud == place).then(|| self.hud.clone());
         let command_bar = div()
             .debug_selector(|| "command-bar".to_owned())
             .rounded_xl()
@@ -900,7 +946,7 @@ impl Render for Shell {
             .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow(theme.floating_shadow())
-            .child(self.hud.clone())
+            .children(hud_at(HudPlacement::Attached))
             .child(self.input.clone());
         let column = div()
             .flex_1()
@@ -921,7 +967,8 @@ impl Render for Shell {
                     .child(self.status.clone())
                     .child(command_bar),
             );
-        let body = if self.on_empty_state() {
+        let on_empty_state = self.on_empty_state();
+        let body = if on_empty_state {
             div().flex_1().min_h_0().child(self.empty_state.clone())
         } else {
             div()
@@ -932,6 +979,7 @@ impl Render for Shell {
                 .child(self.left_dock.clone())
                 .child(column)
                 .child(self.right_dock.clone())
+                .children(hud_at(HudPlacement::Floating))
         };
         chat::handle_keys(div(), &self.chat)
             .size_full()
@@ -964,6 +1012,11 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
                 shell.focus_room_panel(window, cx);
             }))
+            .on_action(cx.listener(|shell, _: &ToggleHud, window, cx| {
+                if !shell.settings_open {
+                    shell.hud.update(cx, |hud, cx| hud.use_shortcut(window, cx));
+                }
+            }))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
             .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
@@ -973,6 +1026,7 @@ impl Render for Shell {
                 }
             })
             .child(self.title_bar.clone())
+            .children(hud_at(HudPlacement::TopStrip).filter(|_| !on_empty_state))
             .child(body)
             .when(self.settings_open, |shell_view| {
                 shell_view.child(deferred(self.settings.clone()).with_priority(SHEET_PRIORITY))
@@ -997,6 +1051,7 @@ pub mod tests {
     use mudling_core::store::TerminalState;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::Path;
@@ -1561,6 +1616,175 @@ pub mod tests {
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.input.read(cx).content(), "kill the king");
         });
+    }
+
+    /// A window with the sample HUD in it, at `placement`.
+    fn hud_window(
+        placement: HudPlacement,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut VisualTestContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.update(|_, cx| {
+            bind_keys(cx);
+            crate::hud::bind_keys(cx);
+        });
+        shell.update_in(cx, |shell, window, cx| {
+            let (vitals, characters, target) = crate::measure::sample_hud(0);
+            shell.show_sample_hud(&vitals, &characters, &target, cx);
+            shell.place_hud(placement, false, window, cx);
+        });
+        cx.run_until_parked();
+        (shell, cx)
+    }
+
+    fn hud_is_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, cx| shell.hud.read(cx).is_open())
+    }
+
+    #[gpui::test]
+    fn the_arrow_and_the_shortcut_open_the_attached_hud_and_the_chat_moves_up(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = hud_window(HudPlacement::Attached, cx);
+        let closed = cx.debug_bounds("command-bar").unwrap();
+        assert!(cx.debug_bounds("hud-details").is_none());
+
+        let toggle = cx.debug_bounds("hud-toggle").unwrap();
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(hud_is_open(&shell, cx));
+        let opened = cx.debug_bounds("command-bar").unwrap();
+        assert!(opened.size.height > closed.size.height);
+        assert_eq!(opened.bottom(), closed.bottom());
+        let chat = cx.debug_bounds("chat-area").unwrap();
+        assert!(chat.bottom() <= opened.top(), "the bar covers the chat");
+
+        cx.simulate_keystrokes(secondary!("j"));
+        cx.run_until_parked();
+        assert!(!hud_is_open(&shell, cx));
+        assert!(cx.debug_bounds("hud-details").is_none());
+    }
+
+    #[gpui::test]
+    fn a_game_with_nothing_more_to_show_has_no_arrow_and_no_empty_box(cx: &mut TestAppContext) {
+        let (shell, cx) = hud_window(HudPlacement::Attached, cx);
+        shell.update(cx, |shell, cx| {
+            let vitals = VitalsState(BTreeMap::from([(Vital::Hp, 1)]));
+            shell.show_sample_vitals(&vitals, cx);
+        });
+        cx.simulate_keystrokes(secondary!("j"));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("hud-toggle").is_none());
+        assert!(cx.debug_bounds("hud-details").is_none());
+        assert!(cx.debug_bounds("meter-HP").is_some());
+    }
+
+    #[gpui::test]
+    fn the_details_show_only_what_the_game_gave(cx: &mut TestAppContext) {
+        let (shell, cx) = hud_window(HudPlacement::Attached, cx);
+        shell.update(cx, |shell, cx| {
+            let vitals = VitalsState(BTreeMap::from([(Vital::Hp, 1), (Vital::ToNextLevel, 9)]));
+            shell.show_sample_vitals(&vitals, cx);
+            shell.hud.update(cx, |hud, cx| hud.set_open(true, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("hud-next-level").is_some());
+        assert!(cx.debug_bounds("hud-opponent").is_none());
+    }
+
+    #[gpui::test]
+    fn the_card_drags_stays_inside_the_window_and_is_kept(cx: &mut TestAppContext) {
+        let (_shell, cx) = hud_window(HudPlacement::Floating, cx);
+        cx.simulate_resize(size(px(1000.), px(700.)));
+        cx.run_until_parked();
+        let card = cx.debug_bounds("hud-card").unwrap();
+        let by = point(px(-300.), px(150.));
+        // A drag starts a few pixels on, and takes hold of the card there.
+        let taken = card.center() + point(px(-4.), px(0.));
+        let to = taken + by;
+
+        cx.simulate_mouse_down(card.center(), MouseButton::Left, Modifiers::none());
+        for step in [taken, to] {
+            cx.simulate_mouse_move(step, MouseButton::Left, Modifiers::none());
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("hud-card").unwrap();
+        assert_eq!(moved.origin, card.origin + by);
+        let area_y = moved.top() - crate::title_bar::HEIGHT;
+        let kept = cx.update(|_, cx| cx.global::<Theme>().choice.card);
+        assert_eq!(
+            kept,
+            Some((f32::from(moved.left()) as i32, f32::from(area_y) as i32))
+        );
+
+        cx.simulate_resize(size(px(500.), px(420.)));
+        cx.run_until_parked();
+        let small = cx.debug_bounds("hud-card").unwrap();
+        assert!(small.right() <= px(500.) && small.bottom() <= px(420.));
+        assert!(small.top() >= crate::title_bar::HEIGHT);
+
+        cx.simulate_resize(size(px(1000.), px(700.)));
+        cx.run_until_parked();
+        let back = cx.debug_bounds("hud-card").unwrap();
+        assert_eq!(
+            back.origin, moved.origin,
+            "it goes back to where it was left"
+        );
+    }
+
+    #[gpui::test]
+    fn the_card_moves_by_keyboard_and_esc_gives_typing_back(cx: &mut TestAppContext) {
+        let (shell, cx) = hud_window(HudPlacement::Floating, cx);
+        let card = cx.debug_bounds("hud-card").unwrap();
+
+        cx.simulate_keystrokes(secondary!("j"));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("left left down");
+        cx.run_until_parked();
+        let moved = cx.debug_bounds("hud-card").unwrap();
+        assert_eq!(moved.origin, card.origin + point(px(-32.), px(16.)));
+        let kept = cx.update(|_, cx| cx.global::<Theme>().choice.card);
+        assert!(kept.is_some());
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.simulate_input("look");
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_card_leaves_typing_in_the_command_bar(cx: &mut TestAppContext) {
+        let (shell, cx) = hud_window(HudPlacement::Floating, cx);
+        let card = cx.debug_bounds("hud-card").unwrap();
+        cx.simulate_click(card.center(), Modifiers::none());
+        cx.simulate_input("look");
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    #[gpui::test]
+    fn the_top_strip_is_as_wide_as_the_window_under_the_title_bar(cx: &mut TestAppContext) {
+        let (_shell, cx) = hud_window(HudPlacement::TopStrip, cx);
+        let window = size(px(1100.), px(700.));
+        cx.simulate_resize(window);
+        cx.run_until_parked();
+        let strip = cx.debug_bounds("hud").unwrap();
+        assert_eq!(strip.size.width, window.width);
+        assert_eq!(strip.top(), crate::title_bar::HEIGHT);
+        assert!(cx.debug_bounds("chat-area").unwrap().top() >= strip.bottom());
+    }
+
+    #[gpui::test]
+    fn hidden_leaves_no_hud_and_the_chat_shows_prompts(cx: &mut TestAppContext) {
+        let (shell, cx) = hud_window(HudPlacement::Hidden, cx);
+        assert!(cx.debug_bounds("hud").is_none());
+        assert!(cx.update(|_, cx| cx.global::<Theme>().choice.shows_prompts()));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.place_hud(HudPlacement::Attached, false, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("hud").is_some());
+        assert!(!cx.update(|_, cx| cx.global::<Theme>().choice.shows_prompts()));
     }
 
     #[gpui::test]

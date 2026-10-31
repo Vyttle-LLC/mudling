@@ -97,6 +97,8 @@ struct LineData {
     links: Box<[Link]>,
     end: LineEnd,
     kind: LineKind,
+    /// Bytes of the plain text a prompt the HUD repeats takes up at its start.
+    prompt_len: u32,
 }
 
 impl Line {
@@ -130,6 +132,41 @@ impl Line {
         Line::build(plain, plain, &styled, self.end(), self.kind())
     }
 
+    /// This line with its first `len` bytes of plain text marked as a prompt
+    /// the HUD repeats, which a shell may hide.
+    pub fn with_prompt(&self, len: usize) -> Self {
+        let mut line = Line::build(
+            self.raw(),
+            self.plain(),
+            self.styled(),
+            self.end(),
+            self.kind(),
+        );
+        Arc::get_mut(&mut line.0)
+            .expect("nothing else holds a line just built")
+            .prompt_len = len as u32;
+        line
+    }
+
+    /// How many bytes of [`Line::plain`] a prompt the HUD repeats takes up.
+    pub fn prompt_len(&self) -> usize {
+        self.0.prompt_len as usize
+    }
+
+    /// Whether this line is a prompt the HUD repeats and nothing else.
+    pub fn is_only_prompt(&self) -> bool {
+        self.prompt_len() > 0 && self.prompt_len() == self.plain().len()
+    }
+
+    /// What's left with the prompt hidden, if anything.
+    pub fn without_prompt(&self) -> Option<Line> {
+        match self.prompt_len() {
+            0 => Some(self.clone()),
+            _ if self.is_only_prompt() => None,
+            at => Some(self.after(at)),
+        }
+    }
+
     fn build(raw: &str, plain: &str, styled: &[Span], end: LineEnd, kind: LineKind) -> Self {
         let (text, plain_start) = if raw == plain {
             (Box::from(raw), 0)
@@ -147,6 +184,7 @@ impl Line {
             links: Box::default(),
             end,
             kind,
+            prompt_len: 0,
         }))
     }
 

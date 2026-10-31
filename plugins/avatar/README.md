@@ -21,6 +21,7 @@ VYT-235): each file says what it reads, and each regex has a comment.
 | `gear.toml` | The 15 slots in the game's order, the gear tables, and the wear, remove and put messages. |
 | `map.toml` | Rooms known by description, the zone's format, the exits line, failed moves, darkness, flees and the maze. |
 | `mobs.toml` | Aggression, and a mob's name from its room title. |
+| `hud.toml` | Where the game lists affects. |
 
 ## How a table is read
 

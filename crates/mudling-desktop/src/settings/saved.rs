@@ -4,6 +4,7 @@
 //!
 //! This is a stopgap for `AppSettings`, which Phase 6's `repo` module will own.
 
+use crate::hud::HudPlacement;
 use crate::theme::{Appearance, ThemeChoice};
 use mudling_core::persist::{self, Batch, Database, Meta, Timestamp, Writer};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,9 @@ struct Row {
     theme: ThemeChoice,
     font: String,
     font_size: u8,
+    hud: HudPlacement,
+    show_prompts: bool,
+    card: Option<(i32, i32)>,
 }
 
 impl Default for Row {
@@ -34,6 +38,9 @@ impl From<Appearance> for Row {
             theme: appearance.theme,
             font: appearance.font.to_owned(),
             font_size: appearance.font_size,
+            hud: appearance.hud,
+            show_prompts: appearance.show_prompts,
+            card: appearance.card,
         }
     }
 }
@@ -42,6 +49,9 @@ impl From<Row> for Appearance {
     fn from(row: Row) -> Appearance {
         Appearance {
             theme: row.theme,
+            hud: row.hud,
+            show_prompts: row.show_prompts,
+            card: row.card,
             ..Appearance::default()
         }
         .with_font_named(&row.font)
@@ -105,6 +115,9 @@ mod tests {
             theme: ThemeChoice::Dark,
             font: CHAT_FONTS[1],
             font_size: 17,
+            hud: HudPlacement::Floating,
+            show_prompts: true,
+            card: Some((120, 48)),
         };
         saved.save(chosen);
         drop(saved);

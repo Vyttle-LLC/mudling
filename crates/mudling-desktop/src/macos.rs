@@ -1,16 +1,17 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input, the live region, the title bar, the Room panel's buttons and
-//! the settings sheet. Reading another app's tree with `AXUIElement` needs the
+//! chat, the input, the live region, the title bar, the Room panel's buttons, the
+//! HUD and the settings sheet. Reading another app's tree with `AXUIElement` needs the
 //! Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
+use crate::hud::HudPlacement;
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{App, Entity, px};
+use gpui::{App, AsyncApp, Context, Entity, Window, px};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -145,7 +146,7 @@ const PROBE_LINES: [&str; 2] = [
 ];
 
 /// What a screen reader must find in the open settings sheet.
-const SETTINGS_CONTROLS: [&str; 10] = [
+const SETTINGS_CONTROLS: [&str; 13] = [
     "Servers & characters",
     "Plugins",
     "Triggers & aliases",
@@ -156,7 +157,19 @@ const SETTINGS_CONTROLS: [&str; 10] = [
     "Close settings",
     "Theme",
     "Larger chat text",
+    "HUD placement",
+    "Floating card",
+    "Show prompt lines",
 ];
+
+/// The HUD's meters, by name, with a value each must read as.
+const HUD_METERS: [(&str, &str); 4] = [
+    ("Hit points", "3,120/4,300"),
+    ("Mana", "1,040/1,800"),
+    ("Moves", "810/900"),
+    ("Next level", "1,240 to go"),
+];
+const CARD_NAME: &str = "Status card. The arrow keys move it.";
 
 /// Text the sheet's Appearance section shows, read from its nodes' values.
 const SETTINGS_TEXT: [&str; 2] = ["A Vyttle app", "The chat will read like this"];
@@ -352,14 +365,76 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("{accesskit_focus:?}"),
         });
 
-        let opened = cx.update(|cx| {
-            let window = cx.windows().into_iter().next()?;
-            window
-                .update(cx, |_, window, cx| {
-                    shell.update(cx, |shell, cx| shell.open_settings(window, cx));
-                })
-                .ok()
+        let in_window = |run: &dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>),
+                         cx: &mut AsyncApp| {
+            cx.update(|cx| {
+                let window = cx.windows().into_iter().next()?;
+                window
+                    .update(cx, |_, window, cx| {
+                        shell.update(cx, |shell, cx| run(shell, window, cx));
+                    })
+                    .ok()
+            })
+        };
+        in_window(
+            &|shell, window, cx| {
+                let (vitals, characters, target) = crate::measure::sample_hud(0);
+                shell.show_sample_hud(&vitals, &characters, &target, cx);
+                shell.place_hud(HudPlacement::Attached, true, window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unread: Vec<_> = HUD_METERS
+            .into_iter()
+            .filter(|(name, value)| {
+                let reads = |e: &AxElement| {
+                    e.title.as_deref() == Some(*name) && e.value.as_deref() == Some(*value)
+                };
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the HUD's meters read their names and values",
+            passed: unread.is_empty(),
+            detail: format!("not read: {unread:?}"),
         });
+        let toggle = |e: &AxElement| {
+            e.is("AXButton", None) && e.title.as_deref() == Some("Hide status details")
+        };
+        checks.push(Check {
+            name: "the opened HUD has a button that closes it",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| tree.find(toggle).len() == 1),
+            detail: format!("{:?}", tree.as_ref().map(|tree| tree.find(toggle).len())),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.place_hud(HudPlacement::Floating, false, window, cx);
+                shell
+                    .hud()
+                    .update(cx, |hud, cx| hud.use_shortcut(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let focused = focused_element();
+        checks.push(Check {
+            name: "the shortcut brings the keyboard to the named floating card",
+            passed: focused
+                .as_ref()
+                .is_some_and(|f| f.title.as_deref() == Some(CARD_NAME)),
+            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+        });
+        in_window(
+            &|shell, window, cx| shell.place_hud(HudPlacement::Attached, false, window, cx),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+
+        let opened = in_window(&|shell, window, cx| shell.open_settings(window, cx), cx);
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
         let missing: Vec<_> = SETTINGS_CONTROLS

@@ -2,6 +2,7 @@
 //! and what the player chose in Settings › Appearance: the theme and the chat
 //! font. Values come from the MUDling brand guidelines and the design canvas.
 
+use crate::hud::HudPlacement;
 use gpui::{BoxShadow, Global, Hsla, Pixels, WindowAppearance, point, px, rgb, rgba};
 use mudling_core::Color;
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,11 @@ pub struct Appearance {
     pub theme: ThemeChoice,
     pub font: &'static str,
     pub font_size: u8,
+    pub hud: HudPlacement,
+    /// Show prompt lines even with a HUD repeating them.
+    pub show_prompts: bool,
+    /// Where the floating HUD was left; `None` until it's moved.
+    pub card: Option<(i32, i32)>,
 }
 
 impl Default for Appearance {
@@ -69,11 +75,20 @@ impl Default for Appearance {
             theme: ThemeChoice::default(),
             font: CHAT_FONTS[0],
             font_size: DEFAULT_CHAT_SIZE,
+            hud: HudPlacement::default(),
+            show_prompts: false,
+            card: None,
         }
     }
 }
 
 impl Appearance {
+    /// Whether the chat shows prompt lines: with the HUD hidden, nothing else
+    /// has their numbers.
+    pub fn shows_prompts(&self) -> bool {
+        self.show_prompts || self.hud == HudPlacement::Hidden
+    }
+
     pub fn with_font_size(self, font_size: u8) -> Appearance {
         Appearance {
             font_size: font_size.clamp(SMALLEST_CHAT_SIZE, LARGEST_CHAT_SIZE),
@@ -146,6 +161,7 @@ pub struct Theme {
     pub hud_hp: Hsla,
     pub hud_mana: Hsla,
     pub hud_moves: Hsla,
+    pub hud_xp: Hsla,
     pub hud_track: Hsla,
     ansi: [u32; 16],
 }
@@ -197,6 +213,7 @@ impl Theme {
                 hud_hp: rgb(ANSI_ON_NIGHT[9]).into(),
                 hud_mana: rgb(ANSI_ON_NIGHT[12]).into(),
                 hud_moves: rgb(0x4FBF87).into(),
+                hud_xp: rgb(ANSI_ON_NIGHT[11]).into(),
                 hud_track: rgb(0x2F3A34).into(),
                 ansi: ANSI_ON_NIGHT,
             },
@@ -228,6 +245,7 @@ impl Theme {
                 hud_hp: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 hud_mana: rgb(ANSI_ON_PARCHMENT[12]).into(),
                 hud_moves: rgb(0x1F6B45).into(),
+                hud_xp: rgb(ANSI_ON_PARCHMENT[11]).into(),
                 hud_track: rgb(0xE6E3DA).into(),
                 ansi: ANSI_ON_PARCHMENT,
             },

@@ -1,7 +1,9 @@
-//! The Appearance section: the theme, and the chat's font and size.
+//! The Appearance section: the theme, the chat's font and size, where the HUD
+//! sits and whether prompt lines show.
 
 use super::{Pane, SettingsSheet, chosen_ground, control, muted_line, section_heading};
-use crate::assets::UI_FONT;
+use crate::assets::{Icon, UI_FONT};
+use crate::hud::HudPlacement;
 use crate::theme::{Appearance, LARGEST_CHAT_SIZE, SMALLEST_CHAT_SIZE, Theme, ThemeChoice};
 use gpui::{Context, FontWeight, Role, accesskit, div, prelude::*, px};
 
@@ -10,8 +12,8 @@ const THEMES: [(ThemeChoice, &str); 3] = [
     (ThemeChoice::Light, "Light"),
     (ThemeChoice::Dark, "Dark"),
 ];
-const LATER_NOTE: &str =
-    "Line width, prompt lines, HUD placement, panels and motion aren't here yet.";
+const LATER_NOTE: &str = "Line width, panels and motion aren't here yet.";
+const PROMPTS_ON_NOTE: &str = "On while the HUD is hidden: nothing else shows their numbers.";
 const SAMPLE: &str = "The chat will read like this, with 80 columns to itself.";
 
 fn toggled(on: bool) -> accesskit::Toggled {
@@ -153,6 +155,84 @@ impl SettingsSheet {
                 .line_height(choice.chat_line_height())
                 .text_color(theme.text),
         );
+
+        pane.row(section_heading("HUD placement", theme));
+        let placements: Vec<_> = HudPlacement::ALL
+            .into_iter()
+            .map(|(hud, label)| {
+                let chosen = choice.hud == hud;
+                control(format!("hud-{label}"), label, &pane.stop(cx), theme)
+                    .role(Role::RadioButton)
+                    .aria_toggled(toggled(chosen))
+                    .flex_1()
+                    .h(px(34.))
+                    .bg(chosen_ground(chosen, theme))
+                    .text_size(px(14.))
+                    .text_color(theme.text)
+                    .child(label)
+                    .on_click(cx.listener(move |sheet, _, _, cx| {
+                        sheet.choose(Appearance { hud, ..choice }, cx);
+                    }))
+            })
+            .collect();
+        pane.row(
+            div()
+                .id("hud-placement")
+                .role(Role::RadioGroup)
+                .aria_label("HUD placement")
+                .p_0p5()
+                .flex()
+                .gap_0p5()
+                .rounded_lg()
+                .bg(theme.segment)
+                .children(placements),
+        );
+
+        pane.row(section_heading("Prompt lines", theme));
+        let shown = choice.shows_prompts();
+        let forced = shown && !choice.show_prompts;
+        let show_prompts = !choice.show_prompts;
+        let stop = pane.stop(cx);
+        pane.row(
+            control("show-prompts", "Show prompt lines", &stop, theme)
+                .role(Role::CheckBox)
+                .aria_toggled(toggled(shown))
+                .h(px(36.))
+                .px_3()
+                .gap_2()
+                .justify_start()
+                .font_family(UI_FONT)
+                .text_size(px(14.))
+                .text_color(theme.text)
+                .child(
+                    div()
+                        .size(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme.border)
+                        .when(shown, |box_| {
+                            box_.child(Icon::Check.svg().size(px(12.)).text_color(theme.accent))
+                        }),
+                )
+                .child("Show prompt lines")
+                .when(!forced, |checkbox| {
+                    checkbox.on_click(cx.listener(move |sheet, _, _, cx| {
+                        sheet.choose(
+                            Appearance {
+                                show_prompts,
+                                ..choice
+                            },
+                            cx,
+                        );
+                    }))
+                }),
+        );
+        if forced {
+            pane.row(muted_line(PROMPTS_ON_NOTE, theme));
+        }
         pane.row(muted_line(LATER_NOTE, theme));
     }
 }

@@ -1,0 +1,4 @@
+# Avatar lists what's on the character in Char.Status, as a diff with the rest
+# of it: `"affects": { "Spell: bless": "for 6 hours" }`, or null once nothing
+# is. The vitals, experience included, are read by their common names.
+affects = "Char.Status.affects"

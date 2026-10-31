@@ -650,6 +650,7 @@ fn chosen_ground(chosen: bool, theme: &Theme) -> Hsla {
 mod tests {
     use super::*;
     use crate::chat::{COLUMN_PADDING, min_column_width};
+    use crate::hud::HudPlacement;
     use crate::shell::{Shell, tests::window_with_keys};
     use crate::theme::{LARGEST_CHAT_SIZE, ThemeChoice};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
@@ -845,6 +846,29 @@ mod tests {
         let column = cx.debug_bounds("chat-area").unwrap().size.width;
         assert!(column >= larger, "{column:?} under {larger:?}");
         assert!(larger > COLUMN_PADDING * 2.);
+    }
+
+    #[gpui::test]
+    fn the_hud_goes_where_it_is_put_and_hiding_it_turns_prompts_on(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1300.), px(1400.)));
+        open(&shell, cx);
+        section(Section::Appearance, cx);
+        assert_eq!(chosen(cx).hud, HudPlacement::Attached);
+        assert!(!chosen(cx).shows_prompts());
+
+        click("hud-Top strip", cx);
+        assert_eq!(chosen(cx).hud, HudPlacement::TopStrip);
+        click("show-prompts", cx);
+        assert!(chosen(cx).show_prompts && chosen(cx).shows_prompts());
+        click("show-prompts", cx);
+        assert!(!chosen(cx).shows_prompts());
+
+        click("hud-Hidden", cx);
+        assert!(chosen(cx).shows_prompts());
+        click("show-prompts", cx);
+        assert!(chosen(cx).shows_prompts(), "they stay on while it's hidden");
+        assert!(!chosen(cx).show_prompts, "and the player's choice stands");
     }
 
     #[gpui::test]

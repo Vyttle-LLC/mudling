@@ -494,6 +494,26 @@ mod tests {
     }
 
     #[test]
+    fn lines_with_no_height_are_walked_past_up_and_down_the_scrollback() {
+        let hidden_every_second = |index: usize| px(if index.is_multiple_of(2) { 0. } else { 20. });
+        let view = size(px(400.), px(60.));
+        let mut position = LinePosition::default();
+        let placed = position.place(0, 100, view, hidden_every_second);
+        assert_eq!(placed.lines, 95..100, "three rows, among hidden lines");
+
+        position.scroll(px(-30.));
+        let placed = position.place(0, 100, view, hidden_every_second);
+        assert_eq!((placed.lines.start, placed.top), (91, px(-10.)));
+
+        let mut at_a_hidden_line = LinePosition::reading_from(50);
+        let placed = at_a_hidden_line.place(0, 100, view, hidden_every_second);
+        assert_eq!(
+            placed.lines.start, 51,
+            "the first line that shows is on top"
+        );
+    }
+
+    #[test]
     fn an_empty_scrollback_places_nothing() {
         let mut position = LinePosition::default();
         assert_eq!(place(&mut position, 0, 0, VIEW.width).lines, 0..0);

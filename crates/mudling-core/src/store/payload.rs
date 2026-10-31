@@ -170,7 +170,8 @@ named_value_stores! {
     VitalsState(Vital => i64),
     /// What plugins read about the character: skills, affects, score. Each
     /// key is `<plugin store>.<key>`. The core adds what GMCP says under
-    /// [`CHARACTER_NAME`], [`CHARACTER_LEVEL`] and [`CHARACTER_POSITION`].
+    /// [`CHARACTER_NAME`], [`CHARACTER_LEVEL`], [`CHARACTER_POSITION`] and
+    /// [`CHARACTER_AFFECTS`].
     CharactersState(String => Value),
     /// What plugins read about gear, keyed like [`CharactersState`].
     GearState(String => Value),
@@ -182,6 +183,55 @@ pub const CHARACTER_NAME: &str = "character.name";
 pub const CHARACTER_LEVEL: &str = "character.level";
 /// What the character is doing as the game words it; empty off the game.
 pub const CHARACTER_POSITION: &str = "character.position";
+
+/// What a plugin's HUD point says is affecting the character: under this key,
+/// `.count`, then `.<n>.name` and `.<n>.detail` for n from 1. Rows past the
+/// count are left from a longer list.
+pub const CHARACTER_AFFECTS: &str = "character.affects";
+
+/// Something affecting the character, as the game words it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Affect {
+    pub name: String,
+    /// How long it lasts; empty if the game doesn't say.
+    pub detail: String,
+}
+
+impl CharactersState {
+    /// The change that makes `affects` the list.
+    pub fn listing(affects: &[Affect]) -> CharactersState {
+        let mut values = BTreeMap::from([(
+            format!("{CHARACTER_AFFECTS}.count"),
+            Value::Number(affects.len() as f64),
+        )]);
+        for (index, affect) in affects.iter().enumerate() {
+            let row = format!("{CHARACTER_AFFECTS}.{}", index + 1);
+            values.insert(format!("{row}.name"), Value::Text(affect.name.clone()));
+            values.insert(format!("{row}.detail"), Value::Text(affect.detail.clone()));
+        }
+        CharactersState(values)
+    }
+
+    pub fn affects(&self) -> Vec<Affect> {
+        let text = |key: String| match self.0.get(&key) {
+            Some(Value::Text(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let count = match self.0.get(&format!("{CHARACTER_AFFECTS}.count")) {
+            Some(Value::Number(count)) => *count as usize,
+            _ => 0,
+        };
+        (1..=count)
+            .filter_map(|row| {
+                let row = format!("{CHARACTER_AFFECTS}.{row}");
+                Some(Affect {
+                    name: text(format!("{row}.name"))?,
+                    detail: text(format!("{row}.detail")).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+}
 
 /// The player's room, as the map last placed them.
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -60,6 +60,7 @@ fn open(config: SessionConfig) -> Session {
     Session::open(config, || {}).expect("the session starts")
 }
 
+/// What a chat hiding the prompts the HUD repeats shows.
 fn terminal(session: &Session) -> Vec<String> {
     session
         .stores()
@@ -68,13 +69,14 @@ fn terminal(session: &Session) -> Vec<String> {
                 .value()
                 .lines()
                 .iter()
+                .filter_map(Line::without_prompt)
                 .map(|line| line.plain().to_owned())
                 .collect()
         })
 }
 
-/// The server's lines, without commands: hooks run off the line thread, so
-/// where a hook's command lands among them isn't fixed.
+/// The server's lines as [`terminal`] shows them, without commands: hooks run
+/// off the line thread, so where a hook's command lands among them isn't fixed.
 fn server_lines(session: &Session) -> Vec<String> {
     session
         .stores()
@@ -84,6 +86,7 @@ fn server_lines(session: &Session) -> Vec<String> {
                 .lines()
                 .iter()
                 .filter(|line| line.kind() == LineKind::Server)
+                .filter_map(Line::without_prompt)
                 .map(|line| line.plain().to_owned())
                 .collect()
         })
@@ -574,8 +577,9 @@ fn a_shell_sees_one_batch_per_frame() {
     assert!(session.stores().drain().is_none());
     assert_eq!(wakes.load(Ordering::Relaxed), 1, "one wake for the batch");
 
-    let lines: Vec<Line> = shell.terminal.value().lines().iter().cloned().collect();
-    assert_eq!(lines.len(), terminal(&session).len());
+    let lines = shell.terminal.value().lines().iter();
+    let shown = lines.filter_map(Line::without_prompt);
+    assert_eq!(shown.count(), terminal(&session).len());
     assert_eq!(shell.vitals.value().0.get(&Vital::Hp), Some(&11));
     session.quit().wait().unwrap();
 }
@@ -619,10 +623,16 @@ impl Driven {
         self.say(&gmcp_frame(message));
     }
 
+    /// What a chat hiding the prompts the HUD repeats shows.
     fn terminal(&self) -> Vec<String> {
+        let lines = self.lines();
+        let shown = lines.iter().filter_map(Line::without_prompt);
+        shown.map(|line| line.plain().to_owned()).collect()
+    }
+
+    fn lines(&self) -> Vec<Line> {
         self.hub.read(|terminal: &Versioned<TerminalState>| {
-            let lines = terminal.value().lines().iter();
-            lines.map(|line| line.plain().to_owned()).collect()
+            terminal.value().lines().iter().cloned().collect()
         })
     }
 }
@@ -1272,6 +1282,74 @@ fn output_glued_after_a_prompt_shows_without_the_prompt() {
     driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
     driven.say(b"<19hp> You rest.\r\n");
     assert_eq!(driven.terminal(), ["You rest."]);
+}
+
+/// A shell's setting has to reach lines already in the scrollback, so prompts
+/// stay there, marked. Before the HUD has numbers there's nothing to hide for.
+#[test]
+fn prompts_the_hud_repeats_stay_in_the_store_marked() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    driven.say(b"<20hp> ");
+    driven.say(&[IAC, GA]);
+    driven.gmcp(r#"Char.Vitals {"hp": 20}"#);
+    driven.say(b"<20hp> ");
+    driven.say(&[IAC, GA]);
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> You rest.\r\n");
+
+    let lines = driven.lines();
+    let marks: Vec<(&str, usize)> = lines
+        .iter()
+        .map(|line| (line.plain(), line.prompt_len()))
+        .collect();
+    assert_eq!(
+        marks,
+        [("<20hp> ", 0), ("<20hp> ", 7), ("<19hp> You rest.", 7)]
+    );
+    assert!(lines[1].is_only_prompt());
+    assert_eq!(lines[1].without_prompt(), None);
+}
+
+#[test]
+fn a_hud_point_lists_affects_and_an_empty_list_clears_them() {
+    let plugin = Plugin::from_files(|file| {
+        Ok(match file {
+            "plugin.toml" => {
+                "id = \"lister\"\nname = \"Lister\"\nversion = \"1.0.0\"\napi = 1\n\
+                 license = \"MIT\"\nlayer = \"game\"\n[servers]\nmssp_names = [\"Lister\"]\n\
+                 [points]\nhud = \"hud.toml\"\n"
+            }
+            _ => "affects = \"Char.Status.affects\"\n",
+        }
+        .to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    let id = plugin.id().clone();
+    let mut driven = Driven::configured("mud.example.org", |config| {
+        config.plugins = vec![plugin];
+        config.enabled = vec![id];
+    });
+    driven.engine.start_connection().unwrap();
+    let affects = |driven: &Driven| {
+        driven
+            .hub
+            .read(|characters: &Versioned<CharactersState>| characters.value().affects())
+    };
+
+    driven.gmcp(r#"Char.Status {"affects": {"Kind: bless": "for 6 hours", "haste": "a while"}}"#);
+    let names: Vec<String> = affects(&driven).into_iter().map(|a| a.name).collect();
+    assert_eq!(names, ["bless", "haste"]);
+    assert_eq!(affects(&driven)[0].detail, "for 6 hours");
+
+    driven.gmcp(r#"Char.Status {"health": 12}"#);
+    assert_eq!(
+        affects(&driven).len(),
+        2,
+        "a status without them leaves them"
+    );
+    driven.gmcp(r#"Char.Status {"affects": null}"#);
+    assert_eq!(affects(&driven), []);
 }
 
 #[test]

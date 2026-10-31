@@ -4,7 +4,8 @@
 //! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
-//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]]
+//!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
+//!                            [--hud attached|open|floating|dragged|strip|hidden]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -18,7 +19,7 @@
 //! off), with its data in a throwaway folder. `--long-lines` joins its lines
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
-//! sheet open. `--ax-check` (macOS) checks the accessibility tree and exits
+//! sheet open, and `--hud` with the HUD in that place. `--ax-check` (macOS) checks the accessibility tree and exits
 //! (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
@@ -62,6 +63,7 @@ use gpui::{
     WindowDecorations, WindowOptions, actions, px, size,
 };
 use launcher::{Launcher, Target, installed_plugins};
+use measure::HudRun;
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
@@ -83,7 +85,8 @@ const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open]] [--ax-check]";
+                     [--settings-open] [--hud attached|open|floating|dragged|strip|hidden]] \
+                     [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -102,6 +105,7 @@ struct Options {
     stream_for: Duration,
     report: PathBuf,
     settings_open: bool,
+    hud: Option<HudRun>,
     ax_check: bool,
 }
 
@@ -243,13 +247,21 @@ fn main() -> ExitCode {
                         .update(cx, |shell, window, cx| shell.open_settings(window, cx))
                         .expect("the measured window is open");
                 }
+                if let Some(hud) = options.hud {
+                    window
+                        .update(cx, |shell, window, cx| hud.put(shell, window, cx))
+                        .expect("the measured window is open");
+                }
                 measure::drive(
                     window.into(),
                     shell,
                     launched,
                     feed,
-                    options.lines_per_second,
-                    options.stream_for,
+                    measure::Run {
+                        lines_per_second: options.lines_per_second,
+                        stream_for: options.stream_for,
+                        hud: options.hud,
+                    },
                     cx,
                 );
             }
@@ -266,6 +278,7 @@ fn main() -> ExitCode {
 pub(crate) fn bind_keys(cx: &mut App) {
     input::bind_keys(cx);
     shell::bind_keys(cx);
+    hud::bind_keys(cx);
     title_bar::bind_keys(cx);
     empty_state::bind_keys(cx);
     session_bar::bind_keys(cx);
@@ -402,6 +415,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         stream_for: Duration::from_secs(20),
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
+        hud: None,
         ax_check: false,
     };
     let mut args = args.iter();
@@ -430,6 +444,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--report" => options.report = PathBuf::from(value()?),
             "--settings-open" => options.settings_open = true,
+            "--hud" => {
+                options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)
+            }
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,
@@ -453,6 +470,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     if (options.measure || options.measured_run) && options.replay.is_empty() && !options.synthetic
     {
         return Err("--measure needs --replay <logs> or --synthetic".into());
+    }
+    if options.hud.is_some() && !options.measure && !options.measured_run {
+        return Err("--hud needs --measure".into());
     }
     if options.lines_per_second < 0.0
         || ((options.measure || options.measured_run) && options.lines_per_second == 0.0)

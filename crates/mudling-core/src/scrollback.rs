@@ -47,7 +47,7 @@ impl Scrollback {
         self.lines.get(index)
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Line> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Line> + ExactSizeIterator {
         self.lines.iter()
     }
 

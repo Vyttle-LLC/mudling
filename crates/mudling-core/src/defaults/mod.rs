@@ -70,8 +70,9 @@ pub struct Defaults {
     pub prompt: PromptLearner,
     pub hud: HudFields,
     pub pager: TablePager,
-    /// Prompt lines are hidden by default where the HUD shows the same
-    /// numbers (PRD §8). A setting turns it off.
+    /// Prompt lines may be hidden where the HUD shows the same numbers (PRD
+    /// §8): the terminal store keeps them, marked for a shell to hide, so its
+    /// setting reaches lines already in the scrollback.
     pub hide_prompts: bool,
     gmcp_hello: Option<String>,
 }

@@ -21,6 +21,11 @@
 //!
 //! `--settings-open` runs all of this with the settings sheet open.
 //!
+//! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
+//! its numbers changing on every frame, and a prompt on every read. `open` is
+//! the attached row opened. `dragged` is the floating card, moved each frame
+//! by what a mouse drag calls.
+//!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
 //! Lines are due by the clock, so the pace stays exact either way.
@@ -35,16 +40,20 @@
 
 use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side};
+use crate::hud::HudPlacement;
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{ActivityGuard, AnyWindowHandle, App, Entity, Window, px};
+use gpui::{ActivityGuard, AnyWindowHandle, App, Context, Entity, Window, point, px};
+use mudling_core::defaults::hud::Vital;
 use mudling_core::map::{LiveMap, PlainRules};
 use mudling_core::persist::Timestamp;
+use mudling_core::plugin::luau::Value;
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Item, MobsState, Occupant, RoomContents, RoomState, StoreHub, Versioned,
+    Affect, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, Item, MobsState,
+    Occupant, RoomContents, RoomState, StoreHub, Target, TargetState, Versioned, VitalsState,
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
@@ -67,6 +76,9 @@ const REWRAP_DRAG: f32 = 60.;
 const SCROLL_STEP: f32 = 30.;
 /// How far back the split opens: more than a window of history.
 const SPLIT_DISTANCE: f32 = 2_000.;
+/// How far the HUD's sample changes before it starts again, and how many
+/// pixels the card is dragged.
+const CARD_SWAY: u64 = 400;
 
 /// A filled Room panel's room, what the map remembers and what's in it.
 pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
@@ -153,6 +165,79 @@ pub fn fill_room_panel(shell: &Shell, room: Option<RoomState>, cx: &mut App) {
     });
 }
 
+/// Where a measured run puts the HUD.
+#[derive(Clone, Copy, PartialEq)]
+pub enum HudRun {
+    Attached,
+    Open,
+    Floating,
+    Dragged,
+    TopStrip,
+    Hidden,
+}
+
+impl HudRun {
+    pub fn named(name: &str) -> Option<HudRun> {
+        match name {
+            "attached" => Some(HudRun::Attached),
+            "open" => Some(HudRun::Open),
+            "floating" => Some(HudRun::Floating),
+            "dragged" => Some(HudRun::Dragged),
+            "strip" => Some(HudRun::TopStrip),
+            "hidden" => Some(HudRun::Hidden),
+            _ => None,
+        }
+    }
+
+    pub fn put(self, shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) {
+        let placement = match self {
+            HudRun::Attached | HudRun::Open => HudPlacement::Attached,
+            HudRun::Floating | HudRun::Dragged => HudPlacement::Floating,
+            HudRun::TopStrip => HudPlacement::TopStrip,
+            HudRun::Hidden => HudPlacement::Hidden,
+        };
+        shell.place_hud(placement, self == HudRun::Open, window, cx);
+    }
+}
+
+/// A character in a fight, made up, whose hit points fall by `lost`.
+pub fn sample_hud(lost: i64) -> (VitalsState, CharactersState, TargetState) {
+    let vitals = VitalsState(BTreeMap::from([
+        (Vital::Hp, 3_120 - lost),
+        (Vital::MaxHp, 4_300),
+        (Vital::Mana, 1_040),
+        (Vital::MaxMana, 1_800),
+        (Vital::Moves, 810),
+        (Vital::MaxMoves, 900),
+        (Vital::ToNextLevel, 1_240),
+        (Vital::MaxToNextLevel, 3_760),
+    ]));
+    let affect = |name: &str, detail: &str| Affect {
+        name: name.to_owned(),
+        detail: detail.to_owned(),
+    };
+    let mut characters = CharactersState::listing(&[
+        affect("sanctuary", "for 12 hours"),
+        affect("haste", "for 4 hours"),
+        affect("bless", "for a while"),
+    ]);
+    characters.0.extend([
+        (CHARACTER_NAME.to_owned(), Value::Text("Marrow".to_owned())),
+        (CHARACTER_LEVEL.to_owned(), Value::Number(42.)),
+        (
+            CHARACTER_POSITION.to_owned(),
+            Value::Text("Fight".to_owned()),
+        ),
+    ]);
+    let target = TargetState(Some(Target {
+        name: "the crazed goblin".to_owned(),
+        health: Some(41),
+        max_health: Some(100),
+        level: Some(38),
+    }));
+    (vitals, characters, target)
+}
+
 /// Prints one marker for the measuring parent.
 pub fn mark(message: &str) {
     eprintln!("{MARKER}{message}");
@@ -184,10 +269,13 @@ struct Pacer {
     feed: ReplayFeed,
     lines_per_second: f64,
     stream_for: Duration,
+    hud: Option<HudRun>,
     phase: Phase,
     started: Instant,
     stream_started: Option<Instant>,
     lines_sent: u64,
+    /// Frames the HUD has changed on.
+    hud_frames: u64,
     _no_app_nap: ActivityGuard,
 }
 
@@ -253,8 +341,13 @@ impl Pacer {
             let due = (stream_started.elapsed().as_secs_f64() * self.lines_per_second) as u64;
             if due > self.lines_sent {
                 let reads = stream::next_reads(&mut self.feed, due - self.lines_sent);
+                let reads = match self.hud {
+                    Some(_) => stream::with_a_prompt(reads),
+                    None => reads,
+                };
                 self.shell.read(cx).replay(reads);
             }
+            self.change_hud(window, cx);
             if phase == Phase::Rewrap {
                 let there_and_back = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
                 let window_width = window.viewport_size().width;
@@ -272,9 +365,33 @@ impl Pacer {
         window.on_next_frame(move |window, cx| self.on_frame(window, cx));
     }
 
+    /// What a frame of a fight does to the HUD, and a mouse to the card.
+    fn change_hud(&mut self, window: &mut Window, cx: &mut App) {
+        let Some(hud) = self.hud else { return };
+        self.hud_frames += 1;
+        let sway = self.hud_frames % CARD_SWAY;
+        let (vitals, characters, target) = sample_hud(sway as i64);
+        self.shell.update(cx, |shell, cx| {
+            shell.show_sample_hud(&vitals, &characters, &target, cx);
+            if hud == HudRun::Dragged {
+                let at = point(px(sway as f32), px(sway as f32));
+                shell
+                    .hud()
+                    .update(cx, |hud, cx| hud.drag_card_to(at, window, cx));
+            }
+        });
+    }
+
     fn dock(&self, side: Side, cx: &App) -> Entity<Dock> {
         self.shell.read(cx).dock(side).clone()
     }
+}
+
+/// How a measured run goes.
+pub struct Run {
+    pub lines_per_second: f64,
+    pub stream_for: Duration,
+    pub hud: Option<HudRun>,
 }
 
 /// Runs the measured phases in the child's window, then closes it, which
@@ -284,8 +401,7 @@ pub fn drive(
     shell: Entity<Shell>,
     launched: Instant,
     feed: ReplayFeed,
-    lines_per_second: f64,
-    stream_for: Duration,
+    run: Run,
     cx: &mut App,
 ) {
     let pacer = Pacer {
@@ -293,12 +409,14 @@ pub fn drive(
         shell,
         launched,
         feed,
-        lines_per_second,
-        stream_for,
+        lines_per_second: run.lines_per_second,
+        stream_for: run.stream_for,
+        hud: run.hud,
         phase: Phase::Load,
         started: Instant::now(),
         stream_started: None,
         lines_sent: 0,
+        hud_frames: 0,
         _no_app_nap: cx
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
@@ -324,6 +442,7 @@ struct FrameReport {
     load_average_1m: Option<f64>,
     scope: &'static str,
     settings_open: bool,
+    hud: Option<String>,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -406,6 +525,11 @@ pub fn run_parent(
         scope: "chat, command bar and both side panels open, the Room panel filled; \
                 the chat split from the split phase on",
         settings_open: child_args.iter().any(|arg| arg == "--settings-open"),
+        hud: child_args
+            .iter()
+            .position(|arg| arg == "--hud")
+            .and_then(|flag| child_args.get(flag + 1))
+            .cloned(),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -444,6 +568,9 @@ fn print_report(report: &FrameReport) {
             "closed"
         }
     );
+    if let Some(hud) = &report.hud {
+        println!("HUD: {hud}");
+    }
     for (phase, summary) in &report.phases {
         println!(
             "{phase:>8}: {} frames, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",

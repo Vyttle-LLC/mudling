@@ -29,7 +29,7 @@ use std::time::Duration;
 /// Where the traffic lights sit, level with the middle of the bar.
 pub const TRAFFIC_LIGHTS: Point<Pixels> = point(px(19.), px(19.));
 const TRAFFIC_LIGHTS_WIDTH: Pixels = px(98.);
-const HEIGHT: Pixels = px(52.);
+pub const HEIGHT: Pixels = px(52.);
 const EDGE_PADDING: Pixels = px(12.);
 const BUTTON_SIZE: Pixels = px(28.);
 const ICON_SIZE: Pixels = px(16.);
@@ -200,7 +200,7 @@ pub fn resize_from_edge(position: Point<Pixels>, window: &Window) -> bool {
     }
 }
 
-fn shortcut_name(key: &str) -> String {
+pub fn shortcut_name(key: &str) -> String {
     let modifier = if cfg!(target_os = "macos") {
         "Meta"
     } else {

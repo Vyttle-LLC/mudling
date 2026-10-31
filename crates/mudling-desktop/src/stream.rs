@@ -7,7 +7,7 @@
 use crate::shell::Shell;
 use gpui::{App, Entity, Task};
 use mudling_core::replay::ReplayFeed;
-use mudling_core::telnet::Bytes;
+use mudling_core::telnet::{Bytes, command, gmcp, option};
 use std::time::{Duration, Instant};
 
 /// Lines in one read from the recording, about what a socket read holds.
@@ -39,6 +39,17 @@ pub fn reads(lines: &[impl AsRef<str>]) -> Vec<Bytes> {
             Bytes::from(read)
         })
         .collect()
+}
+
+/// `reads` opened by a vital and the prompt after it, so a line of each short
+/// connection is a prompt the HUD repeats. A recording's logs hold no GMCP.
+pub fn with_a_prompt(mut reads: Vec<Bytes>) -> Vec<Bytes> {
+    let mut opening = vec![command::IAC, command::WILL, option::GMCP];
+    gmcp::encode("Char.Vitals", r#"{"hp": 1, "maxhp": 2}"#, &mut opening);
+    opening.extend_from_slice(b"<1hp 2mv> ");
+    opening.extend_from_slice(&[command::IAC, command::GA]);
+    reads.insert(0, Bytes::from(opening));
+    reads
 }
 
 pub fn next_reads(feed: &mut ReplayFeed, count: u64) -> Vec<Bytes> {

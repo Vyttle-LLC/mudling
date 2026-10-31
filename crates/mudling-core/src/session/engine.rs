@@ -12,7 +12,7 @@ use super::{SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
 use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_chain};
 use crate::defaults::detect::{ServerSignals, suggest};
-use crate::defaults::hud::{self, FieldMap};
+use crate::defaults::hud::{self, Field, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
 use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
@@ -103,6 +103,8 @@ pub struct Engine {
     /// Which fields hold the vitals, by plugin set and whether any were
     /// learned yet.
     hud_fields: Memo<(u64, bool), FieldMap>,
+    /// Where affects are listed, by plugin set.
+    affects_field: Memo<u64, Option<Field>>,
     /// The room's contents changed since the last settle.
     contents_changed: bool,
     /// When plugin costs were last published.
@@ -177,6 +179,7 @@ impl Engine {
             character_id,
             settings,
             hud_fields: Memo::default(),
+            affects_field: Memo::default(),
             contents_changed: false,
             costs_published: None,
             link_rules_of: 0,
@@ -562,17 +565,16 @@ impl Engine {
             }
             self.route_events(now);
             let Some(link) = &self.link else { return };
-            let hide = link.defaults.hide_prompts && link.defaults.hud.has_learned();
+            let hud_repeats_it = link.defaults.hide_prompts && link.defaults.hud.has_learned();
             let shown = if coloring.is_empty() {
                 line.clone()
             } else {
                 line.colored(&coloring)
             };
-            match prompt.filter(|_| hide) {
-                Some(at) if at == text.len() => {}
-                Some(at) => self.terminal.push(shown.after(at)),
-                None => self.terminal.push(shown),
-            }
+            self.terminal.push(match prompt.filter(|_| hud_repeats_it) {
+                Some(at) => shown.with_prompt(at),
+                None => shown,
+            });
         }
         // The buffer is kept: it's reused for every read.
         self.lines = lines;
@@ -680,6 +682,17 @@ impl Engine {
         {
             let vitals = hud::values(fields, package, &message).into_iter().collect();
             self.hub.write::<VitalsState>(VitalsState(vitals));
+        }
+        let affects_field = self
+            .affects_field
+            .get(plugins.generation(), || hud::affects_field(plugins));
+        if let Some(field) = affects_field
+            && field.package.eq_ignore_ascii_case(package)
+            && let Ok(message) = serde_json::from_str::<Map<String, Value>>(json)
+            && let Some(affects) = hud::affects(field, &message)
+        {
+            self.hub
+                .write::<CharactersState>(CharactersState::listing(&affects));
         }
         self.map.gmcp(package, json, now);
         if !heard.mobs.is_empty() {

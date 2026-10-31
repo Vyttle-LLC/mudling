@@ -97,6 +97,8 @@ struct History {
     position: LinePosition,
     /// The number the first line to arrive after the split opened took.
     first_new_line: u64,
+    /// How many that arrived since are only a prompt.
+    new_prompts: u64,
 }
 
 /// Marks the drag of the divider.
@@ -115,8 +117,21 @@ pub struct Chat {
     history: Option<History>,
     /// Kept while the split is closed, so it reopens as the player left it.
     live_share: f32,
+    /// As the player chose, as of the last frame. Hidden prompts stay in the
+    /// scrollback with no height, so a change reaches every line at once and
+    /// costs a frame no more than it costs to walk past them.
+    prompts_shown: bool,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
+}
+
+/// What of `line` the chat draws, if anything.
+fn shown(line: &Line, prompts_shown: bool) -> Option<Line> {
+    if prompts_shown {
+        Some(line.clone())
+    } else {
+        line.without_prompt()
+    }
 }
 
 impl Chat {
@@ -126,23 +141,29 @@ impl Chat {
             live: LinePosition::default(),
             history: None,
             live_share: LIVE_SHARE,
+            prompts_shown: false,
             unannounced: Vec::new(),
             announcement: None,
         }
     }
 
-    /// Applies a frame's new lines and queues the server's for the live
-    /// region.
+    /// Applies a frame's new lines and queues what shows of the server's for
+    /// the live region.
     pub fn apply(&mut self, diff: &Diff<TerminalState>, cx: &mut Context<Chat>) {
         let TerminalChange::Append(lines) = &diff.change;
         let server_lines = lines.iter().filter(|l| l.kind() == LineKind::Server);
-        let announced: Vec<&Line> = server_lines.rev().take(ANNOUNCED_LINES).collect();
+        let showing = server_lines.filter_map(|line| shown(line, self.prompts_shown));
+        let announced: Vec<Line> = showing.rev().take(ANNOUNCED_LINES).collect();
         for line in announced.into_iter().rev() {
             if self.unannounced.len() == ANNOUNCED_LINES {
                 self.unannounced.remove(0);
             }
             self.unannounced
                 .push(SharedString::from(line.plain().to_owned()));
+        }
+        if let Some(history) = &mut self.history {
+            let prompts = lines.iter().filter(|line| line.is_only_prompt());
+            history.new_prompts += prompts.count() as u64;
         }
         self.terminal.apply_diff(diff);
         cx.notify();
@@ -166,8 +187,9 @@ impl Chat {
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn newest_text(&self) -> Option<String> {
-        let newest = self.len().checked_sub(1)?;
-        self.lines().get(newest).map(|line| line.plain().to_owned())
+        let mut lines = self.lines().iter().rev();
+        let newest = lines.find_map(|line| shown(line, self.prompts_shown))?;
+        Some(newest.plain().to_owned())
     }
 
     /// Whether the chat is whole, on the newest line. A scroll counts at once,
@@ -187,6 +209,7 @@ impl Chat {
         self.history = Some(History {
             position,
             first_new_line,
+            new_prompts: 0,
         });
     }
 
@@ -249,9 +272,14 @@ impl Chat {
         }
     }
 
-    /// Lines that arrived since the split opened.
+    /// Lines that arrived since the split opened and show.
     fn new_lines(&self, history: &History) -> u64 {
-        self.next_line_number() - history.first_new_line
+        let hidden = if self.prompts_shown {
+            0
+        } else {
+            history.new_prompts
+        };
+        self.next_line_number() - history.first_new_line - hidden
     }
 
     fn drag_divider(&mut self, y: Pixels, chat: Bounds<Pixels>, cx: &mut Context<Chat>) {
@@ -302,6 +330,7 @@ impl Chat {
         let theme = *cx.global::<Theme>();
         let lines = self.terminal.value().lines();
         let evicted = lines.evicted();
+        let prompts_shown = self.prompts_shown;
         let space = size(
             AvailableSpace::Definite(bounds.size.width),
             AvailableSpace::MinContent,
@@ -309,12 +338,16 @@ impl Chat {
         // Placing a line can ask for its height more than once.
         let mut measured = HashMap::new();
         let placement = position.place(evicted, lines.len(), bounds.size, |index| {
+            let line = lines
+                .get(index)
+                .expect("placed lines are in the scrollback");
+            if !prompts_shown && line.is_only_prompt() {
+                return px(0.);
+            }
             let (_, line_size) = measured.entry(index).or_insert_with(|| {
-                let line = lines
-                    .get(index)
-                    .expect("placed lines are in the scrollback");
+                let line = shown(line, prompts_shown).expect("it isn't only a prompt");
                 let mut element =
-                    render_line(line, evicted + index as u64, &theme).into_any_element();
+                    render_line(&line, evicted + index as u64, &theme).into_any_element();
                 let line_size = element.layout_as_root(space, window, cx);
                 (element, line_size)
             });
@@ -438,8 +471,17 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
         (span.start as usize..(span.end as usize).min(drawn), style)
     });
     let highlights = highlights.filter(|(range, _)| !range.is_empty());
+    // A prompt the game didn't color recedes behind what the game said.
+    let quiet_prompt = line.styled().is_empty().then(|| {
+        let style = HighlightStyle {
+            color: Some(theme.text_muted),
+            ..HighlightStyle::default()
+        };
+        (0..line.prompt_len().min(drawn), style)
+    });
+    let quiet_prompt = quiet_prompt.filter(|(range, _)| !range.is_empty());
     let styled = StyledText::new(SharedString::from(line.plain()[..drawn].to_owned()))
-        .with_highlights(highlights.collect::<Vec<_>>());
+        .with_highlights(highlights.chain(quiet_prompt).collect::<Vec<_>>());
     let row = div()
         .id(ElementId::Integer(number))
         .role(Role::Label)
@@ -459,6 +501,7 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
 impl Render for Chat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Chat>) -> impl IntoElement {
         let choice = cx.global::<Theme>().choice;
+        self.prompts_shown = choice.shows_prompts();
         let line_height = choice.chat_line_height();
         if !self.unannounced.is_empty() {
             let batch = self.announcement.as_ref().map_or(0, |(batch, _)| batch + 1);
@@ -533,6 +576,7 @@ fn live_region(batch: u64, text: SharedString) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Appearance;
     use gpui::{
         Modifiers, MouseButton, ScrollDelta, TestAppContext, VisualTestContext, WindowAppearance,
     };
@@ -706,6 +750,78 @@ mod tests {
         cx.simulate_click(chip.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(!is_split(&chat, cx));
+    }
+
+    /// `count` lines, each a prompt the HUD repeats alone, after a server line.
+    fn prompts(count: usize) -> Diff<TerminalState> {
+        let Diff { change, revision } = server_lines((0..count).map(|n| format!("<{n}hp> ")));
+        let TerminalChange::Append(lines) = change;
+        let change = TerminalChange::Append(
+            lines
+                .iter()
+                .map(|line| line.with_prompt(line.plain().len()))
+                .collect(),
+        );
+        Diff { change, revision }
+    }
+
+    fn show_prompts(show_prompts: bool, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let choice = cx.global::<Theme>().choice;
+            cx.set_global(Theme::chosen(
+                Appearance {
+                    show_prompts,
+                    ..choice
+                },
+                WindowAppearance::Dark,
+            ));
+            window.refresh();
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn hidden_prompts_take_no_room_and_the_setting_reaches_the_scrollback(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 3);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.apply(&prompts(2), cx));
+        cx.run_until_parked();
+        let newest = |chat: &Entity<Chat>, cx: &mut VisualTestContext| {
+            chat.read_with(cx, |chat, _| chat.newest_text().unwrap())
+        };
+        assert_eq!(chat.read_with(cx, |chat, _| chat.len()), 5);
+        assert_eq!(newest(&chat, cx), "history line 2");
+
+        show_prompts(true, cx);
+        assert_eq!(newest(&chat, cx), "<1hp> ");
+
+        show_prompts(false, cx);
+        assert_eq!(newest(&chat, cx), "history line 2");
+    }
+
+    #[gpui::test]
+    fn a_hidden_prompt_is_not_announced_or_counted_but_what_follows_it_is(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let glued = {
+            let Diff { change, revision } = server_lines(["<9hp> You rest.".to_owned()]);
+            let TerminalChange::Append(lines) = change;
+            let change = TerminalChange::Append(vec![lines[0].with_prompt(6)]);
+            Diff { change, revision }
+        };
+        chat.update(cx, |chat, cx| {
+            chat.apply(&prompts(3), cx);
+            chat.apply(&glued, cx);
+        });
+        cx.run_until_parked();
+        let count = |chat: &Entity<Chat>, cx: &mut VisualTestContext| {
+            chat.read_with(cx, |chat, _| chat.new_lines(chat.history.as_ref().unwrap()))
+        };
+        assert_eq!(count(&chat, cx), 1);
+        let announced = chat.read_with(cx, |chat, _| chat.announcement.clone());
+        assert_eq!(announced.unwrap().1, "You rest.");
+
+        show_prompts(true, cx);
+        assert_eq!(count(&chat, cx), 4);
     }
 
     #[gpui::test]

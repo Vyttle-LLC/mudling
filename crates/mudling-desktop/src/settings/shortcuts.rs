@@ -56,6 +56,21 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
                 &["main-f"],
                 &["title_bar::FindInScrollback"],
             ),
+            row(
+                "Open the HUD, or go to its floating card",
+                &["main-j"],
+                &["hud::ToggleHud"],
+            ),
+            row(
+                "Move the floating card",
+                &["up", "down", "left", "right"],
+                &[
+                    "hud::MoveCardUp",
+                    "hud::MoveCardDown",
+                    "hud::MoveCardLeft",
+                    "hud::MoveCardRight",
+                ],
+            ),
             row("Open settings", &["main-,"], &["title_bar::OpenSettings"]),
             row("Quit", &["main-q"], &["mudling::Quit"]),
         ],

@@ -184,9 +184,11 @@ trait Bridged: Store {
     fn diff(diff: Diff<Self>) -> StoreDiff;
 }
 
+/// The lines' text, without the prompts the HUD repeats.
 fn texts<'a>(lines: impl IntoIterator<Item = &'a Line>) -> Vec<String> {
     lines
         .into_iter()
+        .filter_map(Line::without_prompt)
         .map(|line| line.plain().to_owned())
         .collect()
 }
