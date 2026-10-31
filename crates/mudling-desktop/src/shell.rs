@@ -1372,7 +1372,9 @@ impl Render for Shell {
                 shell.focus_room_panel(window, cx);
             }))
             .on_action(cx.listener(|shell, _: &ToggleHud, window, cx| {
-                if !shell.settings_open {
+                // The empty state draws no HUD, so there is nothing to open
+                // or move, and focus sent to it would be lost.
+                if !shell.settings_open && !shell.on_empty_state() {
                     shell.hud.update(cx, |hud, cx| hud.use_shortcut(window, cx));
                 }
             }))
@@ -2839,6 +2841,27 @@ pub mod tests {
             let game = rows.iter().find(|row| row.id.as_str() == "game");
             assert!(game.is_some_and(|row| row.on), "{rows:?}");
         });
+    }
+
+    #[gpui::test]
+    fn the_hud_shortcut_leaves_the_empty_states_keyboard_alone(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        launched.cx.update(|_, cx| crate::hud::bind_keys(cx));
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            let (vitals, characters, target) = crate::measure::sample_hud(0);
+            shell.show_sample_hud(&vitals, &characters, &target, cx);
+            shell.place_hud(HudPlacement::Floating, false, window, cx);
+        });
+        assert!(launched.is_drawn("connect-0"));
+        assert!(!launched.is_drawn("hud-card"), "no card on the empty state");
+
+        launched.cx.simulate_keystrokes(secondary!("j"));
+        press_enter(launched.cx);
+        // The connection is made without an accept, so a dead keyboard times
+        // out here instead of hanging on the listener.
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        drop(server);
     }
 
     #[gpui::test]
