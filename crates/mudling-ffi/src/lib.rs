@@ -7,8 +7,9 @@
 use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, Diff, GearState, MapState, MobsState, RoomState, SettingsState, Store,
-    StoreHub, StoreKind, TerminalChange, TerminalState, Versioned, VitalsState,
+    CharactersState, CuesState, Diff, GearState, MapState, MobsState, RoomState, RulesState,
+    SettingsState, Store, StoreHub, StoreKind, TerminalChange, TerminalState, Versioned,
+    VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -27,6 +28,8 @@ pub enum StoreKind {
     Characters,
     Gear,
     Settings,
+    Rules,
+    Cues,
 }
 
 /// Told when changes are waiting, at most once per drained batch. It's
@@ -106,6 +109,8 @@ impl Session {
             characters,
             gear,
             settings,
+            rules,
+            cues,
         } = batch;
         [
             terminal.map(TerminalState::diff),
@@ -116,6 +121,8 @@ impl Session {
             characters.map(CharactersState::diff),
             gear.map(GearState::diff),
             settings.map(SettingsState::diff),
+            rules.map(RulesState::diff),
+            cues.map(CuesState::diff),
         ]
         .into_iter()
         .flatten()
@@ -164,6 +171,14 @@ macro_rules! with_store {
             }
             StoreKind::Settings => {
                 type $S = SettingsState;
+                $body
+            }
+            StoreKind::Rules => {
+                type $S = RulesState;
+                $body
+            }
+            StoreKind::Cues => {
+                type $S = CuesState;
                 $body
             }
         }
@@ -294,6 +309,36 @@ impl FieldStore for SettingsState {
             ("connection".to_owned(), format!("{:?}", self.connection)),
             ("echo_off".to_owned(), self.echo_off.to_string()),
         ])
+    }
+}
+
+impl FieldStore for RulesState {
+    fn fields(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("triggers".to_owned(), self.triggers.len().to_string()),
+            ("aliases".to_owned(), self.aliases.len().to_string()),
+            ("hotbar".to_owned(), self.hotbar.join("\n")),
+        ])
+    }
+}
+
+/// Cues aren't state: each diff names the sounds to play once.
+impl Bridged for CuesState {
+    fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
+        StoreSnapshot::Fields {
+            store: Self::KIND,
+            revision: versioned.revision().0,
+            fields: HashMap::new(),
+        }
+    }
+
+    fn diff(diff: Diff<Self>) -> StoreDiff {
+        let fields = HashMap::from([("sounds".to_owned(), diff.change.join("\n"))]);
+        StoreDiff::Fields {
+            store: Self::KIND,
+            revision: diff.revision.0,
+            fields,
+        }
     }
 }
 

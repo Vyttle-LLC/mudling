@@ -103,6 +103,19 @@ pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
     (room, mobs, contents)
 }
 
+/// Chips such as a player keeps. Made up for measuring.
+pub fn sample_chips() -> Vec<String> {
+    ["look", "inv", "score", "kill spirit", "sleep"]
+        .map(str::to_owned)
+        .into()
+}
+
+pub fn fill_hotbar(shell: &Shell, cx: &mut App) {
+    shell
+        .hotbar()
+        .update(cx, |hotbar, cx| hotbar.show(&sample_chips(), cx));
+}
+
 pub fn fill_room_panel(shell: &Shell, cx: &mut App) {
     let (room, mobs, contents) = sample_room();
     shell.room_panel().update(cx, |panel, cx| {
@@ -264,6 +277,7 @@ pub fn drive(
     pacer.shell.update(cx, |shell, cx| {
         shell.open_panels(cx);
         fill_room_panel(shell, cx);
+        fill_hotbar(shell, cx);
     });
     mark(&format!(
         "info window_active={}",

@@ -69,6 +69,8 @@ pub enum InputEvent {
     Newer { line: String },
     /// Tab, with the caret at byte offset `cursor`.
     Complete { line: String, cursor: usize },
+    /// The pin: what's typed goes on the hotbar.
+    Pin(String),
 }
 
 /// The field's text as laid out, in the field's own coordinates: one entry for
@@ -207,10 +209,22 @@ impl CommandInput {
     }
 
     /// Fills the alias preview slot: what the typed alias would send.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_alias_preview(&mut self, preview: Option<SharedString>, cx: &mut Context<Self>) {
-        self.alias_preview = preview;
-        cx.notify();
+        if self.alias_preview != preview {
+            self.alias_preview = preview;
+            cx.notify();
+        }
+    }
+
+    /// Offers what's typed to the hotbar. A password never goes there.
+    pub fn pin(&mut self, cx: &mut Context<Self>) {
+        if self.accepts_commands() && !self.content.trim().is_empty() {
+            cx.emit(InputEvent::Pin(self.content.clone()));
+        }
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
     }
 
     /// Replaces what's in the field: a recalled command or a completion, with
@@ -232,7 +246,7 @@ impl CommandInput {
 
     /// What the row shows beside the text: the alias preview, else the
     /// speedwalk the text would walk.
-    fn hint(&self) -> Option<SharedString> {
+    pub(crate) fn hint(&self) -> Option<SharedString> {
         if self.masked {
             return None;
         }
@@ -377,11 +391,6 @@ impl CommandInput {
         self.marked_range = None;
         window.notify_text_input_changed(&self.focus_handle);
         cx.notify();
-    }
-
-    #[cfg(test)]
-    pub fn is_masked(&self) -> bool {
-        self.masked
     }
 
     pub fn content(&self) -> &str {
@@ -723,6 +732,26 @@ impl CommandInput {
             .child(Icon::Send.svg().size(px(16.)).text_color(theme.on_accent))
     }
 
+    fn render_pin_button(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("pin")
+            .debug_selector(|| "pin".to_owned())
+            .role(Role::Button)
+            .aria_label("Pin to the hotbar")
+            .flex_none()
+            .size(SEND_BUTTON_SIZE)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_lg()
+            .hover(|style| style.bg(theme.hover))
+            .on_click(cx.listener(|input, _, window, cx| {
+                input.pin(cx);
+                window.focus(&input.focus_handle, cx);
+            }))
+            .child(Icon::Pin.svg().size(px(16.)).text_color(theme.text_muted))
+    }
+
     /// The text itself, with what it answers to.
     fn render_text(&self, label: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
@@ -830,6 +859,9 @@ impl Render for CommandInput {
                     .py(px(8.)),
             )
             .children(hint)
+            .when(!self.masked, |row| {
+                row.child(self.render_pin_button(&theme, cx))
+            })
             .child(self.render_send_button(&theme, cx))
             .into_any_element()
     }

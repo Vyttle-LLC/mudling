@@ -20,6 +20,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 futures = "0.3"
 memory-stats = "1"
+rodio = { version = "0.23", default-features = false, features = ["playback", "wav"] }
 unicode-segmentation = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]

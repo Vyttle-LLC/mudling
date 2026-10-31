@@ -67,6 +67,7 @@ icons! {
     WindowMaximize => "window-maximize.svg",
     WindowClose => "window-close.svg",
     Plus => "plus.svg",
+    Pin => "pin.svg",
     Return => "return.svg",
 }
 

@@ -58,6 +58,14 @@ impl Reader {
         Ok(self.all()?)
     }
 
+    pub fn triggers(&self) -> Result<Vec<Trigger>, Error> {
+        Ok(self.all()?)
+    }
+
+    pub fn aliases(&self) -> Result<Vec<Alias>, Error> {
+        Ok(self.all()?)
+    }
+
     /// A room's name, without reading the map.
     pub fn room_name(&self, id: i64) -> Result<Option<String>, Error> {
         let mut names = self.query("SELECT name FROM rooms WHERE id = ?1", [id], |row| {
