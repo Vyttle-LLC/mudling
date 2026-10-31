@@ -41,11 +41,10 @@ impl Exit {
     /// door, then go", which the session writes with the plugin's door
     /// command.
     pub fn command(self) -> String {
-        let word = self.direction.name();
         if self.closed {
-            format!("[{}]", &word[..1])
+            format!("[{}]", self.direction.letter())
         } else {
-            word.to_owned()
+            self.direction.name().to_owned()
         }
     }
 
