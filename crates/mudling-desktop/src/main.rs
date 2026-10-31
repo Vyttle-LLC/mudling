@@ -5,7 +5,8 @@
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
-//!                            [--hud attached|open|floating|dragged|strip|hidden]]
+//!                            [--hud attached|open|floating|dragged|strip|hidden]
+//!                            [--find-open]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -19,8 +20,9 @@
 //! off), with its data in a throwaway folder. `--long-lines` joins its lines
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
-//! sheet open, and `--hud` with the HUD in that place. `--ax-check` (macOS) checks the accessibility tree and exits
-//! (see `macos`).
+//! sheet open, `--hud` with the HUD in that place, and `--find-open` with the
+//! find bar open and results showing. `--ax-check` (macOS) checks the
+//! accessibility tree and exits (see `macos`).
 
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
@@ -87,8 +89,8 @@ const QUIT_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open] [--hud attached|open|floating|dragged|strip|hidden]] \
-                     [--ax-check]";
+                     [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
+                     [--find-open]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -108,6 +110,7 @@ struct Options {
     report: PathBuf,
     settings_open: bool,
     hud: Option<HudRun>,
+    find_open: bool,
     ax_check: bool,
 }
 
@@ -263,6 +266,7 @@ fn main() -> ExitCode {
                         lines_per_second: options.lines_per_second,
                         stream_for: options.stream_for,
                         hud: options.hud,
+                        find_open: options.find_open,
                     },
                     cx,
                 );
@@ -418,6 +422,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
         hud: None,
+        find_open: false,
         ax_check: false,
     };
     let mut args = args.iter();
@@ -449,6 +454,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--hud" => {
                 options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)
             }
+            "--find-open" => options.find_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

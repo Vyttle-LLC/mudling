@@ -2,7 +2,7 @@
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
 //! chat, the input, the live region, the title bar, the Room panel's buttons, the
-//! HUD and the settings sheet. Reading another app's tree with `AXUIElement` needs the
+//! HUD, find and the settings sheet. Reading another app's tree with `AXUIElement` needs the
 //! Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
@@ -178,6 +178,9 @@ const SETTINGS_TEXT: [&str; 2] = ["A Vyttle app", "The chat will read like this"
 const SPLIT_PROBE_LINES: [&str; 1] = ["ax-check: a line arriving while the chat is split"];
 /// How far back the check splits the chat: past anything still on screen.
 const SPLIT_DISTANCE: f32 = 2_000.;
+/// Found in the one line that says it.
+const FIND_PROBE: &str = "while the chat is split";
+const FIND_FIELD: &str = "Find in the scrollback";
 
 /// What a screen reader must find around the command bar. `look` is one of
 /// the chips [`crate::measure::fill_hotbar`] puts there.
@@ -451,7 +454,43 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         );
         cx.background_executor().timer(pause).await;
 
-        let opened = in_window(&|shell, window, cx| shell.open_settings(window, cx), cx);
+        in_window(
+            &|shell, window, cx| {
+                shell.open_find(window, cx);
+                chat.update(cx, |chat, cx| chat.type_in_find(FIND_PROBE, window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let focused = focused_element();
+        checks.push(Check {
+            name: "find's field takes focus, with a name",
+            passed: focused.as_ref().is_some_and(|f| {
+                f.is("AXTextField", None) && f.title.as_deref() == Some(FIND_FIELD)
+            }),
+            detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+        });
+        let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
+        });
+        let said = |text: &Option<String>| text.as_deref().is_some_and(|t| t.ends_with(" result"));
+        checks.push(Check {
+            name: "find's result count reaches a live region",
+            passed: statuses.iter().any(|s| said(&s.value) && said(&s.title)),
+            detail: format!(
+                "{:?}",
+                statuses.iter().map(|s| &s.value).collect::<Vec<_>>()
+            ),
+        });
+
+        let opened = in_window(
+            &|shell, window, cx| {
+                shell.close_find(window, cx);
+                shell.open_settings(window, cx);
+            },
+            cx,
+        );
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
         let missing: Vec<_> = SETTINGS_CONTROLS
