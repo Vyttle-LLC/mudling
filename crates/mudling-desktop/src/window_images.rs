@@ -19,7 +19,7 @@ use gpui::{
 };
 use mudling_core::LinePipeline;
 use mudling_core::defaults::hud::Vital;
-use mudling_core::store::{Diff, Revision, TerminalChange, VitalsState};
+use mudling_core::store::{Diff, Revision, TerminalChange, TerminalState, VitalsState};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,6 +42,21 @@ const SAMPLE_CHAT: [&str; 11] = [
     "\x1b[32mYou donate 50 standard bolts.\x1b[0m",
 ];
 
+/// Prose wider than the panels leave the column, a word wider than the
+/// column, and a table and a map that fit it.
+const WRAPPING_CHAT: [&str; 9] = [
+    "\x1b[33mThe goblin swings a rusty sword at you and misses, stumbling past the \
+     torch and down the quiet stone path towards the river.\x1b[0m",
+    "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+    "| Name   | Lvl | Class  |",
+    "| Mira   |  12 | Mage   |",
+    "| Oskar  |   7 | Ranger |",
+    "    N",
+    "  W-+-E    [ ]--[ ]",
+    "    S       |",
+    "           [*]",
+];
+
 fn images_folder() -> PathBuf {
     std::env::var_os("MUDLING_WINDOW_IMAGES").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-images"),
@@ -49,18 +64,21 @@ fn images_folder() -> PathBuf {
     )
 }
 
-fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
+fn server_lines(texts: &[&str]) -> Diff<TerminalState> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::new();
-    for line in SAMPLE_CHAT {
+    for line in texts {
         pipeline.push(format!("{line}\n").as_bytes(), &mut lines);
     }
-    let diff = Diff {
+    Diff {
         revision: Revision::default(),
         change: TerminalChange::Append(lines),
-    };
+    }
+}
+
+fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.chat().update(cx, |chat, cx| {
-        chat.apply(&diff, cx);
+        chat.apply(&server_lines(&SAMPLE_CHAT), cx);
         chat.echo_unsent("get bracelet", cx);
     });
     let vitals = VitalsState(BTreeMap::from([
@@ -138,6 +156,16 @@ fn window_images() {
             shell.open_panels(cx);
         },
     );
+    render("wrapped-dark", Dark, DEFAULT, |shell, _, cx| {
+        shell.chat().update(cx, |chat, cx| {
+            chat.apply(&server_lines(&WRAPPING_CHAT), cx);
+            chat.echo_unsent(
+                "say a command long enough to wrap beside the marker that starts it",
+                cx,
+            );
+        });
+        shell.open_panels(cx);
+    });
     render("rails-dark", Dark, WIDE, |shell, _, cx| {
         for side in [Side::Left, Side::Right] {
             shell

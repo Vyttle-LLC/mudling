@@ -139,7 +139,8 @@ struct Check {
 /// Lines the check sends through the chat. Synthetic: no real chat.
 const PROBE_LINES: [&str; 2] = [
     "ax-check: the first new line",
-    "ax-check: the second new line",
+    "ax-check: the second new line, long enough to wrap to a second row or a third however \
+     wide the window is, and to be read as one line all the same by a screen reader",
 ];
 
 /// Runs the checks, prints a JSON report and exits: 0 if all passed.
@@ -194,6 +195,14 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         let tree = window_tree();
         let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
+        });
+        let wrapped = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXStaticText", None) && e.value.as_deref() == Some(PROBE_LINES[1]))
+        });
+        checks.push(Check {
+            name: "a wrapped line is one static text holding all of its text",
+            passed: wrapped.len() == 1,
+            detail: format!("{} matching element(s)", wrapped.len()),
         });
         let expected = PROBE_LINES.join("\n");
         checks.push(Check {
