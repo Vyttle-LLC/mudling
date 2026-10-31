@@ -1,16 +1,35 @@
 //! One room found on two devices, under two ids.
 //!
 //! A game with no room numbers gives the map nothing to agree on, so each
-//! device names the rooms it finds. Two rooms are one when their whole identity
-//! matches (name, zone, description and exits) and exactly one room on each
-//! side has it. The lower id stays, everything that hung off the higher one
-//! moves to it, and a tombstone clears the higher one from any device.
+//! device names the rooms it finds. Reading alike doesn't make two rooms one,
+//! because a game can hold two corridors that read the same. When unsure, both
+//! stay: a duplicate on the map is visible and fixable, but a wrong union loses
+//! a room.
 //!
-//! Where either side has look-alikes, they all stay: a duplicate on the map is
-//! visible and fixable, but a wrong union loses a room.
+//! Two rooms unite only if all of this holds:
+//! - Their whole identity (name, zone, description and exits) matches, exactly
+//!   one room on each side has it, and each id is on one side only.
+//! - Something beyond that says they're one: the same stored position on the
+//!   same sheet, or a shared link, the same direction to or from one room or a
+//!   pair that unites too.
+//! - No direction leads to two rooms that stay apart.
+//! - No room would come to reach another by two different directions, which
+//!   the two sides don't each show. A maze gets no pass.
+//!
+//! The lower id stays, everything that hung off the higher one moves to it, and
+//! a tombstone clears the higher one from any device.
+//!
+//! The rules depend on each other: a link is evidence only if the rooms at its
+//! far end unite, and a union can break another. So the pairs are worked out
+//! as sets, dropping what breaks a rule and then keeping what's proven until
+//! nothing changes. Nothing depends on the order of rooms or of the two sides,
+//! so both devices reach one result.
+//!
+//! Devices that started in different places have different coordinates, so a
+//! room both found with no link in common stays a duplicate.
 
 use crate::map::{RoomId, UNNUMBERED_IDS};
-use crate::persist::{Key, MapRows, Timestamp, Tombstone};
+use crate::persist::{Key, MapRows, Room, Timestamp, Tombstone};
 use crate::repo::format::ServerRows;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -45,10 +64,82 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
     ours.tombstones.extend(retired);
 }
 
-/// Each higher id, with the lower id it's one room with. A room both sides
-/// already hold under one id needs nothing, and a lower room deleted on
-/// purpose stays deleted, leaving the other room as it is.
+/// Each higher id, with the lower id it's one room with.
 fn pairs(ours: &ServerRows, theirs: &ServerRows) -> BTreeMap<RoomId, RoomId> {
+    let (our_side, their_side) = (Side::new(ours), Side::new(theirs));
+    let mut pairs = candidates(ours, theirs);
+    loop {
+        let sound = without_broken(pairs.clone(), &our_side, &their_side);
+        let proven = with_evidence(&sound, &our_side, &their_side);
+        if proven == pairs {
+            return pairs.iter().map(|p| (p.retired(), p.kept())).collect();
+        }
+        pairs = proven;
+    }
+}
+
+/// A room on each side that may be one room.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Pair {
+    ours: RoomId,
+    theirs: RoomId,
+}
+
+impl Pair {
+    fn kept(self) -> RoomId {
+        self.ours.min(self.theirs)
+    }
+
+    fn retired(self) -> RoomId {
+        self.ours.max(self.theirs)
+    }
+}
+
+type Links<'a> = HashMap<RoomId, Vec<(&'a str, RoomId)>>;
+
+/// What one side knows of its map, for looking rooms up by id.
+struct Side<'a> {
+    rooms: HashMap<RoomId, &'a Room>,
+    /// Each room's links, as direction and the room at the far end.
+    out_of: Links<'a>,
+    /// The links into each room, as direction and where they start.
+    into: Links<'a>,
+}
+
+impl Side<'_> {
+    fn new(rows: &ServerRows) -> Side<'_> {
+        let mut side = Side {
+            rooms: rows.map.rooms.iter().map(|room| (room.id, room)).collect(),
+            out_of: Links::new(),
+            into: Links::new(),
+        };
+        for link in &rows.map.links {
+            let direction = link.direction.as_str();
+            let out = side.out_of.entry(link.room_id).or_default();
+            out.push((direction, link.to_room));
+            let inward = side.into.entry(link.to_room).or_default();
+            inward.push((direction, link.room_id));
+        }
+        side
+    }
+}
+
+/// The one id each room in `pairs` goes by.
+fn united_ids(pairs: &BTreeSet<Pair>) -> HashMap<RoomId, RoomId> {
+    pairs
+        .iter()
+        .flat_map(|pair| [(pair.ours, pair.kept()), (pair.theirs, pair.kept())])
+        .collect()
+}
+
+fn one_id(united: &HashMap<RoomId, RoomId>, id: RoomId) -> RoomId {
+    united.get(&id).copied().unwrap_or(id)
+}
+
+/// Rooms that read alike, unique on each side. A room both sides already hold
+/// under one id needs nothing, and a lower room deleted on purpose stays
+/// deleted, leaving the other room as it is.
+fn candidates(ours: &ServerRows, theirs: &ServerRows) -> BTreeSet<Pair> {
     let (our_ids, their_ids) = (room_ids(ours), room_ids(theirs));
     let deleted = room_deletes(ours, theirs);
     let survives = |id: RoomId| {
@@ -63,11 +154,127 @@ fn pairs(ours: &ServerRows, theirs: &ServerRows) -> BTreeMap<RoomId, RoomId> {
             let ([a], [b]) = (mine.as_slice(), their_rooms.get(identity)?.as_slice()) else {
                 return None;
             };
-            let (kept, retired) = (*a.min(b), *a.max(b));
+            let pair = Pair {
+                ours: *a,
+                theirs: *b,
+            };
             let apart = !our_ids.contains(b) && !their_ids.contains(a);
-            (apart && survives(kept)).then_some((retired, kept))
+            (apart && survives(pair.kept())).then_some(pair)
         })
         .collect()
+}
+
+/// Drops pairs that break a rule if `pairs` all unite, until none does.
+fn without_broken(mut pairs: BTreeSet<Pair>, ours: &Side<'_>, theirs: &Side<'_>) -> BTreeSet<Pair> {
+    loop {
+        let united = united_ids(&pairs);
+        let doubled = reached_two_ways(&united, ours, theirs);
+        let before = pairs.len();
+        pairs.retain(|pair| {
+            !doubled.contains(&pair.kept()) && !leads_apart(*pair, &united, ours, theirs)
+        });
+        if pairs.len() == before {
+            return pairs;
+        }
+    }
+}
+
+/// Whether one direction from the pair leads to rooms that stay apart.
+fn leads_apart(
+    pair: Pair,
+    united: &HashMap<RoomId, RoomId>,
+    ours: &Side<'_>,
+    theirs: &Side<'_>,
+) -> bool {
+    links_of(&ours.out_of, pair.ours).iter().any(|(way, to)| {
+        links_of(&theirs.out_of, pair.theirs)
+            .iter()
+            .any(|(other, their_to)| {
+                way == other && one_id(united, *to) != one_id(united, *their_to)
+            })
+    })
+}
+
+/// Rooms at either end of two rooms the union joins by two directions. Both
+/// showing the same ways, or one side showing them all, is the map as it is.
+fn reached_two_ways(
+    united: &HashMap<RoomId, RoomId>,
+    ours: &Side<'_>,
+    theirs: &Side<'_>,
+) -> HashSet<RoomId> {
+    let mut ways: HashMap<(RoomId, RoomId), [BTreeSet<&str>; 2]> = HashMap::new();
+    for (index, side) in [ours, theirs].into_iter().enumerate() {
+        for (from, links) in &side.out_of {
+            for (way, to) in links {
+                let ends = (one_id(united, *from), one_id(united, *to));
+                ways.entry(ends).or_default()[index].insert(way);
+            }
+        }
+    }
+    ways.into_iter()
+        .filter(|(_, [ours, theirs])| !ours.is_subset(theirs) && !theirs.is_subset(ours))
+        .flat_map(|((from, to), _)| [from, to])
+        .collect()
+}
+
+/// The pairs that can be proven, each by evidence not resting on itself.
+fn with_evidence(pairs: &BTreeSet<Pair>, ours: &Side<'_>, theirs: &Side<'_>) -> BTreeSet<Pair> {
+    let mut proven = BTreeSet::new();
+    loop {
+        let united = united_ids(&proven);
+        let more: Vec<Pair> = pairs
+            .difference(&proven)
+            .filter(|pair| has_evidence(**pair, &united, ours, theirs))
+            .copied()
+            .collect();
+        if more.is_empty() {
+            return proven;
+        }
+        proven.extend(more);
+    }
+}
+
+fn has_evidence(
+    pair: Pair,
+    united: &HashMap<RoomId, RoomId>,
+    ours: &Side<'_>,
+    theirs: &Side<'_>,
+) -> bool {
+    let shares = |our_links: &Links<'_>, their_links: &Links<'_>| {
+        links_of(our_links, pair.ours).iter().any(|(way, end)| {
+            links_of(their_links, pair.theirs)
+                .iter()
+                .any(|(other, their_end)| {
+                    way == other && one_id(united, *end) == one_id(united, *their_end)
+                })
+        })
+    };
+    same_square(pair, united, ours, theirs)
+        || shares(&ours.out_of, &theirs.out_of)
+        || shares(&ours.into, &theirs.into)
+}
+
+/// The same position on the same sheet: both outdoors, or in one building. A
+/// wing's first room is its own building, so that pair's sheet is its own.
+fn same_square(
+    pair: Pair,
+    united: &HashMap<RoomId, RoomId>,
+    ours: &Side<'_>,
+    theirs: &Side<'_>,
+) -> bool {
+    let (Some(a), Some(b)) = (ours.rooms.get(&pair.ours), theirs.rooms.get(&pair.theirs)) else {
+        return false;
+    };
+    let same_sheet = match (a.building, b.building) {
+        (None, None) => true,
+        (Some(x), Some(y)) => (x == a.id && y == b.id) || one_id(united, x) == one_id(united, y),
+        _ => false,
+    };
+    same_sheet && (a.x, a.y, a.z) == (b.x, b.y, b.z)
+}
+
+fn links_of<'s, 'a>(links: &'s Links<'a>, id: RoomId) -> &'s [(&'a str, RoomId)] {
+    links.get(&id).map_or(&[], Vec::as_slice)
 }
 
 fn room_ids(rows: &ServerRows) -> HashSet<RoomId> {
