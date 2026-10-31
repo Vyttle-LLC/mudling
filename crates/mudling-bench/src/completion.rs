@@ -1,18 +1,13 @@
-//! `completion-bench`: times a Tab completion against 20,000 known words
-//! alongside a full history of 500 commands, and checks it against the
-//! budget of 1 ms at p99.
-//!
-//! ```text
-//! completion-bench [--check] [--json <report.json>]
-//! ```
+//! A Tab completion against 20,000 known words alongside a full history of
+//! 500 commands, against the budget of 1 ms at p99.
 //!
 //! The words are synthetic. Prefixes run from one to three letters, so the
 //! first Tab sees both many matches and few.
 
+use crate::verdict;
 use mudling_core::completion::{Completer, History, KnownWords};
 use mudling_core::stats::Summary;
 use serde::Serialize;
-use std::process::ExitCode;
 use std::time::Instant;
 
 const KNOWN_WORDS: usize = 20_000;
@@ -21,57 +16,23 @@ const BUDGET_US: f64 = 1_000.0;
 const SOURCES: [&str; 3] = ["room", "mob", "item"];
 
 #[derive(Serialize)]
-struct Report {
+pub struct Report {
     known_words: usize,
     history_commands: usize,
     complete: Summary,
     budget_us: f64,
-    within_budget: bool,
+    pub within_budget: bool,
 }
 
-fn main() -> ExitCode {
-    let mut check = false;
-    let mut json = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--check" => check = true,
-            "--json" => match args.next() {
-                Some(path) => json = Some(path),
-                None => return usage("--json needs a path"),
-            },
-            other => return usage(&format!("unknown argument {other}")),
-        }
-    }
-
-    let report = run();
+pub fn print(report: &Report) {
     println!(
-        "complete against {} known words and {} commands: p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",
+        "complete against {} known words and {} commands: {}; budget p99 ≤ {} µs: {}",
         report.known_words,
         report.history_commands,
-        report.complete.p50_us,
-        report.complete.p99_us,
-        report.complete.max_us,
+        report.complete,
         report.budget_us,
-        if report.within_budget { "ok" } else { "MISSED" }
+        verdict(report.within_budget)
     );
-    if let Some(path) = json {
-        let text = serde_json::to_string_pretty(&report).expect("the report serializes");
-        if let Err(error) = std::fs::write(&path, text) {
-            eprintln!("couldn't write {path}: {error}");
-            return ExitCode::from(2);
-        }
-    }
-    if check && !report.within_budget {
-        eprintln!("the budget was missed");
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
-}
-
-fn usage(problem: &str) -> ExitCode {
-    eprintln!("{problem}\nusage: completion-bench [--check] [--json <report.json>]");
-    ExitCode::from(2)
 }
 
 /// A small deterministic generator, so every run times the same words.
@@ -94,7 +55,7 @@ impl Lcg {
     }
 }
 
-fn run() -> Report {
+pub fn run() -> Report {
     let mut random = Lcg(1);
     let mut known = KnownWords::new();
     let mut added = 0;

@@ -1,0 +1,13 @@
+[[pattern]]
+name = "fight.hit"
+pattern = '''^You hit (?<target>.+)\.$'''
+hook = "on_hit"
+
+[[pattern]]
+name = "fight.rested"
+pattern = '''^You feel (?<percent>\d+)% rested\.$'''
+hook = "on_rested"
+
+[[pattern]]
+name = "chat.gossip"
+pattern = '''^\[gossip\] (?<who>\w+): '(?<message>.*)'$'''

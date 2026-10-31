@@ -1,0 +1,21 @@
+room_identity = "gmcp"
+
+[[exits]]
+name = "map.exits"
+pattern = '''^\[Exits: '''
+
+[[failed_move]]
+name = "map.blocked"
+pattern = '''^You can't go that way\.$'''
+
+[[darkness]]
+name = "map.dark"
+pattern = '''^It is pitch black\.$'''
+
+[[flee]]
+name = "map.fled"
+pattern = '''^You flee (?<dir>north|east|south|west)!$'''
+
+[[maze]]
+area = "Testland Hedge"
+rooms = ["A Twisting Hedge"]

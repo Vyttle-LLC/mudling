@@ -6,6 +6,7 @@
 //! Luau hooks run on their own thread, off the line, and aren't counted.
 
 use crate::plugin_host::{Counter, PLUGIN_BUDGET_US, realistic_plugins, split};
+use crate::verdict;
 use mudling_core::line::Line;
 use mudling_core::plugin::{Plugin, PluginHost};
 use mudling_core::stats::Summary;
@@ -103,10 +104,9 @@ fn time(host: &mut PluginHost, line: &Line, sink: &mut Counter) -> Duration {
 }
 
 pub fn print(report: &Report) {
-    let verdict = if report.within_budget { "ok" } else { "MISSED" };
     println!(
         "plugin {} ({} patterns) over {} lines, {} events: host p99 {:.2} µs without, {:.2} µs with; \
-         +{:.2} µs p99; budget ≤ {} µs: {verdict}; alone p99 {:.2} µs (sampled, an upper bound; informational)",
+         +{:.2} µs p99; budget ≤ {} µs: {}; alone p99 {:.2} µs (sampled, an upper bound; informational)",
         report.plugin,
         report.patterns,
         report.lines,
@@ -115,6 +115,7 @@ pub fn print(report: &Report) {
         report.host_with.p99_us,
         report.marginal_p99_us,
         report.budget_us,
+        verdict(report.within_budget),
         report.alone_p99_us
     );
 }

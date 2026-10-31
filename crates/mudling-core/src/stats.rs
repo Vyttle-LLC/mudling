@@ -1,6 +1,7 @@
 //! Percentile summaries for measured durations, as the §6 budgets are stated.
 
 use serde::Serialize;
+use std::fmt;
 use std::time::Duration;
 
 /// A summary of samples, in microseconds.
@@ -29,6 +30,16 @@ impl Summary {
             p99_us: percentile(0.99),
             max_us: sorted[sorted.len() - 1],
         })
+    }
+}
+
+impl fmt::Display for Summary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
+            self.p50_us, self.p99_us, self.max_us
+        )
     }
 }
 
