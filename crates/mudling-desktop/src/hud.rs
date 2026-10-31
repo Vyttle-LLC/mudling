@@ -1,15 +1,13 @@
-//! The HUD row on the command bar: how the connection stands, then a meter
-//! for each vital the server reports. When the bar is too narrow for them all
-//! the meters wrap to a line of their own, so no vital is ever clipped.
+//! The HUD row on the command bar: a meter for each vital the server reports,
+//! and nothing until it reports one. When the bar is too narrow for them all
+//! the meters wrap, so no vital is ever clipped.
 
 use crate::theme::Theme;
-use gpui::{Context, FontWeight, Hsla, Pixels, Role, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, Hsla, Pixels, Role, SharedString, Window, div, prelude::*, px};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::store::VitalsState;
 
 const ROW_HEIGHT: Pixels = px(40.);
-/// Below this the meters wrap, rather than squeeze the connection to nothing.
-const MIN_CONNECTION_WIDTH: Pixels = px(120.);
 const METER_WIDTH: Pixels = px(64.);
 const METER_HEIGHT: Pixels = px(4.);
 
@@ -80,23 +78,16 @@ fn meters_for(vitals: &VitalsState) -> Vec<Meter> {
 
 #[derive(Default)]
 pub struct Hud {
-    connection: SharedString,
     meters: Vec<Meter>,
 }
 
 impl Hud {
-    pub fn show(&mut self, connection: SharedString, vitals: &VitalsState, cx: &mut Context<Hud>) {
+    pub fn show(&mut self, vitals: &VitalsState, cx: &mut Context<Hud>) {
         let meters = meters_for(vitals);
-        if connection != self.connection || meters != self.meters {
-            self.connection = connection;
+        if meters != self.meters {
             self.meters = meters;
             cx.notify();
         }
-    }
-
-    #[cfg(test)]
-    pub fn connection(&self) -> &str {
-        &self.connection
     }
 
     #[cfg(test)]
@@ -139,6 +130,9 @@ fn render_meter(meter: &Meter, theme: &Theme) -> impl IntoElement {
 
 impl Render for Hud {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Hud>) -> impl IntoElement {
+        if self.meters.is_empty() {
+            return div().into_any_element();
+        }
         let theme = cx.global::<Theme>();
         div()
             .id("hud")
@@ -155,30 +149,8 @@ impl Render for Hud {
             .text_size(px(13.))
             .border_b_1()
             .border_color(theme.border)
-            .child(
-                div()
-                    .id("connection")
-                    .role(Role::Label)
-                    .aria_value(self.connection.clone())
-                    .flex_1()
-                    .min_w(MIN_CONNECTION_WIDTH)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(self.connection.clone()),
-            )
-            .child(
-                div()
-                    .max_w_full()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_x_3()
-                    .gap_y_1()
-                    .children(self.meters.iter().map(|meter| render_meter(meter, theme))),
-            )
+            .children(self.meters.iter().map(|meter| render_meter(meter, theme)))
+            .into_any_element()
     }
 }
 

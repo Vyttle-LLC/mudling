@@ -1,8 +1,8 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input and the live region. Reading another app's tree with
-//! `AXUIElement` needs the Accessibility permission; this needs none.
+//! chat, the input, the live region and the title bar. Reading another app's
+//! tree with `AXUIElement` needs the Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
@@ -142,6 +142,14 @@ const PROBE_LINES: [&str; 2] = [
     "ax-check: the second new line",
 ];
 
+const TITLE_BAR_CONTROLS: [&str; 5] = [
+    "Left panel",
+    "Session: Recording",
+    "Search",
+    "Right panel",
+    "Settings",
+];
+
 /// Runs the checks, prints a JSON report and exits: 0 if all passed.
 pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
     let chat = shell.read(cx).chat();
@@ -187,6 +195,19 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 f.is("AXTextField", None) && f.title.as_deref() == Some("Command")
             }),
             detail: format!("{:?}", focused.as_ref().map(|f| (&f.role, &f.title))),
+        });
+
+        let unnamed: Vec<_> = TITLE_BAR_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "title bar controls are named",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
         });
 
         shell.update(cx, |shell, _| shell.replay(stream::reads(&PROBE_LINES)));

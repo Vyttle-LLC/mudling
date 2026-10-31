@@ -41,6 +41,7 @@ mod shell;
 mod status;
 mod stream;
 mod theme;
+mod title_bar;
 #[cfg(all(test, target_os = "macos"))]
 mod window_images;
 
@@ -48,7 +49,7 @@ use futures::channel::mpsc;
 use futures::future::{self, Either};
 use gpui::{
     App, AppContext, AsyncApp, Bounds, Entity, KeyBinding, Task, TitlebarOptions, WindowBounds,
-    WindowOptions, actions, px, size,
+    WindowDecorations, WindowOptions, actions, px, size,
 };
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
@@ -144,14 +145,17 @@ fn main() -> ExitCode {
         motion::follow_os(cx);
         input::bind_keys(cx);
         shell::bind_keys(cx);
+        title_bar::bind_keys(cx);
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(800.)), cx);
         let options_for_window = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("MUDling".into()),
-                ..TitlebarOptions::default()
+                appears_transparent: true,
+                traffic_light_position: Some(title_bar::TRAFFIC_LIGHTS),
             }),
+            window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(480.), px(400.))),
             // A measured run draws every frame even if another app has focus.

@@ -171,7 +171,7 @@ impl Focusable for CommandInput {
 impl CommandInput {
     pub fn new(cx: &mut Context<CommandInput>) -> CommandInput {
         CommandInput {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: String::new(),
             masked: false,
             selected_range: 0..0,

@@ -1,12 +1,12 @@
 //! Quiet lines above the command bar: the game detection's suggestion and the
-//! newest notice. The connection's words live on the HUD row.
+//! newest notice. The connection's words live in the title bar.
 
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{Context, Pixels, Role, SharedString, Window, div, prelude::*, px};
 use mudling_core::defaults::detect::Source;
 use mudling_core::plugin::PluginId;
-use mudling_core::store::{ConnectionStatus, SettingsState};
+use mudling_core::store::SettingsState;
 
 const FONT_SIZE: Pixels = px(12.);
 
@@ -48,21 +48,6 @@ pub fn lines_for(settings: &SettingsState, enabled: &[PluginId]) -> Vec<SharedSt
         .collect()
 }
 
-/// How the connection stands. `replaying` says so instead: a paced replay
-/// opens and closes one every few frames.
-pub fn connection_text(settings: &SettingsState, replaying: bool) -> String {
-    if replaying {
-        return "Replaying a recording".to_owned();
-    }
-    let server = settings.server.as_deref().unwrap_or("the server");
-    match &settings.connection {
-        ConnectionStatus::Idle => format!("Not connected to {server}"),
-        ConnectionStatus::Connecting => format!("Connecting to {server}"),
-        ConnectionStatus::Connected => format!("Connected to {server}"),
-        ConnectionStatus::Closed(reason) => format!("Disconnected from {server}: {reason}"),
-    }
-}
-
 impl Render for StatusLines {
     fn render(&mut self, _: &mut Window, cx: &mut Context<StatusLines>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
@@ -88,24 +73,9 @@ impl Render for StatusLines {
 mod tests {
     use super::*;
     use mudling_core::defaults::detect::Suggestion;
-    use mudling_core::net::DisconnectReason;
 
     fn avatar() -> PluginId {
         PluginId::try_from("avatar".to_owned()).unwrap()
-    }
-
-    #[test]
-    fn the_connection_text_says_how_the_connection_stands() {
-        let settings = SettingsState {
-            server: Some("mud.example".to_owned()),
-            connection: ConnectionStatus::Closed(DisconnectReason::ClosedByServer),
-            ..SettingsState::default()
-        };
-        assert_eq!(
-            connection_text(&settings, false),
-            "Disconnected from mud.example: closed by server"
-        );
-        assert_eq!(connection_text(&settings, true), "Replaying a recording");
     }
 
     #[test]

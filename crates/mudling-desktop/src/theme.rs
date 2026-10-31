@@ -45,6 +45,8 @@ pub struct Theme {
     pub text_muted: Hsla,
     /// The prompt before an echoed command, which tells it from server text.
     pub command: Hsla,
+    /// The runestone in the logomark; its cursor is the accent.
+    pub runestone: Hsla,
     pub accent: Hsla,
     pub accent_hover: Hsla,
     /// Text and icons on a filled accent.
@@ -75,6 +77,7 @@ impl Theme {
                 text: rgb(PARCHMENT).into(),
                 text_muted: rgb(STONE).into(),
                 command: rgb(MOSS).into(),
+                runestone: rgb(STONE).into(),
                 accent: rgb(MOSS).into(),
                 accent_hover: rgb(MOSS_BRIGHT).into(),
                 on_accent: rgb(NIGHT).into(),
@@ -98,6 +101,7 @@ impl Theme {
                 text: rgb(SLATE).into(),
                 text_muted: rgb(0x5E625F).into(),
                 command: rgb(MOSS_DEEP).into(),
+                runestone: rgb(SLATE).into(),
                 accent: rgb(MOSS_DEEP).into(),
                 accent_hover: rgb(MOSS_DIM).into(),
                 on_accent: rgb(PARCHMENT).into(),

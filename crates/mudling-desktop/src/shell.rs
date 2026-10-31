@@ -1,5 +1,6 @@
-//! The window's root view, a thin shell over a [`Session`]: a centered chat
-//! column with the floating command bar at its foot, between two [`Dock`]s.
+//! The window's root view, a thin shell over a [`Session`]: the title bar over
+//! a centered chat column with the floating command bar at its foot, between
+//! two [`Dock`]s.
 //!
 //! The bar looks like it floats, but the chat ends where it begins, so
 //! however tall the bar grows it can't cover the newest line.
@@ -13,8 +14,9 @@ use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::hud::Hud;
 use crate::input::{CommandInput, InputEvent};
-use crate::status::{StatusLines, connection_text, lines_for};
+use crate::status::{StatusLines, lines_for};
 use crate::theme::Theme;
+use crate::title_bar::{self, FocusPreviousControl, SessionLabel, TitleBar};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
@@ -24,7 +26,9 @@ use gpui::{
 use mudling_core::completion::Completion;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
-use mudling_core::store::{ConnectionStatus, SettingsState, Versioned, VitalsState};
+use mudling_core::store::{
+    CharactersState, ConnectionStatus, SettingsState, Versioned, VitalsState,
+};
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
 
@@ -56,6 +60,7 @@ impl Game {
 struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
+    characters: Versioned<CharactersState>,
 }
 
 pub struct Shell {
@@ -64,6 +69,7 @@ pub struct Shell {
     left: bool,
     chat: Entity<Chat>,
     status: Entity<StatusLines>,
+    title_bar: Entity<TitleBar>,
     hud: Entity<Hud>,
     input: Entity<CommandInput>,
     left_dock: Entity<Dock>,
@@ -87,6 +93,7 @@ impl Shell {
         let copies = Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         };
         let chat = cx.new(|_| Chat::new(terminal));
         let input = cx.new(CommandInput::new);
@@ -109,16 +116,19 @@ impl Shell {
         if let Some(game) = game.as_ref().filter(|game| !game.is_replay()) {
             game.session.connect();
         }
+        let left_dock = cx.new(|_| Dock::new(Side::Left));
+        let right_dock = cx.new(|_| Dock::new(Side::Right));
         let mut shell = Shell {
             game,
             copies,
             left: false,
             chat,
             status: cx.new(|_| StatusLines::default()),
+            title_bar: cx.new(|cx| TitleBar::new(left_dock.clone(), right_dock.clone(), cx)),
             hud: cx.new(|_| Hud::default()),
             input,
-            left_dock: cx.new(|_| Dock::new(Side::Left)),
-            right_dock: cx.new(|_| Dock::new(Side::Right)),
+            left_dock,
+            right_dock,
             _subscriptions: [typing, appearance, quitting],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
@@ -163,7 +173,10 @@ impl Shell {
             self.input
                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
         }
-        if batch.vitals.is_some() || batch.settings.is_some() {
+        if let Some(characters) = &batch.characters {
+            self.copies.characters.apply_diff(characters);
+        }
+        if batch.vitals.is_some() || batch.settings.is_some() || batch.characters.is_some() {
             self.show_status(cx);
         }
     }
@@ -172,10 +185,14 @@ impl Shell {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
         let lines = lines_for(settings, &game.enabled);
-        let connection = connection_text(settings, game.is_replay()).into();
+        // The core publishes no latency yet.
+        let latency = None;
+        let characters = self.copies.characters.value();
+        let session = SessionLabel::of(settings, characters, game.is_replay(), latency);
         self.status.update(cx, |status, cx| status.show(lines, cx));
+        self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
         self.hud.update(cx, |hud, cx| {
-            hud.show(connection, self.copies.vitals.value(), cx);
+            hud.show(self.copies.vitals.value(), cx);
         });
     }
 
@@ -248,14 +265,24 @@ impl Shell {
     }
 
     #[cfg(test)]
-    pub fn show_sample_status(
-        &self,
-        connection: &'static str,
-        vitals: &VitalsState,
-        cx: &mut Context<Shell>,
-    ) {
-        self.hud
-            .update(cx, |hud, cx| hud.show(connection.into(), vitals, cx));
+    pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
+        self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
+    }
+
+    #[cfg(test)]
+    pub fn show_sample_session(&self, session: SessionLabel, cx: &mut Context<Shell>) {
+        self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
+    }
+
+    #[cfg(test)]
+    pub fn open_session_menu(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.title_bar
+            .update(cx, |bar, cx| bar.open_menu(window, cx));
+    }
+
+    #[cfg(test)]
+    pub fn typed(&self, cx: &App) -> String {
+        self.input.read(cx).content().to_owned()
     }
 
     #[cfg(test)]
@@ -351,8 +378,8 @@ impl Render for Shell {
             );
         div()
             .size_full()
-            .relative()
             .flex()
+            .flex_col()
             .bg(theme.background)
             .text_color(theme.text)
             .font_family(UI_FONT)
@@ -365,9 +392,23 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
                 window.focus(&shell.input.focus_handle(cx), cx);
             }))
-            .child(self.left_dock.clone())
-            .child(column)
-            .child(self.right_dock.clone())
+            .on_action(|_: &FocusPreviousControl, window, cx| window.focus_prev(cx))
+            .capture_any_mouse_down(|event, window, cx| {
+                if title_bar::resize_from_edge(event.position, window) {
+                    cx.stop_propagation();
+                }
+            })
+            .child(self.title_bar.clone())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .child(self.left_dock.clone())
+                    .child(column)
+                    .child(self.right_dock.clone()),
+            )
     }
 }
 
@@ -552,15 +593,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn vitals_and_the_connection_reach_the_status_line(cx: &mut TestAppContext) {
+    fn vitals_and_the_connection_reach_the_hud_and_the_title_bar(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.say(&[IAC, WILL, GMCP]);
         played.say(&[IAC, SB, GMCP]);
         played.say(br#"Char.Vitals {"hp":11,"maxhp":30}"#);
         played.say(&[IAC, SE]);
         played.frames_until("the vitals", |shell, cx| {
-            let hud = shell.hud.read(cx);
-            hud.connection() == "Connected to 127.0.0.1" && hud.values() == ["11/30"]
+            shell.title_bar.read(cx).connection() == "Connected"
+                && shell.hud.read(cx).values() == ["11/30"]
         });
     }
 
@@ -794,7 +835,7 @@ mod tests {
             .into(),
         );
         shell.update(cx, |shell, cx| {
-            shell.show_sample_status("Connected to mud.example", &vitals, cx);
+            shell.show_sample_vitals(&vitals, cx);
             shell.open_panels(cx);
         });
         cx.run_until_parked();

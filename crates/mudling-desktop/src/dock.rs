@@ -243,7 +243,6 @@ impl Dock {
         cx.notify();
     }
 
-    #[cfg(test)]
     pub fn state(&self) -> DockState {
         self.state
     }

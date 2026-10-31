@@ -53,6 +53,17 @@ icons! {
     CollapseLeft => "collapse-left.svg",
     CollapseRight => "collapse-right.svg",
     Send => "send.svg",
+    PanelLeft => "panel-left.svg",
+    PanelRight => "panel-right.svg",
+    Sprocket => "sprocket.svg",
+    ChevronDown => "chevron-down.svg",
+    Signal => "signal.svg",
+    Check => "check.svg",
+    Runestone => "runestone.svg",
+    RunestoneCursor => "runestone-cursor.svg",
+    WindowMinimize => "window-minimize.svg",
+    WindowMaximize => "window-maximize.svg",
+    WindowClose => "window-close.svg",
 }
 
 impl Icon {

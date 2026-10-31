@@ -13,6 +13,7 @@ use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
 use crate::shell::Shell;
 use crate::theme::Theme;
+use crate::title_bar::{self, SessionLabel};
 use futures::channel::mpsc::unbounded;
 use gpui::{
     AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
@@ -71,7 +72,11 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
         (Vital::Moves, 110),
         (Vital::MaxMoves, 110),
     ]));
-    shell.show_sample_status("Connected to mud.example", &vitals, cx);
+    shell.show_sample_vitals(&vitals, cx);
+    shell.show_sample_session(
+        SessionLabel::new("mud.example", Some("Sample".into()), "Connected · 38 ms"),
+        cx,
+    );
 }
 
 /// Opens the window at `window_size`, lets `arrange` set it up, and saves what
@@ -90,6 +95,7 @@ fn render(
     cx.update(|cx| {
         load_fonts(cx);
         crate::input::bind_keys(cx);
+        title_bar::bind_keys(cx);
         cx.set_reduce_motion(true);
     });
     let (_waker, woken) = unbounded();
@@ -160,5 +166,15 @@ fn window_images() {
     });
     render("speedwalk-dark", Dark, WIDE, |shell, window, cx| {
         shell.type_sample("3n2e", window, cx);
+    });
+    render("title-bar-server-only-dark", Dark, WIDE, |shell, _, cx| {
+        shell.show_sample_session(SessionLabel::new("mud.example", None, "Connected"), cx);
+    });
+    render("title-bar-narrow-dark", Dark, NARROW, |_, _, _| {});
+    render("title-bar-menu-dark", Dark, WIDE, |shell, window, cx| {
+        shell.open_session_menu(window, cx);
+    });
+    render("title-bar-menu-light", Light, WIDE, |shell, window, cx| {
+        shell.open_session_menu(window, cx);
     });
 }
