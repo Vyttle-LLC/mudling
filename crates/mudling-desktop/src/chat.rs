@@ -16,10 +16,13 @@
 //! rows each wraps to. New lines are announced through a separate polite live
 //! region, so lines scrolling into view are never announced.
 
+mod find;
 mod lines;
 
 use crate::assets::Icon;
 use crate::theme::Theme;
+pub use find::CloseFind;
+use find::{Find, Results};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Context, Div, DragMoveEvent, ElementId, Entity,
     FontWeight, HighlightStyle, KeyBinding, Pixels, Role, ScrollEvent, SharedString, StyledText,
@@ -46,6 +49,8 @@ const LIVE_SHARES: std::ops::RangeInclusive<f32> = 0.15..=0.85;
 const DIVIDER_GRIP_HEIGHT: Pixels = px(9.);
 const CHIP_HEIGHT: Pixels = px(28.);
 const CONTEXT: &str = "ChatKeys";
+/// Added to [`CONTEXT`] while the find bar is open.
+const FIND_OPEN: &str = "find_open";
 
 actions!(chat, [BackToLive, PageBack, PageForward]);
 
@@ -59,13 +64,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", BackToLive, Some(CONTEXT)),
         KeyBinding::new("end", BackToLive, Some(CONTEXT)),
     ]);
+    find::bind_keys(cx);
 }
 
 /// Handles those keys on `root`, an ancestor of everything that takes focus:
 /// the chat itself never does, so typing stays in the command bar.
-pub fn handle_keys(root: Div, chat: &Entity<Chat>) -> Div {
+pub fn handle_keys(root: Div, chat: &Entity<Chat>, cx: &App) -> Div {
     let (back, forward, live) = (chat.clone(), chat.clone(), chat.clone());
-    root.key_context(CONTEXT)
+    let context = match chat.read(cx).find_is_open() {
+        true => format!("{CONTEXT} {FIND_OPEN}"),
+        false => CONTEXT.to_owned(),
+    };
+    root.key_context(context.as_str())
         .on_action(move |_: &PageBack, _, cx| back.update(cx, |chat, cx| chat.page_back(cx)))
         .on_action(move |_: &PageForward, _, cx| {
             forward.update(cx, |chat, cx| chat.page_forward(cx))
@@ -117,6 +127,7 @@ pub struct Chat {
     live_share: f32,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
+    find: Option<Find>,
 }
 
 impl Chat {
@@ -128,6 +139,7 @@ impl Chat {
             live_share: LIVE_SHARE,
             unannounced: Vec::new(),
             announcement: None,
+            find: None,
         }
     }
 
@@ -145,6 +157,7 @@ impl Chat {
                 .push(SharedString::from(line.plain().to_owned()));
         }
         self.terminal.apply_diff(diff);
+        self.keep_find_current(cx);
         cx.notify();
     }
 
@@ -153,6 +166,7 @@ impl Chat {
     pub fn echo_unsent(&mut self, command: &str, cx: &mut Context<Chat>) {
         let echo = TerminalChange::Append(vec![Line::command(command)]);
         self.terminal.write(&echo);
+        self.keep_find_current(cx);
         cx.notify();
     }
 
@@ -231,10 +245,12 @@ impl Chat {
 
     /// Opens the history pane with the line numbered `number` on top: how find
     /// shows a result. A line's number is [`Scrollback::evicted`] plus its
-    /// index. New lines count from the first time the split opened.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// index. A number past the newest line means the newest, and one already
+    /// trimmed the oldest. New lines count from the first time the split
+    /// opened.
     pub fn open_history_at(&mut self, number: u64, cx: &mut Context<Chat>) {
-        let position = LinePosition::reading_from(number);
+        let newest = self.next_line_number().saturating_sub(1);
+        let position = LinePosition::reading_from(number.min(newest));
         match &mut self.history {
             Some(history) => history.position = position,
             None => self.open_history(position),
@@ -299,6 +315,10 @@ impl Chat {
             (Pane::History, Some(history)) => &mut history.position,
             (Pane::History, None) => return Vec::new(),
         };
+        let found = match (pane, &self.find) {
+            (Pane::History, Some(find)) => find.results.as_ref(),
+            _ => None,
+        };
         let theme = *cx.global::<Theme>();
         let lines = self.terminal.value().lines();
         let evicted = lines.evicted();
@@ -314,7 +334,7 @@ impl Chat {
                     .get(index)
                     .expect("placed lines are in the scrollback");
                 let mut element =
-                    render_line(line, evicted + index as u64, &theme).into_any_element();
+                    render_line(line, evicted + index as u64, found, &theme).into_any_element();
                 let line_size = element.layout_as_root(space, window, cx);
                 (element, line_size)
             });
@@ -426,7 +446,13 @@ fn drawn_len(line: &Line) -> usize {
     line.plain().trim_end_matches(' ').len().max(painted_end)
 }
 
-fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
+/// One line, with what `found` found in it highlighted.
+fn render_line(
+    line: &Line,
+    number: u64,
+    found: Option<&Results>,
+    theme: &Theme,
+) -> impl IntoElement {
     let drawn = drawn_len(line);
     let highlights = line.styled().iter().map(|span| {
         let style = HighlightStyle {
@@ -438,8 +464,11 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
         (span.start as usize..(span.end as usize).min(drawn), style)
     });
     let highlights = highlights.filter(|(range, _)| !range.is_empty());
+    let matches = found.map_or_else(Vec::new, |found| {
+        found.paint(line.plain(), drawn, number, theme)
+    });
     let styled = StyledText::new(SharedString::from(line.plain()[..drawn].to_owned()))
-        .with_highlights(highlights.collect::<Vec<_>>());
+        .with_highlights(find::paint_matches(highlights.collect(), matches));
     let row = div()
         .id(ElementId::Integer(number))
         .role(Role::Label)
@@ -472,7 +501,13 @@ impl Render for Chat {
         let mut history = None;
         let mut divider = None;
         if let Some(open) = &self.history {
-            history = Some(self.pane(Pane::History, cx).flex_1().min_h_0().pt_4());
+            let pane = self.pane(Pane::History, cx);
+            history = Some(
+                pane.debug_selector(|| "chat-history".to_owned())
+                    .flex_1()
+                    .min_h_0()
+                    .pt_4(),
+            );
             divider = Some(self.divider(open, cx));
             live = live.flex_none().h(relative(self.live_share)).pt_2();
         } else {
@@ -497,24 +532,25 @@ impl Render for Chat {
                     chat.drag_divider(event.event.position.y, event.bounds, cx);
                 }),
             )
+            .children(self.find_bar(cx))
             .children(history)
             .child(live)
             .children(divider)
             .children(
                 self.announcement
                     .clone()
-                    .map(|(batch, text)| live_region(batch, text)),
+                    .map(|(batch, text)| live_region("new-lines", batch, text)),
             )
     }
 }
 
-/// A polite live region holding the newest lines. Each batch is a new node,
-/// so screen readers announce it even when the text repeats a line. The text
-/// is both the label and the value: the Windows and Linux adapters announce a
-/// status node's name (its label), while macOS announces its value.
-fn live_region(batch: u64, text: SharedString) -> impl IntoElement {
+/// A polite live region holding `text`. Each batch is a new node, so screen
+/// readers announce it even when the text repeats itself. The text is both the
+/// label and the value: the Windows and Linux adapters announce a status node's
+/// name (its label), while macOS announces its value.
+fn live_region(name: &'static str, batch: u64, text: SharedString) -> impl IntoElement {
     div()
-        .id(ElementId::NamedInteger("new-lines".into(), batch))
+        .id(ElementId::NamedInteger(name.into(), batch))
         .role(Role::Status)
         .aria_label(text.clone())
         .aria_value(text)
@@ -539,7 +575,7 @@ mod tests {
     use mudling_core::LinePipeline;
     use mudling_core::store::{Revision, TERMINAL_CAPACITY};
 
-    fn server_lines(texts: impl IntoIterator<Item = String>) -> Diff<TerminalState> {
+    pub(super) fn server_lines(texts: impl IntoIterator<Item = String>) -> Diff<TerminalState> {
         let mut pipeline = LinePipeline::default();
         let mut lines = Vec::new();
         for text in texts {
@@ -551,7 +587,7 @@ mod tests {
         }
     }
 
-    fn chat_window(
+    pub(super) fn chat_window(
         cx: &mut TestAppContext,
         history: usize,
     ) -> (Entity<Chat>, &mut VisualTestContext) {
@@ -586,7 +622,7 @@ mod tests {
         (chat, cx)
     }
 
-    fn is_split(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+    pub(super) fn is_split(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
         !chat.read_with(cx, |chat, _| chat.follows_newest())
     }
 
@@ -600,7 +636,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    fn push(chat: &mut Chat, count: usize, cx: &mut Context<Chat>) {
+    pub(super) fn push(chat: &mut Chat, count: usize, cx: &mut Context<Chat>) {
         chat.apply(&server_lines((0..count).map(|n| format!("new {n}"))), cx);
     }
 
@@ -789,6 +825,35 @@ mod tests {
         chat.read_with(cx, |chat, _| {
             assert_eq!(chat.new_lines(chat.history.as_ref().unwrap()), 2);
         });
+    }
+
+    #[gpui::test]
+    fn opening_the_pane_past_the_newest_line_opens_it_on_the_newest(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 1_000);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.open_history_at(5_000, cx));
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), "history line 999");
+    }
+
+    #[gpui::test]
+    fn opening_the_pane_on_an_empty_scrollback_leaves_nothing_open(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 0);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.open_history_at(5, cx));
+        cx.run_until_parked();
+        assert!(!is_split(&chat, cx));
+    }
+
+    #[gpui::test]
+    fn opening_the_pane_on_a_trimmed_line_opens_it_on_the_oldest(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, TERMINAL_CAPACITY);
+        chat.update(cx, |chat, cx| {
+            push(chat, 10, cx);
+            chat.open_history_at(3, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), "history line 10");
     }
 
     #[gpui::test]

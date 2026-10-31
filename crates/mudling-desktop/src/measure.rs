@@ -21,6 +21,10 @@
 //!
 //! `--settings-open` runs all of this with the settings sheet open.
 //!
+//! `--find-open` opens the find bar as `stream` starts, with results showing
+//! from then on: the newest opens in the history pane, so `stream` is split
+//! too. The time from typing to the results goes in the report, to the frame.
+//!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
 //! Lines are due by the clock, so the pace stays exact either way.
@@ -67,6 +71,8 @@ const REWRAP_DRAG: f32 = 60.;
 const SCROLL_STEP: f32 = 30.;
 /// How far back the split opens: more than a window of history.
 const SPLIT_DISTANCE: f32 = 2_000.;
+/// Common in any English text, so results are on screen and many.
+const FIND_TEXT: &str = "the";
 
 /// A filled Room panel's room, what the map remembers and what's in it.
 pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
@@ -201,10 +207,36 @@ struct Pacer {
     started: Instant,
     stream_started: Option<Instant>,
     lines_sent: u64,
+    find_open: bool,
+    /// When the find text went in, until its results show.
+    find_started: Option<Instant>,
     _no_app_nap: ActivityGuard,
 }
 
 impl Pacer {
+    fn start_find(&mut self, window: &mut Window, cx: &mut App) {
+        self.find_started = Some(Instant::now());
+        self.shell
+            .update(cx, |shell, cx| shell.open_find(window, cx));
+        self.chat.update(cx, |chat, cx| {
+            chat.type_in_find(FIND_TEXT, window, cx);
+        });
+    }
+
+    /// Reports the search once it's done.
+    fn note_find_results(&mut self, cx: &App) {
+        let Some(count) = self.chat.read(cx).find_count() else {
+            return;
+        };
+        if let Some(started) = self.find_started.take() {
+            mark(&format!(
+                "info find_ms={:.2}",
+                started.elapsed().as_secs_f64() * 1e3
+            ));
+            mark(&format!("info find_results={count}"));
+        }
+    }
+
     /// Runs once per display frame, before gpui decides whether to draw.
     fn on_frame(mut self, window: &mut Window, cx: &mut App) {
         if self.phase == Phase::Load {
@@ -252,6 +284,9 @@ impl Pacer {
                 Phase::Scroll => "phase scroll",
                 Phase::Rewrap => "phase rewrap",
             });
+            if phase == Phase::Stream && self.find_open {
+                self.start_find(window, cx);
+            }
             if phase == Phase::Split {
                 self.chat
                     .update(cx, |chat, cx| chat.scroll_back(px(SPLIT_DISTANCE), cx));
@@ -261,6 +296,7 @@ impl Pacer {
                     .update(cx, |dock, cx| dock.move_to(DockState::Hidden, cx));
             }
         }
+        self.note_find_results(cx);
         if phase != Phase::Settle {
             let stream_started = *self.stream_started.get_or_insert_with(Instant::now);
             let due = (stream_started.elapsed().as_secs_f64() * self.lines_per_second) as u64;
@@ -297,8 +333,8 @@ pub fn drive(
     shell: Entity<Shell>,
     launched: Instant,
     feed: ReplayFeed,
-    lines_per_second: f64,
-    stream_for: Duration,
+    (lines_per_second, stream_for): (f64, Duration),
+    find_open: bool,
     cx: &mut App,
 ) {
     let pacer = Pacer {
@@ -312,6 +348,8 @@ pub fn drive(
         started: Instant::now(),
         stream_started: None,
         lines_sent: 0,
+        find_open,
+        find_started: None,
         _no_app_nap: cx
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
@@ -340,6 +378,7 @@ struct FrameReport {
     load_average_1m: Option<f64>,
     scope: &'static str,
     settings_open: bool,
+    find_open: bool,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -422,6 +461,7 @@ pub fn run_parent(
         scope: "chat, command bar and both side panels open, the Room panel and the hotbar filled; \
                 the chat split from the split phase on",
         settings_open: child_args.iter().any(|arg| arg == "--settings-open"),
+        find_open: child_args.iter().any(|arg| arg == "--find-open"),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -459,6 +499,10 @@ fn print_report(report: &FrameReport) {
         } else {
             "closed"
         }
+    );
+    println!(
+        "find bar: {}",
+        if report.find_open { "open" } else { "closed" }
     );
     for (phase, summary) in &report.phases {
         println!(
