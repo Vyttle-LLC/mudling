@@ -31,12 +31,16 @@
 //! they both found. A union runs only while the copies are on one side each, so
 //! such a duplicate stays until the player joins the two rooms by hand.
 
-use crate::map::{RoomId, UNNUMBERED_IDS};
-use crate::persist::{Key, MapRows, Timestamp, Tombstone};
+use crate::map::{CURRENT_ROOM, RoomId, UNNUMBERED_IDS};
+use crate::persist::{Batch, Change, Key, MapRows, Record, Timestamp, Tombstone};
 use crate::repo::format::ServerRows;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 type Identity<'a> = (&'a str, &'a str, &'a str, BTreeSet<&'a str>);
+
+/// Rooms gone from a server, each with the room that took its place, or `None`
+/// if the room was deleted.
+pub type RoomMoves = BTreeMap<RoomId, Option<RoomId>>;
 
 /// Moves both sides onto one id for each room they share, so the merge after
 /// this sees two copies of one record.
@@ -65,6 +69,105 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
         }
     }
     ours.tombstones.extend(retired);
+}
+
+/// The rooms in `before` that `after` no longer holds, each with the room that
+/// took its place: the one that reads alike, whichever device united them. A
+/// room with no such match was deleted, and maps to `None`.
+pub(super) fn retired_rooms(before: &ServerRows, after: &ServerRows) -> RoomMoves {
+    let held = room_ids(after);
+    let mut gone: RoomMoves = before
+        .map
+        .rooms
+        .iter()
+        .filter(|room| !held.contains(&room.id))
+        .map(|room| (room.id, None))
+        .collect();
+    if gone.is_empty() {
+        return gone;
+    }
+    let successors = identities(after);
+    for (identity, ids) in identities(before) {
+        let Some([kept]) = successors.get(&identity).map(Vec::as_slice) else {
+            continue;
+        };
+        for id in ids {
+            if let Some(place) = gone.get_mut(&id) {
+                *place = Some(*kept);
+            }
+        }
+    }
+    gone
+}
+
+/// Puts `moves` on rows a session wrote while its rooms were being merged:
+/// what it wrote about a retired room lands on the room that took its place,
+/// and what it wrote about a deleted room goes, so a child with no parent can't
+/// fail the whole batch.
+pub(crate) fn repoint_batch(batch: &mut Batch, moves: &RoomMoves) {
+    if moves.is_empty() {
+        return;
+    }
+    batch.changes.retain_mut(|change| match change {
+        Change::Upsert(record) => repoint_record(record, moves),
+        Change::Delete { key, .. } => match key {
+            Key::Room(id) => !moves.contains_key(id),
+            key => repoint_owned_key(key, moves),
+        },
+        _ => true,
+    });
+}
+
+/// Moves one record off retired rooms. `false` if it has nothing to hang off.
+fn repoint_record(record: &mut Record, moves: &RoomMoves) -> bool {
+    let moved = |id: &mut RoomId| match moves.get(id) {
+        Some(Some(kept)) => {
+            *id = *kept;
+            true
+        }
+        Some(None) => false,
+        None => true,
+    };
+    match record {
+        Record::Room(room) => {
+            room.building.take_if(|building| !moved(building));
+            moved(&mut room.id)
+        }
+        Record::Exit(row) => moved(&mut row.room_id),
+        Record::Link(row) => moved(&mut row.room_id) && moved(&mut row.to_room),
+        Record::Doorway(row) => moved(&mut row.room_id),
+        Record::RoomNote(row) => moved(&mut row.room_id),
+        Record::RoomFeature(row) => moved(&mut row.room_id),
+        Record::Sighting(row) => moved(&mut row.room_id),
+        Record::Meta(row) if row.key == CURRENT_ROOM => {
+            let id = row.value.parse::<RoomId>();
+            match id.ok().map(|id| moves.get(&id)) {
+                Some(Some(Some(kept))) => row.value = kept.to_string(),
+                Some(Some(None)) => return false,
+                _ => {}
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+/// The same for the key of something in a room.
+fn repoint_owned_key(key: &mut Key, moves: &RoomMoves) -> bool {
+    if let Key::Exit { room_id, .. }
+    | Key::Link { room_id, .. }
+    | Key::Doorway { room_id, .. }
+    | Key::RoomNote(room_id)
+    | Key::RoomFeature { room_id, .. }
+    | Key::Sighting { room_id, .. } = key
+        && let Some(moved) = moves.get(room_id)
+    {
+        let Some(kept) = moved else {
+            return false;
+        };
+        *room_id = *kept;
+    }
+    true
 }
 
 /// Each higher id, with the lower id it's one room with.

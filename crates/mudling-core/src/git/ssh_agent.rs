@@ -3,8 +3,8 @@
 //! An app opened from the Finder inherits launchd's `SSH_AUTH_SOCK`, an empty
 //! agent, even when 1Password's agent holds the player's keys. libssh2 reads
 //! only that variable, so when another agent is the one with keys, the variable
-//! is pointed at it. On Windows every agent shares one named pipe, which libssh2
-//! finds itself.
+//! is pointed at it, once, at startup: see [`prepare`](super::prepare). On
+//! Windows every agent shares one named pipe, which libssh2 finds itself.
 
 use directories::BaseDirs;
 use std::env;
@@ -32,10 +32,9 @@ pub(super) fn select() {
 
 #[allow(unsafe_code)]
 fn point_libssh2_at(agent: &Path) {
-    // SAFETY: not proven. A C `getenv` on another thread at this instant would
-    // race. That risk is accepted because this runs only while signing in over
-    // SSH and only when the agent changed, and the variable is the only way to
-    // give libssh2 a socket through git2.
+    // SAFETY: `prepare`'s caller runs this before any other thread exists, so
+    // nothing can read the environment at this instant. The variable is the
+    // only way to give libssh2 a socket through git2.
     unsafe { env::set_var(AUTH_SOCK, agent) };
 }
 

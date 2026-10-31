@@ -14,6 +14,7 @@ use crate::defaults::hud::{self, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
 use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
+use crate::merge::{RoomMoves, repoint_batch};
 use crate::net::DisconnectReason;
 use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
 use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
@@ -29,12 +30,13 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io;
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Under the data folder, one database per server.
-const SERVERS_FOLDER: &str = "servers";
+pub(crate) const SERVERS_FOLDER: &str = "servers";
 /// Who the session plays when no credentials name a character.
 const UNNAMED_CHARACTER: &str = "player";
 /// GMCP modules every server is asked for.
@@ -71,9 +73,9 @@ impl HookSink for HookOutputs {
 }
 
 /// One server's session, for a core thread. Lines and moves keep to memory
-/// and queue their disk writes on the writer threads; opening, finishing, and
-/// an override coming on with the server's name (which reloads the map) wait
-/// on the disk.
+/// and queue their disk writes on the writer threads; opening, finishing, a
+/// merge landing, and an override coming on with the server's name (each of
+/// those two reloads the map) wait on the disk.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -97,6 +99,8 @@ pub struct Engine {
     terminal: Vec<Line>,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
+    /// Rows waiting out a merge, while one lands.
+    held: Option<Batch>,
     output: Vec<u8>,
     lines: Vec<Line>,
     events: Vec<PluginEvent>,
@@ -163,6 +167,7 @@ impl Engine {
             hud_fields: Memo::default(),
             terminal: Vec::new(),
             batch: Batch::new(),
+            held: None,
             output: Vec::new(),
             lines: Vec::new(),
             events: Vec::new(),
@@ -220,6 +225,9 @@ impl Engine {
     pub fn connected(&mut self) {
         self.settings.connection = ConnectionStatus::Connected;
         self.publish_settings();
+        if let Some(sync) = &self.config.sync {
+            sync.connected();
+        }
     }
 
     /// The server's next bytes, in any chunking. Corrupt compressed data
@@ -367,11 +375,76 @@ impl Engine {
             link.hooks.wait_until_idle();
         }
         self.settle(now);
+        let was_connected = self.settings.connection == ConnectionStatus::Connected;
         self.link = None;
         self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
         self.publish_settings();
+        if let Some(sync) = self.config.sync.as_ref().filter(|_| was_connected) {
+            // Sync exports only once the session's last rows are in.
+            let (drained, last_rows_in) = sync_channel(1);
+            if self.writer.notify_when_drained(drained).is_ok() {
+                sync.disconnected(last_rows_in);
+            }
+        }
+    }
+
+    /// Sends what's queued for the database on its way, and keeps later rows
+    /// here until [`Engine::release_writes`]. `drained` answers once the queue
+    /// is done, with no waiting on this thread.
+    pub(super) fn hold_writes(&mut self, drained: SyncSender<()>) {
+        self.held.get_or_insert_default();
+        if let Err(error) = self.writer.notify_when_drained(drained) {
+            self.notice(error.to_string());
+        }
+    }
+
+    pub(super) fn is_holding_writes(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// A merge has landed: writes what was held, moved off any retired room,
+    /// and rebuilds the map from the database. Rows of the merge's window reach
+    /// the disk first so the new map holds them. This waits on the disk, which
+    /// only a merge during play costs.
+    pub(super) fn release_writes(&mut self, moves: &RoomMoves) {
+        self.settle(Timestamp::now());
+        let Some(mut held) = self.held.take() else {
+            return;
+        };
+        repoint_batch(&mut held, moves);
+        self.submit(held);
+        if let Err(error) = self
+            .writer
+            .flush()
+            .map_err(SessionError::from)
+            .and_then(|()| self.reload_map())
+        {
+            self.notice(error.to_string());
+        }
+    }
+
+    /// Replaces the map with what the database holds, for a merge it can't
+    /// have seen. Views lose the rooms that are gone.
+    fn reload_map(&mut self) -> Result<(), SessionError> {
+        let revision = self.map.revision();
+        self.load_saved()?;
+        self.map.follows_revision(revision);
+        let removed = self.hub.read(|map: &Versioned<MapState>| {
+            map.value()
+                .rooms()
+                .map(|room| room.id)
+                .filter(|id| !self.map.holds(*id))
+                .collect()
+        });
+        self.hub.write::<MapState>(MapChange {
+            removed,
+            whereabouts: Some(self.map.whereabouts()),
+            revision: self.map.revision(),
+            ..MapChange::default()
+        });
+        Ok(())
     }
 
     /// The connection can't go on: closes it, saying why.
@@ -386,6 +459,9 @@ impl Engine {
             self.close_connection(DisconnectReason::ClosedByClient, now);
         }
         self.settle(now);
+        if let Some(held) = self.held.take() {
+            self.submit(held);
+        }
         let flushed = self.writer.flush();
         let saved = self.history_writer.finish();
         flushed?;
@@ -791,6 +867,10 @@ impl Engine {
     }
 
     fn submit(&mut self, batch: Batch) {
+        if let Some(held) = &mut self.held {
+            held.extend(batch);
+            return;
+        }
         let queued = !batch.is_empty();
         if let Err(error) = self.writer.submit(batch) {
             self.notice(error.to_string());

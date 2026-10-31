@@ -1,7 +1,8 @@
 //! Merging two commits' files into the files of one.
 
-use super::Error;
 use super::records::merge_server;
+use super::rooms::retired_rooms;
+use super::{Error, Retired};
 use crate::git::Files;
 use crate::repo::format::{
     MANIFEST, SERVERS, SETTINGS, ServerList, ServerRows, check_manifest, is_record_file, json,
@@ -96,8 +97,26 @@ pub(super) fn check_format(files: &Files) -> Result<(), repo::Error> {
     check_manifest(files.get(Path::new(MANIFEST)).map(Vec::as_slice))
 }
 
+/// The rooms `before` holds that `after` doesn't, by server. A server `after`
+/// doesn't list stays on this device, so its rooms stay too.
+pub(super) fn retired(before: &Files, after: &Files) -> Result<Retired, repo::Error> {
+    let after = servers(after)?;
+    let mut retired = Retired::new();
+    for (id, (rows, _)) in servers(before)? {
+        if let Some((merged, _)) = after.get(&id) {
+            let moves = retired_rooms(&rows, merged);
+            if !moves.is_empty() {
+                retired.insert(id, moves);
+            }
+        }
+    }
+    Ok(retired)
+}
+
 /// One side's servers by id, each with its folder.
-fn servers(files: &Files) -> Result<BTreeMap<String, (ServerRows, PathBuf)>, repo::Error> {
+pub(crate) fn servers(
+    files: &Files,
+) -> Result<BTreeMap<String, (ServerRows, PathBuf)>, repo::Error> {
     let mut list: ServerList = match files.get(Path::new(SERVERS)) {
         Some(bytes) => parse(Path::new(SERVERS), bytes)?,
         None => ServerList::default(),

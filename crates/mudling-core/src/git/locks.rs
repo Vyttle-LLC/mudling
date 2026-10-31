@@ -70,23 +70,32 @@ pub(super) fn clear_after_crash(git_dir: &Path) {
 
 /// Removes `.lock` files made at or after `since`. One that can't be removed
 /// is still held, which on Windows is how a live holder shows.
-fn remove_locks_since(dir: &Path, since: SystemTime) {
+fn remove_locks_since(git_dir: &Path, since: SystemTime) {
+    for lock in locks_in(git_dir) {
+        if modified(&lock).is_some_and(|made| made >= since) {
+            let _ = fs::remove_file(lock);
+        }
+    }
+}
+
+/// Every `.lock` file under `dir`.
+pub(super) fn locks_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
+    let mut locks = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             // Object files are immutable and take no locks, and there are many.
             if path.file_name().is_none_or(|name| name != "objects") {
-                remove_locks_since(&path, since);
+                locks.extend(locks_in(&path));
             }
-        } else if path.extension().is_some_and(|ext| ext == "lock")
-            && modified(&path).is_some_and(|made| made >= since)
-        {
-            let _ = fs::remove_file(path);
+        } else if path.extension().is_some_and(|ext| ext == "lock") {
+            locks.push(path);
         }
     }
+    locks
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {

@@ -666,6 +666,84 @@ fn look_alikes_all_stay_when_either_side_has_more_than_one() {
 }
 
 #[test]
+fn a_retired_current_room_leaves_the_player_in_the_room_that_stayed() {
+    let hub: &[&str] = &["n"];
+    let (_folder, mac, ipad) = two_explorers_at_a_hub(hub);
+    let walk: &[Step<'_>] = &[(None, "A hub", hub), (Some("n"), "A quiet road", &["s"])];
+    mac.walk(walk);
+    ipad.walk(walk);
+    let mac_road = road_of(&mac);
+    let ipad_road = road_of(&ipad);
+    let (kept, retired) = (mac_road.min(ipad_road), mac_road.max(ipad_road));
+    let (loser, winner) = if mac_road == retired {
+        (&mac, &ipad)
+    } else {
+        (&ipad, &mac)
+    };
+    winner.sync();
+    loser.commit_local();
+    let theirs = loser.fetch().unwrap();
+    let merge = prepare(&loser.git, &loser.repo, theirs).unwrap().unwrap();
+
+    assert_eq!(
+        merge.retired()[SERVER],
+        RoomMoves::from([(retired, Some(kept))])
+    );
+    land(&loser.git, &loser.repo, &merge, &loser.stores()).unwrap();
+
+    assert_eq!(loser.map().whereabouts().room, Some(kept));
+}
+
+#[test]
+fn rows_a_session_wrote_during_a_merge_land_on_the_room_that_stayed() {
+    let moves = RoomMoves::from([(5, Some(1)), (6, None)]);
+    let mut batch = Batch::new();
+    batch.upsert(room(5, "Retired", T1));
+    batch.upsert(exit(5, T1));
+    batch.upsert(exit(6, T1));
+    batch.upsert(Link {
+        room_id: 5,
+        direction: "north".to_owned(),
+        to_room: 6,
+        updated: T1,
+    });
+    batch.upsert(Link {
+        room_id: 2,
+        direction: "south".to_owned(),
+        to_room: 5,
+        updated: T1,
+    });
+    batch.upsert(Meta {
+        key: CURRENT_ROOM.to_owned(),
+        value: "5".to_owned(),
+        updated: T1,
+    });
+    batch.delete(Key::Room(5));
+    batch.delete(Key::RoomNote(6));
+
+    repoint_batch(&mut batch, &moves);
+
+    let mut expected = Batch::new();
+    expected.upsert(Room {
+        id: 1,
+        ..room(5, "Retired", T1)
+    });
+    expected.upsert(exit(1, T1));
+    expected.upsert(Link {
+        room_id: 2,
+        direction: "south".to_owned(),
+        to_room: 1,
+        updated: T1,
+    });
+    expected.upsert(Meta {
+        key: CURRENT_ROOM.to_owned(),
+        value: "1".to_owned(),
+        updated: T1,
+    });
+    assert_eq!(batch, expected);
+}
+
+#[test]
 fn a_room_with_a_game_number_is_never_united() {
     let (_folder, mac, ipad) = two_explorers();
     mac.apply(|batch| {
@@ -1188,7 +1266,7 @@ fn a_kill_at_any_step_of_a_merge_leaves_both_sides_whole() {
                 .unwrap(),
         }
         if matches!(killed, Killed::AfterTheImport | Killed::AfterTheBranch) {
-            import(&device.repo, &device.stores()).unwrap();
+            import(&device.repo, &device.stores(), merge.retired()).unwrap();
         }
         if matches!(killed, Killed::AfterTheBranch) {
             device

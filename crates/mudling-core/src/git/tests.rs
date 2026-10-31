@@ -187,6 +187,46 @@ fn a_server_rejecting_a_push_is_told_apart_from_being_ahead() {
 }
 
 #[test]
+fn a_push_that_loses_a_race_on_the_server_is_told_as_the_remote_being_ahead() {
+    let lost = [
+        "cannot lock ref 'refs/heads/main': is at 1 but expected 2",
+        "failed to update ref",
+        "fetch first",
+    ];
+    for reason in lost {
+        let error = push_rejected(reason.to_owned());
+        assert!(matches!(error, GitError::NonFastForward(_)), "{reason}");
+    }
+    let refused = push_rejected("pre-receive hook declined".to_owned());
+    assert!(matches!(refused, GitError::RemoteRefused(_)));
+}
+
+#[test]
+fn a_session_starts_after_the_last_finished_commit_or_what_the_remote_holds() {
+    let devices = two_devices();
+    let Device { folder, repo } = &devices.a;
+    let pushed = commit(repo, folder, "a", "1");
+    repo.push("origin", "main").unwrap();
+    let session = |name: &str| {
+        write(folder, name, "1");
+        repo.commit_all("Checkpoint").unwrap().unwrap()
+    };
+    session("b");
+    assert_eq!(
+        repo.session_start("origin", "main", "Checkpoint").unwrap(),
+        Some(pushed)
+    );
+
+    let finished = commit(repo, folder, "c", "1");
+    session("d");
+    session("e");
+    assert_eq!(
+        repo.session_start("origin", "main", "Checkpoint").unwrap(),
+        Some(finished)
+    );
+}
+
+#[test]
 fn squash_folds_a_session_into_one_commit_with_the_same_files() {
     let (folder, repo) = empty_repo();
     let base = commit(&repo, folder.path(), "a.json", "1");
@@ -413,9 +453,23 @@ fn answering_server(answer: &'static str) -> (u16, mpsc::Receiver<Option<String>
 
 #[test]
 fn a_reachable_server_saying_no_is_a_refusal_not_a_lost_network() {
+    let (port, _requests) = answering_server("404 Not Found\r\nContent-Length: 0");
+    let (_folder, repo) = empty_repo();
+    repo.repo
+        .remote("origin", &format!("http://127.0.0.1:{port}/r.git"))
+        .unwrap();
+
+    let failure = repo.fetch("origin", "main").unwrap_err();
+
+    assert!(matches!(failure, GitError::RemoteRefused(_)), "{failure:?}");
+}
+
+#[test]
+fn a_server_in_passing_trouble_is_not_a_refusal() {
     for answer in [
-        "404 Not Found\r\nContent-Length: 0",
         "500 Internal Server Error\r\nContent-Length: 0",
+        "503 Service Unavailable\r\nContent-Length: 0",
+        "429 Too Many Requests\r\nContent-Length: 0",
     ] {
         let (port, _requests) = answering_server(answer);
         let (_folder, repo) = empty_repo();
@@ -426,7 +480,7 @@ fn a_reachable_server_saying_no_is_a_refusal_not_a_lost_network() {
         let failure = repo.fetch("origin", "main").unwrap_err();
 
         assert!(
-            matches!(failure, GitError::RemoteRefused(_)),
+            matches!(failure, GitError::Unavailable(_)),
             "{answer}: {failure:?}"
         );
     }

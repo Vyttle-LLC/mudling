@@ -101,6 +101,12 @@ impl Writer {
         }
     }
 
+    /// Answers on `done` once every batch queued so far is committed or has
+    /// failed. This returns at once, and leaves failures for the next collection.
+    pub(crate) fn notify_when_drained(&self, done: SyncSender<()>) -> Result<(), Error> {
+        self.send(Message::Flush(done))
+    }
+
     fn send(&self, message: Message) -> Result<(), Error> {
         let sender = self.sender.as_ref().expect("the sender lives until drop");
         sender.send(message).map_err(|_| Error::WriterStopped)

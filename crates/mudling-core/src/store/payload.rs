@@ -11,9 +11,12 @@ use crate::defaults::hud::Vital;
 use crate::line::Line;
 use crate::map::{MapChange, MapRoom, Mark, MarkChange, RoomId, Whereabouts};
 use crate::net::DisconnectReason;
+use crate::persist::Timestamp;
 use crate::plugin::luau::Value;
+use crate::repo::AppSettings;
 use crate::scrollback::Scrollback;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// How many lines the terminal store holds (PRD §6: 100,000 lines).
@@ -250,7 +253,28 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, SettingsState);
+/// How sync stands, for Data & sync and the sprocket badge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SyncState {
+    /// The repo in use; `None` keeps everything local.
+    pub repo: Option<PathBuf>,
+    /// A sync is running now.
+    pub syncing: bool,
+    /// When a sync last finished.
+    pub last_sync: Option<Timestamp>,
+    /// What the last sync that changed anything changed, in a line.
+    pub changed: Option<String>,
+    /// Sessions on this device the remote hasn't got yet.
+    pub unsynced: usize,
+    /// What's stopping sync, in plain words. Never quotes a secret.
+    pub problem: Option<String>,
+    /// The settings the app should use: a merge may have brought newer ones.
+    pub settings: AppSettings,
+    /// Where `secrets.vault` lives now, for the app to open it there.
+    pub vault_file: PathBuf,
+}
+
+whole_value_stores!(RoomState, MobsState, SettingsState, SyncState);
 
 #[cfg(test)]
 mod tests {

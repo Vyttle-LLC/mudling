@@ -22,6 +22,7 @@ pub(super) fn write_changed(
             continue;
         }
         write_atomically(&path, bytes).map_err(|error| Error::io(&path, error))?;
+        crate::sync::kill::file_written();
         written.push(relative.clone());
     }
     Ok(written)

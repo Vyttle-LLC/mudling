@@ -176,7 +176,7 @@ struct TombstonesFile {
 }
 
 /// Everything the repo keeps from one server's database.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ServerRows {
     pub servers: Vec<Server>,
     pub meta: Vec<Meta>,

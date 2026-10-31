@@ -5,6 +5,13 @@
 //! whole life, so one sync thread should own it. Every step is safe to repeat:
 //! a failure is a typed [`GitError`] and loses nothing, and a crash between
 //! steps leaves the repo valid.
+//!
+//! Network steps run on a thread of their own, with a handle of their own, so
+//! a [`Limit`] can end the wait for anything: a stalled server, a helper, or an
+//! agent waiting on a finger. A step given up on may still finish later, which
+//! is harmless: a fetch moves a tracking ref, and a push is one atomic step.
+//!
+//! Call [`prepare`] once at startup.
 
 mod credentials;
 mod error;
@@ -26,6 +33,11 @@ use git2::{
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub type Result<T> = std::result::Result<T, GitError>;
 
@@ -37,6 +49,61 @@ const REGULAR_FILE: u32 = 0o100_644;
 /// Commits made on a machine with no git identity set up.
 const FALLBACK_NAME: &str = "MUDling";
 const FALLBACK_EMAIL: &str = "mudling@localhost";
+/// How long [`Repo::fetch`] and [`Repo::push`] wait with no limit of their own.
+const NETWORK_LIMIT: Duration = Duration::from_secs(60);
+/// libgit2's own socket limits, so a thread given up on doesn't stay for good.
+const CONNECT_TIMEOUT_MS: i32 = 15_000;
+const SOCKET_TIMEOUT_MS: i32 = 30_000;
+/// How often a wait for a network step looks at its limit.
+const LIMIT_POLL: Duration = Duration::from_millis(20);
+/// How a server words a push that lost a race: another push moved the branch
+/// after this one read it, so the server's update of the ref failed.
+const LOST_RACE: [&str; 4] = [
+    "non-fast-forward",
+    "fetch first",
+    "cannot lock ref",
+    "failed to update ref",
+];
+
+/// Sets what must be set while no other thread can see it: libgit2's socket
+/// timeouts, and which ssh-agent signs in. An app calls this once, first thing
+/// in `main`. It may wait a moment on an agent that's slow to answer.
+#[allow(unsafe_code)]
+pub fn prepare() {
+    // SAFETY: the caller runs this before any thread exists, so nothing is
+    // using libgit2's options yet.
+    unsafe {
+        let _ = git2::opts::set_server_connect_timeout_in_milliseconds(CONNECT_TIMEOUT_MS);
+        let _ = git2::opts::set_server_timeout_in_milliseconds(SOCKET_TIMEOUT_MS);
+    }
+    #[cfg(unix)]
+    ssh_agent::select();
+}
+
+/// When to stop waiting for a network step: at a deadline, or as soon as
+/// someone raises the flag.
+#[derive(Clone, Debug)]
+pub struct Limit {
+    deadline: Instant,
+    stop: Arc<AtomicBool>,
+}
+
+impl Limit {
+    pub fn after(wait: Duration) -> Limit {
+        Limit::stopped_by(wait, Arc::default())
+    }
+
+    pub fn stopped_by(wait: Duration, stop: Arc<AtomicBool>) -> Limit {
+        Limit {
+            deadline: Instant::now() + wait,
+            stop,
+        }
+    }
+
+    pub fn is_up(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+    }
+}
 
 pub struct Repo {
     repo: Repository,
@@ -108,41 +175,143 @@ impl Repo {
         Ok(Some(id))
     }
 
-    /// Fetches `branch` from `remote`, returning its tip there, or `None` if
-    /// the remote doesn't have it yet. Local branches don't move.
+    /// [`Repo::fetch_within`] with the usual limit.
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<Option<Oid>> {
-        let _writing = self.mark_write()?;
-        let tracking = tracking_ref(remote, branch);
-        let refspec = format!("+{}:{tracking}", local_ref(branch));
-        let mut options = FetchOptions::new();
-        options.remote_callbacks(credentials::machine_callbacks(self.repo.config()?));
-        self.repo
-            .find_remote(remote)?
-            .fetch(&[refspec], Some(&mut options), None)?;
-        self.tip(&tracking)
+        self.fetch_within(remote, branch, &Limit::after(NETWORK_LIMIT))
+    }
+
+    /// Fetches `branch` from `remote`, returning its tip there, or `None` if
+    /// the remote doesn't have it yet. Local branches don't move. Fails with
+    /// [`GitError::TimedOut`] if `limit` comes first.
+    pub fn fetch_within(&self, remote: &str, branch: &str, limit: &Limit) -> Result<Option<Oid>> {
+        let (remote_name, branch_name) = (remote.to_owned(), branch.to_owned());
+        let helpers = limit.clone();
+        self.off_thread(limit, move |repo| {
+            let _writing = locks::WriteMarker::set(repo.commondir())?;
+            let tracking = tracking_ref(&remote_name, &branch_name);
+            let refspec = format!("+{}:{tracking}", local_ref(&branch_name));
+            let mut options = FetchOptions::new();
+            options.remote_callbacks(credentials::machine_callbacks(repo.config()?, helpers));
+            repo.find_remote(&remote_name)?
+                .fetch(&[refspec], Some(&mut options), None)?;
+            Ok(())
+        })?;
+        self.tip(&tracking_ref(remote, branch))
+    }
+
+    /// [`Repo::push_within`] with the usual limit.
+    pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
+        self.push_within(remote, branch, &Limit::after(NETWORK_LIMIT))
     }
 
     /// Pushes `branch` to `remote`, which takes it in one atomic step or not at
-    /// all. Fails with [`GitError::NonFastForward`] if the remote is ahead, and
-    /// with [`GitError::PasswordInFile`], reaching no network, if any commit
-    /// the remote lacks holds a password outside `secrets.vault`.
-    pub fn push(&self, remote: &str, branch: &str) -> Result<()> {
+    /// all. Fails with [`GitError::NonFastForward`] if the remote is ahead,
+    /// even if it only got there during this push, and with
+    /// [`GitError::PasswordInFile`], reaching no network, if any commit the
+    /// remote lacks holds a password outside `secrets.vault`.
+    pub fn push_within(&self, remote: &str, branch: &str, limit: &Limit) -> Result<()> {
         self.refuse_passwords(remote, branch)?;
-        let _writing = self.mark_write()?;
+        let remote = remote.to_owned();
         let name = local_ref(branch);
-        let mut rejection = None;
-        let mut callbacks = credentials::machine_callbacks(self.repo.config()?);
-        callbacks.push_update_reference(|_, status| {
-            rejection = status.map(str::to_owned);
-            Ok(())
-        });
-        let mut options = PushOptions::new();
-        options.remote_callbacks(callbacks);
-        self.repo
-            .find_remote(remote)?
-            .push(&[format!("{name}:{name}")], Some(&mut options))?;
-        drop(options);
-        rejection.map_or(Ok(()), |reason| Err(push_rejected(reason)))
+        let helpers = limit.clone();
+        self.off_thread(limit, move |repo| {
+            let _writing = locks::WriteMarker::set(repo.commondir())?;
+            let mut rejection = None;
+            let mut callbacks = credentials::machine_callbacks(repo.config()?, helpers);
+            callbacks.push_update_reference(|_, status| {
+                rejection = status.map(str::to_owned);
+                Ok(())
+            });
+            let mut options = PushOptions::new();
+            options.remote_callbacks(callbacks);
+            repo.find_remote(&remote)?
+                .push(&[format!("{name}:{name}")], Some(&mut options))?;
+            drop(options);
+            rejection.map_or(Ok(()), |reason| Err(push_rejected(reason)))
+        })
+    }
+
+    /// Runs `work` on a thread with a handle of its own, and waits for it
+    /// until `limit` is up. The thread is then left to end by itself.
+    fn off_thread<T: Send + 'static>(
+        &self,
+        limit: &Limit,
+        work: impl FnOnce(&Repository) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let folder = self.repo.path().to_owned();
+        let (done, finished) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("mudling-git".to_owned())
+            .spawn(move || {
+                let _ = done.send(
+                    Repository::open(folder)
+                        .map_err(GitError::from)
+                        .and_then(|repo| work(&repo)),
+                );
+            })?;
+        loop {
+            match finished.recv_timeout(LIMIT_POLL) {
+                // A helper killed at the limit reads as a refusal, and isn't one.
+                Ok(Err(_)) if limit.is_up() => return Err(timed_out()),
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Timeout) if limit.is_up() => return Err(timed_out()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(GitError::Failed("the git thread stopped".to_owned()));
+                }
+            }
+        }
+    }
+
+    /// Whether the repo has a remote of this name.
+    pub fn has_remote(&self, remote: &str) -> bool {
+        self.repo.find_remote(remote).is_ok()
+    }
+
+    /// Where the last fetch from `remote` saw `branch`.
+    pub fn tracked_tip(&self, remote: &str, branch: &str) -> Result<Option<Oid>> {
+        self.tip(&tracking_ref(remote, branch))
+    }
+
+    /// The commit to squash a session's commits onto, which `tip` builds on:
+    /// the newest finished session or what `remote` holds, or `None` if `tip`
+    /// has nothing to squash onto. A merge folds in the sessions before it,
+    /// because the squash must keep building on what `remote` holds.
+    pub fn session_start(
+        &self,
+        remote: &str,
+        branch: &str,
+        session_message: &str,
+    ) -> Result<Option<Oid>> {
+        let Some(tip) = self.branch_tip(branch)? else {
+            return Ok(None);
+        };
+        let tracked = self.tracked_tip(remote, branch)?;
+        let mut commit = self.repo.find_commit(tip)?;
+        let finished = loop {
+            let in_session = commit.message().unwrap_or_default().trim_end() == session_message
+                || commit.parent_count() > 1;
+            if !in_session || Some(commit.id()) == tracked {
+                break Some(commit.id());
+            }
+            match commit.parent(0) {
+                Ok(parent) => commit = parent,
+                Err(_) => break None,
+            }
+        };
+        match (finished, tracked) {
+            (Some(finished), Some(tracked)) if !self.is_ancestor(tracked, finished)? => {
+                Ok(Some(tracked))
+            }
+            (None, tracked) => Ok(tracked),
+            (finished, _) => Ok(finished),
+        }
+    }
+
+    /// The `.lock` files in the repo's git folder, for telling the player why
+    /// it's stuck.
+    pub fn locks(&self) -> Vec<PathBuf> {
+        locks::locks_in(self.repo.commondir())
     }
 
     /// Replaces the commits on `branch` after `onto` with one commit holding
@@ -402,9 +571,13 @@ fn tracking_ref(remote: &str, branch: &str) -> String {
     format!("refs/remotes/{remote}/{branch}")
 }
 
+fn timed_out() -> GitError {
+    GitError::TimedOut("the remote or its sign-in didn't answer in time".to_owned())
+}
+
 /// A server's reason for rejecting a pushed branch.
 fn push_rejected(reason: String) -> GitError {
-    if reason.contains("non-fast-forward") || reason.contains("fetch first") {
+    if LOST_RACE.iter().any(|words| reason.contains(words)) {
         GitError::NonFastForward(reason)
     } else {
         GitError::RemoteRefused(reason)

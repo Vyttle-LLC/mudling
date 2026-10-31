@@ -44,12 +44,18 @@
 //! # }
 //! ```
 //!
+//! [`crate::sync`] runs this on its thread, splitting [`pull`] into [`prepare`]
+//! and [`land`] so a live session can wait out the part that touches its rows.
+//!
 //! **A kill at any moment loses nothing.** The merged commit is written first,
-//! touching no branch. The folder's files come next, then the import into
-//! SQLite, and the branch moves last. Until it moves, the next sync's export
-//! puts the folder back in step with SQLite and the merge simply runs again,
-//! and the merge of a merged side changes nothing. Once it moves, SQLite
-//! already holds everything the branch does.
+//! touching no branch. Each database then forgets which commit it last saw, and
+//! the folder's files come next, then the import into SQLite, and the branch
+//! moves last. So a database that was killed partway says so: [`has_seen`]
+//! answers no, and [`join`] takes everything in the folder into it before any
+//! export can delete files it hasn't read. The merge then runs again, and the
+//! merge of a merged side changes nothing. The same check protects the first
+//! export on a device that already holds a repo, a server's database made after
+//! the repo was set, and a branch moved by a git outside MUDling.
 //!
 //! [`Tombstone`]: crate::persist::Tombstone
 
@@ -58,18 +64,24 @@ mod records;
 mod rooms;
 mod secrets;
 
-pub(crate) use files::three_way;
+pub(crate) use files::{servers, three_way};
+pub use rooms::RoomMoves;
+pub(crate) use rooms::repoint_batch;
 pub use secrets::find_password;
 
 #[cfg(test)]
 mod tests;
 
 use crate::git::{self, GitError, Oid};
-use crate::persist::{self, Batch, Database, Writer};
+use crate::map::CURRENT_ROOM;
+use crate::persist::{self, Batch, Database, Meta, Reader, Timestamp, Writer};
 use crate::repo::format::{ServerRows, tombstone_cutoff};
 use crate::repo::{self, AppSettings, Repo};
+use crate::sync::kill;
 use crate::vault;
 use records::merge_server;
+use rooms::retired_rooms;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +91,12 @@ pub const CHECKPOINT: &str = "Checkpoint";
 
 const MERGE_MESSAGE: &str = "Merge another device's changes";
 const JOIN_MESSAGE: &str = "Add this device's data";
+/// The commit a database has taken in everything from. Local to the device,
+/// since it says what this database holds.
+const SEEN: &str = "sync.seen";
+
+/// The rooms a merge retires, by server id.
+pub type Retired = BTreeMap<String, RoomMoves>;
 
 /// One server's database on this device.
 pub struct Store<'a> {
@@ -102,6 +120,8 @@ pub struct Joined {
     pub commit: Option<Oid>,
     /// The newer of the device's settings and the repo's, for the app to use.
     pub settings: AppSettings,
+    /// The rooms this retired, for sessions playing on them.
+    pub retired: Retired,
 }
 
 /// Merges `theirs`, a fetched commit, into the current branch, the folder and
@@ -118,32 +138,101 @@ pub fn pull(
     let Some(merge) = prepare(git, repo, theirs)? else {
         return Ok(Pulled::UpToDate);
     };
-    repo.replace_files(&merge.files, &merge.gone)?;
-    import(repo, stores)?;
-    git.move_branch(&merge.branch, merge.ours, merge.commit)?;
+    land(git, repo, &merge, stores)?;
     Ok(Pulled::Merged(merge.commit))
 }
 
-/// Brings this device's data into the repo just set, which may already hold
-/// another device's: SQLite and the repo's records merge as two sides do, into
-/// SQLite first, and the export that follows writes the result. So no file is lost
+/// Puts a prepared merge into the folder, `stores` and the branch, in the order
+/// the kill rule needs. Anything playing on `stores` should wait for this.
+pub fn land(
+    git: &git::Repo,
+    repo: &Repo,
+    merge: &Prepared,
+    stores: &[Store<'_>],
+) -> Result<(), Error> {
+    forget_seen(stores)?;
+    kill::point("land: databases forgot what they saw");
+    kill::arm_after_one_file("land: halfway through the files");
+    repo.replace_files(&merge.files, &merge.gone)?;
+    kill::point("land: files written");
+    import(repo, stores, &merge.retired)?;
+    kill::point("land: imported");
+    git.move_branch(&merge.branch, merge.ours, merge.commit)?;
+    kill::point("land: branch moved");
+    Ok(())
+}
+
+/// Whether `store`'s database has taken in everything up to `tip`, the branch's
+/// commit. Until it has, an export would delete what it hasn't read.
+pub fn has_seen(store: &Store<'_>, tip: Option<Oid>) -> Result<bool, Error> {
+    let Some(tip) = tip else {
+        return Ok(false);
+    };
+    let meta = store.database.reader()?.meta()?;
+    let seen = meta.iter().find(|entry| entry.key == SEEN);
+    Ok(seen.is_some_and(|entry| entry.value == tip.to_string()))
+}
+
+/// Records that `stores` hold everything up to `tip`.
+pub fn mark_seen(stores: &[Store<'_>], tip: Oid) -> Result<(), Error> {
+    for store in stores {
+        if !has_seen(store, Some(tip))? {
+            write_seen(store, tip.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn forget_seen(stores: &[Store<'_>]) -> Result<(), Error> {
+    for store in stores {
+        write_seen(store, String::new())?;
+    }
+    Ok(())
+}
+
+fn write_seen(store: &Store<'_>, value: String) -> Result<(), Error> {
+    let mut batch = Batch::new();
+    batch.upsert(Meta {
+        key: SEEN.to_owned(),
+        value,
+        updated: Timestamp::now(),
+    });
+    store.writer.submit(batch)?;
+    store.writer.flush()?;
+    Ok(())
+}
+
+/// Brings this device's data into the repo set, which may already hold another
+/// device's: SQLite and the repo's records merge as two sides do, into SQLite
+/// first, and the export that follows writes the result. So no file is lost
 /// to an export that hasn't seen it, and the only records that go are the ones
-/// a tombstone says were deleted on purpose. `stores` holds a database for
-/// every server on this device, and an empty one for each server only the repo
-/// has. Safe to run again after a kill.
+/// a tombstone says were deleted on purpose. A database that [`has_seen`] the
+/// branch has nothing to take in. `stores` holds a database for every server on
+/// this device, and an empty one for each server only the repo has. Safe to run
+/// again after a kill.
 pub fn join(
     git: &git::Repo,
     repo: &Repo,
     settings: &AppSettings,
     stores: &[Store<'_>],
 ) -> Result<Joined, Error> {
+    let tip = git.branch_tip(&git.current_branch()?)?;
+    let mut retired = Retired::new();
     for store in stores {
+        if has_seen(store, tip)? {
+            continue;
+        }
         if let Some(held) = repo.server_rows(store.server_id)? {
             let local = ServerRows::load(&store.database.reader()?)?;
-            store
-                .writer
-                .submit(merge_server(local, held).into_batch())?;
+            let merged = merge_server(local.clone(), held);
+            let moves = retired_rooms(&local, &merged);
+            let mut batch = merged.into_batch();
+            follow_current_room(&store.database.reader()?, &moves, &mut batch)?;
+            store.writer.submit(batch)?;
             store.writer.flush()?;
+            if !moves.is_empty() {
+                retired.insert(store.server_id.to_owned(), moves);
+            }
         }
     }
     let held = repo.settings()?;
@@ -152,13 +241,49 @@ pub fn join(
     } else {
         settings.clone()
     };
-    let readers = stores
-        .iter()
-        .map(|store| store.database.reader())
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut readers = Vec::with_capacity(stores.len());
+    for store in stores {
+        let reader = store.database.reader()?;
+        if !reader.servers()?.is_empty() {
+            readers.push(reader);
+        }
+    }
     repo.export(&settings, &readers)?;
     let commit = git.commit_all(JOIN_MESSAGE)?;
-    Ok(Joined { commit, settings })
+    Ok(Joined {
+        commit,
+        settings,
+        retired,
+    })
+}
+
+/// Keeps the player's place when the room they're in is retired: the map's
+/// current room isn't synced, so nothing else would move it.
+fn follow_current_room(
+    reader: &Reader,
+    moves: &RoomMoves,
+    batch: &mut Batch,
+) -> Result<(), persist::Error> {
+    let meta = reader.meta()?;
+    let current = meta.iter().find(|entry| entry.key == CURRENT_ROOM);
+    let id = current.and_then(|entry| entry.value.parse().ok());
+    if let Some(Some(kept)) = id.and_then(|id| moves.get(&id)) {
+        batch.upsert(Meta {
+            key: CURRENT_ROOM.to_owned(),
+            value: kept.to_string(),
+            updated: Timestamp::now(),
+        });
+    }
+    Ok(())
+}
+
+/// The part of `moves` that happened: the rooms `store` no longer holds. A
+/// merge that failed partway may have landed on one database and not another.
+pub fn moves_landed(store: &Store<'_>, moves: &RoomMoves) -> Result<RoomMoves, Error> {
+    let rooms = store.database.reader()?.map()?.rooms;
+    let mut landed = moves.clone();
+    landed.retain(|id, _| rooms.iter().all(|room| room.id != *id));
+    Ok(landed)
 }
 
 /// How many sessions on this device `remote` hasn't got yet, for the sprocket
@@ -172,18 +297,26 @@ pub fn unsynced_sessions(git: &git::Repo, remote: &str, branch: &str) -> Result<
 }
 
 /// Everything a merge has worked out before it touches the folder.
-struct Prepared {
+pub struct Prepared {
     branch: String,
     ours: Option<Oid>,
     commit: Oid,
     files: git::Files,
     /// Files on the branch now that the merged commit doesn't hold.
     gone: Vec<PathBuf>,
+    retired: Retired,
+}
+
+impl Prepared {
+    /// The rooms on this device that the merge retires.
+    pub fn retired(&self) -> &Retired {
+        &self.retired
+    }
 }
 
 /// Works out the merge, and writes its commit without moving any branch.
 /// `None` if `theirs` brings nothing new.
-fn prepare(git: &git::Repo, repo: &Repo, theirs: Oid) -> Result<Option<Prepared>, Error> {
+pub fn prepare(git: &git::Repo, repo: &Repo, theirs: Oid) -> Result<Option<Prepared>, Error> {
     let branch = git.current_branch()?;
     let ours = git.branch_tip(&branch)?;
     if let Some(ours) = ours
@@ -216,12 +349,14 @@ fn prepare(git: &git::Repo, repo: &Repo, theirs: Oid) -> Result<Option<Prepared>
         .filter(|path| !files.contains_key(*path))
         .cloned()
         .collect();
+    let retired = files::retired(&our_files, &files)?;
     Ok(Some(Prepared {
         branch,
         ours,
         commit,
         files,
         gone,
+        retired,
     }))
 }
 
@@ -238,21 +373,24 @@ fn refuse_unsaved_vault(repo: &Repo, ours: &git::Files) -> Result<(), Error> {
 
 /// Brings the repo's files into each database that has a server there, and
 /// waits for them to land: the caller moves on only once they have.
-fn import(repo: &Repo, stores: &[Store<'_>]) -> Result<(), Error> {
+fn import(repo: &Repo, stores: &[Store<'_>], retired: &Retired) -> Result<(), Error> {
     let listed = repo.servers()?;
     for store in stores {
         if listed.iter().any(|server| server.id == store.server_id) {
             let reader = store.database.reader()?;
-            store
-                .writer
-                .submit(repo.import(store.server_id, &reader)?.batch)?;
+            let mut batch = repo.import(store.server_id, &reader)?.batch;
+            if let Some(moves) = retired.get(store.server_id) {
+                follow_current_room(&reader, moves, &mut batch)?;
+            }
+            store.writer.submit(batch)?;
             store.writer.flush()?;
         }
     }
     Ok(())
 }
 
-fn forget_old_tombstones(stores: &[Store<'_>]) -> Result<(), Error> {
+/// Clears tombstones past their life, on every sync.
+pub fn forget_old_tombstones(stores: &[Store<'_>]) -> Result<(), Error> {
     let before = tombstone_cutoff();
     for store in stores {
         let mut batch = Batch::new();

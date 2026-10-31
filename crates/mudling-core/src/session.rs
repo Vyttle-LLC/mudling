@@ -32,25 +32,31 @@ mod map_rules;
 mod values;
 
 pub use engine::Engine;
+pub(crate) use engine::SERVERS_FOLDER;
 pub use login::Credentials;
 
 use crate::completion::{Completer, Completion, History, KnownWords};
+use crate::merge::RoomMoves;
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::{Plugin, PluginError, PluginId};
 use crate::store::{ConnectionStatus, SettingsState, StoreHub};
+use crate::sync::Syncer;
 use crate::telnet::Bytes;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 
 /// How long a clean quit waits for the socket to close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a quit waits for a merge to land.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What a session is for. Plain data, so it can cross into a session from
 /// any shell.
@@ -71,6 +77,9 @@ pub struct SessionConfig {
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
     pub credentials: Option<Credentials>,
+    /// Told when the connection opens and closes, and allowed to reach the
+    /// session around a merge.
+    pub sync: Option<Syncer>,
     pub client_name: String,
     pub client_version: String,
     pub hook_limits: HookLimits,
@@ -87,6 +96,7 @@ impl SessionConfig {
             enabled: Vec::new(),
             approved: Vec::new(),
             credentials: None,
+            sync: None,
             client_name: "MUDling".to_owned(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             hook_limits: HookLimits::default(),
@@ -151,7 +161,61 @@ enum Input {
     Send(String),
     Cancel,
     Replay(Vec<Bytes>),
+    HoldWrites(SyncSender<()>),
+    ReleaseWrites(RoomMoves),
     Quit,
+}
+
+/// How the sync thread reaches a running session, around a merge. A merge can
+/// retire a room the map holds in memory, and a row written for a retired room
+/// comes back as a duplicate or fails its whole batch. So the session holds
+/// its rows while the merge lands, moves them onto the rooms that stayed, and
+/// reloads. Play carries on throughout; only rows wait.
+#[derive(Clone)]
+pub(crate) struct SessionLink {
+    server: String,
+    inbox: WeakUnboundedSender<Input>,
+}
+
+impl SessionLink {
+    pub(crate) fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        self.inbox.upgrade().is_some()
+    }
+
+    /// Asks the session to hold its rows, unless it has ended. `drained`
+    /// answers once what it already queued has reached the database, and the
+    /// session stays reachable until [`HeldSession::release`], even if it's
+    /// quit by then.
+    pub(crate) fn hold(&self, drained: SyncSender<()>) -> Option<HeldSession> {
+        let inbox = self.inbox.upgrade()?;
+        inbox.send(Input::HoldWrites(drained)).ok()?;
+        Some(HeldSession {
+            server: self.server.clone(),
+            inbox,
+        })
+    }
+}
+
+/// A session holding its rows.
+pub(crate) struct HeldSession {
+    server: String,
+    inbox: UnboundedSender<Input>,
+}
+
+impl HeldSession {
+    pub(crate) fn server(&self) -> &str {
+        &self.server
+    }
+
+    /// Lets held rows go, moved by `moves`, and rebuilds the map from the
+    /// database.
+    pub(crate) fn release(self, moves: RoomMoves) {
+        let _ = self.inbox.send(Input::ReleaseWrites(moves));
+    }
 }
 
 /// A running session. Every method returns at once.
@@ -186,6 +250,12 @@ impl Session {
         let hub = Arc::new(StoreHub::new(waker));
         let typing = Arc::new(Mutex::new(Typing::default()));
         let (inbox, inputs) = mpsc::unbounded_channel();
+        if let Some(sync) = &config.sync {
+            sync.attach(SessionLink {
+                server: config.host.clone(),
+                inbox: inbox.downgrade(),
+            });
+        }
         let core = {
             let (hub, typing) = (Arc::clone(&hub), Arc::clone(&typing));
             thread::Builder::new()
@@ -335,6 +405,8 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Replay(chunks)) if socket.is_none() => replay(&mut engine, chunks),
                 Some(Input::Replay(_)) => {}
+                Some(Input::HoldWrites(done)) => engine.hold_writes(done),
+                Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {
@@ -365,7 +437,20 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
     if let Some(socket) = socket {
         close(socket, &mut engine).await;
     }
+    wait_for_release(&mut engine, &mut inputs).await;
     engine.finish()
+}
+
+/// A session that ends during a merge lets it land first, so its last rows go
+/// where the merge says. A sync that never answers doesn't hold up a quit.
+async fn wait_for_release(engine: &mut Engine, inputs: &mut UnboundedReceiver<Input>) {
+    while engine.is_holding_writes() {
+        match tokio::time::timeout(RELEASE_TIMEOUT, inputs.recv()).await {
+            Ok(Some(Input::ReleaseWrites(moves))) => engine.release_writes(&moves),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 /// Closes a socket and waits for it, so the server sees a clean close.
@@ -402,4 +487,134 @@ fn replay(engine: &mut Engine, chunks: Vec<Bytes>) {
         drop(engine.take_output());
     }
     engine.close_connection(DisconnectReason::ClosedByServer, Timestamp::now());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::Whereabouts;
+    use crate::persist::{Batch, Database, Key, Room};
+    use crate::session::engine::SERVERS_FOLDER;
+    use crate::store::{MapState, Versioned};
+    use std::sync::mpsc::sync_channel;
+    use std::time::Instant;
+
+    const HOST: &str = "mud.example.org";
+    const IAC: u8 = 255;
+
+    /// The game saying the player is in room `number`, as GMCP.
+    fn in_room(number: i64) -> Bytes {
+        let info = format!(
+            r#"Room.Info {{"num": {number}, "name": "Room {number}", "zone": "Fields",
+                "environment": "field", "exits": {{"n": {}}}, "details": []}}"#,
+            number + 2
+        );
+        let mut bytes = vec![IAC, 251, 201, IAC, 250, 201];
+        bytes.extend_from_slice(info.as_bytes());
+        bytes.extend_from_slice(&[IAC, 240]);
+        Bytes::from(bytes)
+    }
+
+    fn engine(folder: &std::path::Path, hub: &Arc<StoreHub>) -> Engine {
+        let config = SessionConfig::new(folder, HOST, 4000);
+        let mut engine = Engine::open(config, Arc::clone(hub), Arc::default()).unwrap();
+        engine.start_connection().unwrap();
+        engine.connected();
+        engine
+    }
+
+    fn walk_to(engine: &mut Engine, number: i64) {
+        let now = Timestamp::now();
+        engine.send("n", now);
+        engine.receive(in_room(number), now).unwrap();
+        engine.settle(now);
+    }
+
+    fn room_ids(folder: &std::path::Path) -> Vec<i64> {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let rooms = database.reader().unwrap().map().unwrap().rooms;
+        rooms.into_iter().map(|room| room.id).collect()
+    }
+
+    /// What a merge does to the database: room 2 goes, and room 3 takes its
+    /// place.
+    fn retire_room_2(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        batch.upsert(Room {
+            id: 3,
+            name: "Room 2".to_owned(),
+            area: "Fields".to_owned(),
+            environment: "field".to_owned(),
+            description: String::new(),
+            x: 0,
+            y: 2,
+            z: 0,
+            building: None,
+            tangled: false,
+            maze: false,
+            updated: Timestamp::now(),
+        });
+        batch.delete(Key::Room(2));
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    fn whereabouts(hub: &StoreHub) -> Whereabouts {
+        hub.read(|map: &Versioned<MapState>| map.value().whereabouts())
+    }
+
+    /// A row for a child of the retired room would fail its whole batch if it
+    /// reached the database unmoved, so the new room would be lost with it.
+    #[test]
+    fn rows_written_during_a_merge_survive_it_and_the_map_follows() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        walk_to(&mut engine, 1);
+        walk_to(&mut engine, 2);
+
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+        assert_eq!(room_ids(folder.path()), [1, 2]);
+
+        retire_room_2(folder.path());
+        walk_to(&mut engine, 4);
+        assert_eq!(room_ids(folder.path()), [1, 3], "rows wait for the merge");
+
+        engine.release_writes(&RoomMoves::from([(2, Some(3))]));
+
+        assert_eq!(room_ids(folder.path()), [1, 3, 4]);
+        hub.read(|map: &Versioned<MapState>| {
+            assert!(map.value().room(2).is_none());
+            assert!(map.value().room(3).is_some());
+        });
+        assert_eq!(whereabouts(&hub).room, Some(4));
+        let notices =
+            hub.read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
+        assert_eq!(notices, Vec::<String>::new());
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_session_quit_during_a_merge_waits_for_it_to_land() {
+        let folder = tempfile::tempdir().unwrap();
+        let session = Session::open(SessionConfig::new(folder.path(), HOST, 4000), || {}).unwrap();
+        let link = SessionLink {
+            server: HOST.to_owned(),
+            inbox: session.inbox.downgrade(),
+        };
+        let (drained, queue_empty) = sync_channel(1);
+        let held = link.hold(drained).unwrap();
+        queue_empty.recv().unwrap();
+
+        let quitting = session.quit();
+        let began = Instant::now();
+        held.release(RoomMoves::new());
+
+        quitting.wait().unwrap();
+        assert!(began.elapsed() < RELEASE_TIMEOUT);
+    }
 }

@@ -76,6 +76,11 @@ impl Batch {
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
+
+    /// Adds `later`'s changes after these.
+    pub(crate) fn extend(&mut self, later: Batch) {
+        self.changes.extend(later.changes);
+    }
 }
 
 // Records live inline in the batch's one Vec; boxing them would cost the

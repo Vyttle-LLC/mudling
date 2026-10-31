@@ -4,16 +4,23 @@
 //! This runs helpers itself because `git2::Cred::credential_helper` shells out
 //! to `git credential-<name>`, and no code path may need a system git.
 
+use super::Limit;
 use git2::{Config, Cred, CredentialType, ErrorClass, ErrorCode, RemoteCallbacks};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::Duration;
 use url::Url;
 
+/// How often a running helper is checked on.
+const HELPER_POLL: Duration = Duration::from_millis(20);
+
 /// libgit2 asks again after every refusal, so each way in is offered once.
-pub(super) fn machine_callbacks<'a>(config: Config) -> RemoteCallbacks<'a> {
+/// `limit` ends any helper still running when it's up.
+pub(super) fn machine_callbacks<'a>(config: Config, limit: Limit) -> RemoteCallbacks<'a> {
     let mut agent_offered = false;
     let mut helpers: Option<std::vec::IntoIter<String>> = None;
     let mut callbacks = RemoteCallbacks::new();
@@ -23,13 +30,11 @@ pub(super) fn machine_callbacks<'a>(config: Config) -> RemoteCallbacks<'a> {
         }
         if allowed.contains(CredentialType::SSH_KEY) && !agent_offered {
             agent_offered = true;
-            #[cfg(unix)]
-            super::ssh_agent::select();
             return Cred::ssh_key_from_agent(username.unwrap_or("git"));
         }
         if allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
             let remaining = helpers.get_or_insert_with(|| helpers_for(&config, url).into_iter());
-            if let Some((user, password)) = remaining.find_map(|h| ask(&h, url, username)) {
+            if let Some((user, password)) = remaining.find_map(|h| ask(&h, url, username, &limit)) {
                 return Cred::userpass_plaintext(&user, &password);
             }
         }
@@ -78,9 +83,9 @@ fn scope_covers(key: &str, url: &str) -> bool {
 }
 
 /// Runs one helper's `get`, returning the username and password it gave.
-fn ask(helper: &str, url: &str, username: Option<&str>) -> Option<(String, String)> {
+fn ask(helper: &str, url: &str, username: Option<&str>, limit: &Limit) -> Option<(String, String)> {
     let path = search_path(env::var_os("PATH"), &git_install_dirs());
-    ask_on_path(helper, url, username, &path)
+    ask_on_path(helper, url, username, &path, limit)
 }
 
 fn ask_on_path(
@@ -88,6 +93,7 @@ fn ask_on_path(
     url: &str,
     username: Option<&str>,
     path: &OsStr,
+    limit: &Limit,
 ) -> Option<(String, String)> {
     let mut command = shell(&format!("{} get", helper_command(helper)));
     let mut child = command
@@ -102,11 +108,28 @@ fn ask_on_path(
         .take()?
         .write_all(request(url, username)?.as_bytes())
         .ok()?;
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
+    if !exit_within(&mut child, limit)?.success() {
         return None;
     }
-    parse_answer(&String::from_utf8_lossy(&output.stdout), username)
+    let mut answer = Vec::new();
+    child.stdout.take()?.read_to_end(&mut answer).ok()?;
+    parse_answer(&String::from_utf8_lossy(&answer), username)
+}
+
+/// How `child` ended, or `None` once `limit` is up and it has been killed. An
+/// answer is short enough to sit in the pipe until the helper exits.
+fn exit_within(child: &mut Child, limit: &Limit) -> Option<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            return Some(status);
+        }
+        if limit.is_up() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(HELPER_POLL);
+    }
 }
 
 /// A helper's config value as a shell command. Git's three forms are a `!`
@@ -281,9 +304,31 @@ mod tests {
 
         let path = search_path(Some(finder_path.clone()), &install_dirs);
 
-        let answer = ask_on_path("fake", url, None, &path);
+        let limit = Limit::after(Duration::from_secs(60));
+        let answer = ask_on_path("fake", url, None, &path, &limit);
         assert_eq!(answer, Some(("me".to_owned(), "p".to_owned())));
-        assert_eq!(ask_on_path("fake", url, None, &finder_path), None);
+        assert_eq!(ask_on_path("fake", url, None, &finder_path, &limit), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_helper_is_killed_when_the_limit_is_up() {
+        let folder = tempfile::tempdir().unwrap();
+        let pid_file = folder.path().join("pid");
+        let helper = format!("!echo $$ > '{}'; exec sleep 600; ", pid_file.display());
+        let url = "https://example.com/r.git";
+        let limit = Limit::after(Duration::from_millis(200));
+
+        let answer = ask(&helper, url, None, &limit);
+
+        assert_eq!(answer, None);
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!alive.success(), "the helper should be gone");
     }
 
     #[test]

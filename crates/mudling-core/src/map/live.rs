@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Meta keys the map keeps its own state under.
-const CURRENT_ROOM: &str = "map.current-room";
+pub(crate) const CURRENT_ROOM: &str = "map.current-room";
 pub(crate) const ISLANDS: &str = "map.islands";
 /// This device's own: it never syncs, because it's what sets devices apart.
 const ID_PREFIX: &str = "map.id-prefix";
@@ -143,6 +143,16 @@ impl LiveMap {
         let mut map = LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks));
         map.id_prefix_saved = saved_prefix.is_some();
         map
+    }
+
+    /// Goes on counting from the revision of the map this replaces, so a view
+    /// can't take one for the other.
+    pub(crate) fn follows_revision(&mut self, earlier: u64) {
+        self.revision = earlier + 1;
+    }
+
+    pub(crate) fn holds(&self, id: RoomId) -> bool {
+        self.tracker.layout.contains(id)
     }
 
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {

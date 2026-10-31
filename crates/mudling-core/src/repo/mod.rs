@@ -4,7 +4,9 @@
 //! renders every file in memory and writes only those that differ from the
 //! disk, so a change to one room rewrites one file. Import does the reverse:
 //! it renders the database, and parses only the files that differ from that.
-//! No state is kept between runs, so a killed app has nothing to repair.
+//! Files reach the disk whole, but a killed app can leave the folder ahead of
+//! the database, which [`merge`](crate::merge) has to repair before the next
+//! export.
 //!
 //! Calls block on the disk and the database, so they belong on the sync
 //! thread. They read through a [`Reader`], which never waits on the game's
@@ -14,11 +16,12 @@
 //! The order matters. Export first, so the repo holds every local change;
 //! then, after a pull has merged the repo's files, import. Export deletes
 //! zone and character files with no records behind them, so a file pulled but
-//! not yet imported would be lost. Import never overrules what's newer: the
-//! writer checks each record against the row and the tombstones it finds when
-//! it commits, because the game can write between export and import.
-//! [`merge`](crate::merge) runs this order, and chooses between two sides'
-//! files before import sees them.
+//! not yet imported would be lost: export only for a database that
+//! [`merge::has_seen`](crate::merge::has_seen) the branch. Import never overrules
+//! what's newer: the writer checks each record against the row and the
+//! tombstones it finds when it commits, because the game can write between
+//! export and import. [`merge`](crate::merge) runs this order, and chooses
+//! between two sides' files before import sees them.
 //!
 //! ```no_run
 //! use mudling_core::persist::Database;
@@ -78,6 +81,10 @@ pub struct Imported {
 impl Repo {
     pub fn new(root: impl Into<PathBuf>) -> Repo {
         Repo { root: root.into() }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Brings the repo's files up to date with `readers`, one per server's
@@ -313,7 +320,7 @@ pub enum Error {
 }
 
 impl Error {
-    fn io(path: &Path, source: io::Error) -> Error {
+    pub(crate) fn io(path: &Path, source: io::Error) -> Error {
         Error::Io {
             path: path.to_owned(),
             source,

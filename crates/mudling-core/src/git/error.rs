@@ -24,6 +24,13 @@ const HTTP_STATUS_ANSWERS: [&str; 2] = [
 /// How libgit2 words a git server's error packet.
 const SERVER_ERROR_PACKET: &str = "remote error:";
 
+/// An HTTP status that says "not now": too many requests, or the server's own
+/// trouble. Every 5xx counts, because each of them can pass.
+fn is_passing_status(detail: &str) -> bool {
+    let status = detail.rsplit(' ').next().unwrap_or_default();
+    status == "429" || (status.len() == 3 && status.starts_with('5'))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitError {
     /// The remote couldn't be reached. Retry when the network returns.
@@ -31,6 +38,12 @@ pub enum GitError {
     /// The server was reached and said no: the repo is missing, say, or this
     /// key is read-only. Retrying won't help until the player acts.
     RemoteRefused(String),
+    /// The server is having trouble, or wants fewer requests: an HTTP 5xx or
+    /// 429. It can pass, so retry slowly and tell the player.
+    Unavailable(String),
+    /// A network step went past its [`Limit`](super::Limit): a stalled server,
+    /// say, or a credential helper that never answered. Retry later.
+    TimedOut(String),
     /// The remote refused this machine's credentials, or nothing on this
     /// machine could sign in. Retrying won't help until the player acts.
     AuthRefused(String),
@@ -55,6 +68,8 @@ impl fmt::Display for GitError {
         match self {
             Self::NoNetwork(detail) => write!(f, "can't reach the remote: {detail}"),
             Self::RemoteRefused(detail) => write!(f, "the remote refused: {detail}"),
+            Self::Unavailable(detail) => write!(f, "the remote is having trouble: {detail}"),
+            Self::TimedOut(detail) => write!(f, "gave up waiting: {detail}"),
             Self::AuthRefused(detail) => write!(f, "sign-in refused: {detail}"),
             Self::NonFastForward(detail) => write!(f, "the remote is ahead: {detail}"),
             Self::Locked(detail) => write!(f, "the repo is locked: {detail}"),
@@ -80,6 +95,8 @@ impl From<git2::Error> for GitError {
             (_, ErrorClass::Http) if starts_with_any(&detail, &HTTP_STATUS_ANSWERS) => {
                 if detail.ends_with("403") {
                     Self::AuthRefused(detail)
+                } else if is_passing_status(&detail) {
+                    Self::Unavailable(detail)
                 } else {
                     Self::RemoteRefused(detail)
                 }
@@ -160,6 +177,24 @@ mod tests {
             "request failed with status code: 403",
         );
         assert!(matches!(forbidden, GitError::AuthRefused(_)));
+    }
+
+    #[test]
+    fn a_servers_passing_trouble_is_told_from_a_refusal() {
+        for status in ["500", "502", "503", "504", "429"] {
+            let answer = classify(
+                ErrorCode::GenericError,
+                ErrorClass::Http,
+                &format!("unexpected http status code: {status}"),
+            );
+            assert!(matches!(answer, GitError::Unavailable(_)), "{status}");
+        }
+        let missing = classify(
+            ErrorCode::GenericError,
+            ErrorClass::Http,
+            "unexpected http status code: 404",
+        );
+        assert!(matches!(missing, GitError::RemoteRefused(_)));
     }
 
     #[test]

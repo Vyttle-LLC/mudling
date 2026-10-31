@@ -17,6 +17,7 @@ pub mod scrollback;
 pub mod session;
 pub mod stats;
 pub mod store;
+pub mod sync;
 pub mod telnet;
 pub mod vault;
 
