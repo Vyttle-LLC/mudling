@@ -79,6 +79,17 @@ impl MapRoom {
         }
     }
 
+    /// Whether the two differ only in what's been noted about the room, so
+    /// neither its area nor its place in the map's shape changed.
+    pub(super) fn same_shape(&self, other: &MapRoom) -> bool {
+        self.zone == other.zone
+            && self.indoor == other.indoor
+            && self.position == other.position
+            && self.building == other.building
+            && self.links == other.links
+            && self.doorways == other.doorways
+    }
+
     /// Doors in four or more directions: each a way into a story of its own.
     pub fn is_hub(&self) -> bool {
         self.doorways.len() >= 4

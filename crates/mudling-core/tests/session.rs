@@ -6,12 +6,13 @@ use mudling_core::defaults::hud::Vital;
 use mudling_core::map::Mark;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{Database, Timestamp};
-use mudling_core::plugin::luau::Value;
+use mudling_core::plugin::luau::{DisabledReason, Value};
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, GearState, MapState, MobsState, RoomState, SettingsState,
-    Store, StoreHub, TerminalState, Versioned, VitalsState,
+    CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
+    GearState, Item, MapState, MobsState, Occupant, RoomState, SettingsState, Store, StoreHub,
+    Target, TargetState, TerminalState, Versioned, VitalsState,
 };
 use mudling_core::telnet::command::{DO, GA, IAC, SB, SE, WILL};
 use mudling_core::telnet::option::{ECHO, GMCP};
@@ -158,6 +159,7 @@ fn every_store(session: &Session) -> String {
         text::<MapState>(session),
         text::<MobsState>(session),
         text::<CharactersState>(session),
+        text::<TargetState>(session),
         text::<GearState>(session),
         text::<SettingsState>(session),
     ]
@@ -661,6 +663,252 @@ fn a_detected_game_with_its_plugin_off_runs_no_plugin() {
         let said = lines.iter().find(|l| l.plain().starts_with("Mira says"));
         assert!(said.unwrap().styled().is_empty(), "no plugin coloring");
     });
+    session.quit().wait().unwrap();
+}
+
+fn room_state(driven: &Driven) -> RoomState {
+    driven
+        .hub
+        .read(|room: &Versioned<RoomState>| room.value().clone())
+}
+
+fn character(driven: &Driven, key: &str) -> Option<Value> {
+    driven
+        .hub
+        .read(|characters: &Versioned<CharactersState>| characters.value().0.get(key).cloned())
+}
+
+fn target(driven: &Driven) -> Option<Target> {
+    driven
+        .hub
+        .read(|target: &Versioned<TargetState>| target.value().0.clone())
+}
+
+fn driven_settings(driven: &Driven) -> SettingsState {
+    driven
+        .hub
+        .read(|settings: &Versioned<SettingsState>| settings.value().clone())
+}
+
+/// A connected session, with the first room of `name` announced.
+fn in_a_room(name: &str) -> Driven {
+    let mut driven = Driven::new(Vec::new(), "mud.example");
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(&format!(
+        r#"Room.Info {{"num": 1, "name": "{name}", "exits": {{"n": 2}}}}"#
+    ));
+    driven
+}
+
+#[test]
+fn the_room_fills_from_gmcp_and_empties_with_the_connection() {
+    let mut driven = in_a_room("A road");
+    driven.gmcp(r#"Char.Status {"character_name": "Tamsin", "level": "22"}"#);
+    driven.gmcp(
+        r#"Room.Players {"Tamsin": {"name": "Tamsin", "fullname": "Tamsin is here."},
+            "Mira": {"name": "Mira", "fullname": "Mira the Quick is here."},
+            "7": {"name": "7", "fullname": "(Glowing) A grey wolf sits here."}}"#,
+    );
+    driven.gmcp(
+        r#"Char.Items.List {"location": "room", "items": [
+            {"id": "1", "name": "a silver ring"}, {"id": "2", "name": "a silver ring"}]}"#,
+    );
+    let contents = room_state(&driven).contents;
+    assert_eq!(
+        contents.occupants,
+        [
+            Occupant {
+                name: "(Glowing) A grey wolf sits here.".to_owned(),
+                target: "wolf".to_owned()
+            },
+            Occupant {
+                name: "Mira the Quick is here.".to_owned(),
+                target: "mira".to_owned()
+            }
+        ]
+    );
+    assert_eq!(
+        contents.items,
+        [Item {
+            name: "a silver ring".to_owned(),
+            target: "ring".to_owned(),
+            count: 2
+        }]
+    );
+
+    driven.gmcp(r#"Room.RemovePlayer "Mira""#);
+    assert_eq!(room_state(&driven).contents.occupants.len(), 1);
+
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+    assert_eq!(room_state(&driven).contents, Default::default());
+}
+
+#[test]
+fn the_character_and_the_fight_reach_their_stores() {
+    let mut driven = in_a_room("A road");
+    driven.gmcp(r#"Char.Status {"character_name": "Tamsin", "level": "22"}"#);
+    driven.gmcp(r#"Char.Vitals {"hp": "30", "maxhp": "42", "position": "Fight"}"#);
+    driven.gmcp(
+        r#"Char.Status {"opponent_name": "A rat", "opponent_level": "3",
+            "opponent_health": "36", "opponent_health_max": "100"}"#,
+    );
+    assert_eq!(
+        character(&driven, CHARACTER_NAME),
+        Some(Value::Text("Tamsin".to_owned()))
+    );
+    assert_eq!(
+        character(&driven, CHARACTER_LEVEL),
+        Some(Value::Number(22.0))
+    );
+    assert_eq!(
+        character(&driven, CHARACTER_POSITION),
+        Some(Value::Text("Fight".to_owned()))
+    );
+    assert_eq!(
+        target(&driven),
+        Some(Target {
+            name: "A rat".to_owned(),
+            level: Some(3),
+            health: Some(36),
+            max_health: Some(100)
+        })
+    );
+
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+    assert_eq!(target(&driven), None);
+    assert_eq!(
+        character(&driven, CHARACTER_POSITION),
+        Some(Value::Text(String::new()))
+    );
+}
+
+#[test]
+fn the_first_room_asks_for_the_modules_again() {
+    let mut driven = Driven::new(Vec::new(), "mud.example");
+    driven.engine.start_connection().unwrap();
+    driven.say(&[IAC, WILL, GMCP]);
+    drop(driven.engine.take_output());
+    let room = r#"Room.Info {"num": 1, "name": "A road", "exits": {}}"#;
+    driven.gmcp(room);
+    assert!(contains(&driven.engine.take_output(), b"Core.Supports.Set"));
+    driven.gmcp(room);
+    assert!(driven.engine.take_output().is_empty(), "once a connection");
+}
+
+#[test]
+fn room_players_note_mobs_on_the_map_by_their_lines() {
+    let mut driven = in_a_room("A road");
+    let wolf = "(Glowing) A grey wolf sits here.";
+    let seen = |driven: &Driven| room_state(driven).room.unwrap();
+    driven.gmcp(&format!(
+        r#"Room.Players {{"7": {{"name": "7", "fullname": "{wolf}"}},
+            "Mira": {{"name": "Mira", "fullname": "Mira is here."}}}}"#
+    ));
+    let room = seen(&driven);
+    assert_eq!(room.sightings.keys().collect::<Vec<_>>(), [wolf]);
+    assert!(room.features.is_empty(), "no one has marked wolves");
+
+    driven.gmcp(r#"Room.AddPlayer {"8": {"name": "8", "fullname": "A brown bear stands here."}}"#);
+    assert_eq!(seen(&driven).sightings.len(), 2);
+}
+
+/// A game plugin whose `go` hook never ends, and which links the word `exit`.
+fn slow_plugin() -> Plugin {
+    let manifest = "id = \"slow\"\nname = \"slow\"\nversion = \"1.0.0\"\napi = 1\n\
+        license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n\
+        [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"hooks.luau\"]\n";
+    let text = "[[pattern]]\nname = \"go\"\npattern = '''^go$'''\nhook = \"on_go\"\n\
+        [[link]]\npattern = '''(?<word>exit)'''\naction = \"look {word}\"\n";
+    Plugin::from_files(|file| match file {
+        "plugin.toml" => Ok(manifest.to_owned()),
+        "text.toml" => Ok(text.to_owned()),
+        "hooks.luau" => Ok("function on_go(event) while true do end end".to_owned()),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        )),
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// One that takes too long three times, then the player's click.
+#[test]
+fn a_plugin_turned_off_says_why_and_can_come_back() {
+    let id = slow_plugin().id().clone();
+    let mut driven = Driven::configured("mud.example", |config| {
+        config.plugins = vec![slow_plugin()];
+        config.enabled = vec![id.clone()];
+    });
+    driven.engine.start_connection().unwrap();
+    for _ in 0..3 {
+        driven.say(b"go\r\n");
+    }
+    wait_for("the plugin to be turned off", || {
+        driven.say(b"\r\n");
+        !driven_settings(&driven).turned_off.is_empty()
+    });
+
+    let settings = driven_settings(&driven);
+    assert_eq!(settings.turned_off[0].plugin, id);
+    assert_eq!(settings.turned_off[0].reason, DisabledReason::Overran(3));
+    let notice = settings.notices.last().unwrap();
+    assert!(!notice.contains("Overran"), "{notice}");
+    assert!(notice.contains("ran too long 3 times"), "{notice}");
+    assert!(settings.plugin_costs.iter().any(|cost| cost.plugin == id));
+
+    driven.engine.turn_plugin_on(&id);
+    assert!(driven_settings(&driven).turned_off.is_empty());
+    driven.say(b"go\r\n");
+    driven.engine.settle(Timestamp(0));
+    assert!(
+        driven_settings(&driven).turned_off.is_empty(),
+        "one more overrun starts a clean count"
+    );
+}
+
+#[test]
+fn a_real_connection_times_a_command_from_traffic_that_flows() {
+    let folder = tempfile::tempdir().unwrap();
+    let (listener, port) = FakeServer::listen();
+    let session = open(SessionConfig::new(folder.path(), HOST, port));
+    session.connect();
+    let mut server = FakeServer::accept(&listener);
+    wait_for_status(&session, ConnectionStatus::Connected);
+    assert_eq!(settings(&session).latency, None);
+
+    session.send("look");
+    server.expect(b"look\r\n");
+    std::thread::sleep(Duration::from_millis(20));
+    server.say(b"A road.\r\n");
+    wait_for("a reading", || settings(&session).latency.is_some());
+    assert!(settings(&session).latency.unwrap() >= Duration::from_millis(15));
+    assert_eq!(server.received, b"", "nothing extra went out");
+
+    drop(server);
+    wait_for_status(&session, closed_by_server());
+    assert_eq!(settings(&session).latency, None);
+    session.quit().wait().unwrap();
+}
+
+#[test]
+fn a_plugins_link_rule_reaches_a_shell() {
+    let folder = tempfile::tempdir().unwrap();
+    let session = open(SessionConfig {
+        plugins: vec![slow_plugin()],
+        enabled: vec![slow_plugin().id().clone()],
+        ..SessionConfig::new(folder.path(), HOST, 4000)
+    });
+    session.replay(Vec::new());
+    wait_for_status(&session, closed_by_server());
+
+    let links = session.links(&Line::command("the exit"));
+    assert_eq!(links.len(), 1);
+    assert_eq!(&*links[0].action, "look exit");
+    assert_eq!((links[0].start, links[0].end), (4, 8));
     session.quit().wait().unwrap();
 }
 

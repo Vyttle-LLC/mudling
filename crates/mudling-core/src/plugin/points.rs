@@ -678,7 +678,7 @@ pub struct LinkRule {
 
 impl LinkRule {
     /// Adds a link for each match in `text`.
-    pub(super) fn find(&self, text: &str, links: &mut Vec<Link>) {
+    pub fn find(&self, text: &str, links: &mut Vec<Link>) {
         let group = self
             .group
             .as_deref()

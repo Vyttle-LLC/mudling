@@ -15,30 +15,34 @@ const LOCATION: &str = "inv";
 pub(super) const ASK: &str = "Char.Items.Inv";
 
 #[derive(Debug, Deserialize)]
-struct Item {
-    id: String,
+pub(super) struct Item {
+    pub(super) id: String,
     #[serde(deserialize_with = "without_colors")]
-    name: String,
+    pub(super) name: String,
 }
 
 /// Some games color item names.
 fn without_colors<'de, D: Deserializer<'de>>(names: D) -> Result<String, D::Error> {
-    let name = String::deserialize(names)?;
-    let mut plain = String::with_capacity(name.len());
-    AnsiParser::default().feed(&name, &mut plain, &mut Vec::new());
-    Ok(plain)
+    Ok(plain(&String::deserialize(names)?))
+}
+
+/// `text` without its color codes.
+pub(super) fn plain(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    AnsiParser::default().feed(text, &mut plain, &mut Vec::new());
+    plain
 }
 
 #[derive(Deserialize)]
-struct List {
-    location: String,
-    items: Vec<Item>,
+pub(super) struct List {
+    pub(super) location: String,
+    pub(super) items: Vec<Item>,
 }
 
 #[derive(Deserialize)]
-struct Change {
-    location: String,
-    item: Item,
+pub(super) struct Change {
+    pub(super) location: String,
+    pub(super) item: Item,
 }
 
 #[derive(Debug, Default)]

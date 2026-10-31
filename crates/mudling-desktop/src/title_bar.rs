@@ -20,7 +20,7 @@ use gpui::{
     WindowControlArea, actions, deferred, div, point, prelude::*, px, transparent_black,
 };
 use mudling_core::plugin::luau::Value;
-use mudling_core::store::{CharactersState, ConnectionStatus, SettingsState};
+use mudling_core::store::{CHARACTER_NAME, CharactersState, ConnectionStatus, SettingsState};
 use std::time::Duration;
 
 /// Where the traffic lights sit, level with the middle of the bar.
@@ -35,9 +35,6 @@ const MARK_SIZE: Pixels = px(20.);
 const MENU_MIN_WIDTH: Pixels = px(240.);
 /// How far in from a client-drawn window's edge a press resizes it.
 const RESIZE_MARGIN: Pixels = px(6.);
-/// The key the character's name would be under: the `character` store, which
-/// a game plugin writes. None writes this key yet.
-const CHARACTER_NAME_KEY: &str = "character.name";
 /// With no session the switcher has no server to name.
 const NO_SERVER: &str = "MUDling";
 const CONTEXT: &str = "TitleBar";
@@ -111,7 +108,7 @@ impl SessionLabel {
             Some(server) => server.clone(),
             None => NO_SERVER.to_owned(),
         };
-        let character = match characters.0.get(CHARACTER_NAME_KEY) {
+        let character = match characters.0.get(CHARACTER_NAME) {
             Some(Value::Text(name)) => Some(name.clone().into()),
             _ => None,
         };
@@ -691,7 +688,7 @@ mod tests {
 
         let characters = CharactersState(
             [(
-                CHARACTER_NAME_KEY.to_owned(),
+                CHARACTER_NAME.to_owned(),
                 Value::Text("Altissima".to_owned()),
             )]
             .into(),

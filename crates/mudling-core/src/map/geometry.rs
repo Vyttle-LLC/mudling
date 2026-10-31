@@ -76,8 +76,13 @@ impl Direction {
         let word = word.trim();
         Direction::ALL.into_iter().find(|direction| {
             let name = direction.name();
-            word.eq_ignore_ascii_case(name) || word.eq_ignore_ascii_case(&name[..1])
+            word.eq_ignore_ascii_case(name) || word.eq_ignore_ascii_case(direction.letter())
         })
+    }
+
+    /// The direction's one letter, lowercase: "n" for north.
+    pub fn letter(self) -> &'static str {
+        &self.name()[..1]
     }
 
     fn bit(self) -> u8 {

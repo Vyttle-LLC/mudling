@@ -27,7 +27,7 @@ use mudling_core::completion::Completion;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::Session;
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, SettingsState, Versioned, VitalsState,
+    CharactersState, ConnectionStatus, SettingsState, TargetState, Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use tempfile::TempDir;
@@ -61,6 +61,7 @@ struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
     characters: Versioned<CharactersState>,
+    target: Versioned<TargetState>,
 }
 
 pub struct Shell {
@@ -94,6 +95,7 @@ impl Shell {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            target: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         };
         let chat = cx.new(|_| Chat::new(terminal));
         let input = cx.new(CommandInput::new);
@@ -176,7 +178,14 @@ impl Shell {
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
         }
-        if batch.vitals.is_some() || batch.settings.is_some() || batch.characters.is_some() {
+        if let Some(target) = &batch.target {
+            self.copies.target.apply_diff(target);
+        }
+        if batch.vitals.is_some()
+            || batch.settings.is_some()
+            || batch.characters.is_some()
+            || batch.target.is_some()
+        {
             self.show_status(cx);
         }
     }
@@ -185,14 +194,13 @@ impl Shell {
         let Some(game) = &self.game else { return };
         let settings = self.copies.settings.value();
         let lines = lines_for(settings, &game.enabled);
-        // The core publishes no latency yet.
-        let latency = None;
         let characters = self.copies.characters.value();
-        let session = SessionLabel::of(settings, characters, game.is_replay(), latency);
+        let session = SessionLabel::of(settings, characters, game.is_replay(), settings.latency);
         self.status.update(cx, |status, cx| status.show(lines, cx));
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
         self.hud.update(cx, |hud, cx| {
-            hud.show(self.copies.vitals.value(), cx);
+            let target = self.copies.target.value();
+            hud.show(self.copies.vitals.value(), characters, target, cx);
         });
     }
 
@@ -266,7 +274,10 @@ impl Shell {
 
     #[cfg(test)]
     pub fn show_sample_vitals(&self, vitals: &VitalsState, cx: &mut Context<Shell>) {
-        self.hud.update(cx, |hud, cx| hud.show(vitals, cx));
+        let characters = CharactersState::default();
+        self.hud.update(cx, |hud, cx| {
+            hud.show(vitals, &characters, &TargetState::default(), cx);
+        });
     }
 
     #[cfg(test)]
