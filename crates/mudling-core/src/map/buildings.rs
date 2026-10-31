@@ -133,12 +133,14 @@ impl Layout {
         }
         self.assign_wings();
         let mut straightened = HashSet::new();
+        let mut may_be_misdrawn = self.rooms_leading_to_misdrawing();
         for id in ids {
-            if straightened.contains(&id) {
+            if straightened.contains(&id) || !may_be_misdrawn.contains(&id) {
                 continue;
             }
             if let Some(area) = self.misdrawn_area(id) {
-                self.straighten(&area);
+                let moved = self.straighten(&area);
+                self.note_moved_rooms(&moved, &mut may_be_misdrawn);
                 straightened.extend(self.flat_area_around(id));
             }
         }
