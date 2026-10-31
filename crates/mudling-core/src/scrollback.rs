@@ -88,8 +88,7 @@ mod tests {
         let mut lines = Vec::new();
         let mut scrollback = Scrollback::with_capacity(capacity);
         for text in texts {
-            pipeline.push(text.as_bytes(), &mut lines);
-            pipeline.push(b"\n", &mut lines);
+            pipeline.push_line(text.as_bytes(), &mut lines);
         }
         lines.into_iter().for_each(|line| scrollback.push(line));
         scrollback

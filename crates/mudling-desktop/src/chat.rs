@@ -77,8 +77,7 @@ impl Chat {
     /// `raw` as finished lines: one, or more if it passed the pipeline's cap.
     fn finish_line(&mut self, raw: &str) -> Vec<Line> {
         let mut lines = Vec::new();
-        self.pipeline.push(raw.as_bytes(), &mut lines);
-        self.pipeline.push(b"\n", &mut lines);
+        self.pipeline.push_line(raw.as_bytes(), &mut lines);
         lines
     }
 

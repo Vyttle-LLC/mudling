@@ -244,8 +244,7 @@ fn run(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
     let fill_started = Instant::now();
     let mut scrollback = Scrollback::with_capacity(SCROLLBACK_LINES);
     for _ in 0..SCROLLBACK_LINES {
-        pipeline.push(feed.next_line().as_bytes(), &mut parsed);
-        pipeline.push(b"\n", &mut parsed);
+        pipeline.push_line(feed.next_line().as_bytes(), &mut parsed);
         parsed.drain(..).for_each(|line| scrollback.push(line));
     }
     let fill = fill_started.elapsed();
@@ -255,8 +254,7 @@ fn run(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
     for _ in 0..TIMED_APPENDS {
         let raw = feed.next_line();
         let started = Instant::now();
-        pipeline.push(raw.as_bytes(), &mut parsed);
-        pipeline.push(b"\n", &mut parsed);
+        pipeline.push_line(raw.as_bytes(), &mut parsed);
         parsed.drain(..).for_each(|line| scrollback.push(line));
         appends.push(started.elapsed());
     }

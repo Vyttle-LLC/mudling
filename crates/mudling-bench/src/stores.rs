@@ -190,8 +190,7 @@ fn parsed_lines(count: usize) -> Vec<Line> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(count);
     for text in replay::synthetic_lines(count) {
-        pipeline.push(text.as_bytes(), &mut lines);
-        pipeline.push(b"\n", &mut lines);
+        pipeline.push_line(text.as_bytes(), &mut lines);
     }
     lines
 }

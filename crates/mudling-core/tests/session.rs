@@ -11,12 +11,13 @@ use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
     CharactersState, ConnectionStatus, GearState, MapState, MobsState, RoomState, SettingsState,
-    StoreHub, TerminalState, Versioned, VitalsState,
+    Store, StoreHub, TerminalState, Versioned, VitalsState,
 };
-use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{DO, GA, IAC, SB, SE, WILL};
 use mudling_core::telnet::option::{ECHO, GMCP};
+use mudling_core::telnet::{Bytes, gmcp};
 use mudling_core::{Line, LineKind};
+use std::fmt::Debug;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -133,6 +134,34 @@ fn database_bytes(folder: &Path) -> Vec<u8> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|at| at == needle)
+}
+
+/// `Package.Name {json}`, on the wire.
+fn gmcp_frame(message: &str) -> Vec<u8> {
+    let (package, data) = message.split_once(' ').unwrap_or((message, ""));
+    let mut bytes = Vec::new();
+    gmcp::encode(package, data, &mut bytes);
+    bytes
+}
+
+/// Every store, as text, for proving something isn't in any of them.
+fn every_store(session: &Session) -> String {
+    fn text<S: Store + Debug>(session: &Session) -> String {
+        session
+            .stores()
+            .read(|store: &Versioned<S>| format!("{:?}", store.value()))
+    }
+    [
+        text::<TerminalState>(session),
+        text::<VitalsState>(session),
+        text::<RoomState>(session),
+        text::<MapState>(session),
+        text::<MobsState>(session),
+        text::<CharactersState>(session),
+        text::<GearState>(session),
+        text::<SettingsState>(session),
+    ]
+    .concat()
 }
 
 // ---- A recorded byte stream ----
@@ -274,9 +303,7 @@ impl FakeServer {
     }
 
     fn gmcp(&mut self, message: &str) {
-        self.say(&[IAC, SB, GMCP]);
-        self.say(message.as_bytes());
-        self.say(&[IAC, SE]);
+        self.say(&gmcp_frame(message));
     }
 
     /// Reads until `needle` has arrived, and everything before it is gone.
@@ -426,11 +453,9 @@ fn a_password_typed_with_echo_off_is_kept_nowhere() {
     server.expect(b"after\r\n");
     wait_for_terminal(&session, "after");
 
-    assert!(
-        terminal(&session)
-            .iter()
-            .all(|line| !line.contains("swordfish"))
-    );
+    let stores = every_store(&session);
+    assert!(stores.contains("before"), "the stores were read");
+    assert!(!stores.contains("swordfish"), "{stores}");
     assert_eq!(session.complete("swo", 3), None, "no word from it");
     assert_eq!(session.older("", "").as_deref(), Some("after"));
     assert_eq!(session.older("after", "").as_deref(), Some("before"));
@@ -498,9 +523,12 @@ fn quit_closes_the_connection_and_loses_nothing() {
     server.expect(b"say goodbye\r\n");
     session.quit().wait().unwrap();
 
+    // The read timeout fails here: only a real close passes.
     let mut closed = [0; 1];
-    let read = server.stream.read(&mut closed).unwrap_or(0);
-    assert_eq!(read, 0, "the socket closed");
+    match server.stream.read(&mut closed) {
+        Ok(read) => assert_eq!(read, 0, "the socket closed"),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+    }
 
     let database = Database::open(&folder.path().join("servers"), HOST).unwrap();
     let reader = database.reader().unwrap();
@@ -586,10 +614,7 @@ impl Driven {
     }
 
     fn gmcp(&mut self, message: &str) {
-        let mut bytes = vec![IAC, SB, GMCP];
-        bytes.extend_from_slice(message.as_bytes());
-        bytes.extend_from_slice(&[IAC, SE]);
-        self.say(&bytes);
+        self.say(&gmcp_frame(message));
     }
 
     fn terminal(&self) -> Vec<String> {
@@ -637,6 +662,59 @@ fn a_detected_game_with_its_plugin_off_runs_no_plugin() {
         assert!(said.unwrap().styled().is_empty(), "no plugin coloring");
     });
     session.quit().wait().unwrap();
+}
+
+/// A queue of none drops every event, as a flood would: the player is told
+/// once, not once per line.
+#[test]
+fn hook_events_dropped_on_a_full_queue_are_noticed_once() {
+    let mut driven = Driven::configured("mud.hearth.example", |config| {
+        config.plugins = vec![hearth()];
+        config.enabled = vec![hearth_id()];
+        config.hook_limits.queue = 0;
+    });
+    driven.engine.start_connection().unwrap();
+    driven.say(b"You are now 1% in kick.\r\n");
+    driven.say(b"You are now 2% in kick.\r\n");
+    let notices = driven
+        .hub
+        .read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("hearth"), "{notices:?}");
+}
+
+/// A plugin that names a hook its files don't define fails to load on every
+/// connection, and the notices it leaves stay within their cap.
+#[test]
+fn notices_stay_within_their_cap_across_reconnects() {
+    let plugin = Plugin::from_files(|file| {
+        Ok(match file {
+            "plugin.toml" => {
+                "id = \"broken\"\nname = \"Broken\"\nversion = \"1.0.0\"\napi = 1\n\
+                 license = \"MIT\"\nlayer = \"game\"\n[servers]\nmssp_names = [\"Broken\"]\n\
+                 [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"broken.luau\"]\n"
+            }
+            "text.toml" => "[[pattern]]\nname = \"go\"\npattern = 'go'\nhook = \"missing\"\n",
+            _ => "defined = true\n",
+        }
+        .to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    let id = plugin.id().clone();
+    let mut driven = Driven::configured("mud.example.org", |config| {
+        config.plugins = vec![plugin];
+        config.enabled = vec![id];
+    });
+    for _ in 0..40 {
+        driven.engine.start_connection().unwrap();
+        driven
+            .engine
+            .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+    }
+    let notices = driven
+        .hub
+        .read(|settings: &Versioned<SettingsState>| settings.value().notices.len());
+    assert_eq!(notices, 32);
 }
 
 #[test]
@@ -700,6 +778,124 @@ fn a_reconnect_starts_from_nothing_learned() {
         ["<18hp> "],
         "no HUD numbers yet on this connection, so the prompt shows"
     );
+}
+
+/// A move sent as the connection died never got its answer: the next
+/// connection's first room isn't where it led.
+#[test]
+fn a_move_in_flight_doesnt_cross_a_reconnect() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 1, "name": "A road", "exits": {"n": 2}}"#);
+    driven.engine.send("north", Timestamp(0));
+    driven
+        .engine
+        .close_connection(DisconnectReason::ClosedByServer, Timestamp(0));
+
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 50, "name": "The temple", "exits": {}}"#);
+    let links = driven.hub.read(|map: &Versioned<MapState>| {
+        let links = map.value().room(1).unwrap().links.iter();
+        links.map(|(_, to)| *to).collect::<Vec<_>>()
+    });
+    assert_eq!(links, [] as [i64; 0]);
+}
+
+/// Three prompts of each shape, each with `Char.Vitals` and GA. `{}` is the
+/// number that changes.
+fn prompts(driven: &mut Driven, shape: &str) {
+    for hp in 0..3 {
+        driven.gmcp(&format!(r#"Char.Vitals {{"hp": {hp}}}"#));
+        driven.say(shape.replace("{}", &hp.to_string()).as_bytes());
+        driven.say(&[IAC, GA]);
+    }
+}
+
+/// A prompt that grows, with its old shape seen as much: ended at a signal,
+/// no part of it shows, whatever the part looks like.
+#[test]
+fn a_grown_prompt_is_hidden_whole() {
+    let cases = [
+        ("<{}hp> ", "<{}hp> <{}mv> "),
+        ("<{}hp> ", "<{}hp> [Fighting] "),
+        ("<{}hp> ", "<{}hp> [In Combat] "),
+        ("<{}hp> ", "<{}hp> Tnl 500> "),
+        ("<{}hp> ", "<{}hp> Tank healthy> "),
+        ("HP {} MP 2 ", "HP {} MP 2 MV 3 "),
+    ];
+    for (bare, grown) in cases {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, bare);
+        prompts(&mut driven, grown);
+        assert_eq!(driven.terminal(), [] as [&str; 0], "{grown:?}");
+    }
+}
+
+/// On a game with `Char.Vitals`, only it teaches prompts: a numbered question
+/// or pager line ended at a signal stays visible however often it repeats.
+#[test]
+fn repeated_numbered_lines_stay_visible_with_vitals() {
+    let signaled = |driven: &mut Driven, line: &str| {
+        driven.say(line.as_bytes());
+        driven.say(&[IAC, GA]);
+    };
+    let question = "Choose a class (1-5): ";
+    for between_vitals in [false, true] {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, "<{}hp> ");
+        for _ in 0..3 {
+            signaled(&mut driven, question);
+            if between_vitals {
+                prompts(&mut driven, "<{}hp> ");
+            }
+        }
+        signaled(&mut driven, "--More-- (20%) ");
+        signaled(&mut driven, "--More-- (45%) ");
+        assert_eq!(
+            driven.terminal(),
+            [
+                question,
+                question,
+                question,
+                "--More-- (20%) ",
+                "--More-- (45%) "
+            ],
+            "Vitals between: {between_vitals}"
+        );
+    }
+}
+
+/// A menu repeated at login, before the first `Char.Vitals`, isn't a prompt
+/// once the game turns out to have GMCP.
+#[test]
+fn shapes_repeated_before_the_first_vitals_are_forgotten() {
+    let mut driven = Driven::new(Vec::new(), "mud.example.org");
+    driven.engine.start_connection().unwrap();
+    let question = "Choose a class (1-5): ";
+    for _ in 0..2 {
+        driven.say(question.as_bytes());
+        driven.say(&[IAC, GA]);
+    }
+    prompts(&mut driven, "<{}hp> ");
+    driven.say(question.as_bytes());
+    driven.say(&[IAC, GA]);
+    assert_eq!(driven.terminal(), [question, question, question]);
+}
+
+/// Ended by a newline, output after a prompt shows, even with a shape learned
+/// from that same text at a signal.
+#[test]
+fn newline_ended_output_after_a_prompt_stays_visible() {
+    for output in ["You rest.", "You are carrying:", "You have 5 gold."] {
+        let mut driven = Driven::new(Vec::new(), "mud.example.org");
+        driven.engine.start_connection().unwrap();
+        prompts(&mut driven, "<{}hp> ");
+        prompts(&mut driven, &format!("<{{}}hp> {output}"));
+        driven.say(format!("<7hp> {output}\r\n").as_bytes());
+        assert_eq!(driven.terminal(), [output], "{output:?}");
+    }
 }
 
 #[test]

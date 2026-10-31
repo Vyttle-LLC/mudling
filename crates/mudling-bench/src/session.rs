@@ -19,9 +19,8 @@ use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::stats::Summary;
 use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsState};
-use mudling_core::telnet::Bytes;
-use mudling_core::telnet::command::{GA, IAC, SB, SE};
-use mudling_core::telnet::option::GMCP;
+use mudling_core::telnet::command::{GA, IAC};
+use mudling_core::telnet::{Bytes, gmcp};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -133,20 +132,15 @@ fn read(index: usize, line: &str) -> Bytes {
     bytes.extend_from_slice(b"\n\r");
     if index % LINES_PER_PROMPT == LINES_PER_PROMPT - 1 {
         let (hp, moves) = (index % 500, index % 97);
-        push_gmcp(
+        gmcp::encode(
+            "Char.Vitals",
+            &format!(r#"{{"hp": {hp}, "maxhp": 500, "mv": {moves}}}"#),
             &mut bytes,
-            &format!(r#"Char.Vitals {{"hp": {hp}, "maxhp": 500, "mv": {moves}}}"#),
         );
         bytes.extend_from_slice(format!("<{hp}hp {moves}mv> ").as_bytes());
         bytes.extend_from_slice(&[IAC, GA]);
     }
     bytes.into()
-}
-
-fn push_gmcp(bytes: &mut Vec<u8>, message: &str) {
-    bytes.extend_from_slice(&[IAC, SB, GMCP]);
-    bytes.extend_from_slice(message.as_bytes());
-    bytes.extend_from_slice(&[IAC, SE]);
 }
 
 /// A connected session with a shell subscribed, in a folder of its own.
@@ -260,12 +254,13 @@ fn room_info(x: i64, y: i64) -> Bytes {
         }
     }
     let mut bytes = Vec::new();
-    push_gmcp(
-        &mut bytes,
+    gmcp::encode(
+        "Room.Info",
         &format!(
-            r#"Room.Info {{"num": {id}, "name": "Room {id}", "zone": "Grid", "exits": {{{}}}}}"#,
+            r#"{{"num": {id}, "name": "Room {id}", "zone": "Grid", "exits": {{{}}}}}"#,
             exits.join(", ")
         ),
+        &mut bytes,
     );
     bytes.into()
 }
