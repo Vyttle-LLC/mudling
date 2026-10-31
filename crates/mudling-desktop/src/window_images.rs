@@ -61,6 +61,13 @@ const WRAPPING_CHAT: [&str; 10] = [
     "           [*]",
 ];
 
+/// What arrives while the split is open.
+const LOOT: [&str; 2] = [
+    "\x1b[32mYou get a copper bracelet.\x1b[0m",
+    "\x1b[36mA bright spirit of friendship floats in.\x1b[0m",
+];
+const NEW_LINES: usize = 14;
+
 fn images_folder() -> PathBuf {
     std::env::var_os("MUDLING_WINDOW_IMAGES").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/window-images"),
@@ -98,6 +105,16 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
         SessionLabel::new("mud.example", Some("Sample".into()), "Connected · 38 ms"),
         cx,
     );
+}
+
+/// Reads back to the top of the sample, then 14 lines arrive.
+fn split_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.chat().update(cx, |chat, cx| {
+        chat.open_history_at(0, cx);
+        for _ in 0..NEW_LINES / LOOT.len() {
+            chat.apply(&server_lines(&LOOT), cx);
+        }
+    });
 }
 
 /// Opens the window at `window_size`, lets `arrange` set it up, and saves what
@@ -186,6 +203,22 @@ fn window_images() {
                 .update(cx, |chat, cx| chat.apply(&server_lines(&WRAPPING_CHAT), cx));
         },
     );
+    render("split-dark", Dark, WIDE, |shell, _, cx| {
+        split_sample(shell, cx)
+    });
+    render("split-light", Light, WIDE, |shell, _, cx| {
+        split_sample(shell, cx)
+    });
+    render("split-panels-open-dark", Dark, DEFAULT, |shell, _, cx| {
+        split_sample(shell, cx);
+        shell.open_panels(cx);
+    });
+    render("split-wrapped-dark", Dark, DEFAULT, |shell, _, cx| {
+        shell
+            .chat()
+            .update(cx, |chat, cx| chat.apply(&server_lines(&WRAPPING_CHAT), cx));
+        split_sample(shell, cx);
+    });
     render("rails-dark", Dark, WIDE, |shell, _, cx| {
         for side in [Side::Left, Side::Right] {
             shell

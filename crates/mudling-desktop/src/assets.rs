@@ -57,6 +57,7 @@ icons! {
     PanelRight => "panel-right.svg",
     Sprocket => "sprocket.svg",
     ChevronDown => "chevron-down.svg",
+    ArrowDown => "arrow-down.svg",
     Signal => "signal.svg",
     Check => "check.svg",
     Runestone => "runestone.svg",

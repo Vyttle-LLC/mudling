@@ -82,6 +82,8 @@ cargo build --release
 ./target/release/mudling-desktop --replay ~/dev/vyttle/mud-client-spike/logs/session-*.log \
     --measure --report reports/frames.json
 ./target/release/mudling-desktop --synthetic --measure --report reports/frames-synthetic.json
+# The same with lines that wrap, the costliest kind to lay out.
+./target/release/mudling-desktop --synthetic --long-lines --measure --report reports/frames-long.json
 
 # Look at it: 100,000 lines of history, then 50 new lines a second.
 ./target/release/mudling-desktop --replay ~/dev/vyttle/mud-client-spike/logs/session-*.log
@@ -100,14 +102,15 @@ cargo build --release
   (render, layout, prepaint, paint and the hand-off to Metal) and prints it
   to stderr when `ZED_MEASUREMENTS=1`. The binary re-runs itself with that
   set and sorts the frames by phase: `startup` (open and settle for 1 s),
-  `stream` (20 s at 50 lines a second, pinned to the newest line) and
-  `scroll` (5 s scrolling back while lines still arrive). The measured run
-  is paced by gpui's frame callbacks rather than timers, because timers fire
+  `stream` (20 s at 50 lines a second, pinned to the newest line), `split`
+  (20 s more with the chat split), `scroll` (5 s scrolling the history pane
+  back while lines still arrive) and `rewrap` (5 s of dragging a panel so
+  both panes wrap to a new width each frame). The measured run is paced by gpui's frame callbacks rather than timers, because timers fire
   late on a busy machine and would thin out the frames being measured. It
   also draws while another app has focus, and holds off App Nap.
 - **Report**: `--report` writes JSON with the phases' p50, p99 and max, the
-  load average, time to first frame, the memory and whether the stream
-  phase met 8 ms.
+  load average, time to first frame, the memory and whether the stream and
+  split phases met 8 ms.
 
 ### Windows and Linux
 

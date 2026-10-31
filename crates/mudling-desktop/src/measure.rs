@@ -9,11 +9,15 @@
 //! 1. `startup`: the window opens, the session replays the full scrollback
 //!    into it, then it settles.
 //! 2. `stream`: lines arrive at the replay pace, pinned to the newest line.
-//! 3. `scroll`: the view scrolls back through history while lines still
-//!    arrive, so every frame lays out lines it hasn't shown before.
-//! 4. `rewrap`: the right panel closes, leaving the column room to change
+//! 3. `split`: the chat splits a page back, and lines arrive for as long as
+//!    in `stream`, into the live pane with the history pane held still.
+//! 4. `scroll`: the history pane scrolls back while lines still arrive, so
+//!    every frame lays out lines it hasn't shown before, in both panes.
+//! 5. `rewrap`: the right panel closes, leaving the column room to change
 //!    width, and the left one is dragged back and forth while lines still
-//!    arrive, so every frame wraps the chat to a new width.
+//!    arrive, so every frame wraps both panes to a new width.
+//!
+//! `--long-lines` measures all of this with lines that wrap.
 //!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
@@ -46,6 +50,8 @@ const REWRAP_DURATION: Duration = Duration::from_secs(5);
 const REWRAP_DRAG: f32 = 60.;
 /// Scrolled per display frame: about a line and a half.
 const SCROLL_STEP: f32 = 30.;
+/// How far back the split opens: more than a window of history.
+const SPLIT_DISTANCE: f32 = 2_000.;
 
 /// Prints one marker for the measuring parent.
 pub fn mark(message: &str) {
@@ -66,6 +72,7 @@ enum Phase {
     Load,
     Settle,
     Stream,
+    Split,
     Scroll,
     Rewrap,
 }
@@ -105,13 +112,17 @@ impl Pacer {
             self.started = Instant::now();
         }
         let elapsed = self.started.elapsed();
+        let split_at = SETTLE + self.stream_for;
+        let scroll_at = split_at + self.stream_for;
         let phase = if elapsed < SETTLE {
             Phase::Settle
-        } else if elapsed < SETTLE + self.stream_for {
+        } else if elapsed < split_at {
             Phase::Stream
-        } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION {
+        } else if elapsed < scroll_at {
+            Phase::Split
+        } else if elapsed < scroll_at + SCROLL_DURATION {
             Phase::Scroll
-        } else if elapsed < SETTLE + self.stream_for + SCROLL_DURATION + REWRAP_DURATION {
+        } else if elapsed < scroll_at + SCROLL_DURATION + REWRAP_DURATION {
             Phase::Rewrap
         } else {
             mark_rss("rss_mb_end");
@@ -124,9 +135,14 @@ impl Pacer {
             mark(match phase {
                 Phase::Load | Phase::Settle => "phase startup",
                 Phase::Stream => "phase stream",
+                Phase::Split => "phase split",
                 Phase::Scroll => "phase scroll",
                 Phase::Rewrap => "phase rewrap",
             });
+            if phase == Phase::Split {
+                self.chat
+                    .update(cx, |chat, cx| chat.scroll_back(px(SPLIT_DISTANCE), cx));
+            }
             if phase == Phase::Rewrap {
                 self.dock(Side::Right, cx)
                     .update(cx, |dock, cx| dock.move_to(DockState::Hidden, cx));
@@ -213,6 +229,7 @@ struct FrameReport {
     first_frame_ms: Option<f64>,
     frame_budget_us: f64,
     stream_within_budget: Option<bool>,
+    split_within_budget: Option<bool>,
     phases: BTreeMap<String, Summary>,
     info: BTreeMap<String, f64>,
 }
@@ -279,18 +296,21 @@ pub fn run_parent(
         .iter()
         .filter_map(|(name, samples)| Some((name.clone(), Summary::of(samples)?)))
         .collect();
+    let within_budget = |phase: &str| phases.get(phase).map(|s| s.p99_us <= FRAME_BUDGET_US);
     let report = FrameReport {
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         optimized: !cfg!(debug_assertions),
         load_average_1m,
-        scope: "chat, command bar and both side panels open, their slots empty; no split yet",
+        scope: "chat, command bar and both side panels open, their slots empty; \
+                the chat split from the split phase on",
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
         first_frame_ms: first_frame.map(|d| d.as_secs_f64() * 1e3),
         frame_budget_us: FRAME_BUDGET_US,
-        stream_within_budget: phases.get("stream").map(|s| s.p99_us <= FRAME_BUDGET_US),
+        stream_within_budget: within_budget("stream"),
+        split_within_budget: within_budget("split"),
         phases,
         info,
     };
@@ -326,11 +346,16 @@ fn print_report(report: &FrameReport) {
     for (key, value) in &report.info {
         println!("{key}: {value}");
     }
-    if let Some(ok) = report.stream_within_budget {
-        println!(
-            "stream frame p99 ≤ 8 ms: {}",
-            if ok { "ok" } else { "MISSED" }
-        );
+    for (phase, ok) in [
+        ("stream", report.stream_within_budget),
+        ("split", report.split_within_budget),
+    ] {
+        if let Some(ok) = ok {
+            println!(
+                "{phase} frame p99 ≤ 8 ms: {}",
+                if ok { "ok" } else { "MISSED" }
+            );
+        }
     }
 }
 

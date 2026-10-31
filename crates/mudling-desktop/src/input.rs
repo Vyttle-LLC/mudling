@@ -470,6 +470,11 @@ impl CommandInput {
         cx.notify();
     }
 
+    /// Whether End would leave the caret where it is.
+    pub fn caret_at_end(&self) -> bool {
+        self.cursor_offset() == self.content.len()
+    }
+
     fn cursor_offset(&self) -> usize {
         if self.selection_reversed {
             self.selected_range.start
