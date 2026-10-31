@@ -4,6 +4,7 @@
 
 use super::geometry::Direction;
 use super::info::RoomInfo;
+use super::mobs::MobNamer;
 
 /// How rooms are told apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +68,17 @@ pub trait MapRules: Send {
     /// A line saying the player is in a maze, whose rooms are one square.
     fn maze(&self, _line: &str) -> bool {
         false
+    }
+
+    /// A room whose exits don't hold still, so it and its like are one
+    /// square.
+    fn maze_room(&self, _zone: &str, _room: &str) -> bool {
+        false
+    }
+
+    /// How the game's room titles read as mob names.
+    fn mob_namer(&self) -> MobNamer {
+        MobNamer::default()
     }
 
     /// A mob attacking the player unprovoked, by name: its kind is aggressive.

@@ -8,13 +8,17 @@
 //!   must get at most one batch per frame, and be woken once per batch, not
 //!   once per write.
 
+use mudling_core::defaults::hud::Vital;
+use mudling_core::map::{LiveMap, MapRoom, PlainRules};
+use mudling_core::persist::Timestamp;
 use mudling_core::replay;
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Fields, RoomState, StoreHub, Stores, TERMINAL_CAPACITY, TerminalChange, TerminalLine,
-    TerminalState, VitalsState,
+    RoomState, StoreHub, Stores, TERMINAL_CAPACITY, TerminalChange, TerminalState, VitalsState,
 };
+use mudling_core::{Line, LinePipeline};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -24,6 +28,7 @@ const FRAME_BUDGET_US: f64 = FRAME.as_micros() as f64;
 const APPLY_ROUNDS: usize = 10_000;
 /// A typical frame while text arrives: a few lines, the vitals and the room.
 const LINES_PER_FRAME: usize = 10;
+const ROOMS: usize = 100;
 const BURST_LINES_PER_SECOND: usize = 50;
 const BURST_LINES: usize = 10;
 const BURST_SECONDS: u64 = 2;
@@ -83,17 +88,16 @@ pub fn print(report: &Report) {
 fn measure_frame_apply() -> Summary {
     let hub = StoreHub::new(|| {});
     let mut shell = subscribed_shell(&hub);
-    hub.write::<TerminalState>(append(
-        replay::synthetic_lines(TERMINAL_CAPACITY).into_iter(),
-    ));
+    hub.write::<TerminalState>(append(parsed_lines(TERMINAL_CAPACITY).into_iter()));
     shell.apply_batch(&hub.drain().expect("the terminal filled"));
 
-    let mut lines = replay::synthetic_lines(1_000).into_iter().cycle();
+    let mut lines = parsed_lines(1_000).into_iter().cycle();
+    let rooms = rooms();
     let mut samples = Vec::with_capacity(APPLY_ROUNDS);
     for round in 0..APPLY_ROUNDS {
         hub.write::<TerminalState>(append(lines.by_ref().take(LINES_PER_FRAME)));
         hub.write::<VitalsState>(vitals(round));
-        hub.write::<RoomState>(room(round));
+        hub.write::<RoomState>(room(&rooms, round));
         let started = Instant::now();
         if let Some(batch) = hub.drain() {
             shell.apply_batch(&batch);
@@ -126,7 +130,7 @@ fn measure_burst() -> Burst {
     let writer = std::thread::spawn({
         let hub = Arc::clone(&hub);
         move || {
-            let mut lines = replay::synthetic_lines(BURST_LINES).into_iter().cycle();
+            let mut lines = parsed_lines(BURST_LINES).into_iter().cycle();
             let started = Instant::now();
             for burst in 0..bursts {
                 std::thread::sleep(
@@ -182,19 +186,42 @@ fn subscribed_shell(hub: &StoreHub) -> Stores {
     }
 }
 
-fn append(texts: impl Iterator<Item = String>) -> TerminalChange {
-    TerminalChange::Append(texts.map(|text| TerminalLine { text }).collect())
+fn parsed_lines(count: usize) -> Vec<Line> {
+    let mut pipeline = LinePipeline::default();
+    let mut lines = Vec::with_capacity(count);
+    for text in replay::synthetic_lines(count) {
+        pipeline.push_line(text.as_bytes(), &mut lines);
+    }
+    lines
+}
+
+fn append(lines: impl Iterator<Item = Line>) -> TerminalChange {
+    TerminalChange::Append(lines.collect())
 }
 
 fn vitals(n: usize) -> VitalsState {
-    let hp = (n % 100).to_string();
-    VitalsState(Fields::from([("hp", hp.as_str()), ("maxhp", "100")]))
+    VitalsState(BTreeMap::from([
+        (Vital::Hp, (n % 100) as i64),
+        (Vital::MaxHp, 100),
+    ]))
 }
 
-fn room(n: usize) -> RoomState {
-    let id = (n % 1_000).to_string();
-    RoomState(Fields::from([
-        ("num", id.as_str()),
-        ("name", "A synthetic room"),
-    ]))
+/// Mapped rooms to move between.
+fn rooms() -> Vec<Arc<MapRoom>> {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    (0..ROOMS)
+        .map(|id| {
+            let json = format!(r#"{{"num": {id}, "name": "A synthetic room"}}"#);
+            map.room_info(&json, Timestamp(0));
+            let commit = map.commit(Timestamp(0)).expect("the room is new");
+            Arc::clone(&commit.change.rooms[0])
+        })
+        .collect()
+}
+
+fn room(rooms: &[Arc<MapRoom>], n: usize) -> RoomState {
+    RoomState {
+        room: Some(Arc::clone(&rooms[n % rooms.len()])),
+        ..RoomState::default()
+    }
 }

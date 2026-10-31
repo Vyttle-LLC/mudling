@@ -47,6 +47,19 @@ impl Vital {
             _ => Vital::Other(name.to_owned()),
         }
     }
+
+    /// The vital's common name, which [`Vital::from_name`] reads back.
+    pub fn name(&self) -> &str {
+        match self {
+            Vital::Hp => "hp",
+            Vital::MaxHp => "maxhp",
+            Vital::Mana => "mana",
+            Vital::MaxMana => "maxmana",
+            Vital::Moves => "moves",
+            Vital::MaxMoves => "maxmoves",
+            Vital::Other(name) => name,
+        }
+    }
 }
 
 /// Where a vital's value is: a key of a GMCP message.
@@ -96,6 +109,11 @@ impl HudFields {
             })
             .collect();
         self.learned = Some(learned);
+    }
+
+    /// Whether a `Char.Vitals` has come, so the HUD has numbers to show.
+    pub fn has_learned(&self) -> bool {
+        self.learned.is_some()
     }
 
     /// The learned fields, with every enabled plugin's HUD vitals over them

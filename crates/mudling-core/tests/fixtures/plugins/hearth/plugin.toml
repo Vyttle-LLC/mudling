@@ -1,0 +1,23 @@
+# A synthetic game for the session tests: it logs in, reads a few lines with
+# Luau hooks, and writes to stores and sends a command from them.
+id = "hearth"
+name = "Hearth"
+version = "1.0.0"
+api = 1
+license = "MIT"
+layer = "game"
+permissions = ["write_store:skills", "write_store:gear", "send_commands"]
+
+[servers]
+hosts = ["mud.hearth.example"]
+mssp_names = ["Hearth"]
+
+[points]
+connection = "connection.toml"
+text = "text.toml"
+map = "map.toml"
+mobs = "mobs.toml"
+commands = "commands.toml"
+
+[hooks]
+files = ["hearth.luau"]

@@ -1,10 +1,12 @@
 # How Avatar takes commands.
 #
 # No separator: Avatar would run "n=n=w" as three moves, but its spam check
-# counts each command in a chain, so chaining saves nothing; one command
-# per line is the default. No speedwalk either: the game has none, so
-# shorthand such as "8n, [s], d" expands in the client, one move a line,
-# and a bracketed door opens first with the `open` door command.
+# counts each command in a chain, and a long enough run of them disconnects
+# the player, so chaining saves nothing; one command per line is the
+# default, and what a move refuses can't take the rest of a chain with it.
+# No speedwalk either: the game has none, so shorthand such as "8n, [s], d"
+# expands in the client, one move a line, and a bracketed door opens first
+# with the `open` door command.
 
 [verbs]
 wear = "wear"
@@ -26,3 +28,11 @@ open = "open {dir}"
 close = "close {dir}"
 unlock = "unlock {dir}"
 lock = "lock {dir}"
+
+# The word a command uses for an item: the noun ending its first phrase.
+# "a pixie crossbow" gives "crossbow", "a sash of the captain's guard"
+# gives "sash". The game refuses "remove captain's".
+[keywords]
+skip = ["a", "an", "the", "some"]
+phrase_ends = ["of", "that", "with"]
+possessives = false

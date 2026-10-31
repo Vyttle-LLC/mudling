@@ -1,8 +1,15 @@
+# A mob attacking on sight: "The ugly bear GLARES at you and SNARLS!", its
+# last word the noun to remember. "X screams and attacks!" is a mob helping
+# a friend already fighting, which isn't aggression.
+[[aggro]]
+name = "mobs.aggro"
+pattern = '''^{prompt}?(?<name>(?:.*[^A-Za-z])?(?<noun>[A-Za-z]+)) GLARES at you and SNARLS!'''
+
 # Turns a mob's room title into its name, without the tags in front or
 # what it's doing, which change from visit to visit: "(White Aura) A
-# myconoid shaman is here, chanting." gives "A myconoid shaman". Compare
-# names ignoring case. Applied to titles (GMCP Room.Players fullname), not
-# to every line; aggression is a message, read in text.toml.
+# myconoid shaman is here, chanting." gives "A myconoid shaman". The map
+# keeps names in lowercase. Applied to titles (GMCP Room.Players fullname),
+# not to lines.
 [[room_title]]
 name = "mobs.name"
 pattern = '''^(?:\([^)]*\)\s*)*(?<name>.+?)(?: (?:is|are) .*)?[\s.!,]*$'''

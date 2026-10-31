@@ -5,10 +5,6 @@ local function trim(text)
     return string.match(text, "^%s*(.-)%s*$")
 end
 
-local function starts(event)
-    return string.sub(event.name, -6) == ".start"
-end
-
 -- ---- score ----
 
 -- Score labels and the character keys they fill. The attributes' current
@@ -60,13 +56,10 @@ end
 local finish_score = Readers.count_rows("character", "score.read")
 
 function read_score(event)
-    if starts(event) then
-        local reader = Readers.open("score", finish_score)
+    local kind, reader = Readers.step(event, "score", finish_score)
+    if kind == "start" then
         Readers.write(reader, "character", "title", event.captures.title)
-        return
-    end
-    local reader = Readers.get("score")
-    if reader then
+    elseif kind == "row" then
         Readers.row(reader)
         read_score_row(reader, event.plain)
     end
@@ -77,23 +70,17 @@ end
 local finish_practice = Readers.count_rows("skills", "practice.read")
 
 function read_practice(event)
-    if starts(event) then
-        -- The sessions line, then the header: one table.
-        local reader = Readers.get("practice")
-        if not reader or reader.rows > 0 then
-            reader = Readers.open("practice", finish_practice)
-        end
+    local kind, reader = Readers.step(event, "practice", finish_practice)
+    if kind == "start" then
         local sessions = event.captures.sessions
         if sessions then
             Readers.write(reader, "skills", "practice.sessions", tonumber(sessions))
         end
         return
-    end
-    local reader = Readers.get("practice")
-    if not reader then
+    elseif kind ~= "row" then
         return
     end
-    -- "dodge               90   4   -    0  kick                33   7   -    0"
+    -- "dodge              90   4   -    0  kick                33   7   -    0"
     for name, learned, level, mana in string.gmatch(Readers.body(event), "([a-z][a-z' %-]-)%s+(%d+)%s+(%d+)%s+%S+%s+(%d+)") do
         name = trim(name)
         Readers.row(reader)
@@ -148,12 +135,8 @@ end
 local finish_slist = Readers.count_rows("skills", "slist.read")
 
 function read_slist(event)
-    if starts(event) then
-        Readers.open("slist", finish_slist)
-        return
-    end
-    local reader = Readers.get("slist")
-    if not reader then
+    local kind, reader = Readers.step(event, "slist", finish_slist)
+    if kind ~= "row" then
         return
     end
     local line = Readers.body(event)
@@ -178,19 +161,16 @@ end
 
 local finish_affects = Readers.count_rows("affects", "count")
 
+function on_no_affects(event)
+    mud.store("affects", "count", 0)
+end
+
 function read_affects(event)
-    if event.name == "character.affects.start" then
-        local reader = Readers.open("affects", finish_affects)
+    local kind, reader = Readers.step(event, "affects", finish_affects)
+    if kind == "start" then
         reader.seen = {}
         return
-    end
-    if event.name == "character.affects.none" then
-        -- A whole table on one line.
-        mud.store("affects", "count", 0)
-        return
-    end
-    local reader = Readers.get("affects")
-    if not reader then
+    elseif kind ~= "row" then
         return
     end
     local name, detail = event.captures.name, event.captures.detail or ""

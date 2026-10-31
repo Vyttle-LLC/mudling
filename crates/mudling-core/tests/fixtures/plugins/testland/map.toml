@@ -1,5 +1,5 @@
 room_identity = "gmcp"
-mazes = ["The Hedge"]
+area_name = '''^\[(?<low>\d+)-(?<high>\d+)\] (?<name>.+)$'''
 
 [areas]
 "7" = "The Hedge"
@@ -7,3 +7,10 @@ mazes = ["The Hedge"]
 [[failed_move]]
 name = "blocked"
 pattern = '''^You can't go that way\.$'''
+
+[[maze]]
+area = "The Hedge"
+
+[[maze]]
+area = "Barrow Field"
+rooms = ["The Mist"]

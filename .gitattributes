@@ -1,0 +1,2 @@
+# Recorded byte streams: never touch their line endings.
+*.telnet binary

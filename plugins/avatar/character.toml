@@ -1,10 +1,8 @@
-# The commands that re-read the character in the background, and the
-# table that answers each. Each reader is the same as the start and row
-# patterns of the same name in text.toml (a test keeps them so); with no
-# `end`, the next prompt ends it. The client sends them when the character
-# enters the game, after a level-up (practice, slist), when affects may
-# have changed (aff), and after a gear change (equipment); slist only
-# changes with level.
+# The commands that re-read the character in the background, the table
+# that answers each, and the messages about skills. With no `end`, the next
+# prompt ends a table. The client sends them when the character enters the
+# game, after a level-up (practice, slist), when affects may have changed
+# (aff), and after a gear change (equipment); slist only changes with level.
 
 [[command]]
 command = "score"
@@ -26,38 +24,57 @@ reader = "affects"
 command = "equipment"
 reader = "equipment"
 
-# "You are Tamsin the Quiet Attendant", then the lines that hold facts.
+# "You are Tamsin the Quiet Attendant": the first line of `score`. The
+# capitals keep out room text ("You are in the northeast corner of ...").
 [[reader]]
 name = "score"
-start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
-row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
+start = '''^{prompt}?You are (?<name>[A-Z]\S*) (?<title>the [A-Z].*?)\s*$'''
 hook = "read_score"
+# The lines that hold facts: "Level 8 Harpy Monk  Exp/TNL: ...", "You are 17
+# years old ...", "Str    :    14 (17) ...", and the "Label : value" rows
+# starting with Gold, Killed and Wimpy. Also its last two, "Autoexit: Yes
+# ..." and "Autopull: Yes ...", which hold none but show a page after the
+# pager was read.
+row = '''^(?:Level \d+ \S+ \S+|You are \d+ years old|(?:Str|Int|Wis|Dex|Con|Gold|Killed|Wimpy)\s*:|Auto(?:exit|pull):)'''
 
-# The sessions line, the "at your disposal" line or the header, then rows
-# of "name  learned%  level  sub  mana".
+# The lines above `practice`'s table, whichever comes first: "You have 18
+# practice sessions left.", "The following skills are at your disposal :",
+# and the header "Name  % Lvl Sub Mana".
 [[reader]]
 name = "practice"
 start = '''(?:You have (?<sessions>\d+) practice sessions? left|skills are at your disposal|^Name\s+%\s+Lvl\s+Sub\s+Mana)'''
-row = '''[a-z][a-z' -]*?\s+\d+\s+\d+\s+\S+\s+\d+'''
 hook = "read_practice"
+# A row of one or two cells, "name  learned%  level  sub  mana":
+# "dodge               90   4   -    0  kick                33   7   -    0".
+row = '''[a-z][a-z' -]*?\s+\d+\s+\d+\s+\S+\s+\d+'''
 
-# The class's skills by level, in fixed columns, wrapped rows indented.
+# "Spells and skills learnable by your class at the lower levels."
 [[reader]]
 name = "slist"
 start = '''Spells and skills learnable by your class'''
-row = '''^(?:.*\[C\]ontinue: ?)?(?:\s*\d+:| {4})'''
 hook = "read_slist"
+# "  3:       fast healing        meditation": a level and its skills in
+# fixed columns. A row too long for the line wraps onto an indented line
+# with no level; it may follow the pager's prompt.
+row = '''^{pager}?(?:\s*\d+:| {4})'''
 
-# "You are affected by:", then "Spell: 'bless'." rows.
+# "You are affected by:", the head of `aff`.
 [[reader]]
 name = "affects"
-start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are affected by:'''
-row = '''^(?:Spell|Skill): '(?<name>.+?)'\s*:?\s*(?<detail>.*?)\.?\s*$'''
+start = '''^{prompt}?You are affected by:'''
 hook = "read_affects"
+# "Spell: 'bless'." or, at higher levels, "Spell: 'bless': modifies hit
+# roll by 3 for 6 hours."
+row = '''^(?:Spell|Skill): '(?<name>.+?)'\s*:?\s*(?<detail>.*?)\.?\s*$'''
 
-# "You are using:", then a "<slot>  item" row for every slot.
-[[reader]]
-name = "equipment"
-start = '''^(?:(?:\([A-Z]+\) )*[$*@]*(?:\(\d+hp?[ -]\d+m[ -]\d+v[^)]*\)\([^)]*\)|(?:<[^<>]*\d[^<>]*>){2,}))?You are using:'''
-row = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
-hook = "read_equipment"
+# Practicing at a trainer gives the new level outright: "You practice
+# dodge with Ulric. Your current skill level is now 45."
+[[skill_improved]]
+name = "character.skill_practiced"
+pattern = '''You practice (?<skill>.+?) with .+?\. Your current skill level is now (?<learned>\d+)\.'''
+hook = "on_practiced"
+
+# Improving through use, in ROM's wording; the new percent isn't given.
+[[skill_improved]]
+name = "character.skill_improved"
+pattern = '''You have become better at|You learn from your mistakes'''

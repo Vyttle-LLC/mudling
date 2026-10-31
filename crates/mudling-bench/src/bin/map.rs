@@ -18,7 +18,7 @@
 //!
 //! `--check` exits non-zero when the move budget is missed.
 
-use mudling_core::AnsiParser;
+use mudling_core::LinePipeline;
 use mudling_core::map::{AreaName, Direction, LiveMap, MapRules, RoomIdentity, RoomInfo};
 use mudling_core::persist::{Database, Timestamp, Writer};
 use mudling_core::stats::Summary;
@@ -260,7 +260,8 @@ fn replay(logs: &Path, folder: &Path) -> std::io::Result<(ReplayReport, LiveMap)
     for path in &paths {
         let bytes = std::fs::read(path)?;
         let log = String::from_utf8_lossy(&bytes);
-        let mut ansi = AnsiParser::default();
+        let mut pipeline = LinePipeline::default();
+        let mut parsed = Vec::new();
         clock += SESSION_GAP_MS;
         for raw in log.split('\n') {
             let line = raw.trim_matches('\r');
@@ -276,8 +277,10 @@ fn replay(logs: &Path, folder: &Path) -> std::io::Result<(ReplayReport, LiveMap)
                 let command = note.strip_prefix("move ").unwrap_or(note);
                 map.sent(command, Timestamp(clock));
             } else if !is_note(line) {
-                let text = ansi.parse_line(line).text;
-                map.line(&text, Timestamp(clock));
+                pipeline.push_line(line.as_bytes(), &mut parsed);
+                for line in parsed.drain(..) {
+                    map.line(line.plain(), Timestamp(clock));
+                }
             }
         }
     }

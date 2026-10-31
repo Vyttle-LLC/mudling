@@ -1,5 +1,5 @@
-# Avatar's gear. The tables and messages are read in text.toml; this is
-# the slot vocabulary they write.
+# Avatar's gear: the tables, the messages, and the slot vocabulary they
+# write.
 
 # The 15 slots in the order `equipment` lists them, by the short names the
 # equipment and gear stores use. `equipment` lists every slot, "<nothing>"
@@ -22,3 +22,89 @@ slots = [
     "wield",   # <wielded>
     "held",    # <held>
 ]
+
+# "You are using:", then "<worn on finger>    a pink ice ring"; an empty
+# slot holds "<nothing>".
+[equipment]
+name = "equipment"
+start = '''^{prompt}?You are using:'''
+row = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
+hook = "read_equipment"
+
+[identify]
+name = "identify"
+hook = "read_identify"
+start = [
+    # A shop's identifier names the item first: "Edmund looks closely at
+    # your Nom's Crystal Lantern." The spell doesn't.
+    '''looks closely at your (?<item>.+?)\.$''',
+    # "Object 'light crystal lantern' type light, extra flags glow magic."
+    # Not anchored: in a log the prompt before it may be any shape.
+    '''Object '(?<keywords>.+?)'(?: is)? type (?<type>.+?)(?:, extra flags (?<flags>.+?))?\.?$''',
+]
+row = [
+    # "Weight 6, value 10, level 1."
+    '''^Weight \d+, value \d+, level (?<level>\d+)\.$''',
+    # "Object Quality (20 / 20 hps)": how worn this copy is.
+    '''^Object Quality \((?<quality>.+?)\)$''',
+    # "Armor class is 1." Armor counts down on the character: AC -1.
+    '''^Armor class is (?<armor>-?\d+)\.$''',
+    # What every copy does: " Modifies dexterity by  1 continuous".
+    '''^\s*Modifies (?<stat>.+?) by\s+(?<amount>-?\d+)''',
+    # What was added to this copy, by the spell that added it:
+    # "'enchant armor  '  modifies armor class by  -4 continuous".
+    '''^'(?<spell>.+?)'\s+modifies (?<stat>.+?) by\s+(?<amount>-?\d+)''',
+]
+
+# "You look at an amulet of Gorn in your inventory...", then "This item
+# appears meant to be worn around the neck."
+[examine]
+name = "examine"
+start = '''You look at (?<item>.+?) in your inventory\.\.\.$'''
+row = '''^This item appears meant to be (?<meant>.+?)\.$'''
+hook = "read_examine"
+
+# "You wear a Tiamat mask on your head.", "... around your left wrist."
+[[wear]]
+name = "gear.wore"
+pattern = '''^{prompt}?You wear (?<item>.+?) (?<on>on|around|about|over|in) your (?:left |right )?(?<part>\w+)\.$'''
+hook = "on_wore"
+
+# "You hold a golden feather in your hands."
+[[wear]]
+name = "gear.wore"
+pattern = '''^{prompt}?You hold (?<item>.+?) in your hands?\.$'''
+hook = "on_wore"
+
+# "You light Nom's Crystal Lantern and hold it."
+[[wear]]
+name = "gear.wore"
+pattern = '''^{prompt}?You light (?<item>.+?) and hold it\.$'''
+hook = "on_wore"
+
+# "You wield a long sword."
+[[wear]]
+name = "gear.wore"
+pattern = '''^{prompt}?You wield (?<item>.+?)\.$'''
+hook = "on_wore"
+
+# "You stop using a round shield."
+[[remove]]
+name = "gear.removed"
+pattern = '''^{prompt}?You stop using (?<item>.+?)\.$'''
+hook = "on_removed"
+
+# "You put a rope belt in a satchel."
+[[put]]
+name = "gear.put"
+pattern = '''^{prompt}?You put (?<item>.+?) in (?<container>.+)\.$'''
+
+# The container refused what was put in it.
+[[put]]
+name = "gear.did_not_fit"
+pattern = '''^{prompt}?It won't fit\.$'''
+
+# Nothing carried by that name.
+[[put]]
+name = "gear.not_carried"
+pattern = '''^{prompt}?You do not have that item\.$'''

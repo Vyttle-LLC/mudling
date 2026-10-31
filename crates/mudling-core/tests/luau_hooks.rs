@@ -877,3 +877,50 @@ fn a_column_splitting_hook_reads_a_wrapped_table() {
     .map(|(name, percent)| (name.to_owned(), Value::Number(percent)));
     assert_eq!(abilities, expected, "{outputs:?}");
 }
+
+#[test]
+fn what_a_hook_file_does_as_it_loads_goes_nowhere() {
+    let plugin = hooked(
+        &["send_commands", "write_store:skills"],
+        "mud.store('skills', 'loaded', true)\n\
+         for _ = 1, 5 do mud.send('at load') end\n\
+         function on_go(event) mud.send('go') end",
+    );
+    let limits = HookLimits {
+        commands_per_second: 1,
+        ..HookLimits::default()
+    };
+    let mut hooks = runner_with(&plugin, limits, no_state());
+    hooks.set_approved(&id("hooked"), true);
+    let outputs = run(&plugin, &mut hooks, &["go"]);
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert_eq!(sends(&outputs), ["go"], "the rate limit starts fresh too");
+}
+
+#[test]
+fn a_hook_reads_the_plugin_s_keyword_rules_and_its_point() {
+    let manifest = "id = \"words\"\nname = \"w\"\nversion = \"1.0.0\"\napi = 1\nlicense = \"MIT\"\n\
+         layer = \"default\"\npermissions = [\"write_store:skills\"]\n\
+         [points]\ntext = \"text.toml\"\ncommands = \"commands.toml\"\n\
+         [hooks]\nfiles = [\"hooks.luau\"]\n";
+    let source = "function on_go(event)\n\
+         mud.store('skills', 'word', mud.keyword('the old sword'))\n\
+         mud.store('skills', 'point', event.point)\nend";
+    let plugin = Plugin::from_files(|file| match file {
+        "plugin.toml" => Ok(manifest.to_owned()),
+        "text.toml" => Ok(PATTERNS.to_owned()),
+        "commands.toml" => Ok("[keywords]\nskip = [\"the\", \"sword\"]\n".to_owned()),
+        "hooks.luau" => Ok(source.to_owned()),
+        _ => Err(io::Error::new(io::ErrorKind::NotFound, "no such file")),
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    let mut hooks = runner(&plugin);
+    let outputs = run(&plugin, &mut hooks, &["go"]);
+    assert_eq!(
+        writes(&outputs),
+        [
+            ("skills".to_owned(), "word".to_owned(), text("old")),
+            ("skills".to_owned(), "point".to_owned(), text("text"))
+        ]
+    );
+}

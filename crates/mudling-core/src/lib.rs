@@ -14,10 +14,12 @@ pub mod plugin;
 pub mod replay;
 pub mod repo;
 pub mod scrollback;
+pub mod session;
 pub mod stats;
 pub mod store;
 pub mod telnet;
 pub mod vault;
 
-pub use ansi::{AnsiParser, Color, Line, LineKind, Span, Style};
+pub use ansi::{AnsiParser, Color, Span, Style};
+pub use line::{Line, LineKind, LinePipeline};
 pub use scrollback::Scrollback;

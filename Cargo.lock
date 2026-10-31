@@ -3791,6 +3791,7 @@ name = "mudling-plugin-avatar"
 version = "0.0.0"
 dependencies = [
  "mudling-core",
+ "tempfile",
 ]
 
 [[package]]

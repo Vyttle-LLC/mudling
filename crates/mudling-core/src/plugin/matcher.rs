@@ -129,8 +129,8 @@ impl Matcher {
     }
 
     /// Replaces `out` with the ids of the patterns `text` might match, in
-    /// ascending order: those whose required literals it holds, found in the
-    /// same scan [`Matcher::matching`] makes, and every unfiltered one.
+    /// ascending order: those whose required literals it holds, found in a
+    /// scan of its own, and every unfiltered one.
     pub(crate) fn candidates(&self, text: &str, out: &mut Vec<usize>) {
         out.clear();
         if let Some(prefilter) = &self.prefilter {
@@ -316,13 +316,20 @@ mod tests {
     fn a_pathological_pattern_runs_in_linear_time() {
         // Catastrophic for a backtracking engine: 2^n paths on a near miss.
         let m = matcher(&[r"^(a+)+$", r"(x+x+)+y", r"^(a|aa)+$"]);
+        // The fastest of a few tries: on a busy machine, any one can be
+        // preempted for longer than it takes.
         let time = |n: usize| {
             let text = format!("{}!{} y", "a".repeat(n / 2), "x".repeat(n / 2));
-            let started = Instant::now();
-            for _ in 0..10 {
-                assert!(matching(&m, &text).is_empty());
-            }
-            started.elapsed()
+            (0..5)
+                .map(|_| {
+                    let started = Instant::now();
+                    for _ in 0..10 {
+                        assert!(matching(&m, &text).is_empty());
+                    }
+                    started.elapsed()
+                })
+                .min()
+                .expect("it tried")
         };
         time(1_000);
         let (short, long) = (time(10_000), time(100_000));
