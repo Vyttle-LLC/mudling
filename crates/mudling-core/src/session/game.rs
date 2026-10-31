@@ -152,11 +152,9 @@ impl GameFeed {
             .present
             .values()
             .filter(|present| !is_you(present))
-            .filter_map(|present| {
-                Some(Occupant {
-                    name: present.title.clone(),
-                    target: present.keyword()?,
-                })
+            .map(|present| Occupant {
+                name: present.title.clone(),
+                target: present.keyword(),
             })
             .collect();
         let mut items: Vec<Item> = Vec::new();
@@ -223,13 +221,9 @@ impl GameFeed {
         let max_health = number(status.opponent_health_max.as_ref()).filter(|max| *max > 0);
         match status.opponent_name.as_deref().map(ansi::plain) {
             Some(name) if name.is_empty() => self.target = None,
-            Some(name) if self.target.as_ref().is_none_or(|old| old.name != name) => {
-                self.target = Some(Target {
-                    name,
-                    ..Target::default()
-                });
-            }
-            _ => {}
+            // A switch of opponent keeps what this message leaves out.
+            Some(name) => self.target.get_or_insert_default().name = name,
+            None => {}
         }
         if let Some(target) = &mut self.target {
             target.level = level.or(target.level);
@@ -338,8 +332,21 @@ mod tests {
         contents
             .occupants
             .iter()
-            .map(|occupant| occupant.target.as_str())
+            .map(|occupant| occupant.target.as_deref().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn a_mob_with_no_keyword_still_stands_in_the_room() {
+        let players = r#"{"1": {"name": "1", "fullname": "A humongeous bear towers over you."}}"#;
+        let contents = feed(&[("Room.Players", players)]).contents(None);
+        assert_eq!(
+            contents.occupants,
+            [Occupant {
+                name: "A humongeous bear towers over you.".to_owned(),
+                target: None
+            }]
+        );
     }
 
     #[test]
@@ -444,7 +451,7 @@ mod tests {
         for target in contents
             .occupants
             .iter()
-            .map(|o| &o.target)
+            .filter_map(|o| o.target.as_ref())
             .chain([&item.target])
         {
             assert!(target.chars().all(char::is_alphabetic), "{target}");
@@ -541,7 +548,12 @@ mod tests {
             r#"{"opponent_name": "A Trog Child", "opponent_health": "90"}"#,
         );
         let target = heard.target.unwrap().0.unwrap();
-        assert_eq!(target.level, None, "another opponent starts clean");
+        assert_eq!(
+            (target.name.as_str(), target.health),
+            ("A Trog Child", Some(90))
+        );
+        assert_eq!(target.max_health, Some(100), "unchanged, so left out");
+        assert_eq!(target.level, Some(15), "unchanged, so left out");
 
         let heard = feed.read(
             "Char.Status",
@@ -551,5 +563,9 @@ mod tests {
         assert_eq!(heard.target, Some(TargetState(None)));
         let heard = feed.read("Char.Status", r#"{"opponent_health": "5"}"#);
         assert_eq!(heard.target, Some(TargetState(None)), "no fight, no target");
+
+        let heard = feed.read("Char.Status", r#"{"opponent_name": "A Trog"}"#);
+        let target = heard.target.unwrap().0.unwrap();
+        assert_eq!(target.max_health, None, "a new fight starts clean");
     }
 }

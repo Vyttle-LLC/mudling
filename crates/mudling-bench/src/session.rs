@@ -12,11 +12,13 @@
 //! - **A move:** a `Room.Info` through the session, the map updated, its
 //!   rows queued for the writer and the stores written, walking a map up to
 //!   10,000 rooms and then wandering it.
-//! - **A sighting:** a mob arriving by `Room.AddPlayer` on that full map,
-//!   held to the line budget, since one can come with any line.
+//! - **A sighting:** a mob arriving by `Room.AddPlayer` on that full map, with
+//!   500 aggressive kinds remembered, held to the line budget, since one can
+//!   come with any line.
 
 use crate::plugin_host::{PLUGIN_BUDGET_US, realistic_plugins};
-use mudling_core::persist::Timestamp;
+use mudling_core::map::Mark;
+use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::stats::Summary;
@@ -24,6 +26,7 @@ use mudling_core::store::{MapState, RoomState, StoreHub, TerminalState, VitalsSt
 use mudling_core::telnet::command::{GA, IAC};
 use mudling_core::telnet::{Bytes, gmcp};
 use serde::Serialize;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,6 +41,8 @@ const LINES_PER_FRAME: usize = 8;
 const GRID_SIDE: i64 = 100;
 const WANDER_MOVES: i64 = 5_000;
 const SIGHTINGS: i64 = 20_000;
+/// Kinds of aggressive mob a long-played map has learned.
+const AGGRESSIVE_MARKS: i64 = 500;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -164,7 +169,13 @@ struct Bench {
 
 impl Bench {
     fn new(with_game: bool) -> Bench {
+        Bench::remembering(with_game, 0)
+    }
+
+    /// A session whose saved map remembers `marks` kinds of aggressive mob.
+    fn remembering(with_game: bool, marks: i64) -> Bench {
         let folder = tempfile::tempdir().expect("a temporary folder");
+        save_marks(folder.path(), marks);
         let hub = Arc::new(StoreHub::new(|| {}));
         hub.subscribe::<TerminalState>();
         hub.subscribe::<VitalsState>();
@@ -216,6 +227,26 @@ impl Bench {
     fn finish(self) {
         self.engine.finish().expect("every write reaches the disk");
     }
+}
+
+/// `marks` aggressive kinds in the bench server's database, among them one
+/// that [`mob_arrives`] names.
+fn save_marks(folder: &Path, marks: i64) {
+    let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).expect("the database opens");
+    let writer = database.writer().expect("the writer starts");
+    let mut batch = Batch::new();
+    let names = (1..marks)
+        .map(|n| format!("kind{n}"))
+        .chain(["crow".to_owned()]);
+    for name in names.take(marks as usize) {
+        batch.upsert(MobMark {
+            name,
+            mark: Mark::Aggressive.name().to_owned(),
+            updated: Timestamp(0),
+        });
+    }
+    writer.submit(batch).expect("the writer runs");
+    writer.flush().expect("the marks reach the disk");
 }
 
 fn measure_lines(reads: &[Bytes]) -> Summary {
@@ -303,7 +334,7 @@ fn serpentine() -> Vec<(i64, i64, &'static str)> {
 }
 
 fn measure_moves() -> (Summary, Summary, Summary) {
-    let mut bench = Bench::new(true);
+    let mut bench = Bench::remembering(true, AGGRESSIVE_MARKS);
     let walk = serpentine();
     let mut mapping = Vec::with_capacity(walk.len());
     for (x, y, direction) in &walk {

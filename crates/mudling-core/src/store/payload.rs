@@ -203,8 +203,9 @@ pub struct RoomContents {
 pub struct Occupant {
     pub name: String,
     /// One word the game knows them by, made only of letters, so it's safe
-    /// to put in a command.
-    pub target: String,
+    /// to put in a command. `None` when their line gives no word to guess:
+    /// they're still here, with nothing to aim a command at.
+    pub target: Option<String>,
 }
 
 /// Something on the ground, `count` of them.
@@ -276,8 +277,8 @@ pub struct SettingsState {
     pub suggestion: Option<Suggestion>,
     /// The server turned echo off: what's typed now is a password.
     pub echo_off: bool,
-    /// Things gone wrong that the player should see, newest last: a plugin
-    /// turned off, a failed write.
+    /// Things gone wrong that the player should see, newest last: a failed
+    /// hook, a failed write. A plugin turned off is in `turned_off` instead.
     pub notices: Vec<String>,
     /// Each plugin's sampled cost per line, in the order added. Refreshed
     /// every few seconds while connected.

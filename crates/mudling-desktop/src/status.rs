@@ -1,6 +1,6 @@
-//! A quiet line above the command bar: the newest notice. The connection's
-//! words live in the title bar, and what the player can do about them in the
-//! session bar.
+//! A quiet line above the command bar: the newest plugin turned off, or else
+//! the newest notice. The connection's words live in the title bar, and what
+//! the player can do about them in the session bar.
 
 use crate::assets::UI_FONT;
 use crate::theme::Theme;

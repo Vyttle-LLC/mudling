@@ -38,14 +38,6 @@ const MARK_SIZE: Pixels = px(20.);
 const MENU_MIN_WIDTH: Pixels = px(280.);
 /// How far in from a client-drawn window's edge a press resizes it.
 const RESIZE_MARGIN: Pixels = px(6.);
-/// How a screen reader says the count on the sprocket and the Plugins tab.
-pub fn problems_text(problems: usize) -> String {
-    match problems {
-        1 => "1 problem".to_owned(),
-        _ => format!("{problems} problems"),
-    }
-}
-
 /// With no session the switcher has no server to name.
 const NO_SERVER: &str = "MUDling";
 const BADGE_SIZE: Pixels = px(15.);
@@ -87,6 +79,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", MenuNext, Some(MENU_CONTEXT)),
         KeyBinding::new("up", MenuPrevious, Some(MENU_CONTEXT)),
     ]);
+}
+
+/// How a screen reader says the count on the sprocket and the Plugins tab.
+pub fn problems_text(problems: usize) -> String {
+    match problems {
+        1 => "1 problem".to_owned(),
+        _ => format!("{problems} problems"),
+    }
 }
 
 /// What the bar says about the session.

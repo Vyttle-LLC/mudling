@@ -85,7 +85,7 @@ pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
     let contents = RoomContents {
         occupants: vec![Occupant {
             name: "A traveller resting by the wall".into(),
-            target: "traveller".to_owned(),
+            target: Some("traveller".to_owned()),
         }],
         items: vec![
             item("a worn leather satchel with a strap", "satchel", 3),

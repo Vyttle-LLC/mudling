@@ -134,8 +134,9 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, is of a kind known to be aggressive.
     pub fn is_aggressive(&self, title: &str) -> bool {
-        let covers = |marked: &String| Mark::Aggressive.covers(marked, title);
-        self.aggressive.iter().any(covers)
+        words(title)
+            .filter_map(|word| self.aggressive.get(&word))
+            .any(|marked| Mark::Aggressive.covers(marked, title))
     }
 
     /// The player marking a kind of mob, by one of its room lines, as

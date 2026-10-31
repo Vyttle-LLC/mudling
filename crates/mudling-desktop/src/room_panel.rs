@@ -364,7 +364,6 @@ impl RoomPanel {
             .enumerate()
             .map(|(index, occupant)| {
                 let name = SharedString::from(occupant.name.clone());
-                let target = &occupant.target;
                 div()
                     .id(("occupant", index))
                     .role(Role::ListItem)
@@ -375,24 +374,26 @@ impl RoomPanel {
                     .px_3()
                     .py(px(10.))
                     .child(row_name(name.clone()))
-                    .child(verb_button(
-                        ("look", index),
-                        "Look",
-                        format!("Look at {name}"),
-                        self.verbs.command("look", target),
-                        theme.accent,
-                        theme,
-                        cx,
-                    ))
-                    .child(verb_button(
-                        ("kill", index),
-                        "Kill",
-                        format!("Kill {name}"),
-                        self.verbs.command("kill", target),
-                        theme.danger,
-                        theme,
-                        cx,
-                    ))
+                    .when_some(occupant.target.as_ref(), |row, target| {
+                        row.child(verb_button(
+                            ("look", index),
+                            "Look",
+                            format!("Look at {name}"),
+                            self.verbs.command("look", target),
+                            theme.accent,
+                            theme,
+                            cx,
+                        ))
+                        .child(verb_button(
+                            ("kill", index),
+                            "Kill",
+                            format!("Kill {name}"),
+                            self.verbs.command("kill", target),
+                            theme.danger,
+                            theme,
+                            cx,
+                        ))
+                    })
             })
             .collect();
         section(

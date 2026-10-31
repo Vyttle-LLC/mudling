@@ -719,11 +719,11 @@ fn the_room_fills_from_gmcp_and_empties_with_the_connection() {
         [
             Occupant {
                 name: "(Glowing) A grey wolf sits here.".to_owned(),
-                target: "wolf".to_owned()
+                target: Some("wolf".to_owned())
             },
             Occupant {
                 name: "Mira the Quick is here.".to_owned(),
-                target: "mira".to_owned()
+                target: Some("mira".to_owned())
             }
         ]
     );
@@ -970,12 +970,20 @@ fn a_plugin_turned_off_says_why_and_can_come_back() {
 
     driven.engine.turn_plugin_on(&id);
     assert!(driven_settings(&driven).turned_off.is_empty());
+
+    // It runs again, on a clean count: two overruns leave it on, and a third
+    // turns it off once more.
+    driven.say(b"go\r\ngo\r\n");
+    wait_for("two more overruns", || {
+        driven.say(b"\r\n");
+        driven_settings(&driven).notices.len() == 2
+    });
+    assert!(driven_settings(&driven).turned_off.is_empty());
     driven.say(b"go\r\n");
-    driven.engine.settle(Timestamp(0));
-    assert!(
-        driven_settings(&driven).turned_off.is_empty(),
-        "one more overrun starts a clean count"
-    );
+    wait_for("the plugin to be turned off again", || {
+        driven.say(b"\r\n");
+        !driven_settings(&driven).turned_off.is_empty()
+    });
 }
 
 #[test]
