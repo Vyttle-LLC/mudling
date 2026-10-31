@@ -999,6 +999,32 @@ pub mod tests {
         }
     }
 
+    /// The next line `server` reads, past any telnet the client put ahead of
+    /// it, which is the only part that isn't printable.
+    fn read_command(server: &mut TcpStream) -> String {
+        let mut heard = Vec::new();
+        let mut byte = [0];
+        while byte != *b"\n" {
+            server.read_exact(&mut byte).unwrap();
+            heard.push(byte[0]);
+        }
+        let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
+        let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
+        String::from_utf8_lossy(command.unwrap()).into_owned()
+    }
+
+    /// Sends a GMCP message from `server`, offering GMCP first.
+    fn send_gmcp(server: &mut TcpStream, message: &str) {
+        for bytes in [
+            &[IAC, WILL, GMCP][..],
+            &[IAC, SB, GMCP],
+            message.as_bytes(),
+            &[IAC, SE],
+        ] {
+            server.write_all(bytes).unwrap();
+        }
+    }
+
     /// A window on a session, with its folder and a real server on loopback.
     struct Played<'a> {
         shell: Entity<Shell>,
@@ -1088,10 +1114,7 @@ pub mod tests {
         }
 
         fn gmcp(&mut self, message: &str) {
-            self.say(&[IAC, WILL, GMCP]);
-            self.say(&[IAC, SB, GMCP]);
-            self.say(message.as_bytes());
-            self.say(&[IAC, SE]);
+            send_gmcp(&mut self.server, message);
         }
 
         /// Walks into a room with an open exit north and a door east, with
@@ -1127,15 +1150,7 @@ pub mod tests {
         /// The next line the server reads, past any telnet the client put
         /// ahead of it, which is the only part that isn't printable.
         fn heard_command(&mut self) -> String {
-            let mut heard = Vec::new();
-            let mut byte = [0];
-            while byte != *b"\n" {
-                self.server.read_exact(&mut byte).unwrap();
-                heard.push(byte[0]);
-            }
-            let printable = |byte: &u8| byte.is_ascii() && !byte.is_ascii_control();
-            let command = heard.trim_ascii_end().rsplit(|b| !printable(b)).next();
-            String::from_utf8_lossy(command.unwrap()).into_owned()
+            read_command(&mut self.server)
         }
 
         fn chat_lines(&mut self) -> Vec<String> {
@@ -1868,6 +1883,16 @@ pub mod tests {
     }
 
     fn launch<'a>(saved: &[(&str, u16)], cx: &'a mut TestAppContext) -> Launched<'a> {
+        launch_with(saved, vec![loopback_plugin()], Vec::new(), cx)
+    }
+
+    /// `enabled` is what the command line turns on.
+    fn launch_with<'a>(
+        saved: &[(&str, u16)],
+        plugins: Vec<Plugin>,
+        enabled: Vec<PluginId>,
+        cx: &'a mut TestAppContext,
+    ) -> Launched<'a> {
         cx.update(|cx| {
             crate::input::bind_keys(cx);
             bind_keys(cx);
@@ -1880,12 +1905,7 @@ pub mod tests {
         for (host, port) in saved {
             persist::save_server(folder.path(), host, *port).unwrap();
         }
-        let launcher = Launcher::new(
-            folder.path().to_owned(),
-            vec![loopback_plugin()],
-            Vec::new(),
-            || {},
-        );
+        let launcher = Launcher::new(folder.path().to_owned(), plugins, enabled, || {});
         let (_wake, woken) = unbounded();
         let (shell, cx) = cx.add_window_view(|window, cx| {
             let mut shell = Shell::new(None, woken, window, cx);
@@ -1999,6 +2019,50 @@ pub mod tests {
         }
         socket.read_exact(&mut heard[1..]).unwrap();
         assert_eq!(&heard[1..], b"ook");
+    }
+
+    /// Launches the first saved server with `plugin` turned on, and plays.
+    fn launch_playing(plugin: Plugin, cx: &mut TestAppContext) -> (Launched<'_>, TcpStream) {
+        let (server, port) = fake_server();
+        let enabled = vec![plugin.id().clone()];
+        let mut launched = launch_with(&[("127.0.0.1", port)], vec![plugin], enabled, cx);
+        press_enter(launched.cx);
+        let (socket, _) = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        (launched, socket)
+    }
+
+    #[gpui::test]
+    fn a_launched_games_words_reach_the_room_panel(cx: &mut TestAppContext) {
+        let (mut launched, mut socket) = launch_playing(game_plugin(), cx);
+        send_gmcp(
+            &mut socket,
+            r#"Room.Info {"num": 1, "name": "A hall", "exits": {"n": 2}}"#,
+        );
+        launched.frames_until("the room", |shell, cx| {
+            shell.room_panel.read(cx).room_name() == Some("A hall")
+        });
+        launched.shell.update(launched.cx, |shell, cx| {
+            let (_, _, contents) = crate::measure::sample_room();
+            shell
+                .room_panel
+                .update(cx, |panel, cx| panel.show_contents(contents, cx));
+            shell.open_panels(cx);
+        });
+        launched.cx.run_until_parked();
+
+        launched.click("Get a stone");
+        assert_eq!(read_command(&mut socket), "take stone");
+    }
+
+    #[gpui::test]
+    fn a_launched_games_plugins_reach_settings(cx: &mut TestAppContext) {
+        let (launched, _socket) = launch_playing(game_plugin(), cx);
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let rows = shell.settings.read(cx).plugins();
+            let game = rows.iter().find(|row| row.id.as_str() == "game");
+            assert!(game.is_some_and(|row| row.on), "{rows:?}");
+        });
     }
 
     #[gpui::test]

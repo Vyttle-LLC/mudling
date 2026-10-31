@@ -326,6 +326,11 @@ impl SettingsSheet {
         &self.servers
     }
 
+    #[cfg(test)]
+    pub fn plugins(&self) -> &[PluginRow] {
+        &self.plugins
+    }
+
     /// What the session says about itself.
     pub fn show_session(
         &mut self,
