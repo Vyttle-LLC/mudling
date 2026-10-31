@@ -75,12 +75,12 @@ it. The checker pairs rooms by identity, in order of id.
 
 ## Differences
 
-All 248 are intended. "Prototype" means its code on these logs.
+All 252 are intended. "Prototype" means its code on these logs.
 
 | Kind | Count | Sample | Why |
 | --- | --- | --- | --- |
 | `character.skill` | 126 | `heighten senses`: learned none / 90; `hide`: learned none / 95; `identify`: none / 95, level 51, mana 12 | MUDling is right. The prototype takes the pager's line as the blank that ends `practice`, so it never reads page two, though the rows are in the log. All 126 are the Kzinti hero's, all none / a value. |
-| `character.stat` | 47 | `class`: none / `Monk`; `level`: none / 51; `race`: none / `Lesser Imp`; `bank`: none / 6853 | MUDling is right. It reads three characters' scores the prototype missed: see [score](#the-score-pattern). |
+| `character.stat` | 51 | `class`: none / `Monk`; `level`: none / 51; `race`: none / `Lesser Imp`; `bank`: none / 6853; `name`: none / `Fikus` | MUDling is right. 47 are the scores of three characters the prototype missed: see [score](#the-score-pattern). The other 4 are `name`, one per character: the plugin keeps the name as a stat, from the login greeting or the score line, because Avatar sends a full Char.Status in only some sessions and the shell needs the name. The prototype keys a character by its name and keeps no such stat. One of the four, a character who never ran `score`, has no other row. |
 | `character.affect` | 15 | `adrenaline pump`, `anticipate`, `body brace`: none / on | MUDling is right. It's `aff` after a prompt that leaves a space in front of the next line, which the prototype misses. |
 | `character.worn` | 13 | `worn.about.1`: none / a linen robe; `worn.head.1`: a Tiamat mask / an official Cult of Bonk Hat; `worn.wield.2`: an alligator tooth / none | MUDling is right. It reads `eq` after that same prompt, which the prototype never did. So the prototype's list for this character is only what wear messages added across every log, never corrected by a table: it shows four weapons at once. MUDling's is the last table. |
 | `character.title` | 2 | `the donation room for players level 1 through 10.  Items in` / `the Violent Missionary`; none / `The Lost` | MUDling is right. The first is room text the prototype takes for `score`: "You are in the donation room…". The second is a title with a capital. |
