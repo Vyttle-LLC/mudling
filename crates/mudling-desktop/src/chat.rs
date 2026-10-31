@@ -7,19 +7,25 @@
 //! scrollback is, and holds a scrolled-back view on its top line as lines are
 //! trimmed or the column changes width.
 //!
-//! Accessibility: the chat is a `Log` node whose visible lines are `Label`
-//! nodes, readable line by line however many rows each wraps to. New lines are
-//! announced through a separate polite live region, so lines scrolling into
-//! view are never announced.
+//! Reading back splits the chat: a history pane holds still at the reading
+//! position over a live pane pinned to the newest lines. They are two views of
+//! one scrollback, so between them they draw no more lines than a whole chat.
+//!
+//! Accessibility: the live pane is a `Log` node and the history pane a group,
+//! whose visible lines are `Label` nodes, readable line by line however many
+//! rows each wraps to. New lines are announced through a separate polite live
+//! region, so lines scrolling into view are never announced.
 
 mod lines;
 
+use crate::assets::Icon;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, AvailableSpace, Bounds, Context, ElementId, FontWeight, HighlightStyle,
-    Pixels, Role, SharedString, StyledText, Window, div, font, point, prelude::*, px, size,
+    AnyElement, App, AvailableSpace, Bounds, Context, Div, DragMoveEvent, ElementId, Entity,
+    FontWeight, HighlightStyle, KeyBinding, Pixels, Role, ScrollEvent, SharedString, StyledText,
+    Window, actions, div, font, point, prelude::*, px, relative, size,
 };
-use lines::{LineList, LinePosition};
+use lines::{LineList, LinePosition, Pane};
 use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
 use mudling_core::{Line, LineKind, Scrollback};
 use std::collections::HashMap;
@@ -33,6 +39,39 @@ pub const COLUMN_WIDTH: Pixels = px(800.);
 pub const COLUMN_PADDING: Pixels = px(32.);
 /// What servers wrap their text to, and tables and maps are drawn for.
 const MIN_COLUMNS: f32 = 80.;
+/// The live pane's share of the chat's height, until its divider is dragged.
+const LIVE_SHARE: f32 = 1. / 3.;
+/// How far the divider drags: neither pane closes.
+const LIVE_SHARES: std::ops::RangeInclusive<f32> = 0.15..=0.85;
+const DIVIDER_GRIP_HEIGHT: Pixels = px(9.);
+const CHIP_HEIGHT: Pixels = px(28.);
+const CONTEXT: &str = "ChatKeys";
+
+actions!(chat, [BackToLive, PageBack, PageForward]);
+
+/// Keys that reach the chat wherever the focus is, unless what has it binds
+/// them too. They name the root's key context because gpui ranks a binding
+/// with no context above every other. The shell routes the command bar's End.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("pageup", PageBack, Some(CONTEXT)),
+        KeyBinding::new("pagedown", PageForward, Some(CONTEXT)),
+        KeyBinding::new("escape", BackToLive, Some(CONTEXT)),
+        KeyBinding::new("end", BackToLive, Some(CONTEXT)),
+    ]);
+}
+
+/// Handles those keys on `root`, an ancestor of everything that takes focus:
+/// the chat itself never does, so typing stays in the command bar.
+pub fn handle_keys(root: Div, chat: &Entity<Chat>) -> Div {
+    let (back, forward, live) = (chat.clone(), chat.clone(), chat.clone());
+    root.key_context(CONTEXT)
+        .on_action(move |_: &PageBack, _, cx| back.update(cx, |chat, cx| chat.page_back(cx)))
+        .on_action(move |_: &PageForward, _, cx| {
+            forward.update(cx, |chat, cx| chat.page_forward(cx))
+        })
+        .on_action(move |_: &BackToLive, _, cx| live.update(cx, |chat, cx| chat.back_to_live(cx)))
+}
 
 /// How wide the chat column has to be to show [`MIN_COLUMNS`] of the chosen
 /// chat font on one row each.
@@ -53,9 +92,29 @@ pub fn column_width(cx: &App) -> Pixels {
 /// server text is summarized by its tail rather than read in full.
 const ANNOUNCED_LINES: usize = 5;
 
+/// The open split's history pane.
+struct History {
+    position: LinePosition,
+    /// The number the first line to arrive after the split opened took.
+    first_new_line: u64,
+}
+
+/// Marks the drag of the divider.
+struct DraggingDivider;
+
+impl Render for DraggingDivider {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
 pub struct Chat {
     terminal: Versioned<TerminalState>,
-    position: LinePosition,
+    /// Always follows the newest line. Without a split it fills the chat.
+    live: LinePosition,
+    history: Option<History>,
+    /// Kept while the split is closed, so it reopens as the player left it.
+    live_share: f32,
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
 }
@@ -64,7 +123,9 @@ impl Chat {
     pub fn new(terminal: Versioned<TerminalState>) -> Chat {
         Chat {
             terminal,
-            position: LinePosition::default(),
+            live: LinePosition::default(),
+            history: None,
+            live_share: LIVE_SHARE,
             unannounced: Vec::new(),
             announcement: None,
         }
@@ -109,11 +170,24 @@ impl Chat {
         self.lines().get(newest).map(|line| line.plain().to_owned())
     }
 
-    /// Whether the view follows the newest line. A scroll counts at once, not
-    /// from the next frame.
+    /// Whether the chat is whole, on the newest line. A scroll counts at once,
+    /// not from the next frame.
     #[cfg(test)]
     pub fn follows_newest(&self) -> bool {
-        self.position.is_following()
+        self.history.is_none()
+    }
+
+    /// The number the next line will take. Trimming doesn't change it.
+    fn next_line_number(&self) -> u64 {
+        self.lines().evicted() + self.len() as u64
+    }
+
+    fn open_history(&mut self, position: LinePosition) {
+        let first_new_line = self.next_line_number();
+        self.history = Some(History {
+            position,
+            first_new_line,
+        });
     }
 
     /// Scrolls back through history by `distance`, as a reader would.
@@ -121,8 +195,68 @@ impl Chat {
         self.scroll_down(-distance, cx);
     }
 
+    /// Moves the history pane, which is every scroll's target, wherever the
+    /// pointer is. Scrolling up a whole chat opens the split from the view it
+    /// was showing, so what stays on screen doesn't move.
     fn scroll_down(&mut self, distance: Pixels, cx: &mut Context<Chat>) {
-        self.position.scroll(distance);
+        if let Some(history) = &mut self.history {
+            history.position.scroll(distance);
+        } else if distance < px(0.) && self.live.has_lines_above(self.lines().evicted()) {
+            let mut position = self.live.clone();
+            position.scroll(distance);
+            self.open_history(position);
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    /// A page of what the history pane shows or would show, less a line kept
+    /// for context.
+    fn page(&self) -> Pixels {
+        let shown = match &self.history {
+            Some(history) => history.position.height(),
+            None => self.live.height() * (1. - self.live_share),
+        };
+        (shown - LINE_HEIGHT).max(LINE_HEIGHT)
+    }
+
+    fn page_back(&mut self, cx: &mut Context<Chat>) {
+        self.scroll_back(self.page(), cx);
+    }
+
+    fn page_forward(&mut self, cx: &mut Context<Chat>) {
+        self.scroll_down(self.page(), cx);
+    }
+
+    /// Opens the history pane with the line numbered `number` on top: how find
+    /// shows a result. A line's number is [`Scrollback::evicted`] plus its
+    /// index. New lines count from the first time the split opened.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn open_history_at(&mut self, number: u64, cx: &mut Context<Chat>) {
+        let position = LinePosition::reading_from(number);
+        match &mut self.history {
+            Some(history) => history.position = position,
+            None => self.open_history(position),
+        }
+        cx.notify();
+    }
+
+    /// Closes the split, if it's open.
+    pub fn back_to_live(&mut self, cx: &mut Context<Chat>) {
+        if self.history.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Lines that arrived since the split opened.
+    fn new_lines(&self, history: &History) -> u64 {
+        self.next_line_number() - history.first_new_line
+    }
+
+    fn drag_divider(&mut self, y: Pixels, chat: Bounds<Pixels>, cx: &mut Context<Chat>) {
+        let share = (chat.bottom() - y) / chat.size.height;
+        self.live_share = share.clamp(*LIVE_SHARES.start(), *LIVE_SHARES.end());
         cx.notify();
     }
 
@@ -131,25 +265,40 @@ impl Chat {
         self.lines().get(index).map(|line| line.plain().to_owned())
     }
 
+    /// Where the view that scrolls is.
+    #[cfg(test)]
+    fn reading(&self) -> &LinePosition {
+        self.history
+            .as_ref()
+            .map_or(&self.live, |history| &history.position)
+    }
+
     #[cfg(test)]
     pub fn scroll_offset(&self) -> lines::Anchor {
-        self.position.top()
+        self.reading().top()
     }
 
     /// How tall the line at the top of the view drew.
     #[cfg(test)]
     pub fn top_line_height(&self) -> Pixels {
-        self.position.top_height()
+        self.reading().top_height()
     }
 
-    /// Lays out this frame's lines inside `bounds`, top to bottom, the order
-    /// a screen reader walks them in.
+    /// Lays out this frame's lines of `pane` inside `bounds`, top to bottom,
+    /// the order a screen reader walks them in. A history pane scrolled down
+    /// to the newest line closes the split.
     fn place_lines(
         &mut self,
+        pane: Pane,
         bounds: Bounds<Pixels>,
         window: &mut Window,
         cx: &mut Context<Chat>,
     ) -> Vec<AnyElement> {
+        let position = match (pane, &mut self.history) {
+            (Pane::Live, _) => &mut self.live,
+            (Pane::History, Some(history)) => &mut history.position,
+            (Pane::History, None) => return Vec::new(),
+        };
         let theme = *cx.global::<Theme>();
         let lines = self.terminal.value().lines();
         let evicted = lines.evicted();
@@ -159,20 +308,22 @@ impl Chat {
         );
         // Placing a line can ask for its height more than once.
         let mut measured = HashMap::new();
-        let placement = self
-            .position
-            .place(evicted, lines.len(), bounds.size, |index| {
-                let (_, line_size) = measured.entry(index).or_insert_with(|| {
-                    let line = lines
-                        .get(index)
-                        .expect("placed lines are in the scrollback");
-                    let mut element =
-                        render_line(line, evicted + index as u64, &theme).into_any_element();
-                    let line_size = element.layout_as_root(space, window, cx);
-                    (element, line_size)
-                });
-                line_size.height
+        let placement = position.place(evicted, lines.len(), bounds.size, |index| {
+            let (_, line_size) = measured.entry(index).or_insert_with(|| {
+                let line = lines
+                    .get(index)
+                    .expect("placed lines are in the scrollback");
+                let mut element =
+                    render_line(line, evicted + index as u64, &theme).into_any_element();
+                let line_size = element.layout_as_root(space, window, cx);
+                (element, line_size)
             });
+            line_size.height
+        });
+        if pane == Pane::History && position.is_following() {
+            // This frame is already laid out, and a notify would be lost in it.
+            cx.defer_in(window, |chat, _, cx| chat.back_to_live(cx));
+        }
         let mut y = bounds.top() + placement.top;
         placement
             .lines
@@ -183,6 +334,87 @@ impl Chat {
                 Some(element)
             })
             .collect()
+    }
+
+    /// One pane of the capped, centered column.
+    fn pane(&self, pane: Pane, cx: &mut Context<Chat>) -> gpui::Stateful<Div> {
+        let (id, role, label) = match pane {
+            Pane::History => ("chat-history", Role::Group, "Chat history"),
+            Pane::Live => ("chat-live", Role::Log, "Chat"),
+        };
+        div()
+            .id(id)
+            .role(role)
+            .aria_label(label)
+            .w_full()
+            .max_w(column_width(cx))
+            .px(COLUMN_PADDING)
+            .child(LineList::new(cx.entity(), pane))
+    }
+
+    /// The line between the panes, over them, which grabs a few pixels to each
+    /// side, and the chip on it.
+    fn divider(&self, history: &History, cx: &mut Context<Chat>) -> Div {
+        let theme = *cx.global::<Theme>();
+        let new_lines = match self.new_lines(history) {
+            0 => SharedString::from("Back to live"),
+            1 => "Back to live · 1 new line".into(),
+            count => format!("Back to live · {count} new lines").into(),
+        };
+        let grip = div()
+            .id("chat-divider")
+            .debug_selector(|| "chat-divider".to_owned())
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(-DIVIDER_GRIP_HEIGHT / 2.)
+            .h(DIVIDER_GRIP_HEIGHT)
+            .cursor_row_resize()
+            .on_drag(DraggingDivider, |_, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| DraggingDivider)
+            });
+        let chip = div()
+            .id("back-to-live")
+            .debug_selector(|| "back-to-live".to_owned())
+            .role(Role::Button)
+            .aria_label(new_lines.clone())
+            .h(CHIP_HEIGHT)
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.accent)
+            .bg(theme.surface_raised)
+            .hover(|style| style.bg(theme.hover))
+            .font_family(crate::assets::UI_FONT)
+            .text_size(px(13.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.accent)
+            .cursor_pointer()
+            .on_click(cx.listener(|chat, _, _, cx| chat.back_to_live(cx)))
+            .child(Icon::ArrowDown.svg().size(px(14.)).text_color(theme.accent))
+            .child(new_lines);
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(relative(1. - self.live_share))
+            .h(px(1.))
+            .bg(theme.divider)
+            .child(grip)
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(-CHIP_HEIGHT / 2.)
+                    .flex()
+                    .justify_center()
+                    .child(chip),
+            )
     }
 }
 
@@ -227,22 +459,47 @@ fn render_line(line: &Line, number: u64, theme: &Theme) -> impl IntoElement {
 impl Render for Chat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Chat>) -> impl IntoElement {
         let choice = cx.global::<Theme>().choice;
+        let line_height = choice.chat_line_height();
         if !self.unannounced.is_empty() {
             let batch = self.announcement.as_ref().map_or(0, |(batch, _)| batch + 1);
             let text = std::mem::take(&mut self.unannounced).join("\n");
             self.announcement = Some((batch, text.into()));
         }
 
+        let mut live = self
+            .pane(Pane::Live, cx)
+            .debug_selector(|| "chat-area".to_owned());
+        let mut history = None;
+        let mut divider = None;
+        if let Some(open) = &self.history {
+            history = Some(self.pane(Pane::History, cx).flex_1().min_h_0().pt_4());
+            divider = Some(self.divider(open, cx));
+            live = live.flex_none().h(relative(self.live_share)).pt_2();
+        } else {
+            live = live.flex_1().min_h_0().pt_4();
+        }
+
         div()
             .id("chat")
-            .role(Role::Log)
-            .aria_label("Chat")
             .size_full()
             .relative()
+            .flex()
+            .flex_col()
+            .items_center()
             .font_family(choice.font)
             .text_size(choice.chat_size())
-            .line_height(choice.chat_line_height())
-            .child(LineList::new(cx.entity()))
+            .line_height(line_height)
+            .on_scroll(cx.listener(move |chat, event: &ScrollEvent, _, cx| {
+                chat.scroll_down(-event.delta.pixel_delta(line_height).y, cx);
+            }))
+            .on_drag_move(
+                cx.listener(|chat, event: &DragMoveEvent<DraggingDivider>, _, cx| {
+                    chat.drag_divider(event.event.position.y, event.bounds, cx);
+                }),
+            )
+            .children(history)
+            .child(live)
+            .children(divider)
             .children(
                 self.announcement
                     .clone()
@@ -277,8 +534,7 @@ fn live_region(batch: u64, text: SharedString) -> impl IntoElement {
 mod tests {
     use super::*;
     use gpui::{
-        Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext,
-        WindowAppearance,
+        Modifiers, MouseButton, ScrollDelta, TestAppContext, VisualTestContext, WindowAppearance,
     };
     use mudling_core::LinePipeline;
     use mudling_core::store::{Revision, TERMINAL_CAPACITY};
@@ -314,8 +570,34 @@ mod tests {
         }
 
         fn top_text(&self) -> String {
-            self.text_of(self.position.top().line)
+            self.text_of(self.reading().top().line)
         }
+    }
+
+    /// A chat with a page of lines, split `distance` back from the newest.
+    fn split_window(
+        cx: &mut TestAppContext,
+        distance: Pixels,
+    ) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = chat_window(cx, 1_000);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.scroll_back(distance, cx));
+        cx.run_until_parked();
+        (chat, cx)
+    }
+
+    fn is_split(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+        !chat.read_with(cx, |chat, _| chat.follows_newest())
+    }
+
+    fn wheel(lines: f32, cx: &mut VisualTestContext) {
+        cx.simulate_event(ScrollEvent {
+            position: point(px(10.), px(10.)),
+            delta: ScrollDelta::Lines(point(0., lines)),
+            modifiers: Modifiers::none(),
+            ..ScrollEvent::default()
+        });
+        cx.run_until_parked();
     }
 
     fn push(chat: &mut Chat, count: usize, cx: &mut Context<Chat>) {
@@ -329,32 +611,184 @@ mod tests {
     #[gpui::test]
     fn follows_the_newest_line_while_pinned(cx: &mut TestAppContext) {
         let (chat, cx) = chat_window(cx, 1_000);
-        assert!(chat.read_with(cx, |chat, _| chat.follows_newest()));
+        cx.run_until_parked();
+        assert!(!is_split(&chat, cx));
         let before = top_line(&chat, cx);
 
         chat.update(cx, |chat, cx| push(chat, 5, cx));
         cx.run_until_parked();
-        assert!(chat.read_with(cx, |chat, _| chat.follows_newest()));
+        assert!(!is_split(&chat, cx));
         assert_ne!(top_line(&chat, cx), before);
     }
 
     #[gpui::test]
-    fn the_wheel_scrolls_back_and_returns_to_the_newest_line(cx: &mut TestAppContext) {
+    fn the_wheel_splits_the_chat_and_scrolling_to_the_bottom_closes_it(cx: &mut TestAppContext) {
         let (chat, cx) = chat_window(cx, 1_000);
-        let wheel = |lines: f32, cx: &mut VisualTestContext| {
-            cx.simulate_event(ScrollEvent {
-                position: point(px(10.), px(10.)),
-                delta: ScrollDelta::Lines(point(0., lines)),
-                modifiers: Modifiers::none(),
-                ..ScrollEvent::default()
-            });
+        cx.run_until_parked();
+
+        wheel(3., cx);
+        assert!(is_split(&chat, cx));
+        wheel(-1_000., cx);
+        assert!(!is_split(&chat, cx));
+    }
+
+    #[gpui::test]
+    fn the_wheel_scrolls_the_history_pane_from_over_the_live_pane(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let reading = chat.read_with(cx, |chat, _| chat.scroll_offset());
+
+        let live = cx.debug_bounds("chat-area").unwrap().center();
+        cx.simulate_event(ScrollEvent {
+            position: live,
+            delta: ScrollDelta::Lines(point(0., 3.)),
+            modifiers: Modifiers::none(),
+            ..ScrollEvent::default()
+        });
+        cx.run_until_parked();
+        assert_ne!(chat.read_with(cx, |chat, _| chat.scroll_offset()), reading);
+    }
+
+    #[gpui::test]
+    fn lines_that_all_fit_have_nothing_to_split_for(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 3);
+        cx.run_until_parked();
+        wheel(3., cx);
+        assert!(!is_split(&chat, cx));
+    }
+
+    #[gpui::test]
+    fn the_history_pane_holds_still_and_the_live_pane_follows(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let reading = top_line(&chat, cx);
+        let live_top = chat.read_with(cx, |chat, _| chat.live.top());
+
+        chat.update(cx, |chat, cx| push(chat, 5, cx));
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), reading);
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.live.top().line),
+            live_top.line + 5
+        );
+    }
+
+    #[gpui::test]
+    fn the_panes_share_the_chat_a_third_of_it_live(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let live = cx.debug_bounds("chat-area").unwrap();
+        let divider = cx.debug_bounds("chat-divider").unwrap();
+        let height = cx.update(|window, _| window.viewport_size().height);
+
+        assert_eq!(live.size.height, height * LIVE_SHARE);
+        assert_eq!(live.bottom(), height);
+        assert_eq!(divider.center().y.round(), live.top().round());
+        let shown = chat.read_with(cx, |chat, _| {
+            chat.history.as_ref().unwrap().position.height()
+        });
+        assert!(shown >= height / 2., "the history pane drew {shown:?}");
+    }
+
+    #[gpui::test]
+    fn the_chip_counts_new_lines_and_closes_the_split(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let count = |chat: &Entity<Chat>, cx: &mut VisualTestContext| {
+            chat.read_with(cx, |chat, _| chat.new_lines(chat.history.as_ref().unwrap()))
+        };
+        assert_eq!(count(&chat, cx), 0);
+
+        chat.update(cx, |chat, cx| {
+            push(chat, 13, cx);
+            chat.echo_unsent("look", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(count(&chat, cx), 14);
+
+        let chip = cx.debug_bounds("back-to-live").unwrap();
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!is_split(&chat, cx));
+    }
+
+    #[gpui::test]
+    fn the_count_survives_lines_being_trimmed(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, TERMINAL_CAPACITY);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.scroll_back(LINE_HEIGHT * 100., cx);
+            push(chat, 10, cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.new_lines(chat.history.as_ref().unwrap()), 10);
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_the_divider_resizes_the_panes_and_a_new_split_remembers(cx: &mut TestAppContext) {
+        let (chat, cx) = split_window(cx, LINE_HEIGHT * 100.);
+        let height = cx.update(|window, _| window.viewport_size().height);
+        let drag_divider_to = |y: Pixels, cx: &mut VisualTestContext| {
+            // To the side of the chip, which sits on the divider's middle.
+            let from = cx.debug_bounds("chat-divider").unwrap().origin + point(px(20.), px(4.));
+            let to = point(from.x, y);
+            cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+            // The first move past gpui's threshold only starts the drag.
+            for _ in 0..2 {
+                cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+            }
+            cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
             cx.run_until_parked();
         };
 
-        wheel(3., cx);
-        assert!(!chat.read_with(cx, |chat, _| chat.follows_newest()));
-        wheel(-3., cx);
-        assert!(chat.read_with(cx, |chat, _| chat.follows_newest()));
+        drag_divider_to(height / 2., cx);
+        let live = cx.debug_bounds("chat-area").unwrap().size.height;
+        assert_eq!(live, height / 2.);
+
+        chat.update(cx, |chat, cx| chat.back_to_live(cx));
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.scroll_back(LINE_HEIGHT * 100., cx));
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("chat-area").unwrap().size.height, live);
+
+        drag_divider_to(px(0.), cx);
+        assert_eq!(
+            cx.debug_bounds("chat-area").unwrap().size.height,
+            height * *LIVE_SHARES.end()
+        );
+    }
+
+    #[gpui::test]
+    fn widening_the_column_keeps_a_reader_near_the_newest_line(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 0);
+        narrow_window(cx);
+        chat.update(cx, |chat, cx| chat.apply(&long_lines(500), cx));
+        cx.run_until_parked();
+        // Five wrapped lines from the bottom: wider, they'd all fit the pane.
+        chat.update(cx, |chat, cx| chat.open_history_at(495, cx));
+        cx.run_until_parked();
+        let reading = top_line(&chat, cx);
+
+        cx.simulate_resize(size(px(1_600.), px(1_000.)));
+        cx.run_until_parked();
+        assert!(is_split(&chat, cx));
+        assert_eq!(top_line(&chat, cx), reading);
+    }
+
+    #[gpui::test]
+    fn find_can_open_the_pane_at_a_line(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 1_000);
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.open_history_at(40, cx));
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), "history line 40");
+
+        chat.update(cx, |chat, cx| {
+            push(chat, 2, cx);
+            chat.open_history_at(7, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(top_line(&chat, cx), "history line 7");
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.new_lines(chat.history.as_ref().unwrap()), 2);
+        });
     }
 
     #[gpui::test]
@@ -376,7 +810,7 @@ mod tests {
         let (chat, cx) = chat_window(cx, TERMINAL_CAPACITY);
         let reading = chat.update(cx, |chat, cx| {
             // The first line above the view, whatever height it has.
-            let reading = chat.text_of(chat.position.top().line - 1);
+            let reading = chat.text_of(chat.reading().top().line - 1);
             chat.scroll_back(LINE_HEIGHT, cx);
             // No frame runs between the scroll and these lines.
             push(chat, 10, cx);
@@ -406,7 +840,7 @@ mod tests {
 
         chat.read_with(cx, |chat, _| {
             assert_eq!(chat.len(), 1);
-            assert!(chat.position.top_height() > LINE_HEIGHT);
+            assert!(chat.top_line_height() > LINE_HEIGHT);
         });
     }
 
@@ -418,11 +852,11 @@ mod tests {
         chat.update(cx, |chat, cx| chat.scroll_back(LINE_HEIGHT * 300., cx));
         cx.run_until_parked();
         let reading = top_line(&chat, cx);
-        let height = chat.read_with(cx, |chat, _| chat.position.top_height());
+        let height = chat.read_with(cx, |chat, _| chat.top_line_height());
 
         narrow_window(cx);
         assert_eq!(top_line(&chat, cx), reading);
-        assert!(chat.read_with(cx, |chat, _| chat.position.top_height()) > height);
+        assert!(chat.read_with(cx, |chat, _| chat.top_line_height()) > height);
     }
 
     #[gpui::test]
@@ -433,7 +867,7 @@ mod tests {
         chat.update(cx, |chat, cx| chat.apply(&server_lines([row]), cx));
         narrow_window(cx);
         assert_eq!(
-            chat.read_with(cx, |chat, _| chat.position.top_height()),
+            chat.read_with(cx, |chat, _| chat.top_line_height()),
             LINE_HEIGHT
         );
     }
@@ -441,9 +875,9 @@ mod tests {
     #[gpui::test]
     fn eighty_columns_take_one_row_and_a_longer_line_wraps(cx: &mut TestAppContext) {
         let (chat, cx) = chat_window(cx, 0);
-        let text_width = cx.update(|_, cx| min_column_width(cx)) - COLUMN_PADDING * 2.;
-        // One row high, so the newest line is the top line.
-        cx.simulate_resize(size(text_width, LINE_HEIGHT));
+        let column = cx.update(|_, cx| min_column_width(cx));
+        // One row high below the top padding, so the newest line is on top.
+        cx.simulate_resize(size(column, LINE_HEIGHT + px(16.)));
         let height_of = |columns: usize, cx: &mut VisualTestContext| {
             let line = "0".repeat(columns);
             chat.update(cx, |chat, cx| chat.apply(&server_lines([line]), cx));

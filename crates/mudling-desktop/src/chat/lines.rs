@@ -7,11 +7,10 @@
 //! nothing. The price is that nothing here knows the scrollback's total
 //! height, which a scrollbar would have to estimate from line numbers.
 
-use super::{Chat, LINE_HEIGHT};
+use super::Chat;
 use gpui::{
-    AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, Pixels,
-    ScrollEvent, Size, Style, Window, px, relative,
+    AnyElement, App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Size, Style, Window, px, relative,
 };
 use std::ops::Range;
 
@@ -26,21 +25,28 @@ pub struct Anchor {
 }
 
 /// Where a view sits in the scrollback.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LinePosition {
     following: bool,
+    /// Whether the last scroll since the last frame went down. Only that can
+    /// reach the newest line: a wider column or a taller view that brings it
+    /// into view leaves a reader where they are.
+    scrolled_down: bool,
     top: Anchor,
     top_height: Pixels,
     width: Pixels,
+    height: Pixels,
 }
 
 impl Default for LinePosition {
     fn default() -> LinePosition {
         LinePosition {
             following: true,
+            scrolled_down: false,
             top: Anchor::default(),
             top_height: px(0.),
             width: px(0.),
+            height: px(0.),
         }
     }
 }
@@ -54,8 +60,19 @@ pub struct Placement {
 }
 
 impl LinePosition {
+    /// A view with the line numbered `line` at its top.
+    pub fn reading_from(line: u64) -> LinePosition {
+        LinePosition {
+            following: false,
+            top: Anchor {
+                line,
+                past_top: px(0.),
+            },
+            ..LinePosition::default()
+        }
+    }
+
     /// Whether the view stays on the newest line as lines arrive.
-    #[cfg(test)]
     pub fn is_following(&self) -> bool {
         self.following
     }
@@ -70,6 +87,17 @@ impl LinePosition {
         self.top_height
     }
 
+    /// How tall the view last drew.
+    pub fn height(&self) -> Pixels {
+        self.height
+    }
+
+    /// Whether any of the scrollback lies above the view. Lines trimmed since
+    /// `evicted` was the oldest number don't count.
+    pub fn has_lines_above(&self, evicted: u64) -> bool {
+        self.top.line > evicted || self.top.past_top > px(0.)
+    }
+
     /// Moves the view `down`, or up if negative. Scrolling up stops following;
     /// reaching the newest line again follows it again.
     pub fn scroll(&mut self, down: Pixels) {
@@ -77,6 +105,7 @@ impl LinePosition {
             return;
         }
         self.following = false;
+        self.scrolled_down = down > px(0.);
         self.top.past_top += down;
     }
 
@@ -110,10 +139,13 @@ impl LinePosition {
         };
         self.top_height = height(placement.lines.start);
         self.width = view.width;
+        self.height = view.height;
+        self.scrolled_down = false;
         placement
     }
 
-    /// `None` once the newest line is in view, where the view follows it.
+    /// `None` once scrolling down brings the newest line into view, where the
+    /// view follows it.
     fn place_from_anchor(
         &self,
         evicted: u64,
@@ -149,7 +181,8 @@ impl LinePosition {
             bottom += height(end);
             end += 1;
         }
-        (end < len || bottom > view.height).then_some(Placement {
+        let reached_newest = self.scrolled_down && end == len && bottom <= view.height;
+        (!reached_newest).then_some(Placement {
             lines: first..end,
             top: -past_top,
         })
@@ -175,29 +208,35 @@ fn place_from_newest(
     }
 }
 
-/// Draws the chat's lines. They live on [`Chat`], which measures them against
+/// Which of the chat's views a [`LineList`] draws.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pane {
+    History,
+    Live,
+}
+
+/// Draws one pane's lines. They live on [`Chat`], which measures them against
 /// the width this element is given.
 pub struct LineList {
     chat: Entity<Chat>,
+    pane: Pane,
 }
 
 impl LineList {
-    pub fn new(chat: Entity<Chat>) -> LineList {
-        LineList { chat }
+    pub fn new(chat: Entity<Chat>, pane: Pane) -> LineList {
+        LineList { chat, pane }
     }
-}
-
-pub struct PlacedLines {
-    hitbox: Hitbox,
-    lines: Vec<AnyElement>,
 }
 
 impl Element for LineList {
     type RequestLayoutState = ();
-    type PrepaintState = PlacedLines;
+    type PrepaintState = Vec<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
-        Some("chat-lines".into())
+        Some(match self.pane {
+            Pane::History => "history-lines".into(),
+            Pane::Live => "live-lines".into(),
+        })
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -225,13 +264,12 @@ impl Element for LineList {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> PlacedLines {
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let lines = window.with_content_mask(Some(ContentMask { bounds }), |window| {
+    ) -> Vec<AnyElement> {
+        let pane = self.pane;
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
             self.chat
-                .update(cx, |chat, cx| chat.place_lines(bounds, window, cx))
-        });
-        PlacedLines { hitbox, lines }
+                .update(cx, |chat, cx| chat.place_lines(pane, bounds, window, cx))
+        })
     }
 
     fn paint(
@@ -240,20 +278,12 @@ impl Element for LineList {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        placed: &mut PlacedLines,
+        lines: &mut Vec<AnyElement>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let chat = self.chat.clone();
-        let hitbox = placed.hitbox.clone();
-        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                let down = -event.delta.pixel_delta(LINE_HEIGHT).y;
-                chat.update(cx, |chat, cx| chat.scroll_down(down, cx));
-            }
-        });
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for line in &mut placed.lines {
+            for line in lines {
                 line.paint(window, cx);
             }
         });
@@ -270,6 +300,7 @@ impl IntoElement for LineList {
 
 #[cfg(test)]
 mod tests {
+    use super::super::LINE_HEIGHT;
     use super::*;
     use gpui::size;
     use std::cell::Cell;
@@ -289,10 +320,10 @@ mod tests {
 
     fn reading(line: u64, past_top: Pixels) -> LinePosition {
         LinePosition {
-            following: false,
             top: Anchor { line, past_top },
             top_height: mixed_height(line),
             width: VIEW.width,
+            ..LinePosition::reading_from(line)
         }
     }
 
@@ -409,6 +440,34 @@ mod tests {
                 past_top: LINE_HEIGHT * 2.
             }
         );
+    }
+
+    #[test]
+    fn a_wider_column_that_brings_in_the_newest_line_keeps_the_reader_in_place() {
+        // Line 990 and the lines after it overflow the view, until they halve.
+        let mut position = reading(990, LINE_HEIGHT);
+        place(&mut position, 0, 1_000, VIEW.width);
+
+        let halved = |index: usize| mixed_height(index as u64) * 0.5;
+        position.place(0, 1_000, size(px(600.), VIEW.height * 3.), halved);
+        assert!(!position.is_following());
+        assert_eq!(position.top().line, 990);
+    }
+
+    #[test]
+    fn a_taller_view_reaches_the_newest_line_only_once_scrolled_down() {
+        let mut position = reading(995, px(0.));
+        let tall = size(VIEW.width, VIEW.height * 5.);
+        position.place(0, 1_000, tall, |index| mixed_height(index as u64));
+        assert!(!position.is_following());
+
+        position.scroll(px(-1.));
+        position.place(0, 1_000, tall, |index| mixed_height(index as u64));
+        assert!(!position.is_following(), "that went up");
+
+        position.scroll(px(1.));
+        position.place(0, 1_000, tall, |index| mixed_height(index as u64));
+        assert!(position.is_following());
     }
 
     #[test]

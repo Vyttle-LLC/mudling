@@ -10,7 +10,7 @@
 
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{App, Entity};
+use gpui::{App, Entity, px};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -161,6 +161,11 @@ const SETTINGS_CONTROLS: [&str; 10] = [
 /// Text the sheet's Appearance section shows, read from its nodes' values.
 const SETTINGS_TEXT: [&str; 2] = ["A Vyttle app", "The chat will read like this"];
 
+/// What arrives with the chat split. Synthetic: no real chat.
+const SPLIT_PROBE_LINES: [&str; 1] = ["ax-check: a line arriving while the chat is split"];
+/// How far back the check splits the chat: past anything still on screen.
+const SPLIT_DISTANCE: f32 = 2_000.;
+
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
     "Session: Recording",
@@ -272,6 +277,64 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: room_buttons.iter().all(|name| named_buttons.contains(name)),
             detail: format!("{named_buttons:?}"),
         });
+        chat.update(cx, |chat, cx| chat.scroll_back(px(SPLIT_DISTANCE), cx));
+        cx.background_executor().timer(pause).await;
+        let probe = stream::reads(&SPLIT_PROBE_LINES);
+        shell.update(cx, |shell, _| shell.replay(probe));
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let history_lines = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXGroup", None) && e.title.as_deref() == Some("Chat history"))
+                .first()
+                .map_or_else(Vec::new, |pane| pane.find(|e| e.is("AXStaticText", None)))
+        });
+        checks.push(Check {
+            name: "with the chat split, the history pane's lines are static text one by one",
+            passed: history_lines.len() > 1,
+            detail: format!("{} line element(s)", history_lines.len()),
+        });
+        let logs = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                e.is("AXGroup", Some("AXApplicationLog")) && e.title.as_deref() == Some("Chat")
+            })
+        });
+        let live_newest = logs
+            .first()
+            .map(|log| log.find(|e| e.is("AXStaticText", None)))
+            .and_then(|lines| lines.last().and_then(|line| line.value.clone()));
+        checks.push(Check {
+            name: "with the chat split, the log ends on the newest line",
+            passed: live_newest.as_deref() == Some(SPLIT_PROBE_LINES[0]),
+            detail: format!("{live_newest:?}"),
+        });
+        let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
+        });
+        checks.push(Check {
+            name: "with the chat split, new lines still reach the live region",
+            passed: statuses.len() == 1
+                && statuses[0].value.as_deref() == Some(SPLIT_PROBE_LINES[0])
+                && statuses[0].title.as_deref() == Some(SPLIT_PROBE_LINES[0]),
+            detail: format!(
+                "{:?}",
+                statuses.iter().map(|s| &s.value).collect::<Vec<_>>()
+            ),
+        });
+        let chip_named = |e: &AxElement| {
+            e.is("AXButton", None)
+                && e.title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("Back to live"))
+        };
+        let chips = tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| tree.find(chip_named));
+        checks.push(Check {
+            name: "with the chat split, the Back to live chip is a button",
+            passed: chips.len() == 1,
+            detail: format!("{:?}", chips.iter().map(|c| &c.title).collect::<Vec<_>>()),
+        });
+
         let accesskit_tree = cx
             .update(|cx| {
                 cx.windows().first().and_then(|w| {

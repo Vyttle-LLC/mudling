@@ -31,7 +31,7 @@ const fn row(
     }
 }
 
-pub const SHORTCUTS: [(&str, &[Shortcut]); 3] = [
+pub const SHORTCUTS: [(&str, &[Shortcut]); 4] = [
     (
         "Window",
         &[
@@ -58,6 +58,14 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 3] = [
             ),
             row("Open settings", &["main-,"], &["title_bar::OpenSettings"]),
             row("Quit", &["main-q"], &["mudling::Quit"]),
+        ],
+    ),
+    (
+        "Chat",
+        &[
+            row("Read back a page", &["pageup"], &["chat::PageBack"]),
+            row("Forward a page", &["pagedown"], &["chat::PageForward"]),
+            row("Back to live", &["end", "escape"], &["chat::BackToLive"]),
         ],
     ),
     (

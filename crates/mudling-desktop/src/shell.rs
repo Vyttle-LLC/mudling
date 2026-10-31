@@ -10,11 +10,11 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 use crate::assets::UI_FONT;
-use crate::chat::{COLUMN_PADDING, Chat, column_width};
+use crate::chat::{self, Chat, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::hud::Hud;
-use crate::input::{CommandInput, InputEvent};
+use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
@@ -57,6 +57,7 @@ actions!(
 const SHEET_PRIORITY: usize = 4;
 
 pub fn bind_keys(cx: &mut App) {
+    chat::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
@@ -857,7 +858,6 @@ impl Render for Shell {
             cx,
         );
         let theme = *cx.global::<Theme>();
-        let column_width = column_width(cx);
         let command_bar = div()
             .debug_selector(|| "command-bar".to_owned())
             .rounded_xl()
@@ -874,21 +874,11 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .items_center()
-            .child(
-                div()
-                    .debug_selector(|| "chat-area".to_owned())
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .max_w(column_width)
-                    .px(COLUMN_PADDING)
-                    .pt_4()
-                    .child(self.chat.clone()),
-            )
+            .child(div().flex_1().min_h_0().w_full().child(self.chat.clone()))
             .child(
                 div()
                     .w_full()
-                    .max_w(column_width)
+                    .max_w(column_width(cx))
                     .px_4()
                     .pt_3()
                     .pb_4()
@@ -908,13 +898,19 @@ impl Render for Shell {
                 .child(column)
                 .child(self.right_dock.clone())
         };
-        div()
+        chat::handle_keys(div(), &self.chat)
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
             .text_color(theme.text)
             .font_family(UI_FONT)
+            // End closes the split once it has no caret left to move.
+            .capture_action(cx.listener(|shell, _: &input::End, _, cx| {
+                if shell.input.read(cx).caret_at_end() {
+                    shell.chat.update(cx, |chat, cx| chat.back_to_live(cx));
+                }
+            }))
             .on_action(cx.listener(|shell, _: &ToggleLeftPanel, _, cx| {
                 shell.toggle_dock(Side::Left, cx);
             }))
@@ -952,7 +948,7 @@ impl Render for Shell {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::chat::{LINE_HEIGHT, min_column_width};
+    use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::room_panel::press_key;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
@@ -1154,8 +1150,9 @@ pub mod tests {
         let chat = shell.read_with(cx, |shell, _| shell.chat());
         chat.update(cx, |chat, cx| {
             (0..1_000).for_each(|_| chat.echo_unsent("a line", cx));
-            chat.scroll_back(px(400.), cx);
         });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| chat.scroll_back(px(400.), cx));
         cx.run_until_parked();
         let reading = chat.read_with(cx, |chat, _| chat.scroll_offset());
 
@@ -1167,9 +1164,111 @@ pub mod tests {
         );
 
         cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.newest_text()).as_deref(),
             Some("look north")
+        );
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.scroll_offset()),
+            reading,
+            "sending must not move the history pane"
+        );
+    }
+
+    /// A window on no session, split, with a page of lines to read back over.
+    fn split_window(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.update(|_, cx| bind_keys(cx));
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        chat.update(cx, |chat, cx| {
+            (0..1_000).for_each(|_| chat.echo_unsent("a line", cx));
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        (shell, cx)
+    }
+
+    fn is_split(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, cx| !shell.chat.read(cx).follows_newest())
+    }
+
+    #[gpui::test]
+    fn page_up_splits_the_chat_and_goes_further_back_with_each_press(cx: &mut TestAppContext) {
+        let (shell, cx) = split_window(cx);
+        assert!(is_split(&shell, cx));
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        let first_page = chat.read_with(cx, |chat, _| chat.scroll_offset());
+
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        assert!(chat.read_with(cx, |chat, _| chat.scroll_offset()).line < first_page.line);
+
+        cx.simulate_keystrokes("pagedown");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.scroll_offset()),
+            first_page
+        );
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_split(cx: &mut TestAppContext) {
+        let (shell, cx) = split_window(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!is_split(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn end_closes_the_split_once_the_caret_has_nowhere_to_go(cx: &mut TestAppContext) {
+        let (shell, cx) = split_window(cx);
+        cx.simulate_input("look");
+        cx.simulate_keystrokes("home end");
+        cx.run_until_parked();
+        assert!(is_split(&shell, cx), "End moved the caret");
+
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        assert!(!is_split(&shell, cx));
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    #[gpui::test]
+    fn typing_after_a_click_in_the_chat_still_reaches_the_command_bar(cx: &mut TestAppContext) {
+        let (shell, cx) = split_window(cx);
+        let live = cx.debug_bounds("chat-area").unwrap();
+        cx.simulate_click(live.center(), Modifiers::none());
+        cx.simulate_input("look");
+        cx.run_until_parked();
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+        assert!(is_split(&shell, cx));
+    }
+
+    #[gpui::test]
+    fn the_column_stays_capped_and_centered_on_a_wide_window(cx: &mut TestAppContext) {
+        let (_shell, cx) = split_window(cx);
+        let window = size(px(2_400.), px(900.));
+        cx.simulate_resize(window);
+        cx.run_until_parked();
+
+        let column = cx.debug_bounds("chat-area").unwrap();
+        assert_eq!(column.size.width, COLUMN_WIDTH);
+        assert_eq!(column.center().x, window.width / 2.);
+        let bar = cx.debug_bounds("command-bar").unwrap();
+        assert_eq!(bar.center().x, window.width / 2.);
+    }
+
+    #[gpui::test]
+    fn the_divider_crosses_the_whole_chat_beyond_the_column(cx: &mut TestAppContext) {
+        let (_shell, cx) = split_window(cx);
+        let window = size(px(2_400.), px(900.));
+        cx.simulate_resize(window);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("chat-divider").unwrap().size.width,
+            window.width
         );
     }
 
