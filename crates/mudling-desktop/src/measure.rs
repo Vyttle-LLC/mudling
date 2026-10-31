@@ -202,7 +202,10 @@ impl HudRun {
         }
     }
 
-    pub fn put(self, shell: &Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    /// Puts the HUD there and keeps it on the sample: each read is a connection
+    /// of its own, and its stores would otherwise replace the sample.
+    pub fn put(self, shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+        shell.hold_hud();
         let placement = match self {
             HudRun::Attached | HudRun::Open => HudPlacement::Attached,
             HudRun::Floating | HudRun::Dragged => HudPlacement::Floating,

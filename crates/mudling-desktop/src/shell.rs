@@ -164,6 +164,8 @@ pub struct Shell {
     room_panel: Entity<RoomPanel>,
     settings: Entity<SettingsSheet>,
     settings_open: bool,
+    /// A measured run draws its sample in the HUD, whatever the stores say.
+    hud_held: bool,
     /// Where focus goes back to when the sheet closes.
     focus_before_settings: Option<FocusHandle>,
     /// Keeps the player's choices, if there's a folder to keep them in.
@@ -308,6 +310,7 @@ impl Shell {
             room_panel,
             settings,
             settings_open: false,
+            hud_held: false,
             focus_before_settings: None,
             saved_settings: None,
             speaker: None,
@@ -742,10 +745,12 @@ impl Shell {
         self.status.update(cx, |status, cx| status.show(lines, cx));
         self.session_bar.update(cx, |bar, cx| bar.show(offers, cx));
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
-        self.hud.update(cx, |hud, cx| {
-            let target = self.copies.target.value();
-            hud.show(self.copies.vitals.value(), characters, target, cx);
-        });
+        if !self.hud_held {
+            self.hud.update(cx, |hud, cx| {
+                let target = self.copies.target.value();
+                hud.show(self.copies.vitals.value(), characters, target, cx);
+            });
+        }
     }
 
     /// Brings the title bar and what's beside the chat in line with whether
@@ -961,6 +966,11 @@ impl Shell {
 
     pub fn hud(&self) -> Entity<Hud> {
         self.hud.clone()
+    }
+
+    /// Leaves the HUD to [`Shell::show_sample_hud`] from now on.
+    pub fn hold_hud(&mut self) {
+        self.hud_held = true;
     }
 
     /// Puts the HUD at `placement`, opened or not, as the sheet would.
@@ -1595,6 +1605,24 @@ pub mod tests {
             shell.title_bar.read(cx).connection() == "Connected"
                 && shell.hud.read(cx).values() == ["11/30"]
         });
+    }
+
+    #[gpui::test]
+    fn a_held_hud_keeps_its_sample_through_a_store_batch(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.shell.update(played.cx, |shell, cx| {
+            let (vitals, characters, target) = crate::measure::sample_hud(0);
+            shell.hold_hud();
+            shell.show_sample_hud(&vitals, &characters, &target, cx);
+        });
+        played.gmcp(r#"Char.Vitals {"hp":11,"maxhp":30}"#);
+        played.frames_until("the vitals", |shell, _| {
+            shell.copies.vitals.value().0.get(&Vital::Hp) == Some(&11)
+        });
+        let shown = played
+            .shell
+            .read_with(played.cx, |shell, cx| shell.hud.read(cx).values());
+        assert_eq!(shown[0], "3,120/4,300");
     }
 
     #[gpui::test]
