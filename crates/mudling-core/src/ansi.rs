@@ -61,6 +61,13 @@ enum Escape {
     OscEsc,
 }
 
+/// `text` without its ANSI codes: for a name in GMCP, which some games color.
+pub fn plain(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    AnsiParser::default().feed(text, &mut plain, &mut Vec::new());
+    plain
+}
+
 /// Parses lines in order. The current style carries from one line to the
 /// next, as servers expect.
 #[derive(Debug, Default)]

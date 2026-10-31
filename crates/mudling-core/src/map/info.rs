@@ -2,6 +2,7 @@
 
 use super::geometry::{DirMap, Direction};
 use super::rules::MapRules;
+use crate::ansi;
 use crate::telnet::gmcp;
 use serde_json::Value;
 
@@ -35,10 +36,10 @@ impl RoomInfo {
         let value: Value = gmcp::from_json(json)?;
         let object = value.as_object()?;
         let text = |keys: &[&str]| {
-            keys.iter()
-                .find_map(|key| object.get(*key).and_then(Value::as_str))
-                .unwrap_or_default()
-                .to_owned()
+            let text = keys
+                .iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_str));
+            ansi::plain(text.unwrap_or_default())
         };
         let exits = object
             .get("exits")

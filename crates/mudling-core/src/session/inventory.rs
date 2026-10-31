@@ -3,7 +3,7 @@
 //! for n from 1. Entries past `count` are stale. The session asks for it on
 //! entering the game, so it's kept for the connection and never saved.
 
-use crate::ansi::AnsiParser;
+use crate::ansi;
 use crate::plugin::luau::Value;
 use crate::telnet::gmcp;
 use serde::{Deserialize, Deserializer};
@@ -23,14 +23,7 @@ pub(super) struct Item {
 
 /// Some games color item names.
 fn without_colors<'de, D: Deserializer<'de>>(names: D) -> Result<String, D::Error> {
-    Ok(plain(&String::deserialize(names)?))
-}
-
-/// `text` without its color codes.
-pub(super) fn plain(text: &str) -> String {
-    let mut plain = String::with_capacity(text.len());
-    AnsiParser::default().feed(text, &mut plain, &mut Vec::new());
-    plain
+    Ok(ansi::plain(&String::deserialize(names)?))
 }
 
 #[derive(Deserialize)]

@@ -151,6 +151,7 @@ pub struct Typing {
 enum Input {
     Connect,
     Send(String),
+    SendAction(String),
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
@@ -217,6 +218,12 @@ impl Session {
     /// Sends what the player typed.
     pub fn send(&self, typed: impl Into<String>) {
         self.queue(Input::Send(typed.into()));
+    }
+
+    /// Sends a command from a button, not the command box: see
+    /// [`Engine::send_action`].
+    pub fn send_action(&self, command: impl Into<String>) {
+        self.queue(Input::SendAction(command.into()));
     }
 
     /// Closes the connection, or gives up on one still opening.
@@ -352,6 +359,9 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Connect) => {}
                 Some(Input::Send(typed)) => engine.send(&typed, Timestamp::now()),
+                Some(Input::SendAction(command)) => {
+                    engine.send_action(&command, Timestamp::now());
+                }
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();

@@ -296,6 +296,15 @@ impl Engine {
         self.issue(typed, now);
     }
 
+    /// A command a shell's button sent. It's never a password, so with echo
+    /// off it goes nowhere: a click made a frame before the server asked for
+    /// one mustn't land in the password box.
+    pub fn send_action(&mut self, command: &str, now: Timestamp) {
+        if !self.settings.echo_off {
+            self.send(command, now);
+        }
+    }
+
     /// Publishes what changed since the last settle: the stores, and the
     /// rows for the database. A move's map work finishes here.
     pub fn settle(&mut self, now: Timestamp) {

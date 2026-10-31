@@ -9,6 +9,7 @@
 //! [`Item::target`]: a name from the server can't carry a command with it.
 
 use super::inventory::{self, Change, List};
+use crate::ansi;
 use crate::map::mob_name;
 use crate::plugin::luau::Value;
 use crate::store::{
@@ -59,7 +60,7 @@ struct Present {
 impl Present {
     fn of(key: String, player: RoomPlayer) -> Present {
         let name = player.name.unwrap_or(key);
-        let title = inventory::plain(player.fullname.as_deref().unwrap_or(&name));
+        let title = ansi::plain(player.fullname.as_deref().unwrap_or(&name));
         Present { name, title }
     }
 
@@ -208,7 +209,7 @@ impl GameFeed {
         let Some(status) = gmcp::from_json::<Status>(json) else {
             return;
         };
-        if let Some(name) = status.character_name.as_deref().map(inventory::plain)
+        if let Some(name) = status.character_name.as_deref().map(ansi::plain)
             && !name.is_empty()
         {
             let value = Value::Text(name.clone());
@@ -223,7 +224,7 @@ impl GameFeed {
         let level = number(status.opponent_level.as_ref()).filter(|level| *level > 0);
         let health = number(status.opponent_health.as_ref());
         let max_health = number(status.opponent_health_max.as_ref()).filter(|max| *max > 0);
-        match status.opponent_name.as_deref().map(inventory::plain) {
+        match status.opponent_name.as_deref().map(ansi::plain) {
             Some(name) if name.is_empty() => self.target = None,
             Some(name) if self.target.as_ref().is_none_or(|old| old.name != name) => {
                 self.target = Some(Target {

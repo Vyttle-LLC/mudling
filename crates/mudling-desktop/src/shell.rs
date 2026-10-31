@@ -284,7 +284,13 @@ impl Shell {
     /// now would go as one, so it's refused, as core refuses a hook's.
     fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
         if !self.copies.settings.value().echo_off {
-            self.submit(&sent.command, cx);
+            self.send_with(
+                &sent.command,
+                |session, command| {
+                    session.send_action(command);
+                },
+                cx,
+            );
         }
         if !sent.by_keyboard {
             window.focus(&self.input.focus_handle(cx), cx);
@@ -295,11 +301,15 @@ impl Shell {
     /// unless it's a password. With no server connected they go nowhere, so
     /// the chat shows them here.
     fn submit(&mut self, typed: &str, cx: &mut Context<Shell>) {
+        self.send_with(typed, |session, command| session.send(command), cx);
+    }
+
+    fn send_with(&mut self, typed: &str, send: impl Fn(&Session, &str), cx: &mut Context<Shell>) {
         let settings = self.copies.settings.value();
         let connected = settings.connection == ConnectionStatus::Connected;
         for command in typed.split('\n') {
             match &self.game {
-                Some(game) if connected && !game.is_replay() => game.session.send(command),
+                Some(game) if connected && !game.is_replay() => send(&game.session, command),
                 _ if settings.echo_off => {}
                 _ => self
                     .chat

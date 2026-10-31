@@ -817,6 +817,32 @@ fn room_players_note_mobs_on_the_map_by_their_lines() {
 }
 
 #[test]
+fn a_button_press_is_refused_at_a_password_prompt() {
+    let mut driven = Driven::new(Vec::new(), "mud.example");
+    driven.engine.start_connection().unwrap();
+    driven.say(&[IAC, WILL, ECHO]);
+    drop(driven.engine.take_output());
+    driven.engine.send_action("kill wolf", Timestamp(0));
+    assert!(driven.engine.take_output().is_empty());
+
+    driven.engine.send("hunter2", Timestamp(0));
+    assert!(contains(&driven.engine.take_output(), b"hunter2"));
+}
+
+#[test]
+fn color_codes_in_a_room_name_never_reach_the_room() {
+    let mut driven = Driven::new(Vec::new(), "mud.example");
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(
+        r#"Room.Info {"num": 1, "name": "A \u001b[1;31mred\u001b[0m road",
+            "zone": "\u001b[32mThe Fields\u001b[0m", "exits": {}}"#,
+    );
+    let room = room_state(&driven).room.unwrap();
+    assert_eq!(room.name, "A red road");
+    assert_eq!(room.zone, "The Fields");
+}
+
+#[test]
 fn a_mob_of_a_marked_kind_marks_the_room() {
     let mut driven = Driven::configured("mud.hearth.example", |config| {
         config.plugins = vec![hearth()];
