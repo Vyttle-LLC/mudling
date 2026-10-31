@@ -83,6 +83,40 @@ fn the_rest_of_a_line_shows_after_the_command_that_split_it() {
     );
 }
 
+/// A chat that shows the prompts the HUD repeats still has each reply after
+/// the command it answers: the prompts are marked, not moved or dropped.
+#[test]
+fn with_prompts_shown_a_reply_still_follows_its_command() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> ");
+    driven.send("save");
+    driven.say(b"Saved.");
+    driven.say(b"\n\r");
+    assert_eq!(
+        driven.terminal_with_prompts(),
+        ["<20hp> ", "<19hp> ", "save", "Saved."]
+    );
+    assert_eq!(driven.terminal(), ["save", "Saved."]);
+}
+
+/// A command splits a line the server hasn't ended: what came before shows
+/// first, then the command, then the rest, and the next line is whole.
+#[test]
+fn with_prompts_shown_a_command_still_splits_the_line_it_interrupts() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> ");
+    driven.say(b"You see a stag");
+    driven.send("look");
+    driven.say(b" here.\r\nNext.\r\n");
+    let expected = ["You see a stag", "look", " here.", "Next."];
+    assert_eq!(driven.terminal(), expected);
+    let mut with_prompts = vec!["<20hp> ", "<19hp> "];
+    with_prompts.extend(expected);
+    assert_eq!(driven.terminal_with_prompts(), with_prompts);
+}
+
 #[test]
 fn a_reply_comes_after_the_command_it_answers() {
     let mut driven = learned();

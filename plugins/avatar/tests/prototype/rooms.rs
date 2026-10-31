@@ -173,6 +173,26 @@ fn half_a_prompt_does_not_hide_the_whole_one() {
     assert_eq!(game.terminal(), ["You stop using midnight boots."]);
 }
 
+/// The same with the prompts shown: each is a line of its own, in order.
+#[test]
+fn with_prompts_shown_replies_still_follow_the_command() {
+    let mut game = Game::new();
+    game.gmcp(r#"Char.Vitals { "hp": "125" }"#);
+    game.say(b"(125h-129m-180v-1166)(-/-)");
+    game.send("autoloot");
+    game.say(b"Ok, your autoloot is now set to OFF.");
+    game.say(b"\n\r(125h-129m-180v-1166)(-/-)");
+    assert_eq!(
+        game.terminal_with_prompts(),
+        [
+            "(125h-129m-180v-1166)(-/-)",
+            "autoloot",
+            "Ok, your autoloot is now set to OFF.",
+            "(125h-129m-180v-1166)(-/-)",
+        ]
+    );
+}
+
 /// A prompt, a command, the reply and the next prompt: the reply comes
 /// after the command it answers.
 #[test]

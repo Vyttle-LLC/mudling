@@ -1170,9 +1170,14 @@ impl Engine {
         self.show(line);
     }
 
-    /// Queues a line for the terminal. Runs of blank lines show as one, so
-    /// the prompts hidden between them leave no gaps.
+    /// Queues a line for the terminal. Runs of blank lines show as one, and a
+    /// prompt the HUD repeats, which a chat may hide, counts as no line at
+    /// all, so the blanks around it join one run.
     fn show(&mut self, line: Line) {
+        if line.is_only_prompt() {
+            self.terminal.push(line);
+            return;
+        }
         let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
         if !(blank && self.blank_shown) {
             self.terminal.push(line);
