@@ -522,24 +522,43 @@ fn reading_alike_with_links_that_agree_on_nothing_is_no_evidence() {
 }
 
 #[test]
-fn starting_rooms_that_read_alike_are_no_evidence_of_one_room() {
-    // Every device starts at the origin, so sharing it proves nothing.
+fn rooms_where_an_island_starts_are_no_evidence_of_one_room() {
+    // Every device's first rooms land on these squares, so sharing one proves
+    // nothing: the first island is the origin, and a jump starts the next.
     let hall: &[&str] = &["e", "w"];
-    for mac_syncs_first in [true, false] {
-        let (_folder, mac, ipad) = two_explorers();
-        mac.walk(&[(None, "A corridor", hall), (Some("e"), "A barn", &["w"])]);
-        ipad.walk(&[(None, "A corridor", hall), (Some("w"), "A pond", &["e"])]);
+    let start: [(&[Step<'_>], &[Step<'_>], i64); 2] = [
+        (&[], &[], 0),
+        (
+            &[(None, "The Mac's hill", &["s"])],
+            &[(None, "The iPad's lake", &["s"])],
+            1000,
+        ),
+    ];
+    for (mac_start, ipad_start, x) in start {
+        for mac_syncs_first in [true, false] {
+            let (_folder, mac, ipad) = two_explorers();
+            mac.walk(mac_start);
+            ipad.walk(ipad_start);
+            mac.walk(&[(None, "A corridor", hall), (Some("e"), "A barn", &["w"])]);
+            ipad.walk(&[(None, "A corridor", hall), (Some("w"), "A pond", &["e"])]);
+            for device in [&mac, &ipad] {
+                let rooms = device.rooms();
+                let corridor = rooms.iter().find(|room| room.name == "A corridor");
+                assert_eq!(corridor.unwrap().x, x);
+            }
 
-        if mac_syncs_first {
-            converge(&mac, &ipad);
-        } else {
-            converge(&ipad, &mac);
+            if mac_syncs_first {
+                converge(&mac, &ipad);
+            } else {
+                converge(&ipad, &mac);
+            }
+
+            let corridors = mac.room_names();
+            let corridors = corridors.iter().filter(|name| *name == "A corridor");
+            assert_eq!(corridors.count(), 2);
+            assert_eq!(mac.rooms(), ipad.rooms());
+            assert_eq!(mac.links().len(), 4);
         }
-
-        let names = ["A barn", "A corridor", "A corridor", "A pond"];
-        assert_eq!(mac.sorted_rooms(), names);
-        assert_eq!(mac.rooms(), ipad.rooms());
-        assert_eq!(mac.links().len(), 4);
     }
 }
 

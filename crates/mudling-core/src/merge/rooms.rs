@@ -10,8 +10,9 @@
 //! - Their whole identity (name, zone, description and exits) matches, exactly
 //!   one room on each side has it, and each id is on one side only.
 //! - Something beyond that says they're one: the same stored position on the
-//!   same sheet, away from the origin where every device starts, or a shared
-//!   link, the same direction to or from one room or a pair that unites too.
+//!   same sheet, on a square a walk reached and not where an island starts, or
+//!   a shared link, the same direction to or from one room or a pair that
+//!   unites too.
 //! - No direction leads to two rooms that stay apart.
 //! - No room would come to reach another by two different directions, which
 //!   the two sides don't each show. A maze gets no pass.
@@ -28,7 +29,7 @@
 //! Devices that started in different places have different coordinates, so a
 //! room both found with no link in common stays a duplicate.
 
-use crate::map::{RoomId, UNNUMBERED_IDS};
+use crate::map::{GridPoint, RoomId, UNNUMBERED_IDS, is_island_start};
 use crate::persist::{Key, MapRows, Room, Timestamp, Tombstone};
 use crate::repo::format::ServerRows;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -94,8 +95,6 @@ impl Pair {
         self.ours.max(self.theirs)
     }
 }
-
-const ORIGIN: (i64, i64, i64) = (0, 0, 0);
 
 type Links<'a> = HashMap<RoomId, Vec<(&'a str, RoomId)>>;
 
@@ -257,8 +256,9 @@ fn has_evidence(
 }
 
 /// The same position on the same sheet: both outdoors, or in one building. A
-/// wing's first room is its own building, so that pair's sheet is its own. The
-/// origin proves nothing, because every device starts there.
+/// wing's first room is its own building, so that pair's sheet is its own. Only
+/// a square a walk reached counts: where an island starts proves nothing,
+/// because any device's first room there lands on it.
 fn same_square(
     pair: Pair,
     united: &HashMap<RoomId, RoomId>,
@@ -273,8 +273,8 @@ fn same_square(
         (Some(x), Some(y)) => (x == a.id && y == b.id) || one_id(united, x) == one_id(united, y),
         _ => false,
     };
-    let square = (a.x, a.y, a.z);
-    same_sheet && square == (b.x, b.y, b.z) && square != ORIGIN
+    let square = GridPoint::new(a.x, a.y, a.z);
+    same_sheet && square == GridPoint::new(b.x, b.y, b.z) && !is_island_start(square)
 }
 
 fn links_of<'s, 'a>(links: &'s Links<'a>, id: RoomId) -> &'s [(&'a str, RoomId)] {
