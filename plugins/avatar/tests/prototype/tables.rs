@@ -77,7 +77,12 @@ fn the_skill_list_leaves_out_the_pager_and_what_follows_the_prompt() {
             .all(|key| !key.contains("Scroll") && !key.contains("Continue")),
         "{skills:?}"
     );
-    assert!(!skills.keys().any(|key| key.contains("oncentrate")));
+    assert!(
+        !skills
+            .keys()
+            .any(|key| key.to_lowercase().contains("concentrate")),
+        "{skills:?}"
+    );
 }
 
 /// Room text after a list was once read as skills ("(Glowing) Are you").
@@ -113,6 +118,42 @@ fn the_skill_list_and_practice_merge() {
     assert_eq!(get(&skills, "iron monk.learned"), None);
     assert_eq!(get(&skills, "iron monk.level"), number(30.0));
     assert_eq!(get(&skills, "dodge.learned"), number(90.0));
+}
+
+/// A command sent between two reads shows in the chat; the game's text is
+/// read as the game sent it.
+#[test]
+fn a_command_mid_line_leaves_the_line_whole() {
+    let mut game = Game::new();
+    game.say(b"You are");
+    game.send("look");
+    game.say(
+        b" using:\r\n<used as light>     a small lantern\r\n\
+          <worn on finger>    a pink ice ring\r\n(1h-1m-1v-1)(-/-)",
+    );
+    game.close();
+    assert_eq!(game.terminal()[..3], ["You are", "look", " using:"]);
+    let worn = game
+        .hub
+        .read(|gear: &Versioned<GearState>| gear.value().0.get("equipment.count").cloned());
+    assert_eq!(worn, number(2.0));
+}
+
+#[test]
+fn a_command_at_any_point_of_a_table_changes_nothing_read() {
+    let text = PRACTICE.replace('\n', "\r\n");
+    for split in (1..text.len()).step_by(41) {
+        let mut game = Game::new();
+        game.say(&text.as_bytes()[..split]);
+        game.send("look");
+        game.say(&text.as_bytes()[split..]);
+        game.close();
+        assert_eq!(
+            stored(&game, "skills.practice.read"),
+            number(7.0),
+            "split at {split}"
+        );
+    }
 }
 
 #[test]

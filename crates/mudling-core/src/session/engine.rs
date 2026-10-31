@@ -56,6 +56,8 @@ struct Link {
     inventory_asked: bool,
     login: Option<Login>,
     variety: CommandVariety,
+    /// How much of the pending line the chat already shows.
+    pending_shown: usize,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
@@ -211,6 +213,7 @@ impl Engine {
             inventory_asked: false,
             login: self.new_login(),
             variety: CommandVariety::default(),
+            pending_shown: 0,
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
@@ -274,8 +277,7 @@ impl Engine {
             self.history_writer.save(&typing.history);
         }
         drop(typing);
-        // Text waiting for its line end came before this command.
-        self.quiet(now);
+        self.show_pending();
         self.show(Line::command(typed));
         self.issue(typed, now);
     }
@@ -471,17 +473,19 @@ impl Engine {
                 self.map.line(body, now);
             }
             self.route_events(now);
-            let Some(link) = &self.link else { return };
+            let Some(link) = &mut self.link else { return };
             let hide = link.defaults.hide_prompts && link.defaults.hud.has_learned();
             let shown = if coloring.is_empty() {
                 line.clone()
             } else {
                 line.colored(&coloring)
             };
-            match prompt.filter(|_| hide) {
-                Some(at) if at == text.len() => {}
-                Some(at) => self.show(shown.after(at)),
-                None => self.show(shown),
+            let hidden = prompt.filter(|_| hide).unwrap_or(0);
+            let from = hidden.max(std::mem::take(&mut link.pending_shown));
+            if from == 0 {
+                self.show(shown);
+            } else if from < text.len() {
+                self.show(shown.after(from));
             }
         }
         // The buffer is kept: it's reused for every read.
@@ -724,6 +728,22 @@ impl Engine {
         for line in chain_lines(&commands, separator) {
             write_line(&line, encoding, &mut self.output);
         }
+    }
+
+    /// Text the server hasn't ended came before the command being sent, so
+    /// the chat shows it now. Only the chat: the line stays pending, and
+    /// what follows it joins it for the plugins, the map and the learner.
+    fn show_pending(&mut self) {
+        let Some(link) = &mut self.link else { return };
+        let Some(pending) = link.pipeline.pending() else {
+            return;
+        };
+        if pending.plain[link.pending_shown..].trim().is_empty() {
+            return;
+        }
+        let line = pending.shown_from(link.pending_shown);
+        link.pending_shown = pending.plain.len();
+        self.show(line);
     }
 
     /// Queues a line for the terminal. Runs of blank lines show as one, so

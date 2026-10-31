@@ -34,7 +34,7 @@ All four are fixed, each with its test as proof.
 
 1. **A long walk sent one line over and over.** `25n` went out as 25 identical `north` lines, and Merc-derived games disconnect a player for that. A repeated move now alternates its spelling: `CommandVariety` in `defaults/commands.rs`.
 2. **Blank lines piled up.** Hiding a prompt left the blank lines around it, so runs of them showed in the chat. A run now shows as one, and a blank line before anything else doesn't show.
-3. **A command could land before the text it answered.** Text the server hadn't ended, such as a prompt, waited for silence, so a quick command showed above it. Sending now ends that line first.
+3. **A command could land before the text it answered.** Text the server hadn't ended, such as a prompt, waited for silence, so a quick command showed above it. Sending now shows that text first, in the chat only: the line stays pending, so the plugins, the map and the prompt learner still read it whole.
 4. **A character with no saved password got a blank one.** Auto-login answered the password prompt with an empty line. With no password saved it now stops after the name, and the player types the rest.
 
 ## Gaps reported, in areas this ticket doesn't own
@@ -467,7 +467,7 @@ All four are fixed, each with its test as proof.
 | `TerminalBufferTests.anUnlearnedPromptStaysVisible` | Ported | `core::terminal::a_prompt_that_was_never_learned_stays_visible` |  |
 | `TerminalBufferTests.showsThePromptWhenAsked` | Not carried over | — | VYT-208: `Defaults::hide_prompts` is on until the settings sheet can turn it off. |
 | `TerminalBufferTests.collapsesBlankLines` | Ported | `core::terminal::a_run_of_blank_lines_shows_as_one`<br>`core::terminal::blank_lines_around_a_hidden_prompt_show_as_one`<br>`core::terminal::a_blank_line_follows_a_command` | Bug 2. |
-| `TerminalBufferTests.localEchoEndsTheInProgressLine` | Ported | `core::terminal::a_command_ends_the_line_in_progress` | Bug 3. |
+| `TerminalBufferTests.localEchoEndsTheInProgressLine` | Ported | `core::terminal::a_command_shows_after_the_line_in_progress`<br>`core::terminal::the_rest_of_a_line_shows_after_the_command_that_split_it`<br>`avatar::tables::a_command_mid_line_leaves_the_line_whole`<br>`avatar::tables::a_command_at_any_point_of_a_table_changes_nothing_read` | Bug 3. |
 | `TerminalBufferTests.repliesAreNumberedAfterTheCommandTheyAnswer` | Ported | `core::terminal::a_reply_comes_after_the_command_it_answers`<br>`avatar::rooms::replies_follow_the_command_they_answer` | Bug 3. Ids became the store's order. |
 | `TerminalBufferTests.colorsSurviveLineSplitting` | Already covered | `unit::ansi::style_carries_to_the_next_line` |  |
 | `TerminalBufferTests.keepsAtMostMaxLines` | Already covered | `unit::scrollback::keeps_the_newest_lines_once_full` |  |

@@ -52,7 +52,7 @@ fn a_blank_line_follows_a_command() {
 /// Text the server hasn't ended came before what the player sends, whether
 /// or not it had gone quiet yet.
 #[test]
-fn a_command_ends_the_line_in_progress() {
+fn a_command_shows_after_the_line_in_progress() {
     let mut driven = Driven::new();
     driven.say(b"Your choice: ");
     driven.send("look");
@@ -62,6 +62,25 @@ fn a_command_ends_the_line_in_progress() {
         lines.map(|line| line.kind()).collect::<Vec<_>>()
     });
     assert_eq!(kinds, [LineKind::Server, LineKind::Command]);
+
+    // Silence ends the line; what the chat shows already isn't shown again.
+    driven.engine.quiet(Timestamp(0));
+    driven.engine.settle(Timestamp(0));
+    assert_eq!(driven.terminal(), ["Your choice: ", "look"]);
+}
+
+#[test]
+fn the_rest_of_a_line_shows_after_the_command_that_split_it() {
+    let mut driven = Driven::new();
+    driven.say(b"A long ");
+    driven.send("look");
+    driven.say(b"line");
+    driven.send("west");
+    driven.say(b" ends.\r\nNext.\r\n");
+    assert_eq!(
+        driven.terminal(),
+        ["A long ", "look", "line", "west", " ends.", "Next."]
+    );
 }
 
 #[test]
