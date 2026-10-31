@@ -119,6 +119,8 @@ impl Section {
 pub enum SheetEvent {
     Closed,
     Chose(Appearance),
+    /// The player confirmed taking this host off their list.
+    RemoveServer(String),
     TurnOn(PluginId),
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
@@ -239,7 +241,7 @@ fn control(
 }
 
 /// An outlined button with its label as its text.
-fn text_button(
+pub(crate) fn text_button(
     id: impl Into<ElementId>,
     label: &'static str,
     stop: &FocusHandle,
@@ -276,6 +278,12 @@ pub struct SettingsSheet {
     section: Section,
     server: Option<SharedString>,
     servers: Vec<SavedServer>,
+    /// What the last thing done to the saved servers ran into.
+    servers_problem: Option<SharedString>,
+    /// The host of the game running, which can't be removed.
+    playing: Option<SharedString>,
+    /// The host whose removal is being asked about.
+    removing: Option<SharedString>,
     plugins: Vec<PluginRow>,
     rules: RulesState,
     form: triggers::Form,
@@ -310,6 +318,9 @@ impl SettingsSheet {
             section: Section::Appearance,
             server: None,
             servers: Vec::new(),
+            servers_problem: None,
+            playing: None,
+            removing: None,
             plugins: Vec::new(),
             rules: RulesState::default(),
             form: triggers::Form::new(window, cx),
@@ -340,6 +351,7 @@ impl SettingsSheet {
     /// Takes the keyboard. With problems to show, opens on the section that
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        self.removing = None;
         if self.problems() > 0 {
             self.select(Section::Plugins, cx);
         }
@@ -352,9 +364,22 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    pub fn show_servers(&mut self, servers: Vec<SavedServer>, cx: &mut Context<SettingsSheet>) {
+    pub fn show_servers(
+        &mut self,
+        servers: Vec<SavedServer>,
+        problem: Option<String>,
+        cx: &mut Context<SettingsSheet>,
+    ) {
         self.servers = servers;
+        self.servers_problem = problem.map(Into::into);
         cx.notify();
+    }
+
+    pub fn show_playing(&mut self, host: Option<&str>, cx: &mut Context<SettingsSheet>) {
+        if self.playing.as_deref() != host {
+            self.playing = host.map(|host| host.to_owned().into());
+            cx.notify();
+        }
     }
 
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
@@ -544,7 +569,7 @@ impl SettingsSheet {
             stops,
         };
         match self.section {
-            Section::Servers => servers::fill(&mut pane, &self.servers, theme),
+            Section::Servers => self.fill_servers(&mut pane, theme, cx),
             Section::Plugins => self.fill_plugins(&mut pane, theme, cx),
             Section::Triggers => self.fill_triggers_section(&mut pane, theme, cx),
             Section::Appearance => self.fill_appearance(&mut pane, theme, cx),

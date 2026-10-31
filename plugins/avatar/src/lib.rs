@@ -1,7 +1,8 @@
 //! Runs the Avatar plugin the way the client will, through the public
 //! plugin API only: server text through the line pipeline, each line
 //! through the plugin host, and each event naming a hook through the Luau
-//! hooks. The fixture tests and the log replay share it.
+//! hooks. The fixture tests and the log replay share it. [`bundled`] is the
+//! plugin itself, for an app to ship.
 
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
@@ -9,6 +10,7 @@ use mudling_core::plugin::luau::{
 };
 use mudling_core::plugin::{PendingKind, Plugin, PluginEvent, PluginHost};
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,6 +21,27 @@ pub fn plugin_dir() -> PathBuf {
 
 pub fn load() -> Plugin {
     Plugin::load(plugin_dir()).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// The plugin compiled in, from the same files as its folder.
+pub fn bundled() -> Plugin {
+    Plugin::from_files(|file| {
+        let text = match file {
+            "plugin.toml" => include_str!("../plugin.toml"),
+            "text.toml" => include_str!("../text.toml"),
+            "commands.toml" => include_str!("../commands.toml"),
+            "character.toml" => include_str!("../character.toml"),
+            "gear.toml" => include_str!("../gear.toml"),
+            "map.toml" => include_str!("../map.toml"),
+            "mobs.toml" => include_str!("../mobs.toml"),
+            "readers.luau" => include_str!("../readers.luau"),
+            "character.luau" => include_str!("../character.luau"),
+            "gear.luau" => include_str!("../gear.luau"),
+            _ => return Err(io::ErrorKind::NotFound.into()),
+        };
+        Ok(text.to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// One connection's text through the plugin.

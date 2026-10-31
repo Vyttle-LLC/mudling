@@ -1,6 +1,6 @@
-//! Where a game comes from: the saved servers, the installed plugins, and the
-//! session opened for a server. Everything here that isn't a plain getter
-//! blocks on the disk, so the shell calls it off the UI thread.
+//! Where a game comes from: the saved servers, the plugins, and the session
+//! opened for a server. Everything here that isn't a plain getter blocks on
+//! the disk, so the shell calls it off the UI thread.
 
 use crate::room_panel::Verbs;
 use crate::settings::PluginRow;
@@ -61,6 +61,13 @@ impl Launcher {
             .map_err(|error| format!("couldn't save {target}: {error}"))
     }
 
+    /// Takes `host` off the saved list. See [`persist::remove_server`] for what
+    /// stays.
+    pub fn remove(&self, host: &str) -> Result<(), String> {
+        persist::remove_server(&self.data_folder, host)
+            .map_err(|error| format!("couldn't remove {host}: {error}"))
+    }
+
     /// Opens a session on `target`, with the plugins saved for it. `turn_on`
     /// is saved among them first: the core reads a session's plugins when it
     /// opens, so the player's click takes effect through a new session.
@@ -109,6 +116,21 @@ impl Launcher {
     }
 }
 
+/// The plugins that ship inside the app. Compiled in rather than copied to the
+/// data folder on first run: nothing can go stale across an update or be left
+/// half copied, and the player's folder stays theirs. They're installed, not
+/// on: detection suggests one, and the player turns it on.
+pub fn bundled_plugins() -> Vec<Plugin> {
+    vec![mudling_plugin_avatar::bundled()]
+}
+
+/// `plugins`, with those in `replacing` taking the place of any with their id.
+pub fn replaced(mut plugins: Vec<Plugin>, replacing: Vec<Plugin>) -> Vec<Plugin> {
+    plugins.retain(|plugin| !replacing.iter().any(|other| other.id() == plugin.id()));
+    plugins.extend(replacing);
+    plugins
+}
+
 /// The plugins installed in the data folder, one folder each. One that won't
 /// load is left out, with a line on stderr, so it can't stop the app.
 pub fn installed_plugins(data_folder: &Path) -> Vec<Plugin> {
@@ -130,6 +152,51 @@ pub fn installed_plugins(data_folder: &Path) -> Vec<Plugin> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_plugin_the_player_turns_on_stays_on_for_that_server() {
+        let folder = TempDir::new().unwrap();
+        let plugins = bundled_plugins();
+        let id = plugins[0].id().clone();
+        let launcher = Launcher::new(folder.path().to_owned(), plugins, Vec::new(), || {});
+        let target = Target {
+            host: "mud.example".to_owned(),
+            port: 4000,
+        };
+
+        let game = launcher.open(&target, None).unwrap();
+        assert!(game.enabled.is_empty(), "detection turns nothing on");
+        game.session.quit().wait().unwrap();
+
+        let game = launcher.open(&target, Some(&id)).unwrap();
+        assert_eq!(game.enabled, std::slice::from_ref(&id));
+        game.session.quit().wait().unwrap();
+
+        let game = launcher.open(&target, None).unwrap();
+        assert_eq!(game.enabled, [id]);
+        game.session.quit().wait().unwrap();
+    }
+
+    #[test]
+    fn a_bundled_plugin_is_installed_and_a_folder_with_its_id_replaces_it() {
+        let bundled = bundled_plugins();
+        let game = bundled[0].id().as_str().to_owned();
+        assert!(!bundled.is_empty());
+
+        let folder = TempDir::new().unwrap();
+        let mine = folder.path().join(PLUGINS_FOLDER).join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        let manifest = format!(
+            "id = \"{game}\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+             license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n"
+        );
+        std::fs::write(mine.join("plugin.toml"), manifest).unwrap();
+
+        let plugins = replaced(bundled, installed_plugins(folder.path()));
+        let named: Vec<_> = plugins.iter().filter(|p| p.id().as_str() == game).collect();
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].manifest.name, "Mine");
+    }
 
     #[test]
     fn a_plugin_folder_that_will_not_load_leaves_the_others_installed() {

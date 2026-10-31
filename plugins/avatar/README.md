@@ -7,6 +7,11 @@ Avatar is in this folder; the core holds none of its wording.
 It's also the first worked example for plugin authors (the cookbook,
 VYT-235): each file says what it reads, and each regex has a comment.
 
+The desktop app ships it compiled in (`bundled()` in `src/lib.rs`, which names
+every file here, so a new file goes there too). It stays off until the player
+turns it on from the suggestion. A folder with its id in `<data>/plugins/`
+replaces it.
+
 ## Files
 
 | File | What it declares |

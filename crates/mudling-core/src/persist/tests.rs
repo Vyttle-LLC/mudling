@@ -606,6 +606,28 @@ fn a_saved_server_lists_with_only_what_is_known() {
 }
 
 #[test]
+fn a_removed_server_leaves_the_list_and_comes_back_with_what_it_had() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let database = Database::open(&folder.path().join(SERVERS_FOLDER), "mud.example.org").unwrap();
+    save_stat(&database, "player", "character.name", "\"Altissima\"");
+    let mut batch = Batch::new();
+    batch.upsert(room(7, "The Donation Room"));
+    commit(&database, batch);
+
+    remove_server(folder.path(), "mud.example.org").unwrap();
+    assert_eq!(saved_servers(folder.path()), SavedServers::default());
+
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let saved = saved_servers(folder.path());
+    assert_eq!(saved.servers[0].characters.len(), 1);
+    assert_eq!(
+        database.reader().unwrap().room_name(7).unwrap().as_deref(),
+        Some("The Donation Room")
+    );
+}
+
+#[test]
 fn a_saved_character_shows_its_level_name_and_last_room() {
     let folder = TempDir::new().unwrap();
     save_server(folder.path(), "mud.example.org", 4000).unwrap();
