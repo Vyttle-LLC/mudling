@@ -1,0 +1,69 @@
+West of the Oak
+[Exits: north east south west]
+Text 1.
+[GMCP] Room.Info {"name":"West of the Oak","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move south
+Field 1
+[Exits: north east south west]
+Text 2.
+[GMCP] Room.Info {"name":"Field 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+Field 1
+[Exits: north east south west]
+Text 3.
+[GMCP] Room.Info {"name":"Field 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move north
+Field 2
+[Exits: north east south west]
+Text 4.
+[GMCP] Room.Info {"name":"Field 2","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move west
+Inside the Oak
+[Exits: east west up down]
+Text 5.
+[GMCP] Room.Info {"name":"Inside the Oak","zone":"{1 4} A  Greenfield","environment":"inside","exits":{"East":"O","West":"O","Up":"O","Down":"O"}}
+[MAP] move west
+West of the Oak
+[Exits: north east south west]
+Text 1.
+[GMCP] Room.Info {"name":"West of the Oak","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+Inside the Oak
+[Exits: east west up down]
+Text 5.
+[GMCP] Room.Info {"name":"Inside the Oak","zone":"{1 4} A  Greenfield","environment":"inside","exits":{"East":"O","West":"O","Up":"O","Down":"O"}}
+[MAP] move west
+West of the Oak
+[Exits: north east south west]
+Text 1.
+[GMCP] Room.Info {"name":"West of the Oak","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move north
+Field 3
+[Exits: north east south west]
+Text 6.
+[GMCP] Room.Info {"name":"Field 3","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+Field 3
+[Exits: north east south west]
+Text 7.
+[GMCP] Room.Info {"name":"Field 3","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move south
+Field 2
+[Exits: north east south west]
+Text 4.
+[GMCP] Room.Info {"name":"Field 2","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move south
+Field 1
+[Exits: north east south west]
+Text 3.
+[GMCP] Room.Info {"name":"Field 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move south
+The Wagon
+[Exits: north east south west]
+Text 8.
+[GMCP] Room.Info {"name":"The Wagon","zone":"{1 4} A  Greenfield","environment":"inside","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move west
+Field 1
+[Exits: north east south west]
+Text 9.
+[GMCP] Room.Info {"name":"Field 1","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}

@@ -1,0 +1,23 @@
+The Portal
+[Exits: east west]
+Text 1.
+[GMCP] Room.Info {"name":"The Portal","zone":"{1 4} A  Area A","environment":"inside","exits":{"East":"O","West":"O"}}
+[MAP] move east
+The Canopy
+[Exits: south west up down]
+Text 2.
+[GMCP] Room.Info {"name":"The Canopy","zone":"{1 4} A  Greenfield","environment":"inside","exits":{"South":"O","West":"O","Up":"O","Down":"O"}}
+Hall 1
+[Exits: south west up]
+Text 3.
+[GMCP] Room.Info {"name":"Hall 1","zone":"{1 4} A  Greenfield","environment":"mountain","exits":{"South":"O","West":"O","Up":"O"}}
+[MAP] move south
+The Tunnel
+[Exits: north south]
+Text 4.
+[GMCP] Room.Info {"name":"The Tunnel","zone":"{1 4} A  Greenfield","environment":"inside","exits":{"North":"O","South":"O"}}
+[MAP] move south
+Hall 2
+[Exits: north east south]
+Text 5.
+[GMCP] Room.Info {"name":"Hall 2","zone":"{1 4} A  Area B","environment":"inside","exits":{"North":"O","East":"O","South":"O"}}

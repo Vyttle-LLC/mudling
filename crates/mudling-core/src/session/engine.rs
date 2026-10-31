@@ -8,11 +8,13 @@ use super::map_rules::PluginRules;
 use super::values::{self, HubView};
 use super::{SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
-use crate::defaults::commands::{WalkSyntax, chain_lines, parse_speedwalk, split_chain};
+use crate::defaults::commands::{
+    CommandVariety, WalkSyntax, chain_lines, parse_speedwalk, split_chain,
+};
 use crate::defaults::detect::{ServerSignals, suggest};
 use crate::defaults::hud::{self, FieldMap};
 use crate::defaults::{self, Defaults, PendingAction};
-use crate::line::{Encoding, Line, LineEnd, LinePipeline};
+use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
 use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
@@ -53,6 +55,7 @@ struct Link {
     inventory: Inventory,
     inventory_asked: bool,
     login: Option<Login>,
+    variety: CommandVariety,
     hooks: LuauHooks,
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
@@ -95,6 +98,8 @@ pub struct Engine {
     hud_fields: Memo<(u64, bool), FieldMap>,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
+    /// The last line shown was a blank one from the server, or none has been.
+    blank_shown: bool,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
     output: Vec<u8>,
@@ -162,6 +167,7 @@ impl Engine {
             settings,
             hud_fields: Memo::default(),
             terminal: Vec::new(),
+            blank_shown: true,
             batch: Batch::new(),
             output: Vec::new(),
             lines: Vec::new(),
@@ -204,6 +210,7 @@ impl Engine {
             inventory: Inventory::default(),
             inventory_asked: false,
             login: self.new_login(),
+            variety: CommandVariety::default(),
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
@@ -267,7 +274,9 @@ impl Engine {
             self.history_writer.save(&typing.history);
         }
         drop(typing);
-        self.terminal.push(Line::command(typed));
+        // Text waiting for its line end came before this command.
+        self.quiet(now);
+        self.show(Line::command(typed));
         self.issue(typed, now);
     }
 
@@ -330,7 +339,7 @@ impl Engine {
                 // What's being typed now is a password; a hook's command
                 // would land in the password box.
                 if self.link.is_some() && !self.settings.echo_off {
-                    self.terminal.push(Line::command(&send.command));
+                    self.show(Line::command(&send.command));
                     self.issue(&send.command, now);
                 }
             }
@@ -471,8 +480,8 @@ impl Engine {
             };
             match prompt.filter(|_| hide) {
                 Some(at) if at == text.len() => {}
-                Some(at) => self.terminal.push(shown.after(at)),
-                None => self.terminal.push(shown),
+                Some(at) => self.show(shown.after(at)),
+                None => self.show(shown),
             }
         }
         // The buffer is kept: it's reused for every read.
@@ -706,10 +715,25 @@ impl Engine {
                 }
             }
         }
+        if let Some(link) = &mut self.link {
+            for command in &mut commands {
+                *command = link.variety.next(command);
+            }
+        }
         let separator = self.plugins.settings().separator.as_deref();
         for line in chain_lines(&commands, separator) {
             write_line(&line, encoding, &mut self.output);
         }
+    }
+
+    /// Queues a line for the terminal. Runs of blank lines show as one, so
+    /// the prompts hidden between them leave no gaps.
+    fn show(&mut self, line: Line) {
+        let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
+        if !(blank && self.blank_shown) {
+            self.terminal.push(line);
+        }
+        self.blank_shown = blank;
     }
 
     fn plugin_store_write(&mut self, write: StoreWrite, now: Timestamp) {
