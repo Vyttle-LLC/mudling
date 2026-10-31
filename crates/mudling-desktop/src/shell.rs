@@ -985,6 +985,7 @@ pub mod tests {
     use super::*;
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::room_panel::press_key;
+    use crate::settings::Section;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
@@ -1182,6 +1183,22 @@ pub mod tests {
         /// ahead of it, which is the only part that isn't printable.
         fn heard_command(&mut self) -> String {
             read_command(&mut self.server)
+        }
+
+        /// Like [`Self::frames_until`], with a line sent each time round, which
+        /// is what keeps a session's clock ticking.
+        fn frames_with_traffic_until(
+            &mut self,
+            what: &str,
+            done: impl Fn(&Shell, &gpui::App) -> bool,
+        ) {
+            let started = Instant::now();
+            while !self.shell.read_with(self.cx, |shell, cx| done(shell, cx)) {
+                assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
+                self.say(b"\r\n");
+                self.frame();
+                sleep(Duration::from_millis(1));
+            }
         }
 
         fn chat_lines(&mut self) -> Vec<String> {
@@ -2263,6 +2280,68 @@ pub mod tests {
         });
         let saved = persist::enabled_plugins(launched.folder.path(), "127.0.0.1").unwrap();
         assert_eq!(saved, ["loopback"]);
+    }
+
+    /// A game plugin whose `go` hook never ends.
+    fn slow_plugin() -> Plugin {
+        Plugin::from_files(|file| {
+            Ok(match file {
+                "plugin.toml" => "id = \"slow\"\nname = \"Slow\"\nversion = \"1.0.0\"\napi = 1\n\
+                                  license = \"MIT\"\nlayer = \"game\"\n\
+                                  [servers]\nhosts = [\"mud.example\"]\n\
+                                  [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"hooks.luau\"]\n"
+                    .to_owned(),
+                "text.toml" => "[[pattern]]\nname = \"go\"\npattern = '''^go$'''\nhook = \"on_go\"\n"
+                    .to_owned(),
+                "hooks.luau" => "function on_go(event) while true do end end".to_owned(),
+                _ => return Err(std::io::ErrorKind::NotFound.into()),
+            })
+        })
+        .expect("the plugin loads")
+    }
+
+    #[gpui::test]
+    fn a_plugin_turned_off_shows_in_settings_and_turns_on_again_through_the_session(
+        cx: &mut TestAppContext,
+    ) {
+        let mut played = play_with(cx, vec![slow_plugin()]);
+        played.connected();
+        played.say(b"go\r\ngo\r\ngo\r\n");
+        played.frames_with_traffic_until("the plugin to be turned off", |shell, cx| {
+            !shell.settings.read(cx).turned_off().is_empty()
+        });
+        played.shell.read_with(played.cx, |shell, cx| {
+            let sheet = shell.settings.read(cx);
+            assert_eq!(sheet.turned_off()[0].plugin.as_str(), "slow");
+            assert!(
+                sheet
+                    .costs()
+                    .iter()
+                    .any(|cost| cost.plugin.as_str() == "slow")
+            );
+        });
+
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            shell
+                .settings
+                .update(cx, |sheet, cx| sheet.select(Section::Plugins, cx));
+        });
+        played.cx.run_until_parked();
+        assert!(
+            played.cx.debug_bounds("notice-0").is_some(),
+            "the notice is drawn"
+        );
+
+        played.click("notice-turn-on-0");
+        played.frames_with_traffic_until("the plugin to come back", |shell, cx| {
+            shell.settings.read(cx).turned_off().is_empty()
+        });
+        played.cx.run_until_parked();
+        assert!(
+            played.cx.debug_bounds("notice-0").is_none(),
+            "the notice went"
+        );
     }
 
     #[gpui::test]

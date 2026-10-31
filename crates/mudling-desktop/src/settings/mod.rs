@@ -339,6 +339,16 @@ impl SettingsSheet {
         &self.plugins
     }
 
+    #[cfg(test)]
+    pub fn turned_off(&self) -> &[PluginDisabled] {
+        &self.turned_off
+    }
+
+    #[cfg(test)]
+    pub fn costs(&self) -> &[PluginCost] {
+        &self.costs
+    }
+
     /// What the session says about itself.
     pub fn show_session(&mut self, settings: &SettingsState, cx: &mut Context<SettingsSheet>) {
         let server = settings.server.as_deref();
