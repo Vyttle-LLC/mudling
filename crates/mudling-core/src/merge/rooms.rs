@@ -10,8 +10,8 @@
 //! - Their whole identity (name, zone, description and exits) matches, exactly
 //!   one room on each side has it, and each id is on one side only.
 //! - Something beyond that says they're one: the same stored position on the
-//!   same sheet, or a shared link, the same direction to or from one room or a
-//!   pair that unites too.
+//!   same sheet, away from the origin where every device starts, or a shared
+//!   link, the same direction to or from one room or a pair that unites too.
 //! - No direction leads to two rooms that stay apart.
 //! - No room would come to reach another by two different directions, which
 //!   the two sides don't each show. A maze gets no pass.
@@ -94,6 +94,8 @@ impl Pair {
         self.ours.max(self.theirs)
     }
 }
+
+const ORIGIN: (i64, i64, i64) = (0, 0, 0);
 
 type Links<'a> = HashMap<RoomId, Vec<(&'a str, RoomId)>>;
 
@@ -255,7 +257,8 @@ fn has_evidence(
 }
 
 /// The same position on the same sheet: both outdoors, or in one building. A
-/// wing's first room is its own building, so that pair's sheet is its own.
+/// wing's first room is its own building, so that pair's sheet is its own. The
+/// origin proves nothing, because every device starts there.
 fn same_square(
     pair: Pair,
     united: &HashMap<RoomId, RoomId>,
@@ -270,7 +273,8 @@ fn same_square(
         (Some(x), Some(y)) => (x == a.id && y == b.id) || one_id(united, x) == one_id(united, y),
         _ => false,
     };
-    same_sheet && (a.x, a.y, a.z) == (b.x, b.y, b.z)
+    let square = (a.x, a.y, a.z);
+    same_sheet && square == (b.x, b.y, b.z) && square != ORIGIN
 }
 
 fn links_of<'s, 'a>(links: &'s Links<'a>, id: RoomId) -> &'s [(&'a str, RoomId)] {
