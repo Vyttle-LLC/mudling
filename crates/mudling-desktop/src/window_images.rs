@@ -112,6 +112,7 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
                 port: 4000,
                 characters: vec!["Sample".into()],
             }],
+            None,
             cx,
         );
     });

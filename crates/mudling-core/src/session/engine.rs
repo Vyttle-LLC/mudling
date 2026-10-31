@@ -22,7 +22,8 @@ use crate::line::{Encoding, Line, LineEnd, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
 use crate::persist::{
-    self, Batch, Character, Database, SERVERS_FOLDER, Server, Timestamp, UNNAMED_CHARACTER, Writer,
+    self, Batch, Character, Database, Key, REMOVED, SERVERS_FOLDER, Server, Timestamp,
+    UNNAMED_CHARACTER, Writer,
 };
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
@@ -175,6 +176,8 @@ impl Engine {
             name: character_id.clone(),
             updated: now,
         });
+        // Playing on a server the player removed puts it back on their list.
+        batch.delete(Key::Meta(REMOVED.to_owned()));
         writer.submit(batch)?;
 
         let plugins = PluginHost::new([defaults::plugin()])?;
