@@ -382,6 +382,31 @@ fn another_character_on_the_session_sees_no_one_elses_gear() {
 }
 
 #[test]
+fn equipment_answering_nothing_empties_the_worn_list_and_its_rows() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let name = gmcp("Char.Status", r#"{"character_name":"Fen"}"#);
+    engine.receive(name, now).unwrap();
+    engine.settle(now);
+    let hat = b"You are using:\r\n<worn on head>      a red hat\r\n(1h-1m-1v-1)(-/-)\r\n";
+    engine.receive(Bytes::from_static(hat), now).unwrap();
+    engine.quiet(now);
+    settle_until(&mut engine, &hub, |items| !items.worn.is_empty());
+
+    let bare = b"You are using:\r\nNothing.\r\n(1h-1m-1v-1)(-/-)\r\n";
+    engine.receive(Bytes::from_static(bare), now).unwrap();
+    engine.quiet(now);
+    settle_until(&mut engine, &hub, |items| items.worn.is_empty());
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+    engine.finish().unwrap();
+
+    let database = Database::open(&folder.path().join("servers"), HOST).unwrap();
+    let saved = database.reader().unwrap().characters().unwrap().worn;
+    assert!(saved.is_empty(), "{saved:?}");
+}
+
+#[test]
 fn a_stall_at_the_pager_with_vitals_awaited_leaves_the_table_open() {
     let folder = tempfile::tempdir().unwrap();
     let (mut engine, hub) = engine(folder.path());

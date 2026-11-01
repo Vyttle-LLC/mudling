@@ -40,6 +40,11 @@ local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
     local kind, reader = Readers.step(event, "equipment", finish_equipment)
+    if kind == "row" and not event.captures.slot then
+        -- "Nothing.": no row will end the table with a count, so say it now.
+        mud.store("worn", "count", 0)
+        return
+    end
     local slot = SLOTS[event.captures.slot]
     if kind ~= "row" or not slot then
         return

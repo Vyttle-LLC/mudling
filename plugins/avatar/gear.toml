@@ -25,7 +25,8 @@ slots = [
 
 # "You are using:", then "<worn on finger>    a pink ice ring"; an empty
 # slot holds "<nothing>". With nothing worn the table is one line, "Nothing.",
-# which is a row only so a quiet read hides it: it has no slot to read.
+# a row with no slot: the hook writes an empty list for it, and a quiet read
+# hides it.
 [equipment]
 name = "equipment"
 start = '''^\s*{prompt}?\s*You are using:'''
