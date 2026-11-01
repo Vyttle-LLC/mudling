@@ -1,6 +1,6 @@
 # The prototype's tests in Rust
 
-Every test in `mud-client-spike/Tests/MUDKitTests`, and where it went. The prototype counted 278: 105 are ported, 88 were already covered by a Rust test that checks the same behaviour, and 85 are not carried over, each with the reason. The directory holds 22 Swift files and 5 fixtures, not the 23 files the ticket counted; the test count holds.
+Every test in `mud-client-spike/Tests/MUDKitTests`, and where it went. The prototype counted 278: 105 are ported, 112 were already covered by a Rust test that checks the same behaviour, and 61 are not carried over, each with the reason. The directory holds 22 Swift files and 5 fixtures, not the 23 files the ticket counted; the test count holds.
 
 A parameterized Swift test counts once. A row can share a Rust test with its neighbors when one test checks both.
 
@@ -50,7 +50,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 - **Truecolor is dropped.** `38;2;r;g;b` is skipped cleanly, and the theme draws from its palette.
 - **Empty equipment slots are kept.** The Gear panel shows them in slot order, so `equipment` has a row with an empty item for each.
 - **Carried gear is asked for, not guessed.** The prototype edited its inventory from wear messages. Avatar's plugin asks for `Char.Items.Inv` again.
-- **Another character's skills can't land in the list.** Stores are per character, so the prototype's replacing of the whole list isn't needed when credentials name the character. A session logged in by hand shares one unnamed character, and a skill no longer listed stays in its store until VYT-219 reads the table as a whole.
+- **Another character's skills can't land in the list.** Stores are per character, so the prototype's replacing of the whole list isn't needed when credentials name the character. A session logged in by hand shares one unnamed character, and a skill no longer listed stays in the character's skills table: a finished read adds and updates rows, and never deletes one.
 
 
 ## AliasTests.swift
@@ -151,7 +151,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 
 ## CharacterRecordTests.swift
 
-24 tests: 12 ported, 9 already covered, 3 not carried over.
+24 tests: 12 ported, 10 already covered, 2 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
@@ -160,7 +160,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 | `CharacterParserTests.aFinishedListReplacesSkillsFromElsewhere` | Ported | `avatar::tables::text_after_a_list_is_no_skill` | Half: see differences for the other character's skills. |
 | `CharacterParserTests.readsThePracticeTable` | Ported | `avatar::tables::the_practice_table_reads_every_cell` |  |
 | `CharacterParserTests.mergesBothSources` | Ported | `avatar::tables::the_skill_list_and_practice_merge` |  |
-| `CharacterParserTests.spellsAreCastAndSkillsUsedDirectly` | Not carried over | — | VYT-219: the Skills panel's actions. The table keeps each mana cost. |
+| `CharacterParserTests.spellsAreCastAndSkillsUsedDirectly` | Not carried over | — | The Skills panel practices; it has no cast or use action. The table keeps each mana cost. |
 | `CharacterParserTests.readsScoreExtras` | Already covered | `avatar-it::character::score_fills_the_character` |  |
 | `CharacterParserTests.readsStatsFromScoreUnderGMCPKeys` | Already covered | `avatar-it::character::score_fills_the_character` |  |
 | `CharacterParserTests.recordsSavedBeforeStatsStillLoad` | Not carried over | — | VYT-194: reading the prototype's saved files. |
@@ -173,7 +173,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 | `CharacterParserTests.readsEquipmentGluedToThePrompt` | Ported | `avatar::messages::equipment_glued_to_the_prompt_is_read` |  |
 | `CharacterParserTests.readsEquipmentAndSkipsEmptySlots` | Already covered | `avatar-it::gear::equipment_lists_every_row_in_order_empty_slots_included` | Empty slots are kept; see differences. |
 | `CharacterParserTests.reportsGearAndAffectHints` | Ported | `avatar::messages::gear_and_affect_messages_are_events` |  |
-| `CharacterParserTests.gearPutOnTakesItsPlaceInTheList` | Not carried over | — | VYT-220: the Gear panel's Worn list. Between reads the store holds the last `eq`. |
+| `CharacterParserTests.gearPutOnTakesItsPlaceInTheList` | Already covered | `avatar-it::session::wearing_one_item_measures_it_and_moves_it_to_the_worn_list` | The item takes its slot's row at once; the next `equipment` read corrects the list. |
 | `CharacterParserTests.readsGearAfterAMarkedPrompt` | Ported | `avatar::messages::gear_after_a_marked_prompt_is_read` |  |
 | `CharacterParserTests.labelsPracticeLinesAsOneTable` | Already covered | `core-it::plugin_host::a_table_runs_start_rows_and_end_and_rows_need_it_open`<br>`core-it::plugin_host::a_prompt_or_the_next_table_ends_a_table_and_output_after_a_prompt_is_read` |  |
 | `CharacterParserTests.trainerMessagesAreOrdinaryOutput` | Ported | `avatar::tables::a_trainers_message_is_ordinary_output` |  |
@@ -182,17 +182,17 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 
 ## CharacterRefreshPlannerTests.swift
 
-7 tests: 0 ported, 0 already covered, 7 not carried over.
+7 tests: 0 ported, 5 already covered, 2 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
-| `enteringTheGameReadsScoreAndPracticeAndTheSkillListOnce` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `knownCharactersSkipTheSkillList` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `affectAndGearChangesQueueOneReadEach` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `nothingIsSentBeforeTheCharacterIsInTheGame` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `aLevelUpRereadsSkills` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `waitsOutFightsAndSleep` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
-| `staleSkillsRefreshWhenTheSheetOpens` | Not carried over | — | VYT-219: quiet background reads. The plugin declares these commands; nothing sends them yet. |
+| `enteringTheGameReadsScoreAndPracticeAndTheSkillListOnce` | Already covered | `avatar-it::quiet_reads::entering_the_game_reads_the_tables_in_order_and_hides_their_answers`<br>`unit::session::quiet::entering_the_game_reads_every_command_in_order_spaced_apart` | The plugin's order is `score`, `practice`, `slist`, `aff`, `equipment`. |
+| `knownCharactersSkipTheSkillList` | Not carried over | — | Differs: a plugin can't say a table only changes with level, so each connection reads every table once. |
+| `affectAndGearChangesQueueOneReadEach` | Already covered | `unit::session::quiet::refresh_asks_again_for_the_character_and_a_gear_change_for_the_gear`<br>`unit::session::quiet::wearing_something_makes_the_gear_table_stale`<br>`unit::session::quiet::however_often_a_table_goes_stale_it_is_read_at_a_spaced_rate` |  |
+| `nothingIsSentBeforeTheCharacterIsInTheGame` | Already covered | `unit::session::quiet::nothing_goes_out_before_the_game_or_without_a_position` |  |
+| `aLevelUpRereadsSkills` | Already covered | `avatar-it::quiet_reads::a_level_up_reads_the_score_and_both_skill_tables_again` | It reads `score` as well. |
+| `waitsOutFightsAndSleep` | Already covered | `unit::session::quiet::typing_a_fight_a_password_or_sleep_stops_the_reads`<br>`avatar-it::quiet_reads::typing_a_fight_and_a_password_stop_the_reads_and_the_pager` |  |
+| `staleSkillsRefreshWhenTheSheetOpens` | Not carried over | — | Differs: an improved skill is read when the player is idle (`practice.stale`), not when a panel opens. |
 
 ## CommandChainTests.swift
 
@@ -252,7 +252,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 
 ## GameStateTests.swift
 
-10 tests: 2 ported, 2 already covered, 6 not carried over.
+10 tests: 2 ported, 3 already covered, 5 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
@@ -263,7 +263,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 | `statusDiffSetsAndClearsOpponent` | Not carried over | — | VYT-249: current target and its health. |
 | `statusDiffMergesRoomAndAffects` | Not carried over | — | VYT-249: the core doesn't read `Char.Status`. Affects come from `aff`, see `avatar-it::character::affects_lists_each_spell_once`. Door state: see gaps reported. |
 | `itemListsAndIncrementalUpdates` | Already covered | `unit::session::inventory::items_come_and_go_and_other_places_are_ignored` | Items carried. Items on the ground are VYT-249. |
-| `statusMergesIntoACharacterSheet` | Not carried over | — | VYT-219: the sheet comes from `score`, see `avatar-it::character::score_fills_the_character`. Live `Char.Status` values are VYT-249. |
+| `statusMergesIntoACharacterSheet` | Already covered | `core-it::session::the_character_and_the_fight_reach_their_stores`<br>`avatar-it::character::score_fills_the_character` | `Char.Status` values go to the character's stats; `score` fills the rest of the sheet. |
 | `itemsWithRawColorCodesInTheirNamesStillArrive` | Already covered | `unit::session::inventory::raw_color_codes_in_a_name_are_read_and_stripped` |  |
 | `channelListParses` | Not carried over | — | The prototype parsed `Comm.Channel.List` and never showed it. No ticket asks for it. |
 
@@ -305,24 +305,24 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 
 ## GearTests.swift
 
-14 tests: 0 ported, 0 already covered, 14 not carried over.
+14 tests: 0 ported, 14 already covered, 0 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
-| `GearChangeTests.wearingIntoAnEmptySlotMeasuresTheEffects` | Not carried over | — | VYT-220: gear measured by what wearing it changes. |
-| `GearChangeTests.takingOffAloneMeasuresTheReverse` | Not carried over | — | VYT-220: gear measured by what wearing it changes. |
-| `GearChangeTests.aSwapMeasuresNeither` | Not carried over | — | VYT-220: gear measured by what wearing it changes. |
-| `GearChangeTests.unknownBeforeValuesAreNotGuessed` | Not carried over | — | VYT-220: gear measured by what wearing it changes. |
-| `GearDatabaseTests.aCopysIdentifyIsItsOwnAndTeachesTheItemsWords` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.anotherCopyIsEstimatedWithoutTheEnchants` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.copiesThatDifferGiveARange` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.measuredStatsCountOnlyWhenNothingWasIdentified` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.anIdentifyIsNeverReplacedByMeasuring` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.aMeasurementOfNothingKeepsWhatWasSeen` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.aMagicTagOnAPlainItemHintsAtAnEnchant` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.theSameIdentifyByNameCountsOnce` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.savesAndLoads` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
-| `GearDatabaseTests.searchFindsItemsByAnyWord` | Not carried over | — | VYT-220: the gear database, per copy and per item. |
+| `GearChangeTests.wearingIntoAnEmptySlotMeasuresTheEffects` | Already covered | `unit::session::gear::a_change_measures_one_item_either_way_and_never_a_swap`<br>`avatar-it::session::wearing_one_item_measures_it_and_moves_it_to_the_worn_list` |  |
+| `GearChangeTests.takingOffAloneMeasuresTheReverse` | Already covered | `unit::session::gear::a_change_measures_one_item_either_way_and_never_a_swap` |  |
+| `GearChangeTests.aSwapMeasuresNeither` | Already covered | `unit::session::gear::a_change_measures_one_item_either_way_and_never_a_swap`<br>`avatar-it::session::a_swap_measures_nothing` |  |
+| `GearChangeTests.unknownBeforeValuesAreNotGuessed` | Already covered | `unit::session::gear::a_stat_with_no_value_before_is_not_guessed` |  |
+| `GearDatabaseTests.aCopysIdentifyIsItsOwnAndTeachesTheItemsWords` | Already covered | `unit::gear::two_copies_keep_a_reading_each`<br>`avatar-it::session::two_copies_with_one_name_keep_a_reading_each_and_come_back_saved` |  |
+| `GearDatabaseTests.anotherCopyIsEstimatedWithoutTheEnchants` | Already covered | `unit::gear::a_new_copy_gets_an_estimate_of_what_copies_showed`<br>`unit::gear::enchants_count_for_their_copy_and_never_in_an_estimate` |  |
+| `GearDatabaseTests.copiesThatDifferGiveARange` | Already covered | `unit::gear::a_new_copy_gets_an_estimate_of_what_copies_showed` |  |
+| `GearDatabaseTests.measuredStatsCountOnlyWhenNothingWasIdentified` | Already covered | `unit::gear::a_measurement_never_replaces_an_identify_and_nothing_never_erases_it` |  |
+| `GearDatabaseTests.anIdentifyIsNeverReplacedByMeasuring` | Already covered | `unit::gear::a_measurement_never_replaces_an_identify_and_nothing_never_erases_it` |  |
+| `GearDatabaseTests.aMeasurementOfNothingKeepsWhatWasSeen` | Already covered | `unit::gear::a_measurement_never_replaces_an_identify_and_nothing_never_erases_it`<br>`unit::gear::a_measurement_with_no_copy_is_kept_for_the_item` |  |
+| `GearDatabaseTests.aMagicTagOnAPlainItemHintsAtAnEnchant` | Already covered | `unit::gear::a_magical_tag_hints_at_an_enchant_only_where_no_copy_was_magic` |  |
+| `GearDatabaseTests.theSameIdentifyByNameCountsOnce` | Already covered | `unit::gear::a_reading_read_again_is_no_news` |  |
+| `GearDatabaseTests.savesAndLoads` | Already covered | `unit::gear::the_book_reads_back_from_its_rows` |  |
+| `GearDatabaseTests.searchFindsItemsByAnyWord` | Already covered | `unit::map::find::items_are_whats_at_hand_and_what_the_map_noted`<br>`unit::map::find::items_reach_what_is_worn_and_known_and_each_only_once` | The Find panel searches them. |
 
 ## IdentifyTests.swift
 
@@ -331,7 +331,7 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
 | `readsAShopIdentifyUpToThePrompt` | Already covered | `avatar-it::gear::identify_splits_base_from_enchant` |  |
-| `theSpellGivesKeywordsAndAddsUpModifiers` | Ported | `avatar::messages::the_spell_gives_the_words_and_adds_up_what_it_names` | `details` lines have no store yet: VYT-220. |
+| `theSpellGivesKeywordsAndAddsUpModifiers` | Ported | `avatar::messages::the_spell_gives_the_words_and_adds_up_what_it_names` | The reading keeps its `details` lines in order: `unit::session::gear::a_reading_keeps_a_spell_with_a_dot_in_its_name_and_details_in_order`. |
 | `enchantsAreKeptApartFromWhatTheItemDoes` | Already covered | `avatar-it::gear::identify_splits_base_from_enchant` |  |
 | `pastLogsMatchTheSpellsIdentifiesToWhatWasCarried` | Not carried over | — | VYT-194: gear data comes over in the import; MUDling keeps no chat logs to read. |
 | `examineGivesTheSlot` | Already covered | `avatar-it::gear::examine_notes_the_slot_an_item_goes_in` |  |
@@ -373,22 +373,22 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 |---|---|---|---|
 | `MonitorTests.monitorHealthComesAndGoesWithGMCP` | Not carried over | — | VYT-207: targeting and monitoring. |
 | `MonitorTests.monitorTargetFromCommand` | Not carried over | — | VYT-207: targeting and monitoring. |
-| `AlignmentTests.wordsMatchAvatarsScore` | Not carried over | — | VYT-219: the Character panel shows it. It's Avatar's wording, so it goes in the plugin then. |
+| `AlignmentTests.wordsMatchAvatarsScore` | Not carried over | — | The Character panel shows alignment as a number. Nothing turns it into Avatar's words. |
 
 ## OutputRouterTests.swift
 
-8 tests: 1 ported, 2 already covered, 5 not carried over.
+8 tests: 1 ported, 5 already covered, 2 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
 | `LineSplitterTests.holdsTheUnfinishedTail` | Already covered | `unit::line::a_prompt_without_a_newline_waits_for_more_text`<br>`unit::line::a_split_at_any_byte_changes_nothing` |  |
 | `LineSplitterTests.keepsColorCodes` | Already covered | `unit::line::styles_are_spans_of_the_plain_text` |  |
 | `passesEverythingThroughWhenNothingIsPending` | Ported | `avatar::tables::a_table_the_player_asked_for_shows_and_is_read` |  |
-| `hidesTheTablesItAskedFor` | Not carried over | — | VYT-219: quiet background reads. The Character panel's reads send and hide these tables; nothing does yet. |
-| `thePlayersOwnTableAfterTheQuietOneShows` | Not carried over | — | VYT-219: quiet background reads. The Character panel's reads send and hide these tables; nothing does yet. |
-| `chatterAndStrayPromptsDontConfuseIt` | Not carried over | — | VYT-219: quiet background reads. The Character panel's reads send and hide these tables; nothing does yet. |
-| `aLineStartedBeforeQuietIsNotRepeated` | Not carried over | — | VYT-219: quiet background reads. The Character panel's reads send and hide these tables; nothing does yet. |
-| `aTimeoutReleasesTheHeldLineAndForgetsThePendingRead` | Not carried over | — | VYT-219: quiet background reads. The Character panel's reads send and hide these tables; nothing does yet. |
+| `hidesTheTablesItAskedFor` | Already covered | `avatar-it::quiet_reads::entering_the_game_reads_the_tables_in_order_and_hides_their_answers`<br>`unit::session::quiet::an_answers_table_prompt_and_leading_blanks_are_hidden_and_nothing_else` |  |
+| `thePlayersOwnTableAfterTheQuietOneShows` | Already covered | `avatar-it::quiet_reads::a_table_the_player_asks_for_shows_and_counts_as_read`<br>`unit::session::quiet::a_lost_answer_cant_swallow_a_table_the_player_asks_for` |  |
+| `chatterAndStrayPromptsDontConfuseIt` | Already covered | `avatar-it::quiet_reads::every_line_of_the_games_own_tables_is_a_row_and_a_tell_inside_one_shows`<br>`unit::session::quiet::a_reads_own_text_cant_make_it_stale` |  |
+| `aLineStartedBeforeQuietIsNotRepeated` | Not carried over | — | No test: the core shows a half line once whether or not a quiet read follows it. |
+| `aTimeoutReleasesTheHeldLineAndForgetsThePendingRead` | Not carried over | — | Differs: a late answer is still owed and stays hidden however late it comes (`unit::session::quiet::an_answer_past_the_wait_frees_the_queue_and_stays_hidden`). |
 
 ## RoomTextTrackerTests.swift
 
