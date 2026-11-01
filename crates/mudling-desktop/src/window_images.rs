@@ -248,6 +248,20 @@ fn open_gear_worn(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell
         .update(cx, |panel, cx| panel.show_worn(cx));
 }
 
+fn open_gear_sets(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::fill_gear_sets(shell, cx);
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+fn edit_gear_set(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_gear_sets(shell, window, cx);
+    shell
+        .gear_panel()
+        .update(cx, |panel, cx| panel.edit_first_set(window, cx));
+}
+
 /// The sample's chat, with a line naming an item for the pointer to rest on.
 fn name_an_item(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
     open_gear_tab(shell, window, cx);
@@ -614,6 +628,10 @@ fn window_images() {
     render("gear-tab-dark", Dark, WIDE, open_gear_tab);
     render("gear-tab-light", Light, WIDE, open_gear_tab);
     render("gear-tab-worn-dark", Dark, WIDE, open_gear_worn);
+    render("gear-sets-dark", Dark, WIDE, open_gear_sets);
+    render("gear-sets-light", Light, WIDE, open_gear_sets);
+    render("gear-set-editor-dark", Dark, WIDE, edit_gear_set);
+    render("gear-set-editor-light", Light, WIDE, edit_gear_set);
     render_hovering(
         "gear-tooltip-dark",
         Dark,

@@ -120,7 +120,9 @@ fn ready(engine: &mut Engine, hub: &StoreHub) {
     let list = gmcp("Char.Items.List", SATCHEL_LIST);
     engine.receive(list, NOW).unwrap();
     let inside = r#"{"location":"30","items":[{"id":"4","name":"a Tiamat mask","type":"armor"}]}"#;
-    engine.receive(gmcp("Char.Items.List", inside), NOW).unwrap();
+    engine
+        .receive(gmcp("Char.Items.List", inside), NOW)
+        .unwrap();
     let eq = "You are using:\r\n<worn on head>      a red hat\r\n(1h-1m-1v-1)(-/-)\r\n";
     say(engine, eq, NOW);
     settle_until(engine, hub, |items| {
@@ -158,7 +160,9 @@ fn a_bag_is_asked_about_and_its_contents_reach_the_store() {
     assert!(!sent(&mut engine).contains("Char.Items.Contents"));
 
     let inside = r#"{"location":"30","items":[{"id":"4","name":"a Tiamat mask"}]}"#;
-    engine.receive(gmcp("Char.Items.List", inside), NOW).unwrap();
+    engine
+        .receive(gmcp("Char.Items.List", inside), NOW)
+        .unwrap();
     settle_until(&mut engine, &hub, |items| {
         items.bags.first().is_some_and(|bag| bag.items.len() == 1)
     });
@@ -197,7 +201,10 @@ fn a_change_for_someone_no_longer_playing_goes_nowhere() {
     named(&mut engine, "Ash");
     engine.settle(NOW);
 
-    engine.edit_gear(GearEdit::SaveSet(set("fen", "Stale", Vec::new(), None)), NOW);
+    engine.edit_gear(
+        GearEdit::SaveSet(set("fen", "Stale", Vec::new(), None)),
+        NOW,
+    );
     let remove = GearEdit::RemoveSet {
         character: "fen".to_owned(),
         id: id.clone(),
@@ -257,7 +264,10 @@ fn saving_a_known_set_changes_it_in_place() {
     saved(&mut engine, &hub, renamed);
     let sets = items(&hub).sets;
     assert_eq!(sets.len(), 1);
-    assert_eq!((sets[0].id.as_str(), sets[0].name.as_str()), (id.as_str(), "Hit"));
+    assert_eq!(
+        (sets[0].id.as_str(), sets[0].name.as_str()),
+        (id.as_str(), "Hit")
+    );
 }
 
 #[test]
@@ -269,7 +279,11 @@ fn wear_sends_the_plan_with_the_games_ids_and_the_chat_shows_it() {
         piece("a Tiamat mask", "head", None),
         piece("an amulet of Gorn", "neck", Some("3")),
     ];
-    let id = saved(&mut engine, &hub, set("fen", "Tank", pieces, Some("a satchel")));
+    let id = saved(
+        &mut engine,
+        &hub,
+        set("fen", "Tank", pieces, Some("a satchel")),
+    );
     let preview = items(&hub).plan(&items(&hub).sets[0]);
 
     engine.wear_set("fen", &id, NOW);
@@ -288,12 +302,16 @@ fn wear_is_refused_while_echo_is_off() {
     let pieces = vec![piece("a linen robe", "about", None)];
     let id = saved(&mut engine, &hub, set("fen", "Robe", pieces, None));
 
-    engine.receive(Bytes::from(vec![IAC, WILL, ECHO]), NOW).unwrap();
+    engine
+        .receive(Bytes::from(vec![IAC, WILL, ECHO]), NOW)
+        .unwrap();
     engine.take_output();
     engine.wear_set("fen", &id, NOW);
     assert_eq!(sent(&mut engine), "");
 
-    engine.receive(Bytes::from(vec![IAC, WONT, ECHO]), NOW).unwrap();
+    engine
+        .receive(Bytes::from(vec![IAC, WONT, ECHO]), NOW)
+        .unwrap();
     engine.take_output();
     engine.wear_set("fen", &id, NOW);
     assert_eq!(sent_lines(&mut engine), ["wear 1"]);
@@ -305,11 +323,17 @@ fn a_put_away_after_echo_went_off_is_refused_too() {
     let (mut engine, hub) = engine(folder.path());
     ready(&mut engine, &hub);
     let pieces = vec![piece("a linen robe", "about", None)];
-    let id = saved(&mut engine, &hub, set("fen", "Robe", pieces, Some("a satchel")));
+    let id = saved(
+        &mut engine,
+        &hub,
+        set("fen", "Robe", pieces, Some("a satchel")),
+    );
     engine.wear_set("fen", &id, NOW);
     engine.take_output();
 
-    engine.receive(Bytes::from(vec![IAC, WILL, ECHO]), NOW).unwrap();
+    engine
+        .receive(Bytes::from(vec![IAC, WILL, ECHO]), NOW)
+        .unwrap();
     engine.take_output();
     say(&mut engine, "You stop using a cloak.\r\n", NOW);
     assert_eq!(sent(&mut engine), "");
@@ -322,7 +346,11 @@ fn what_a_piece_of_unknown_slot_swaps_out_goes_in_the_container() {
     ready(&mut engine, &hub);
     let mut robe = piece("a linen robe", "about", None);
     robe.slot = None;
-    let id = saved(&mut engine, &hub, set("fen", "Robe", vec![robe], Some("a satchel")));
+    let id = saved(
+        &mut engine,
+        &hub,
+        set("fen", "Robe", vec![robe], Some("a satchel")),
+    );
     engine.wear_set("fen", &id, NOW);
     assert_eq!(sent_lines(&mut engine), ["wear 1"]);
 
@@ -330,7 +358,11 @@ fn what_a_piece_of_unknown_slot_swaps_out_goes_in_the_container() {
     assert_eq!(sent_lines(&mut engine), ["put cloak 30"]);
 
     say(&mut engine, "You stop using a linen robe.\r\n", NOW);
-    assert_eq!(sent_lines(&mut engine), Vec::<String>::new(), "its own piece");
+    assert_eq!(
+        sent_lines(&mut engine),
+        Vec::<String>::new(),
+        "its own piece"
+    );
 
     let later = Timestamp(NOW.0 + 60_000);
     say(&mut engine, "You stop using a sash.\r\n", later);
@@ -343,11 +375,19 @@ fn a_full_container_is_said_to_the_player() {
     let (mut engine, hub) = engine(folder.path());
     ready(&mut engine, &hub);
     let pieces = vec![piece("a Tiamat mask", "head", None)];
-    let id = saved(&mut engine, &hub, set("fen", "Mask", pieces, Some("a satchel")));
+    let id = saved(
+        &mut engine,
+        &hub,
+        set("fen", "Mask", pieces, Some("a satchel")),
+    );
     engine.wear_set("fen", &id, NOW);
     engine.take_output();
     say(&mut engine, "You stop using a red hat.\r\n", NOW);
-    assert_eq!(sent_lines(&mut engine), Vec::<String>::new(), "already on its way");
+    assert_eq!(
+        sent_lines(&mut engine),
+        Vec::<String>::new(),
+        "already on its way"
+    );
 
     say(&mut engine, "It won't fit.\r\n", NOW);
     let said = notices(&hub);
@@ -366,7 +406,11 @@ fn the_copy_a_plan_named_is_the_copy_the_worn_list_keeps() {
     let pieces = vec![piece("an amulet of Gorn", "neck", Some("3"))];
     let id = saved(&mut engine, &hub, set("fen", "Amulet", pieces, None));
     engine.wear_set("fen", &id, NOW);
-    say(&mut engine, "You wear an amulet of Gorn around your neck.\r\n", NOW);
+    say(
+        &mut engine,
+        "You wear an amulet of Gorn around your neck.\r\n",
+        NOW,
+    );
     settle_until(&mut engine, &hub, |items| {
         items.worn.iter().any(|worn| worn.slot == "neck")
     });
@@ -375,6 +419,68 @@ fn the_copy_a_plan_named_is_the_copy_the_worn_list_keeps() {
     assert_eq!(neck.copy.as_deref(), Some("3"));
     let left: Vec<&str> = state.carried.iter().map(|item| item.id.as_str()).collect();
     assert!(left.contains(&"2") && !left.contains(&"3"), "{left:?}");
+}
+
+/// Both amulets on, and the plan takes off the second by its id: the game's
+/// message only names the item, but the worn list keeps the first.
+#[test]
+fn taking_off_one_of_two_by_its_id_keeps_the_other_copy_on() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    ready(&mut engine, &hub);
+    let both = vec![
+        piece("an amulet of Gorn", "neck", Some("2")),
+        piece("an amulet of Gorn", "neck", Some("3")),
+    ];
+    let id = saved(&mut engine, &hub, set("fen", "Both", both, None));
+    engine.wear_set("fen", &id, NOW);
+    let on = "You wear an amulet of Gorn around your neck.\r\n";
+    say(&mut engine, on, NOW);
+    say(&mut engine, on, NOW);
+    settle_until(&mut engine, &hub, |items| {
+        items.worn.iter().filter(|worn| worn.slot == "neck").count() == 2
+    });
+
+    let swap = vec![
+        piece("an amulet of Gorn", "neck", Some("2")),
+        piece("a Tiamat mask", "neck", Some("4")),
+    ];
+    let id = saved(&mut engine, &hub, set("fen", "Swap", swap, None));
+    engine.take_output();
+    engine.wear_set("fen", &id, NOW);
+    assert_eq!(sent_lines(&mut engine)[0], "remove 3");
+    say(&mut engine, "You stop using an amulet of Gorn.\r\n", NOW);
+    engine.settle(NOW);
+    let state = items(&hub);
+    let on: Vec<Option<&str>> = (state.worn.iter())
+        .filter(|worn| worn.item.contains("amulet"))
+        .map(|worn| worn.copy.as_deref())
+        .collect();
+    assert_eq!(on, [Some("2")]);
+}
+
+/// The game refused `wear 3`. Long after, the player wears an amulet themselves
+/// and the game takes the first of the name, whatever the plan named.
+#[test]
+fn a_copy_a_refused_command_named_lapses() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    ready(&mut engine, &hub);
+    let pieces = vec![piece("an amulet of Gorn", "neck", Some("3"))];
+    let id = saved(&mut engine, &hub, set("fen", "Amulet", pieces, None));
+    engine.wear_set("fen", &id, NOW);
+    let later = Timestamp(NOW.0 + 60_000);
+    say(
+        &mut engine,
+        "You wear an amulet of Gorn around your neck.\r\n",
+        later,
+    );
+    settle_until(&mut engine, &hub, |items| {
+        items.worn.iter().any(|worn| worn.slot == "neck")
+    });
+    let state = items(&hub);
+    let neck = state.worn.iter().find(|worn| worn.slot == "neck").unwrap();
+    assert_eq!(neck.copy.as_deref(), Some("2"));
 }
 
 #[test]
@@ -390,7 +496,10 @@ fn a_piece_not_seen_is_said_and_the_rest_still_go_on() {
     engine.wear_set("fen", &id, NOW);
     assert_eq!(sent_lines(&mut engine), ["wear 1"]);
     let said = notices(&hub);
-    assert!(said.iter().any(|notice| notice.contains("an alligator tooth")));
+    assert!(
+        said.iter()
+            .any(|notice| notice.contains("an alligator tooth"))
+    );
 }
 
 #[test]
@@ -402,5 +511,9 @@ fn a_set_all_on_says_so_and_sends_nothing() {
     let id = saved(&mut engine, &hub, set("fen", "Hat", pieces, None));
     engine.wear_set("fen", &id, NOW);
     assert_eq!(sent(&mut engine), "");
-    assert!(notices(&hub).iter().any(|notice| notice == "Hat is already on."));
+    assert!(
+        notices(&hub)
+            .iter()
+            .any(|notice| notice == "Hat is already on.")
+    );
 }

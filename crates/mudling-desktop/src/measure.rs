@@ -68,20 +68,22 @@ use gpui::{
     ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, Window, point, px,
 };
 use mudling_core::defaults::hud::Vital;
+use mudling_core::gear::sets::GearRules;
 use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
 use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
 use mudling_core::persist::{
-    self, Batch, Database, Exit, Link, Meta, Room, Sighting, StatMap, Timestamp,
+    self, Batch, Database, Exit, GearPiece, GearSet, Link, Meta, Room, Sighting, StatMap, Timestamp,
 };
 use mudling_core::plugin::luau::Value;
+use mudling_core::plugin::points::Keywords;
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CarriedItem,
-    CharactersState, ConnectionStatus, Improved, Item, ItemsState, MapState, MobsState, Occupant,
-    RoomContents, RoomState, SettingsState, SheetState, SkillRow, StoreHub, Target, TargetState,
-    Versioned, VitalsState, WornItem,
+    Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CarriedBag,
+    CarriedItem, CharactersState, ConnectionStatus, Improved, Item, ItemsState, MapState,
+    MobsState, Occupant, RoomContents, RoomState, SettingsState, SheetState, SkillRow, StoreHub,
+    Target, TargetState, Versioned, VitalsState, WornItem,
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
@@ -315,7 +317,85 @@ pub fn sample_items() -> ItemsState {
             .map(str::to_owned)
             .to_vec()
             .into(),
+        ..ItemsState::default()
     }
+}
+
+/// Who the sample's sets belong to.
+const SAMPLE_CHARACTER: &str = "tamsin";
+
+/// The sample, with a bag, an exact copy and the two sets the mockup draws:
+/// one all at hand, one with a piece not seen right now.
+pub fn sample_items_with_sets() -> ItemsState {
+    let mut items = sample_items();
+    let carried = |id: &str, name: &str| CarriedItem {
+        id: id.to_owned(),
+        name: name.to_owned(),
+    };
+    let mut on_hand = items.carried.to_vec();
+    on_hand.push(carried("20", "a canvas backpack"));
+    items.carried = on_hand.into();
+    items.bags = vec![CarriedBag {
+        id: "20".to_owned(),
+        name: "a canvas backpack".to_owned(),
+        items: vec![
+            carried("998127", "a black hematite ring"),
+            carried("21", "a Tiamat mask"),
+            carried("22", "a dragonscale vest"),
+        ],
+    }]
+    .into();
+    let mut worn = items.worn.to_vec();
+    worn[2].copy = Some("1204883".to_owned());
+    items.worn = worn.into();
+    let mut rules = GearRules::default();
+    rules.use_words(Default::default(), Keywords::default());
+    rules.note_holds("neck", 2);
+    rules.note_holds("finger", 2);
+    items.rules = Arc::new(rules);
+    let mut book = (*items.book).clone();
+    let mut batch = Batch::new();
+    book.learn_keywords("mask tiamat", "a Tiamat mask", Timestamp(0), &mut batch);
+    items.book = Arc::new(book);
+    let piece = |item: &str, slot: &str, copy: Option<&str>| GearPiece {
+        item: item.to_owned(),
+        slot: Some(slot.to_owned()),
+        copy_id: copy.map(str::to_owned),
+    };
+    let set = |id: &str, name: &str, pieces, container: Option<&str>| GearSet {
+        id: id.to_owned(),
+        character_id: SAMPLE_CHARACTER.to_owned(),
+        name: name.to_owned(),
+        container: container.map(str::to_owned),
+        pieces,
+        updated: Timestamp(0),
+    };
+    items.character = SAMPLE_CHARACTER.into();
+    items.sets = vec![
+        set(
+            "1",
+            "Levelling",
+            vec![
+                piece("a black hematite ring", "finger", Some("998127")),
+                piece("a Tiamat mask", "head", None),
+                piece("a dragonscale vest", "body", None),
+                piece("an amulet of the moon", "neck", None),
+            ],
+            Some("a canvas backpack"),
+        ),
+        set(
+            "2",
+            "Tank",
+            vec![
+                piece("a bright ball of light", "light", None),
+                piece("a small boat", "feet", None),
+                piece("a cracked alligator tooth", "held", None),
+            ],
+            None,
+        ),
+    ]
+    .into();
+    items
 }
 
 /// A line the sample's tooltips find an item in.
@@ -349,7 +429,28 @@ pub fn fill_gear(shell: &Shell, cx: &mut App) {
 /// The Gear tab on the sample, with a database of [`FULL_GEAR_NAMES`] items
 /// behind the panel and the tooltips.
 pub fn fill_full_gear(shell: &Shell, cx: &mut App) {
-    let mut items = sample_items();
+    show_gear(shell, full_gear(sample_items()), cx);
+}
+
+/// The sample's sets, listed above Worn, as the player sees them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn fill_gear_sets(shell: &Shell, cx: &mut App) {
+    show_gear(shell, sample_items_with_sets(), cx);
+    shell
+        .gear_panel()
+        .update(cx, |panel, cx| panel.show_worn(cx));
+}
+
+/// The Gear tab with its sets listed, on a database of [`FULL_GEAR_NAMES`]
+/// items.
+pub fn fill_full_gear_sets(shell: &Shell, cx: &mut App) {
+    show_gear(shell, full_gear(sample_items_with_sets()), cx);
+    shell
+        .gear_panel()
+        .update(cx, |panel, cx| panel.show_worn(cx));
+}
+
+fn full_gear(mut items: ItemsState) -> ItemsState {
     let mut book = (*items.book).clone();
     let mut batch = Batch::new();
     for number in 0..FULL_GEAR_NAMES {
@@ -362,7 +463,7 @@ pub fn fill_full_gear(shell: &Shell, cx: &mut App) {
     }
     items.matcher = Arc::new(ItemMatcher::new(book.names()));
     items.book = Arc::new(book);
-    show_gear(shell, items, cx);
+    items
 }
 
 /// The room with the most in it across `logs`, their GMCP read through an

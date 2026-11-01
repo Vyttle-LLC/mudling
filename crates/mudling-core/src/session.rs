@@ -222,10 +222,7 @@ enum Input {
     Edit(RuleEdit),
     EditMap(MapEdit),
     EditGear(GearEdit),
-    WearSet {
-        character: String,
-        id: String,
-    },
+    WearSet { character: String, id: String },
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),

@@ -28,7 +28,7 @@ const PUT: &str = "put";
 
 /// How long a change of gear lasts after the last thing came off, so a slow
 /// game still has all it took off put away.
-const PUT_AWAY_WINDOW_MS: i64 = 15_000;
+pub const CHANGE_WINDOW_MS: i64 = 15_000;
 
 /// How one game takes gear: the plugin's words, and what its hooks wrote about
 /// its slots.
@@ -185,7 +185,9 @@ fn is_id(id: &str) -> bool {
 /// How a command names `name` by its words: its known keywords, quoted when
 /// there are several, else a likely word among `names` nearby.
 pub fn word_for(name: &str, book: &GearBook, rules: &GearRules, names: &[&str]) -> String {
-    let known = book.item(name).and_then(|item| item.facts.keywords.as_ref());
+    let known = book
+        .item(name)
+        .and_then(|item| item.facts.keywords.as_ref());
     match known.and_then(|known| quoted(known)) {
         Some(keywords) => keywords,
         None => likely_word(name, &rules.keywords, names),
@@ -239,7 +241,9 @@ fn likely_word(name: &str, keywords: &Keywords, names: &[&str]) -> String {
     words.sort_by_key(|word| std::cmp::Reverse(word.len()));
     let plain_words = words.iter().filter(|word| !word.contains('\''));
     let possessives = words.iter().filter(|word| word.contains('\''));
-    let candidates = std::iter::once(&usual).chain(plain_words).chain(possessives);
+    let candidates = std::iter::once(&usual)
+        .chain(plain_words)
+        .chain(possessives);
     let is_distinct = |word: &&String| !others.iter().any(|other| other.contains(word));
     if let Some(distinct) = candidates.into_iter().find(is_distinct) {
         return distinct.clone();
@@ -394,7 +398,8 @@ fn sort_out<'a>(
         });
         let same_name: Vec<usize> = same_name.collect();
         let chosen = piece.copy_id.as_deref();
-        let exact = (same_name.iter()).find(|at| chosen.is_some() && worn[**at].copy.as_deref() == chosen);
+        let exact =
+            (same_name.iter()).find(|at| chosen.is_some() && worn[**at].copy.as_deref() == chosen);
         if let Some(&exact) = exact {
             staying.insert(exact);
             plan.left_alone += 1;
@@ -438,8 +443,14 @@ fn make_room(
         if !cleared.insert(slot) {
             continue;
         }
-        let there: Vec<usize> = (0..worn.len()).filter(|at| worn[*at].slot == slot).collect();
-        let leaving: Vec<usize> = there.iter().copied().filter(|at| replaced.contains(at)).collect();
+        let there: Vec<usize> = (0..worn.len())
+            .filter(|at| worn[*at].slot == slot)
+            .collect();
+        let leaving: Vec<usize> = there
+            .iter()
+            .copied()
+            .filter(|at| replaced.contains(at))
+            .collect();
         let coming = (going.iter())
             .filter(|piece| piece.slot.as_deref() == Some(slot))
             .count();
@@ -555,7 +566,7 @@ impl PutAway {
             container_name,
             pieces: pieces.into_iter().map(|item| plain_name(&item)).collect(),
             expected: sent.into_iter().map(|item| plain_name(&item)).collect(),
-            until: Timestamp(now.0 + PUT_AWAY_WINDOW_MS),
+            until: Timestamp(now.0 + CHANGE_WINDOW_MS),
         }
     }
 
@@ -567,7 +578,7 @@ impl PutAway {
         if now >= self.until || self.pieces.contains(&key) || self.expected.contains(&key) {
             return None;
         }
-        self.until = Timestamp(now.0 + PUT_AWAY_WINDOW_MS);
+        self.until = Timestamp(now.0 + CHANGE_WINDOW_MS);
         self.expected.push(key);
         Some(&self.container)
     }

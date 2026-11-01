@@ -76,7 +76,9 @@ impl Inventory {
     /// whether it was one.
     pub(super) fn read_bag(&mut self, package: &str, json: &str) -> bool {
         let is_bag = |items: &[Item], location: &str| {
-            items.iter().any(|item| item.id == location && item.is_bag())
+            items
+                .iter()
+                .any(|item| item.id == location && item.is_bag())
         };
         if package.eq_ignore_ascii_case("Char.Items.List") {
             let Some(list) = gmcp::from_json::<List>(json) else {
@@ -263,7 +265,11 @@ mod tests {
 
         let bags = inventory.bags();
         assert_eq!(bags[0].name, "a satchel");
-        let names: Vec<&str> = bags[0].items.iter().map(|item| item.name.as_str()).collect();
+        let names: Vec<&str> = bags[0]
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect();
         assert_eq!(names, ["a mask"]);
     }
 

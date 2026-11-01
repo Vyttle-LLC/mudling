@@ -81,7 +81,11 @@ fn set(name: &str, pieces: Vec<GearPiece>, container: Option<&str>) -> GearSet {
 }
 
 fn leveling() -> GearSet {
-    let pieces = ["a mushroom-shaped amulet", "a linen robe", "the red-eyed jewel"];
+    let pieces = [
+        "a mushroom-shaped amulet",
+        "a linen robe",
+        "the red-eyed jewel",
+    ];
     set("Leveling", pieces.map(piece).to_vec(), Some("a satchel"))
 }
 
@@ -158,7 +162,11 @@ impl Gear {
 }
 
 fn wearing_hit() -> Gear {
-    let in_satchel = ["a mushroom-shaped amulet", "a linen robe", "the red-eyed jewel"];
+    let in_satchel = [
+        "a mushroom-shaped amulet",
+        "a linen robe",
+        "the red-eyed jewel",
+    ];
     Gear {
         worn: vec![
             worn("light", "the Orb of Faerie Magic"),
@@ -183,7 +191,11 @@ fn a_piece_saved_with_its_slot_makes_room_there() {
         carried: vec![named("the mantle of Bonk")],
         ..Gear::default()
     };
-    let wanted = set("Leveling", vec![in_slot("the mantle of Bonk", "neck")], None);
+    let wanted = set(
+        "Leveling",
+        vec![in_slot("the mantle of Bonk", "neck")],
+        None,
+    );
     let plan = gear.plan_with(&wanted, &GearBook::default());
     assert_eq!(plan.commands, ["remove amulet", "wear mantle"]);
 }
@@ -251,8 +263,15 @@ fn copies_count_separately() {
         bags: vec![bag("a satchel", "", vec![named("a lion's mane")])],
         ..Gear::default()
     };
-    let manes = set("Manes", vec![piece("a lion's mane"), piece("a lion's mane")], None);
-    assert_eq!(gear.plan(&manes).commands, ["get mane satchel", "wear mane"]);
+    let manes = set(
+        "Manes",
+        vec![piece("a lion's mane"), piece("a lion's mane")],
+        None,
+    );
+    assert_eq!(
+        gear.plan(&manes).commands,
+        ["get mane satchel", "wear mane"]
+    );
 }
 
 /// The satchel also holds a belt that says "Seven In One.".
@@ -308,7 +327,10 @@ fn avoids_words_the_game_wont_take() {
 fn counts_when_no_word_tells_items_apart() {
     let keywords = rules().keywords;
     let word = |name, names: &[&str]| likely_word(name, &keywords, names);
-    assert_eq!(word("a gold ring", &["a silver ring", "a gold ring"]), "gold");
+    assert_eq!(
+        word("a gold ring", &["a silver ring", "a gold ring"]),
+        "gold"
+    );
     assert_eq!(word("a ring", &["a ring of iron", "a ring"]), "2.ring");
     let two = ["a sprite ribcage", "a sprite ribcage"];
     assert_eq!(word("a sprite ribcage", &two), "ribcage");
@@ -326,7 +348,12 @@ fn uses_the_start_of_a_hyphenated_word() {
 #[test]
 fn words_given_to_an_item_name_it_in_every_command() {
     let mut book = GearBook::default();
-    book.set_keywords("  amulet   gorn ", "an amulet of Gorn", NOW, &mut Batch::new());
+    book.set_keywords(
+        "  amulet   gorn ",
+        "an amulet of Gorn",
+        NOW,
+        &mut Batch::new(),
+    );
     let gear = Gear {
         worn: vec![
             worn("neck", "an amulet of Gorn"),
@@ -377,7 +404,10 @@ fn two_neck_pieces_each_make_room() {
         bags: vec![bag(
             "a satchel",
             "",
-            vec![named("the mantle of Bonk"), named("a mushroom-shaped amulet")],
+            vec![
+                named("the mantle of Bonk"),
+                named("a mushroom-shaped amulet"),
+            ],
         )],
         ..Gear::default()
     };
@@ -443,7 +473,10 @@ fn the_chosen_copy_replaces_another_of_its_name() {
         bags: vec![satchel_with(vec![copy("an amulet of Gorn", ENCHANTED)])],
         ..Gear::default()
     };
-    let plan = gear.plan_with(&the_enchanted_amulet(Some("a satchel")), &GearBook::default());
+    let plan = gear.plan_with(
+        &the_enchanted_amulet(Some("a satchel")),
+        &GearBook::default(),
+    );
     let moved = |id: &str| Moved {
         name: "an amulet of Gorn".to_owned(),
         copy: Some(id.to_owned()),
@@ -512,7 +545,11 @@ fn a_chosen_copy_that_cant_be_named_exactly_stays_off() {
         carried: vec![copy("an amulet of Gorn", copy_id)],
         ..Gear::default()
     };
-    let wanted = set("Hit", vec![pinned("an amulet of Gorn", "neck", copy_id)], None);
+    let wanted = set(
+        "Hit",
+        vec![pinned("an amulet of Gorn", "neck", copy_id)],
+        None,
+    );
     let plan = gear.plan_with(&wanted, &GearBook::default());
     assert!(plan.commands.is_empty());
     assert_eq!(plan.missing, ["an amulet of Gorn"]);
@@ -540,8 +577,16 @@ fn the_plugin_names_the_verbs_and_the_slots_they_fill() {
         carried: vec![copy("a golden feather", "7"), copy("a linen robe", "8")],
         ..Gear::default()
     };
-    let pieces = vec![in_slot("a golden feather", "held"), in_slot("a linen robe", "about")];
-    let plan = plan(&set("Both", pieces, None), gear.now(), &GearBook::default(), &rules);
+    let pieces = vec![
+        in_slot("a golden feather", "held"),
+        in_slot("a linen robe", "about"),
+    ];
+    let plan = plan(
+        &set("Both", pieces, None),
+        gear.now(),
+        &GearBook::default(),
+        &rules,
+    );
     assert_eq!(plan.commands, ["doff kite", "grasp 7", "don 8"]);
 }
 

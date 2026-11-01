@@ -27,6 +27,7 @@
 //! bar open and results showing, `--find-panel` with the Find panel showing and
 //! being typed in, `--notes-open` with a note being typed in the Notes tab,
 //! `--gear-open` with the Gear tab open on a full gear database,
+//! `--gear-sets-open` with that tab listing gear sets above Worn,
 //! `--character-open` and `--skills-open` with that tab showing a sample, and
 //! `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
@@ -105,7 +106,7 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
-                     [--character-open] [--skills-open] \
+                     [--gear-sets-open] [--character-open] [--skills-open] \
                      [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
@@ -130,6 +131,7 @@ struct Options {
     find_panel: bool,
     notes_open: bool,
     gear_open: bool,
+    gear_sets_open: bool,
     sheet_tab: Option<Slot>,
     sample_map: Option<i64>,
     ax_check: bool,
@@ -309,6 +311,11 @@ fn main() -> ExitCode {
                         .update(cx, |shell, _, cx| measure::fill_full_gear(shell, cx))
                         .expect("the measured window is open");
                 }
+                if options.gear_sets_open {
+                    window
+                        .update(cx, |shell, _, cx| measure::fill_full_gear_sets(shell, cx))
+                        .expect("the measured window is open");
+                }
                 measure::drive(
                     window.into(),
                     shell,
@@ -486,6 +493,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         find_panel: false,
         notes_open: false,
         gear_open: false,
+        gear_sets_open: false,
         sheet_tab: None,
         sample_map: None,
         ax_check: false,
@@ -530,6 +538,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--find-panel" => options.find_panel = true,
             "--notes-open" => options.notes_open = true,
             "--gear-open" => options.gear_open = true,
+            "--gear-sets-open" => options.gear_sets_open = true,
             "--character-open" => options.sheet_tab = Some(Slot::Character),
             "--skills-open" => options.sheet_tab = Some(Slot::Skills),
             "--measure" => options.measure = true,

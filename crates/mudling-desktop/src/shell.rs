@@ -16,6 +16,7 @@ use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::find_panel::{self, FindPanel};
 use crate::gear_panel::GearPanel;
+use crate::gear_panel::sets::SetAction;
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
@@ -87,6 +88,7 @@ const STUCK_SESSION: &str = "The last session didn't finish saving in time, so i
 
 pub fn bind_keys(cx: &mut App) {
     chat::bind_keys(cx);
+    crate::gear_panel::bind_keys(cx);
     crate::hotbar::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
@@ -279,7 +281,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 18],
+    _subscriptions: [Subscription; 19],
     _woken: Task<()>,
 }
 
@@ -319,6 +321,7 @@ impl Shell {
         let gear_sent = cx.subscribe_in(&gear_panel, window, |shell, _, sent, window, cx| {
             shell.on_panel_command(sent, window, cx);
         });
+        let gear_set_acted = cx.subscribe_in(&gear_panel, window, Self::on_gear_set);
         let character_panel = cx.new(CharacterPanel::new);
         let refreshed = cx.subscribe_in(&character_panel, window, Self::on_refresh);
         let skills_panel = cx.new(|cx| {
@@ -497,6 +500,7 @@ impl Shell {
                 card_moves,
                 walked,
                 gear_sent,
+                gear_set_acted,
                 mob_marked,
                 note_events,
             ],
@@ -1316,6 +1320,32 @@ impl Shell {
         self.send_button_command(&sent.command, cx);
         if !sent.by_keyboard {
             window.focus(&self.input.focus_handle(cx), cx);
+        }
+    }
+
+    /// The Gear panel acted on a gear set. Wearing one sends commands, so with
+    /// echo off it's refused, as a panel's command is.
+    fn on_gear_set(
+        &mut self,
+        _: &Entity<GearPanel>,
+        action: &SetAction,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(game) = &self.game else { return };
+        match action {
+            SetAction::Edit(edit) => game.session.edit_gear(edit.clone()),
+            SetAction::Wear { .. } if self.copies.settings.value().echo_off => {}
+            SetAction::Wear {
+                character,
+                id,
+                by_keyboard,
+            } => {
+                game.session.wear_set(character.clone(), id.clone());
+                if !by_keyboard {
+                    window.focus(&self.input.focus_handle(cx), cx);
+                }
+            }
         }
     }
 
@@ -3364,6 +3394,36 @@ pub mod tests {
             };
             shell.on_panel_command(&sent, window, cx);
         });
+
+        played.say(&[IAC, WONT, ECHO]);
+        played.frames_until("echo on", |shell, _| {
+            !shell.copies.settings.value().echo_off
+        });
+        played.shell.update(played.cx, |shell, cx| {
+            shell.submit("look", cx);
+        });
+        assert_eq!(played.heard_command(), "look", "nothing went before it");
+    }
+
+    #[gpui::test]
+    fn wearing_a_set_is_refused_while_echo_is_off(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("echo off", |shell, _| {
+            shell.copies.settings.value().echo_off
+        });
+        let panel = played
+            .shell
+            .read_with(played.cx, |shell, _| shell.gear_panel.clone());
+        panel.update(played.cx, |_, cx| {
+            cx.emit(SetAction::Wear {
+                character: "tamsin".to_owned(),
+                id: "1".to_owned(),
+                by_keyboard: true,
+            });
+        });
+        played.cx.run_until_parked();
 
         played.say(&[IAC, WONT, ECHO]);
         played.frames_until("echo on", |shell, _| {

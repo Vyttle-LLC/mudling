@@ -23,8 +23,8 @@ use crate::persist::{Batch, GearRows, GearSet, Key, Meta, StatMap, Timestamp, Wo
 use crate::plugin::luau::Value;
 use crate::plugin::{PluginEvent, PluginHost, Point};
 use crate::store::{
-    CHARACTER_NAME, CarriedBag, CarriedItem, CharactersState, GearState, ItemsState, StoreHub, Versioned,
-    VitalsState, WornItem,
+    CHARACTER_NAME, CarriedBag, CarriedItem, CharactersState, GearState, ItemsState, StoreHub,
+    Versioned, VitalsState, WornItem,
 };
 use crate::telnet::gmcp;
 use serde_json::Value as Json;
@@ -146,6 +146,9 @@ pub(super) struct GearWatch {
     /// them, whatever the first of the name is.
     naming_on: Vec<(String, String)>,
     naming_off: Vec<(String, String)>,
+    /// When those lapse: a command the game refused leaves its copy behind,
+    /// and that mustn't name what the player does next.
+    naming_until: Timestamp,
 }
 
 impl GearWatch {
@@ -170,9 +173,20 @@ impl GearWatch {
         noted
     }
 
-    fn named(copies: &mut Vec<(String, String)>, key: &str) -> Option<String> {
-        let at = copies.iter().position(|(name, _)| name == key)?;
-        Some(copies.remove(at).1)
+    fn named_on(&mut self, key: &str, now: Timestamp) -> Option<String> {
+        if now >= self.naming_until {
+            self.naming_on.clear();
+        }
+        let at = self.naming_on.iter().position(|(name, _)| name == key)?;
+        Some(self.naming_on.remove(at).1)
+    }
+
+    fn named_off(&mut self, key: &str, now: Timestamp) -> Option<String> {
+        if now >= self.naming_until {
+            self.naming_off.clear();
+        }
+        let at = self.naming_off.iter().position(|(name, _)| name == key)?;
+        Some(self.naming_off.remove(at).1)
     }
 
     fn copy_worn_as(&self, key: &str, taken: &[usize]) -> Option<usize> {
@@ -430,6 +444,7 @@ impl GearKeeper {
         };
         watch.naming_off = copies(&plan.removed);
         watch.naming_on = copies(&plan.wearing);
+        watch.naming_until = Timestamp(now.0 + sets::CHANGE_WINDOW_MS);
         Some((set.name.clone(), plan))
     }
 
@@ -702,6 +717,11 @@ impl GearKeeper {
         {
             self.finish_change(watch, saving);
         }
+        let key = plain_name(name);
+        let (named_on, named_off) = match moved {
+            Moved::On => (watch.named_on(&key, saving.now), None),
+            Moved::Off => (None, watch.named_off(&key, saving.now)),
+        };
         let change = watch.change.get_or_insert_with(|| GearChange {
             worn: Vec::new(),
             removed: Vec::new(),
@@ -709,10 +729,9 @@ impl GearKeeper {
             after: StatMap::new(),
             saw_prompt: false,
         });
-        let key = plain_name(name);
         let copy = match moved {
             Moved::On => {
-                let named = GearWatch::named(&mut watch.naming_on, &key);
+                let named = named_on;
                 let copy = inventory.wore(&key, named.as_deref());
                 let held = Held {
                     name: name.to_owned(),
@@ -726,10 +745,10 @@ impl GearKeeper {
                 copy
             }
             Moved::Off => {
-                let named = GearWatch::named(&mut watch.naming_off, &key);
+                let named = named_off;
                 let is_named = |id: &String| named.as_ref().is_none_or(|named| named == id);
-                let at = (watch.worn_copies.iter())
-                    .position(|(worn, id)| *worn == key && is_named(id));
+                let at =
+                    (watch.worn_copies.iter()).position(|(worn, id)| *worn == key && is_named(id));
                 let noted = at.map(|at| watch.worn_copies.remove(at).1);
                 let listed = self.take_off(&key, named.as_deref());
                 let copy = named.or(noted).or(listed);
@@ -752,7 +771,10 @@ impl GearKeeper {
             return None;
         }
         let container = watch.put_away.as_mut()?.came_off(name, saving.now)?;
-        Some(self.rules.put_away(&self.target(name, copy.as_deref()), container))
+        Some(
+            self.rules
+                .put_away(&self.target(name, copy.as_deref()), container),
+        )
     }
 
     /// Empties the worn row of the copy `named`, or else the first of the

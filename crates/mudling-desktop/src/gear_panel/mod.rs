@@ -11,7 +11,11 @@
 //! reader; what the keyboard reaches in it is its buttons, and More opens the
 //! rest in the row. The items the chat named lately are listed too, each a tab
 //! stop, so what a tooltip shows on hover reaches the keyboard.
+//!
+//! Gear sets are listed above Worn, and edited in the panel's place: see
+//! [`sets`].
 
+pub mod sets;
 pub mod text;
 
 use crate::assets::HEADING_FONT;
@@ -19,13 +23,17 @@ use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label};
 use crate::theme::Theme;
 use gpui::{
     AnyView, App, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight,
-    Pixels, Render, Role, SharedString, Stateful, Window, div, prelude::*, px,
+    KeyBinding, Pixels, Render, Role, SharedString, Stateful, Window, actions, div, prelude::*, px,
 };
 use mudling_core::gear::{ItemMatcher, ItemRef, plain_name, shown_name, tags};
 use mudling_core::store::{CHARACTER_LEVEL, CarriedItem, CharactersState, ItemsState, WornItem};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+actions!(gear_panel, [CloseEditor]);
+
+/// The set editor's key context.
+const EDITOR_CONTEXT: &str = "GearSetEditor";
 const BUTTON_HEIGHT: Pixels = px(28.);
 const FILTER_HEIGHT: Pixels = px(30.);
 /// How many items the panel remembers the chat naming.
@@ -42,6 +50,10 @@ const EXAMINE: &str = "examine";
 /// Wear first, and Wield and Hold under More.
 const HELD_SLOTS: [&str; 2] = ["held", "light"];
 const WIELD_SLOT: &str = "wield";
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("escape", CloseEditor, Some(EDITOR_CONTEXT))]);
+}
 
 /// The two views.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -202,10 +214,10 @@ fn carrying_actions(slot: Option<&str>, target: &Option<String>) -> (Option<Acti
     let hold = action("Hold", HOLD, target);
     let examine = action("Examine", EXAMINE, target);
     let (primary, others) = match slot {
-        Some(WIELD_SLOT) => (wield, [wear, hold]),
-        Some(slot) if HELD_SLOTS.contains(&slot) => (hold, [wear, wield]),
-        Some(_) => (wear, [wield, hold]),
-        None => (None, [wear, hold]),
+        Some(WIELD_SLOT) => (wield, [None, wear, hold]),
+        Some(slot) if HELD_SLOTS.contains(&slot) => (hold, [None, wear, wield]),
+        Some(_) => (wear, [None, wield, hold]),
+        None => (None, [wear, wield, hold]),
     };
     let more = others.into_iter().chain([examine]).flatten().collect();
     (primary, more)
@@ -284,11 +296,15 @@ pub struct GearPanel {
     open: Option<String>,
     worn: Vec<Row>,
     carried: Vec<Row>,
+    sets: Vec<sets::SetRow>,
+    /// The set being made or changed: it takes the panel's place.
+    editor: Option<sets::Editor>,
     /// Items the chat named, newest first, by plain name.
     named: VecDeque<String>,
 }
 
 impl EventEmitter<SendCommand> for GearPanel {}
+impl EventEmitter<sets::SetAction> for GearPanel {}
 
 impl GearPanel {
     pub fn new(verbs: Verbs, cx: &mut Context<GearPanel>) -> GearPanel {
@@ -302,6 +318,8 @@ impl GearPanel {
             open: None,
             worn: Vec::new(),
             carried: Vec::new(),
+            sets: Vec::new(),
+            editor: None,
             named: VecDeque::new(),
         }
     }
@@ -340,6 +358,8 @@ impl GearPanel {
     fn rebuild(&mut self, cx: &mut Context<GearPanel>) {
         self.worn = worn_rows(&self.items);
         self.carried = carried_rows(&self.items, self.level);
+        self.sets = sets::set_rows(&self.items);
+        self.refresh_editor(cx);
         cx.notify();
     }
 
@@ -364,7 +384,6 @@ impl GearPanel {
     }
 
     /// Opens the Worn view, for a sample.
-    #[cfg(all(test, target_os = "macos"))]
     pub fn show_worn(&mut self, cx: &mut Context<GearPanel>) {
         self.choose(View::Worn, cx);
     }
@@ -650,9 +669,26 @@ impl GearPanel {
     }
 }
 
+/// The panel's heading.
+fn render_heading(name: &'static str, theme: &Theme) -> impl IntoElement + use<> {
+    div()
+        .id("gear-heading")
+        .role(Role::Heading)
+        .aria_level(2)
+        .aria_label(name)
+        .font_family(HEADING_FONT)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(21.))
+        .text_color(theme.text)
+        .child(name)
+}
+
 impl Render for GearPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<GearPanel>) -> impl IntoElement {
         let theme = *cx.global::<Theme>();
+        if let Some(editor) = &self.editor {
+            return self.render_editor(editor, &theme, cx);
+        }
         let rows: Vec<_> = (self.rows().iter().enumerate())
             .map(|(index, row)| self.render_row(index, row, &theme, cx))
             .collect();
@@ -681,20 +717,12 @@ impl Render for GearPanel {
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .id("gear-heading")
-                            .role(Role::Heading)
-                            .aria_level(2)
-                            .aria_label("Gear")
-                            .font_family(HEADING_FONT)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(21.))
-                            .text_color(theme.text)
-                            .child("Gear"),
-                    )
+                    .child(render_heading("Gear", &theme))
                     .child(self.render_views(&theme, cx)),
             )
+            .when(self.view == View::Worn, |panel| {
+                panel.child(self.render_sets(&theme, cx))
+            })
             .child(section_label(&self.section_name(), &theme))
             .children(notes)
             .child(
@@ -707,6 +735,7 @@ impl Render for GearPanel {
                     .children(rows),
             )
             .children(self.render_named(&theme))
+            .into_any_element()
     }
 }
 

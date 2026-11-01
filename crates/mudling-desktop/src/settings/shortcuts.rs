@@ -55,6 +55,11 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
             row("Go to the Notes tab", &["main-6"], &["shell::FocusNotes"]),
             row("Finish a note", &["escape"], &["notes::FinishNote"]),
             row(
+                "Leave a gear set without saving",
+                &["escape"],
+                &["gear_panel::CloseEditor"],
+            ),
+            row(
                 "Keep the map when asked to restore one",
                 &["escape"],
                 &["map_history::KeepTheMap"],
