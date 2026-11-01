@@ -566,17 +566,25 @@ impl Engine {
     }
 
     /// Puts a saved version of the map back, after saving the map as it is
-    /// now. On failure the map stays as it was, on the disk and in memory.
+    /// now. On failure the map stays as it was, on the disk and in memory. A
+    /// merge landing counts as a failure: it would rebuild the map under the
+    /// restore, and the restore writes past the rows held for it.
     pub fn restore_map(&mut self, version_id: i64, now: Timestamp) {
         self.settle(now);
-        let outcome = self.apply_map_version(version_id, now);
+        let outcome = if self.is_holding_writes() {
+            Err("a sync is landing, so try again in a moment".to_owned())
+        } else {
+            self.apply_map_version(version_id, now)
+                .map(|()| version_id)
+                .map_err(|error| error.to_string())
+        };
         if let Err(error) = &outcome {
             self.notice(format!("couldn't restore the map: {error}"));
         }
         self.restores += 1;
         self.settings.map_restore = Some(MapRestore {
             attempt: self.restores,
-            outcome: outcome.map(|()| version_id).map_err(|e| e.to_string()),
+            outcome,
         });
         self.settings.map_versions += 1;
         self.publish_settings();
@@ -751,9 +759,11 @@ impl Engine {
     }
 
     /// A merge has landed: writes what was held, moved off any retired room,
-    /// and rebuilds the map from the database. Rows of the merge's window reach
-    /// the disk first so the new map holds them. This waits on the disk, which
-    /// only a merge during play costs.
+    /// and rebuilds the map and the player's rules (triggers, aliases, hotbar
+    /// and notepad) from the database, since a merge may have brought newer
+    /// ones. Rows of the merge's window reach the disk first so the new map
+    /// holds them. This waits on the disk, which only a merge during play
+    /// costs.
     pub(super) fn release_writes(&mut self, moves: &RoomMoves) {
         self.settle(Timestamp::now());
         let Some(mut held) = self.held.take() else {
@@ -766,6 +776,7 @@ impl Engine {
             .flush()
             .map_err(SessionError::from)
             .and_then(|()| self.reload_map())
+            .and_then(|()| self.load_rules())
         {
             self.notice(error.to_string());
         }

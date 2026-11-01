@@ -798,6 +798,116 @@ fn a_devices_id_prefix_stays_on_the_device_and_survives_a_merge() {
     }
 }
 
+fn version_labeled(device: &Device, label: &str) -> i64 {
+    let versions = device.database.reader().unwrap().map_versions().unwrap();
+    versions.iter().find(|v| v.label == label).unwrap().id
+}
+
+#[test]
+fn a_room_a_restore_discards_stays_discarded_on_the_other_device() {
+    let (_folder, mac, ipad) = two_explorers();
+    mac.walk(&[(None, "A quiet road", &["n"])]);
+    mac.apply(|batch| {
+        batch.save_map_version("manual", "Before the gate", T1);
+    });
+    mac.walk(&[(Some("n"), "A gate", &["s"])]);
+    converge(&mac, &ipad);
+    assert_eq!(ipad.sorted_rooms(), ["A gate", "A quiet road"]);
+
+    let before = version_labeled(&mac, "Before the gate");
+    mac.apply(|batch| {
+        batch.restore_map_version(before, Timestamp::now());
+    });
+    converge(&mac, &ipad);
+
+    assert_eq!(mac.sorted_rooms(), ["A quiet road"]);
+    assert_eq!(ipad.sorted_rooms(), ["A quiet road"], "the gate came back");
+}
+
+#[test]
+fn a_restore_does_not_beat_a_newer_edit_of_a_room_it_left_alone() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.save_map_version("manual", "As it was", T2);
+    });
+    let as_it_was = version_labeled(&world.mac, "As it was");
+    world.ipad.apply(|batch| {
+        batch.upsert(room(1, "The iPad's name for it", T3));
+    });
+    let restored_at = Timestamp(T3.0 + 60_000);
+    world.mac.apply(|batch| {
+        batch.restore_map_version(as_it_was, restored_at);
+    });
+
+    settle(&world);
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        assert_eq!(device.room_names(), ["The iPad's name for it"]);
+    }
+}
+
+#[test]
+fn a_restore_that_changes_a_room_reaches_the_other_device() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.save_map_version("manual", "As it was", T1);
+        batch.upsert(room(1, "Edited on the Mac", T2));
+    });
+    settle(&world);
+    assert_eq!(world.ipad.room_names(), ["Edited on the Mac"]);
+
+    let as_it_was = version_labeled(&world.mac, "As it was");
+    world.mac.apply(|batch| {
+        batch.restore_map_version(as_it_was, T3);
+    });
+    settle(&world);
+    settle(&world);
+
+    assert_eq!(world.ipad.room_names(), ["A quiet road"]);
+}
+
+#[test]
+fn a_room_the_restore_discarded_never_gives_its_id_to_a_new_room() {
+    let (_folder, mac, ipad) = two_explorers();
+    mac.walk(&[
+        (None, "A quiet road", &["n"]),
+        (Some("n"), "A gate", &["s", "n"]),
+    ]);
+    mac.apply(|batch| {
+        batch.save_map_version("manual", "Before the tower", T1);
+    });
+    mac.walk(&[(Some("n"), "A tower", &["s"])]);
+    converge(&mac, &ipad);
+    let tower = |device: &Device| device.rooms().into_iter().find(|r| r.name == "A tower");
+    let tower_id = tower(&mac).unwrap().id;
+
+    let before = version_labeled(&mac, "Before the tower");
+    mac.apply(|batch| {
+        batch.restore_map_version(before, Timestamp::now());
+    });
+    // The session ends and the next one starts from what's on the disk.
+    mac.walk(&[
+        (None, "A gate", &["s", "n"]),
+        (Some("n"), "A cellar", &["s"]),
+    ]);
+    let cellar = mac.rooms().into_iter().find(|r| r.name == "A cellar");
+    assert_ne!(cellar.unwrap().id, tower_id, "the id was made again");
+
+    // The iPad still has the tower, and edits it after all of that.
+    let mut edited = tower(&ipad).unwrap();
+    edited.name = "The iPad's tower".to_owned();
+    edited.updated = Timestamp::now();
+    ipad.apply(|batch| {
+        batch.upsert(edited);
+    });
+    converge(&mac, &ipad);
+
+    let names = ["A cellar", "A gate", "A quiet road", "The iPad's tower"];
+    assert_eq!(mac.sorted_rooms(), names);
+    assert_eq!(ipad.sorted_rooms(), names);
+}
+
 #[test]
 fn undoing_a_restore_keeps_a_sighting_through_a_real_merge() {
     let world = two_devices();

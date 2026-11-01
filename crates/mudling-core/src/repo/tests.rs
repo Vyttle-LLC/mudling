@@ -1,6 +1,6 @@
 use super::*;
 use crate::defaults::hotbar::HOTBAR_META;
-use crate::map::ISLANDS;
+use crate::map::{CURRENT_ROOM, ISLANDS};
 use crate::persist::*;
 use crate::repo::Error;
 use std::collections::{BTreeMap, BTreeSet};
@@ -698,17 +698,37 @@ fn only_the_documented_files_reach_the_repo() {
         value: "SENTINEL-TYPED".to_owned(),
         updated: T1,
     });
+    // What makes this device its own: no other device may be told of it.
+    for key in ["map.id-prefix", "map.next-id"] {
+        batch.upsert(Meta {
+            key: key.to_owned(),
+            value: "1".to_owned(),
+            updated: T1,
+        });
+    }
+    commit(&database, batch);
+    // A restore that leaves the player nowhere deletes where they were.
+    let mut batch = Batch::new();
+    batch.delete(Key::Meta(CURRENT_ROOM.to_owned()));
     commit(&database, batch);
     let root = TempDir::new().unwrap();
 
     export(&Repo::new(root.path()), &database);
 
+    let mut synced_meta = String::new();
     for (path, bytes) in tree(root.path()) {
         let name = path.rsplit('/').next().unwrap();
         let allowed = name.ends_with(".json") || matches!(name, "notes.txt" | ".gitignore");
         assert!(allowed || name == ".gitattributes", "{path}");
         let text = String::from_utf8(bytes).unwrap();
         assert!(!text.contains("SENTINEL"), "{path}");
+        for stays in [CURRENT_ROOM, "map.id-prefix", "map.next-id"] {
+            assert!(!text.contains(stays), "{stays} in {path}");
+        }
+        synced_meta.push_str(&text);
+    }
+    for travels in [ISLANDS, HOTBAR_META] {
+        assert!(synced_meta.contains(travels), "{travels} stayed behind");
     }
 }
 

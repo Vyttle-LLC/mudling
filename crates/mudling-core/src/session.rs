@@ -648,10 +648,11 @@ fn replay(engine: &mut Engine, chunks: Vec<Bytes>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::Whereabouts;
+    use crate::defaults::hotbar::HOTBAR_META;
+    use crate::map::{LiveMap, Whereabouts};
     use crate::persist::SERVERS_FOLDER;
-    use crate::persist::{Batch, Database, Key, Room};
-    use crate::store::{MapState, Versioned};
+    use crate::persist::{Batch, Database, Key, Meta, NOTEPAD, Room};
+    use crate::store::{MapState, RulesState, Versioned};
     use std::sync::mpsc::sync_channel;
     use std::time::Instant;
 
@@ -751,6 +752,86 @@ mod tests {
         let notices =
             hub.read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
         assert_eq!(notices, Vec::<String>::new());
+        engine.finish().unwrap();
+    }
+
+    /// What a merge does to the rules: a newer notepad and hotbar arrive in
+    /// the database.
+    fn merge_brings_notes_and_hotbar(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        for (key, value) in [
+            (NOTEPAD, "from the other device"),
+            (HOTBAR_META, r#"["look"]"#),
+        ] {
+            batch.upsert(Meta {
+                key: key.to_owned(),
+                value: value.to_owned(),
+                updated: Timestamp::now(),
+            });
+        }
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn the_notepad_and_hotbar_follow_a_merge() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        engine.edit(RuleEdit::SetNotepad("mine".to_owned()), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_notes_and_hotbar(folder.path());
+        engine.release_writes(&RoomMoves::new());
+
+        hub.read(|rules: &Versioned<RulesState>| {
+            assert_eq!(rules.value().notepad, "from the other device");
+            assert_eq!(rules.value().hotbar, ["look"]);
+        });
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_restore_waits_out_a_merge_landing() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        walk_to(&mut engine, 1);
+        let database = Database::open(&folder.path().join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        writer
+            .submit(LiveMap::save_version(
+                "manual",
+                "One room",
+                Timestamp::now(),
+            ))
+            .unwrap();
+        writer.flush().unwrap();
+        walk_to(&mut engine, 2);
+        let version = database.reader().unwrap().map_versions().unwrap()[0].id;
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        engine.restore_map(version, Timestamp::now());
+
+        let restore = hub.read(|settings: &Versioned<SettingsState>| {
+            settings.value().map_restore.clone().unwrap()
+        });
+        assert!(restore.outcome.is_err(), "{restore:?}");
+        assert_eq!(room_ids(folder.path()), [1, 2], "the map was left alone");
+        engine.release_writes(&RoomMoves::new());
+        engine.restore_map(version, Timestamp::now());
+        assert_eq!(
+            room_ids(folder.path()),
+            [1],
+            "restoring works once it's over"
+        );
         engine.finish().unwrap();
     }
 

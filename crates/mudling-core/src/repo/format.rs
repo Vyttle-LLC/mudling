@@ -62,8 +62,11 @@ pub(super) const IGNORED: [&str; 7] = [
 pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 
 /// The only [`Meta`] keys that sync besides the notepad, which has a file of
-/// its own. The rest stay on the device, such as the room this device last
-/// stood in.
+/// its own. The rest stay on the device: the room this device last stood in,
+/// and the id prefix and next id that set its rooms' ids apart from other
+/// devices'. Saved versions of the map stay too, since their rows hold ids a
+/// union may have retired; a restore reaches other devices as the rows it
+/// changes, and as tombstones for the rooms it drops.
 const SYNCED_META: [&str; 2] = [ISLANDS, HOTBAR_META];
 
 /// How long a delete is remembered. A device offline for longer brings back

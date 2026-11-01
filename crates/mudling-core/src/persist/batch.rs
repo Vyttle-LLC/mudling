@@ -526,6 +526,10 @@ fn save_map_version(
 /// Clears the live map and copies a version back in. A version that
 /// doesn't exist fails the batch rather than leave the map empty. Rows the
 /// version doesn't hold are deletes like any other, so they get tombstones.
+/// A restore is an edit at `at` only of what it changes: a row the version
+/// holds the same as the live map keeps its time, so restoring never beats
+/// another device's newer edit of a room it left alone. A row that differs,
+/// or comes back, is stamped `at` and wins as any later edit does.
 /// A sighting brought back keeps its time unless a tombstone for it or its
 /// room is newer, which another device may hold too: bringing it back is a
 /// change of its own, so it takes that tombstone's time and outranks it.
@@ -536,6 +540,12 @@ fn restore_map_version(
 ) -> rusqlite::Result<()> {
     tx.prepare_cached("SELECT 1 FROM map_versions WHERE id = ?1")?
         .query_row(params![version_id], |_| Ok(()))?;
+    for table in MAP_TABLES {
+        let MapTable { live, columns, .. } = table;
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE prior_{live} AS SELECT {columns}, updated FROM {live}"
+        ))?;
+    }
     for table in MAP_TABLES {
         let MapTable {
             live,
@@ -559,27 +569,39 @@ fn restore_map_version(
             live,
             version,
             columns,
+            order_by,
             key_json,
             restore_stamps_updated,
-            ..
         } = table;
-        let updated = if restore_stamps_updated {
-            "?2".to_owned()
+        if restore_stamps_updated {
+            tx.prepare_cached(&format!(
+                "INSERT INTO {live} ({columns}, updated)
+                 SELECT {columns}, updated FROM prior_{live}
+                 WHERE ({order_by}) IN (SELECT {order_by} FROM
+                     (SELECT {columns} FROM {version} WHERE version_id = ?1
+                      INTERSECT SELECT {columns} FROM prior_{live}))"
+            ))?
+            .execute(params![version_id])?;
+            tx.prepare_cached(&format!(
+                "INSERT INTO {live} ({columns}, updated)
+                 SELECT {columns}, ?2 FROM {version} WHERE version_id = ?1
+                 AND ({order_by}) NOT IN (SELECT {order_by} FROM {live})"
+            ))?
+            .execute(params![version_id, at])?;
         } else {
             let deleted = |key: &str| {
                 format!("coalesce((SELECT deleted FROM tombstones WHERE key = {key}), 0)")
             };
             let (own, room) = (deleted(key_json), deleted("json_object('room', room_id)"));
-            format!("max(updated, {own}, {room})")
-        };
-        let mut insert = tx.prepare_cached(&format!(
-            "INSERT INTO {live} ({columns}, updated) SELECT {columns}, {updated} FROM {version} WHERE version_id = ?1"
-        ))?;
-        if restore_stamps_updated {
-            insert.execute(params![version_id, at])?;
-        } else {
-            insert.execute(params![version_id])?;
+            tx.prepare_cached(&format!(
+                "INSERT INTO {live} ({columns}, updated)
+                 SELECT {columns}, max(updated, {own}, {room}) FROM {version} WHERE version_id = ?1"
+            ))?
+            .execute(params![version_id])?;
         }
+    }
+    for table in MAP_TABLES {
+        tx.execute_batch(&format!("DROP TABLE prior_{}", table.live))?;
     }
     Ok(())
 }

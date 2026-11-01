@@ -21,6 +21,9 @@ pub const CURRENT_ROOM: &str = "map.current-room";
 pub(crate) const ISLANDS: &str = "map.islands";
 /// This device's own: it never syncs, because it's what sets devices apart.
 const ID_PREFIX: &str = "map.id-prefix";
+/// This device's own too: the next id it will make, so one it made and lost
+/// (to a restore or a union) is never made again for a different room.
+const NEXT_ID: &str = "map.next-id";
 
 /// Kinds of version the map saves by itself: every few minutes of play when
 /// the map changed, and when a session starts or before a restore.
@@ -51,6 +54,8 @@ pub struct LiveMap {
     committed: Layout,
     committed_whereabouts: Whereabouts,
     id_prefix_saved: bool,
+    /// The next id as the database holds it.
+    next_id_saved: RoomId,
     revision: u64,
     /// Bumps when a commit changes a room's area or the map's shape: all
     /// that [`Derived`] reads.
@@ -167,6 +172,9 @@ impl LiveMap {
         let saved_prefix = value(ID_PREFIX).filter(|prefix| is_id_prefix(*prefix));
         let prefix = saved_prefix.unwrap_or_else(draw_id_prefix);
         let mut layout = layout_of(map, &*rules, prefix);
+        if let Some(next) = value(NEXT_ID).filter(|next| id_prefix(*next) == prefix) {
+            layout.next_id = layout.next_id.max(next);
+        }
         layout.current = value(CURRENT_ROOM).filter(|id| layout.contains(*id));
         layout.islands = value(ISLANDS).unwrap_or(0);
         layout.clear_dirty();
@@ -198,6 +206,7 @@ impl LiveMap {
             dark_line: false,
             maze_line: false,
             fountain_here: false,
+            next_id_saved: layout.next_id,
             committed: layout,
             committed_whereabouts: Whereabouts::default(),
             id_prefix_saved: false,
@@ -686,6 +695,10 @@ impl LiveMap {
         if !self.id_prefix_saved && !batch.is_empty() {
             meta(&mut batch, ID_PREFIX, id_prefix(layout.next_id), now);
             self.id_prefix_saved = true;
+        }
+        if layout.next_id > self.next_id_saved {
+            meta(&mut batch, NEXT_ID, layout.next_id, now);
+            self.next_id_saved = layout.next_id;
         }
 
         // While unsure, every explanation's changes count from the last

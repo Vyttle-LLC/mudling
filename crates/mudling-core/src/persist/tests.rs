@@ -520,8 +520,11 @@ fn map_versions_save_list_and_restore() {
     writer.submit(batch).unwrap();
     writer.flush().unwrap();
 
-    // The live map is the first version again, stamped with the restore's
-    // time; sightings keep when the mob was seen.
+    // The live map is the first version again. What the restore changed or
+    // brought back (both rooms, room 1's exit and note, and every link, which
+    // went with room 1) is stamped with the restore's time. What was the same
+    // already, room 2's exits, doorways and features, keeps its time, and
+    // sightings keep when the mob was seen.
     let mut expected = small_map();
     expected
         .rooms
@@ -530,23 +533,16 @@ fn map_versions_save_list_and_restore() {
     expected
         .exits
         .iter_mut()
+        .filter(|e| e.room_id == 1)
         .for_each(|e| e.updated = restored_at);
     expected
         .links
         .iter_mut()
         .for_each(|l| l.updated = restored_at);
     expected
-        .doorways
-        .iter_mut()
-        .for_each(|d| d.updated = restored_at);
-    expected
         .notes
         .iter_mut()
         .for_each(|n| n.updated = restored_at);
-    expected
-        .features
-        .iter_mut()
-        .for_each(|f| f.updated = restored_at);
     assert_eq!(reader.map().unwrap(), expected);
 
     // Deleting a version deletes its rows; the other stays.
