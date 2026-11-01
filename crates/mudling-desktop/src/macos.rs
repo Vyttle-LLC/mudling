@@ -271,6 +271,31 @@ const GEAR_CONTROLS: [&str; 5] = [
     "More about a small necklace",
     "Items named in chat",
 ];
+/// The Gear tab with sets listed: the section, a set's actions and what a row
+/// reads.
+const GEAR_SET_CONTROLS: [&str; 5] = [
+    "Gear sets",
+    "New set",
+    "Edit Levelling",
+    "Wear Levelling",
+    "Levelling: 4 pieces · what comes off goes in a canvas backpack",
+];
+/// The set editor: every control, and a piece not seen with its Drop.
+const GEAR_EDITOR_CONTROLS: [&str; 11] = [
+    "Set name",
+    "What comes off goes in: a canvas backpack",
+    "Pieces in this set",
+    "Exact copy of a black hematite ring",
+    "Words for a black hematite ring",
+    "Drop a black hematite ring",
+    "Use what I'm wearing now",
+    "Delete set",
+    "Cancel",
+    "Save",
+    "Also at hand",
+];
+/// What the editor's preview reads as one stop.
+const GEAR_PREVIEW_START: &str = "Wearing it now would send: remove 1204883";
 /// What the sample's level lock says, on the row, to a screen reader.
 const GEAR_LOCKED_ROW: &str = "a copper bracelet, Glowing, Humming, Needs level 7";
 /// What the tooltip over the sample's item says.
@@ -437,6 +462,61 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "the Gear tab names its views, actions and lists",
             passed: unnamed.is_empty(),
             detail: format!("not found: {unnamed:?}"),
+        });
+        shell.update(cx, |shell, cx| crate::measure::fill_gear_sets(shell, cx));
+        cx.background_executor().timer(pause).await;
+        let set_tree = window_tree();
+        let not_found = |tree: &Option<AxElement>, names: &[&'static str]| {
+            let missing = names.iter().filter(|name| {
+                let named = |e: &AxElement| {
+                    e.title.as_deref() == Some(**name) || e.value.as_deref() == Some(**name)
+                };
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            });
+            missing.copied().collect::<Vec<_>>()
+        };
+        let unnamed = not_found(&set_tree, &GEAR_SET_CONTROLS);
+        checks.push(Check {
+            name: "the Gear tab lists its sets above Worn, each with its actions",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let window = cx.update(|cx| cx.windows().first().copied());
+        if let Some(window) = window.and_then(|window| window.downcast::<Shell>()) {
+            window
+                .update(cx, |shell, window, cx| {
+                    let panel = shell.gear_panel();
+                    panel.update(cx, |panel, cx| panel.edit_first_set(window, cx));
+                })
+                .expect("the window is open");
+        }
+        cx.background_executor().timer(pause).await;
+        let editor_tree = window_tree();
+        let unnamed = not_found(&editor_tree, &GEAR_EDITOR_CONTROLS);
+        checks.push(Check {
+            name: "the set editor names its fields, pieces and actions",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let preview = editor_tree.as_ref().map_or_else(Vec::new, |tree| {
+            let reads = |e: &AxElement| {
+                let starts = |text: &Option<String>| {
+                    (text.as_deref()).is_some_and(|text| text.starts_with(GEAR_PREVIEW_START))
+                };
+                starts(&e.title) || starts(&e.help)
+            };
+            tree.find(reads)
+        });
+        checks.push(Check {
+            name: "the set editor reads what Wear would send as one stop",
+            passed: !preview.is_empty(),
+            detail: format!("{} matching element(s)", preview.len()),
+        });
+        shell.update(cx, |shell, cx| {
+            shell
+                .gear_panel()
+                .update(cx, |panel, cx| panel.close_sample_editor(cx));
+            crate::measure::fill_gear(shell, cx);
         });
         let locked = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.title.as_deref() == Some(GEAR_LOCKED_ROW))

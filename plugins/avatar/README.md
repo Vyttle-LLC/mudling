@@ -162,6 +162,17 @@ order:
 | `slot.<plain name>` | the slot it goes in: from `equipment`, a wear message or `examine` |
 | `keyword.<plain name>` | the word a command names it by: the noun ending its first phrase, never a possessive while there's another word (the game refuses `remove captain's`) |
 | `keywords.<plain name>` | the game's own keywords for it, from a shop's identify |
+| `holds.<slot>` | how many items a slot holds, where it's more than one: `holds.neck` = 2 |
+| `verb.<slot>` | the `[verbs]` verb that fills a slot, where it isn't `wear`: `verb.held` = `hold` |
+
+The last two are what a gear set's wear plan needs to know of the game. They
+aren't about items, and they're said once a connection, at the first gear table
+or wear message.
+
+While a gear set goes on the core reads the Gear point's `put` rules. A rule
+with an `item` capture means it went in; otherwise a name ending `.did_not_fit`
+means the container refused it, and one ending `.not_carried` that it hadn't
+come off yet.
 
 **`identify`**, one batch per reading. The core files each as a reading of
 its own, so two copies with the same words keep theirs, and it's the core that

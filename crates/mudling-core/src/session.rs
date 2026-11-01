@@ -45,7 +45,7 @@ use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
 use crate::map::{Mark, RoomId};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
-use crate::persist::{self, Database, MapVersion, SERVERS_FOLDER, Timestamp};
+use crate::persist::{self, Database, GearSet, MapVersion, SERVERS_FOLDER, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
@@ -177,6 +177,23 @@ pub enum RuleEdit {
     SetNotepad(String),
 }
 
+/// A change the player made to their gear. None of it ever goes to the server.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GearEdit {
+    /// A set, for its `character_id`, who must still be playing. A set with no
+    /// id is new.
+    SaveSet(GearSet),
+    RemoveSet {
+        character: String,
+        id: String,
+    },
+    /// The words the game knows an item by; none leaves commands to guess.
+    SetKeywords {
+        item: String,
+        words: String,
+    },
+}
+
 /// A change the player made to the map. None of it ever goes to the server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MapEdit {
@@ -204,6 +221,8 @@ enum Input {
     RefreshCharacter,
     Edit(RuleEdit),
     EditMap(MapEdit),
+    EditGear(GearEdit),
+    WearSet { character: String, id: String },
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
@@ -339,6 +358,20 @@ impl Session {
     /// Saves a change the player made to the map; the map store shows it.
     pub fn edit_map(&self, edit: MapEdit) {
         self.queue(Input::EditMap(edit));
+    }
+
+    /// Applies a change to the player's gear and saves it.
+    pub fn edit_gear(&self, edit: GearEdit) {
+        self.queue(Input::EditGear(edit));
+    }
+
+    /// Puts on `character`'s gear set `id`. While the server asks for a
+    /// password it does nothing, and nor does it if they aren't playing now.
+    pub fn wear_set(&self, character: impl Into<String>, id: impl Into<String>) {
+        self.queue(Input::WearSet {
+            character: character.into(),
+            id: id.into(),
+        });
     }
 
     /// See [`Typing::alias_preview`].
@@ -495,6 +528,10 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::RefreshCharacter) => engine.refresh_character(),
                 Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
                 Some(Input::EditMap(edit)) => engine.edit_map(edit, Timestamp::now()),
+                Some(Input::EditGear(edit)) => engine.edit_gear(edit, Timestamp::now()),
+                Some(Input::WearSet { character, id }) => {
+                    engine.wear_set(&character, &id, Timestamp::now());
+                }
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();

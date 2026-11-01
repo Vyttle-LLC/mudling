@@ -1,6 +1,6 @@
 # The prototype's tests in Rust
 
-Every test in `mud-client-spike/Tests/MUDKitTests`, and where it went. The prototype counted 278: 86 are ported, 87 were already covered by a Rust test that checks the same behaviour, and 105 are not carried over, each with the reason. The directory holds 22 Swift files and 5 fixtures, not the 23 files the ticket counted; the test count holds.
+Every test in `mud-client-spike/Tests/MUDKitTests`, and where it went. The prototype counted 278: 105 are ported, 88 were already covered by a Rust test that checks the same behaviour, and 85 are not carried over, each with the reason. The directory holds 22 Swift files and 5 fixtures, not the 23 files the ticket counted; the test count holds.
 
 A parameterized Swift test counts once. A row can share a Rust test with its neighbors when one test checks both.
 
@@ -12,7 +12,7 @@ A parameterized Swift test counts once. A row can share a Rust test with its nei
 | `avatar::` | `plugins/avatar/tests/prototype/`, by module |
 | `core-it::` | `crates/mudling-core/tests/`: `core-it::defaults::x` is `defaults.rs` |
 | `avatar-it::` | `plugins/avatar/tests/`, the same way |
-| `unit::` | Unit tests in `crates/mudling-core/src/`: `unit::map::x` is in `map/tests.rs`, `unit::persist::x` in `persist/tests.rs`, `unit::ansi::x` in `ansi.rs` |
+| `unit::` | Unit tests in `crates/mudling-core/src/`: `unit::map::x` is in `map/tests.rs`, `unit::gear::sets::x` in `gear/sets/tests.rs`, `unit::persist::x` in `persist/tests.rs`, `unit::ansi::x` in `ansi.rs` |
 
 The five walks in `plugins/avatar/tests/fixtures/walks/` are cut from the prototype's fixtures, 166 KB in all, to 12 KB. Each is the shortest stretch whose test still passes: loops were taken out, and some stretches joined by a jump with no move, as a recall does. Rooms, zones and descriptions are renamed, keeping which are the same. Only the area and room the plugin's maze rule names keep their real names. No test needs a long real walk or the local logs. The whole walks stay in the prototype's repo, and the parity check (VYT-188) replays real logs.
 
@@ -269,39 +269,39 @@ Three more were fixed by VYT-188, each with its test: Avatar's auto-login, doors
 
 ## GearSetTests.swift
 
-29 tests: 2 ported, 4 already covered, 23 not carried over.
+29 tests: 21 ported, 5 already covered, 3 not carried over.
 
 | Test | Outcome | Rust test | Note |
 |---|---|---|---|
-| `GearPlanTests.aPieceSavedWithItsSlotMakesRoomThere` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.piecesInABagComeOutAndGoOn` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.piecesAlreadyWornAreLeftAlone` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.carriedPiecesGoStraightOn` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.piecesFoundNowhereAreReported` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.copiesCountSeparately` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.aGuessedWordPicksOutItsItemAmongWhatsNearby` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.whenASetOverfillsASlotTheLaterPieceWins` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.avoidsWordsTheGameWontTake` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.whatComesOffGoesIntoTheContainerWhileTheSetGoesOn` | Not carried over | — | VYT-221: gear sets. |
+| `GearPlanTests.aPieceSavedWithItsSlotMakesRoomThere` | Ported | `unit::gear::sets::a_piece_saved_with_its_slot_makes_room_there` |  |
+| `GearPlanTests.piecesInABagComeOutAndGoOn` | Ported | `unit::gear::sets::pieces_in_a_bag_come_out_and_go_on` |  |
+| `GearPlanTests.piecesAlreadyWornAreLeftAlone` | Ported | `unit::gear::sets::pieces_already_worn_are_left_alone` |  |
+| `GearPlanTests.carriedPiecesGoStraightOn` | Ported | `unit::gear::sets::carried_pieces_go_straight_on` |  |
+| `GearPlanTests.piecesFoundNowhereAreReported` | Ported | `unit::gear::sets::pieces_found_nowhere_are_reported` |  |
+| `GearPlanTests.copiesCountSeparately` | Ported | `unit::gear::sets::copies_count_separately` |  |
+| `GearPlanTests.aGuessedWordPicksOutItsItemAmongWhatsNearby` | Ported | `unit::gear::sets::a_guessed_word_picks_out_its_item_among_whats_nearby` |  |
+| `GearPlanTests.whenASetOverfillsASlotTheLaterPieceWins` | Ported | `unit::gear::sets::when_a_set_overfills_a_slot_the_later_piece_wins` |  |
+| `GearPlanTests.avoidsWordsTheGameWontTake` | Ported | `unit::gear::sets::avoids_words_the_game_wont_take` | With another possessive: the core holds no game's item names. |
+| `GearPlanTests.whatComesOffGoesIntoTheContainerWhileTheSetGoesOn` | Ported | `unit::gear::sets::what_comes_off_goes_into_the_container_while_the_set_goes_on` |  |
 | `GearPlanTests.setsSavedWithABagPerPieceKeepThatBag` | Not carried over | — | VYT-194: reading the prototype's saved files. |
-| `GearPlanTests.countsWhenNoWordTellsItemsApart` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.usesTheStartOfAHyphenatedWord` | Not carried over | — | VYT-221: gear sets. |
-| `GearPlanTests.wordsGivenToAnItemNameItInEveryCommand` | Not carried over | — | VYT-221: gear sets. |
+| `GearPlanTests.countsWhenNoWordTellsItemsApart` | Ported | `unit::gear::sets::counts_when_no_word_tells_items_apart` |  |
+| `GearPlanTests.usesTheStartOfAHyphenatedWord` | Ported | `unit::gear::sets::uses_the_start_of_a_hyphenated_word` |  |
+| `GearPlanTests.wordsGivenToAnItemNameItInEveryCommand` | Ported | `unit::gear::sets::words_given_to_an_item_name_it_in_every_command` |  |
 | `GearPlanTests.pastLogsGiveTheKeywordsOfItemsIdentifiedThere` | Not carried over | — | VYT-194: gear data comes over in the import; MUDling keeps no chat logs to read. |
 | `GearPlanTests.setsSavedWithAScriptStillLoad` | Not carried over | — | VYT-194: reading the prototype's saved files. |
 | `GearPlanTests.remembersTheSlotEachItemWasWornIn` | Already covered | `avatar-it::gear::equipment_lists_every_row_in_order_empty_slots_included` |  |
 | `GearPlanTests.wearMessagesTeachTheSlotToo` | Already covered | `avatar-it::gear::wear_remove_and_put_are_events_and_wearing_notes_the_slot` |  |
-| `GearPlanTests.twoNeckPiecesEachMakeRoom` | Not carried over | — | VYT-221: gear sets. |
+| `GearPlanTests.twoNeckPiecesEachMakeRoom` | Ported | `unit::gear::sets::two_neck_pieces_each_make_room` |  |
 | `PutAwayMessageTests.readsWhatWentInAndWhatDidNot` | Already covered | `avatar-it::gear::wear_remove_and_put_are_events_and_wearing_notes_the_slot` |  |
 | `WornListTests.aWearFollowedByEqInTheSameTextIsCountedOnce` | Ported | `avatar::messages::a_wear_followed_by_eq_in_one_read_is_counted_once` |  |
 | `WornListTests.aGearLineRightAfterAnEqTableStillCounts` | Ported | `avatar::messages::a_gear_line_right_after_an_eq_table_still_counts` |  |
 | `CarriedGearTests.wearAndRemoveMessagesKeepTheInventoryCurrent` | Already covered | `avatar-it::gear::wearing_or_removing_asks_for_the_inventory_again` | MUDling asks the game instead of guessing; see differences. |
-| `GearCopyTests.copiesWithIdsAreNamedByThem` | Not carried over | — | VYT-221: gear sets. |
-| `GearCopyTests.theChosenCopyReplacesAnotherOfItsName` | Not carried over | — | VYT-221: gear sets. |
-| `GearCopyTests.anotherOfTheNameStandsInForACopyThatsGone` | Not carried over | — | VYT-221: gear sets. |
-| `GearCopyTests.anEqReadKeepsTheIdsOfWhatsStillInItsSlot` | Not carried over | — | VYT-221: gear sets. |
-| `GearCopyTests.takingOffOneOfTwoByItsIdKeepsTheOtherCopyOn` | Not carried over | — | VYT-221: gear sets. |
-| `GearCopyTests.wearingTheCopyMUDPadNamedTakesThatOneFromTheInventory` | Not carried over | — | VYT-221: gear sets. |
+| `GearCopyTests.copiesWithIdsAreNamedByThem` | Ported | `unit::gear::sets::copies_with_ids_are_named_by_them` |  |
+| `GearCopyTests.theChosenCopyReplacesAnotherOfItsName` | Ported | `unit::gear::sets::the_chosen_copy_replaces_another_of_its_name` |  |
+| `GearCopyTests.anotherOfTheNameStandsInForACopyThatsGone` | Ported | `unit::gear::sets::a_chosen_copy_thats_gone_is_missing_and_another_of_the_name_stays_out` | The opposite on purpose: VYT-221 says a chosen copy is never swapped for another of its name, so MUDling calls it missing. |
+| `GearCopyTests.anEqReadKeepsTheIdsOfWhatsStillInItsSlot` | Already covered | `avatar-it::session::two_worn_copies_of_a_name_stay_two_across_a_reconnect` |  |
+| `GearCopyTests.takingOffOneOfTwoByItsIdKeepsTheOtherCopyOn` | Ported | `avatar-it::gear_sets::taking_off_one_of_two_by_its_id_keeps_the_other_copy_on` |  |
+| `GearCopyTests.wearingTheCopyMUDPadNamedTakesThatOneFromTheInventory` | Ported | `unit::session::inventory::the_copy_a_plan_named_is_the_one_that_goes_on` |  |
 
 ## GearTests.swift
 

@@ -16,6 +16,7 @@ use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::find_panel::{self, FindPanel};
 use crate::gear_panel::GearPanel;
+use crate::gear_panel::sets::SetAction;
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
@@ -87,6 +88,7 @@ const STUCK_SESSION: &str = "The last session didn't finish saving in time, so i
 
 pub fn bind_keys(cx: &mut App) {
     chat::bind_keys(cx);
+    crate::gear_panel::bind_keys(cx);
     crate::hotbar::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(secondary!("1"), ToggleLeftPanel, None),
@@ -279,7 +281,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 18],
+    _subscriptions: [Subscription; 19],
     _woken: Task<()>,
 }
 
@@ -319,6 +321,7 @@ impl Shell {
         let gear_sent = cx.subscribe_in(&gear_panel, window, |shell, _, sent, window, cx| {
             shell.on_panel_command(sent, window, cx);
         });
+        let gear_set_acted = cx.subscribe_in(&gear_panel, window, Self::on_gear_set);
         let character_panel = cx.new(CharacterPanel::new);
         let refreshed = cx.subscribe_in(&character_panel, window, Self::on_refresh);
         let skills_panel = cx.new(|cx| {
@@ -497,6 +500,7 @@ impl Shell {
                 card_moves,
                 walked,
                 gear_sent,
+                gear_set_acted,
                 mob_marked,
                 note_events,
             ],
@@ -1319,6 +1323,32 @@ impl Shell {
         }
     }
 
+    /// The Gear panel acted on a gear set. Wearing one sends commands, so with
+    /// echo off it's refused, as a panel's command is.
+    fn on_gear_set(
+        &mut self,
+        _: &Entity<GearPanel>,
+        action: &SetAction,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(game) = &self.game else { return };
+        match action {
+            SetAction::Edit(edit) => game.session.edit_gear(edit.clone()),
+            SetAction::Wear { .. } if self.copies.settings.value().echo_off => {}
+            SetAction::Wear {
+                character,
+                id,
+                by_keyboard,
+            } => {
+                game.session.wear_set(character.clone(), id.clone());
+                if !by_keyboard {
+                    window.focus(&self.input.focus_handle(cx), cx);
+                }
+            }
+        }
+    }
+
     /// Sends a panel's command, unless echo is off.
     fn send_button_command(&mut self, command: &str, cx: &mut Context<Shell>) {
         if !self.copies.settings.value().echo_off {
@@ -1845,10 +1875,10 @@ pub mod tests {
     use mudling_core::defaults::aliases::AliasRule;
     use mudling_core::defaults::hud::Vital;
     use mudling_core::map::MapChange;
-    use mudling_core::persist;
+    use mudling_core::persist::{self, GearPiece, GearSet, Timestamp};
     use mudling_core::plugin::Plugin;
     use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
-    use mudling_core::session::SessionConfig;
+    use mudling_core::session::{GearEdit, SessionConfig};
     use mudling_core::store::{Diff, Revision, TerminalState};
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
@@ -3374,6 +3404,84 @@ pub mod tests {
             shell.submit("look", cx);
         });
         assert_eq!(played.heard_command(), "look", "nothing went before it");
+    }
+
+    /// The session refuses too while it knows echo is off, so what's the
+    /// shell's alone is the moment its copy says off and the session's says on:
+    /// the server has given echo back, and no frame has told the shell.
+    #[gpui::test]
+    fn wearing_a_set_is_refused_while_the_shell_sees_echo_off(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Items.List {"location": "inv", "items": [{"id": "7", "name": "a linen robe"}]}"#);
+        played.frames_until("the robe", |shell, _| {
+            !shell.copies.items.value().carried.is_empty()
+        });
+        played.shell.update(played.cx, |shell, _| {
+            let game = shell.game.as_ref().expect("a game is on");
+            game.session.edit_gear(GearEdit::SaveSet(GearSet {
+                id: String::new(),
+                character_id: "bren".to_owned(),
+                name: "Robe".to_owned(),
+                container: None,
+                pieces: vec![GearPiece {
+                    item: "a linen robe".to_owned(),
+                    slot: None,
+                    copy_id: None,
+                }],
+                updated: Timestamp(0),
+            }));
+        });
+        played.frames_until("the set", |shell, _| {
+            !shell.copies.items.value().sets.is_empty()
+        });
+        let (panel, wear) = played.shell.read_with(played.cx, |shell, _| {
+            let id = shell.copies.items.value().sets[0].id.clone();
+            let wear = SetAction::Wear {
+                character: "bren".to_owned(),
+                id,
+                by_keyboard: true,
+            };
+            (shell.gear_panel.clone(), wear)
+        });
+
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("echo off", |shell, _| {
+            shell.copies.settings.value().echo_off
+        });
+        played.say(&[IAC, WONT, ECHO]);
+        let started = Instant::now();
+        while played.shell.read_with(played.cx, |shell, _| {
+            let game = shell.game.as_ref().expect("a game is on");
+            let stores = game.session.stores();
+            stores.read(|settings: &Versioned<SettingsState>| settings.value().echo_off)
+        }) {
+            assert!(
+                started.elapsed() < WAIT,
+                "timed out waiting for the session"
+            );
+            sleep(Duration::from_millis(1));
+        }
+        panel.update(played.cx, |_, cx| cx.emit(wear.clone()));
+        played.shell.read_with(played.cx, |shell, _| {
+            assert!(shell.copies.settings.value().echo_off, "no frame went by");
+        });
+
+        played.frames_until("echo on", |shell, _| {
+            !shell.copies.settings.value().echo_off
+        });
+        played.shell.update(played.cx, |shell, cx| {
+            shell.submit("look", cx);
+        });
+        assert_eq!(played.heard_command(), "look", "nothing went before it");
+
+        panel.update(played.cx, |_, cx| cx.emit(wear));
+        assert_eq!(
+            played.heard_command(),
+            "wear 7",
+            "the set could go all along"
+        );
     }
 
     #[gpui::test]

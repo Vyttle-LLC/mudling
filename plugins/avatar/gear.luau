@@ -20,6 +20,26 @@ local SLOTS = {
     ["held"] = "held",
 }
 
+-- What a set's wear plan needs from the game, said once a connection: how many
+-- items a slot holds where that's more than one, and the verb that fills a slot
+-- where `wear` isn't the word. Keys of the `gear` store; see README.md.
+local HOLDS = { finger = 2, neck = 2, wrist = 2 }
+local SLOT_VERBS = { wield = "wield", held = "hold", offhand = "hold" }
+local slots_said = false
+
+local function say_slots(write)
+    if slots_said then
+        return
+    end
+    slots_said = true
+    for slot, holds in HOLDS do
+        write("gear", "holds." .. slot, holds)
+    end
+    for slot, verb in SLOT_VERBS do
+        write("gear", "verb." .. slot, verb)
+    end
+end
+
 local function note_item(write, item, slot)
     local plain = Readers.plain(item)
     write("gear", "name." .. plain, item)
@@ -40,6 +60,7 @@ local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
     local kind, reader = Readers.step(event, "equipment", finish_equipment)
+    say_slots(mud.store)
     if kind == "row" and not event.captures.slot then
         -- "Nothing.": no row will end the table with a count, so say it now.
         mud.store("worn", "count", 0)
@@ -87,6 +108,7 @@ end
 
 -- Avatar sends no Char.Items when gear goes on or comes off, so ask again.
 function on_wore(event)
+    say_slots(mud.store)
     note_item(mud.store, event.captures.item, slot_worn(event))
     mud.refresh_inventory()
 end
