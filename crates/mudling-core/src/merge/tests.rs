@@ -2327,6 +2327,31 @@ fn a_kept_note_cleared_after_the_join_has_landed_stays_cleared() {
     mac.apply(|batch| {
         batch.upsert(feature(kept, "shop"));
     });
+    converge(&ipad, &mac);
+
+    assert_eq!(note_of(&mac, kept), None);
+    assert_same_maps(&mac, &ipad);
+}
+
+/// The clear wins by being the only change, whatever the note's time says.
+#[test]
+fn a_clear_stands_against_a_note_stamped_later_than_it() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Original", T1));
+        batch.upsert(note(retired, "Beggars at night", T2));
+    });
+    join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+    let later = Timestamp(Timestamp::now().0 + 60_000);
+    mac.apply(|batch| {
+        batch.upsert(RoomNote {
+            updated: later,
+            ..note(kept, &note_of(&ipad, kept).unwrap(), later)
+        });
+    });
+
+    clear_note(&ipad, kept);
     converge(&mac, &ipad);
 
     assert_eq!(note_of(&mac, kept), None);
