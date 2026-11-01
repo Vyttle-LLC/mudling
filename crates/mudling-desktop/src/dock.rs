@@ -413,6 +413,8 @@ impl Dock {
                 div()
                     .id("tabs")
                     .role(Role::TabList)
+                    // The mouse never moves focus here: typing stays with the bar.
+                    .capture_any_mouse_down(|_, window, _| window.prevent_default())
                     .flex_1()
                     .min_w_0()
                     .flex()

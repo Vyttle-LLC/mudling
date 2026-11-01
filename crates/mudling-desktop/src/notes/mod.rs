@@ -918,11 +918,38 @@ impl RoomCard {
     }
 }
 
+/// A room card's frame. The mouse never moves focus here, under the map or in
+/// the Room panel: typing stays with the bar.
+fn card() -> Div {
+    div()
+        .debug_selector(|| "room-card".to_owned())
+        .capture_any_mouse_down(|_, window, _| window.prevent_default())
+        .flex()
+        .flex_col()
+        .gap_2()
+}
+
 impl Render for RoomCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<RoomCard>) -> impl IntoElement {
         let theme = *cx.global::<Theme>();
         let entity = self.notes.clone();
         let notes = self.notes.read(cx);
+        // The card keeps a draft moved to the notepad: the editor can't vanish
+        // from under the typing and leave the next words to the command bar.
+        if notes.draft_in(self.host, NoteTarget::Notepad).is_some() {
+            let message = notes.message.clone();
+            return card()
+                .children(message.map(|text| status_line("card-message", text, theme.text_muted)))
+                .child(section_label("NOTEPAD", &theme))
+                .child(render_note(
+                    notes,
+                    &entity,
+                    NoteTarget::Notepad,
+                    self.host,
+                    &theme,
+                ))
+                .into_any_element();
+        }
         let Some(room) = self.room(notes) else {
             return div().into_any_element();
         };
@@ -931,11 +958,7 @@ impl Render for RoomCard {
         let message = notes.message.clone().filter(|_| self.host == Host::Map);
         let features = self.render_features(id, &features, &theme, cx);
         let walk = entity.clone();
-        div()
-            .debug_selector(|| "room-card".to_owned())
-            .flex()
-            .flex_col()
-            .gap_2()
+        card()
             .when(self.host == Host::Map, |card| {
                 card.child(
                     div()
@@ -956,7 +979,7 @@ impl Render for RoomCard {
                         ),
                 )
             })
-            .children(message.map(|message| status_line("map-message", message, theme.text_muted)))
+            .children(message.map(|text| status_line("card-message", text, theme.text_muted)))
             .child(section_label("NOTE", &theme))
             .child(note)
             .child(section_label("FEATURES", &theme))

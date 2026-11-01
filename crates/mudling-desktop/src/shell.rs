@@ -1594,11 +1594,12 @@ pub mod tests {
     };
     use mudling_core::defaults::aliases::AliasRule;
     use mudling_core::defaults::hud::Vital;
+    use mudling_core::map::MapChange;
     use mudling_core::persist;
     use mudling_core::plugin::Plugin;
     use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
     use mudling_core::session::SessionConfig;
-    use mudling_core::store::TerminalState;
+    use mudling_core::store::{Diff, Revision, TerminalState};
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
     use std::collections::BTreeMap;
@@ -2668,6 +2669,84 @@ pub mod tests {
             shell.submit("look", cx);
         });
         assert_eq!(played.heard_command(), "look");
+    }
+
+    /// Takes the room out of the notes' copy of the map, as a map that folds
+    /// a room away does.
+    fn remove_room_under_the_note(played: &mut Played<'_>, notes: &Entity<Notes>) {
+        let diff = Diff {
+            revision: Revision(1_000),
+            change: MapChange {
+                removed: vec![1],
+                ..MapChange::default()
+            },
+        };
+        notes.update_in(played.cx, |notes, window, cx| {
+            notes.apply(&diff, window, cx);
+        });
+        played.cx.run_until_parked();
+    }
+
+    fn typing_stays_in_a_note_when_its_room_leaves_the_map(host: Host, cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        let notes = played.shell.read_with(played.cx, |shell, _| shell.notes());
+        played.shell.update(played.cx, |shell, cx| {
+            shell.map.update(cx, |map, cx| map.go_to(1, cx));
+        });
+        played.cx.run_until_parked();
+        notes.update_in(played.cx, |notes, window, cx| {
+            notes.edit(NoteTarget::Room(1), host, window, cx);
+        });
+        played.cx.run_until_parked();
+        played.cx.simulate_input("a door");
+
+        remove_room_under_the_note(&mut played, &notes);
+
+        played.cx.simulate_input(" here");
+        played.cx.simulate_keystrokes("enter");
+        played.cx.simulate_input("quit");
+        played.cx.run_until_parked();
+        assert!(played.cx.debug_bounds("Done").is_some(), "still editing");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(
+                shell.input.read(cx).content(),
+                "",
+                "nothing went to the bar"
+            );
+            let typed = shell.notes.read(cx).editor().read(cx).content().to_owned();
+            assert!(typed.ends_with(": a door here\nquit"), "{typed:?}");
+        });
+    }
+
+    #[gpui::test]
+    fn typing_stays_in_a_room_panel_note_when_its_room_leaves_the_map(cx: &mut TestAppContext) {
+        typing_stays_in_a_note_when_its_room_leaves_the_map(Host::RoomPanel, cx);
+    }
+
+    #[gpui::test]
+    fn typing_stays_in_a_map_note_when_its_room_leaves_the_map(cx: &mut TestAppContext) {
+        typing_stays_in_a_note_when_its_room_leaves_the_map(Host::Map, cx);
+    }
+
+    #[gpui::test]
+    fn clicking_a_tab_or_the_cards_buttons_leaves_typing_with_the_bar(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.shell.update(played.cx, |shell, cx| {
+            shell.map.update(cx, |map, cx| map.go_to(1, cx));
+        });
+        played.cx.run_until_parked();
+
+        played.click("tab-Notes");
+        played.click("Walk to A hall");
+        played.click("Set Shop");
+        played.cx.run_until_parked();
+
+        played.cx.simulate_input("say hi there");
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.input.read(cx).content(), "say hi there");
+        });
     }
 
     #[gpui::test]
