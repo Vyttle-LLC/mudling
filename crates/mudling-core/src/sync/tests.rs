@@ -1128,11 +1128,13 @@ fn a_session_syncs_at_its_end_and_its_map_follows_a_merge() {
     )
     .unwrap();
     session.replay(hearth_recording());
-    wait_until(|| map_rooms(&session) > 0);
+    // The room the session opened with already shows on the map, so it's the
+    // database the replay's rooms wait on.
+    wait_until(|| world.mac.rooms().len() > 1);
     let played = world.mac.rooms();
     wait_until(|| {
         let pushed = |room: &String| remote_ever_held(&world.remote, room);
-        played.len() > 1 && played.iter().all(pushed)
+        played.iter().all(pushed)
     });
 
     // The other device deletes the room both hold.
