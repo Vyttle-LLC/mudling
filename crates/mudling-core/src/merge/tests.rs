@@ -1740,14 +1740,18 @@ fn join_on(device: &Device, kept: i64, retired: i64) -> Timestamp {
     now
 }
 
+/// `now` is taken first, as the session's is: before the rows are read, and
+/// so before the deletes the undo writes.
 fn undo_on(device: &Device, kept: i64, retired: i64, created: Timestamp) {
+    let now = Timestamp::now();
+    std::thread::sleep(std::time::Duration::from_millis(5));
     let reader = device.database.reader().unwrap();
     let rows = ServerRows::load(&reader).unwrap();
     let versions = reader.map_versions().unwrap();
     let version = versions.iter().find(|v| v.created == created).unwrap();
     let before = reader.map_version(version.id).unwrap();
     let id_time = (version.id, created);
-    let batch = undo_join(&rows, &before, (kept, retired), id_time, Timestamp::now()).unwrap();
+    let batch = undo_join(&rows, &before, (kept, retired), id_time, now).unwrap();
     device.writer.commit(batch).unwrap();
 }
 
@@ -2003,11 +2007,107 @@ fn joining_a_pair_again_after_an_undo_holds() {
     assert_same_maps(&mac, &ipad);
 }
 
+/// Undo leaves deletes on the kept room, later than the rows it puts back. A
+/// second join's rows are not what those deletes were about.
+#[test]
+fn a_second_join_keeps_what_the_first_undo_put_back() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(retired, "Beggars at night", T2));
+        batch.upsert(feature(retired, "fountain"));
+        batch.upsert(sighting(retired, "a beggar"));
+    });
+    let created = join_on(&mac, kept, retired);
+    undo_on(&mac, kept, retired, created);
+
+    join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+
+    for device in [&mac, &ipad] {
+        assert_eq!(features_of(device, kept), ["fountain"]);
+        assert_eq!(note_of(device, kept).as_deref(), Some("Beggars at night"));
+        assert_eq!(sightings_of(device, kept), ["a beggar"]);
+    }
+    assert_same_maps(&mac, &ipad);
+}
+
+#[test]
+fn a_row_the_kept_room_once_dropped_comes_over_from_the_retired_room() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(feature(retired, "shop"));
+        batch.upsert(feature(kept, "shop"));
+    });
+    mac.apply(|batch| {
+        batch.delete(Key::RoomFeature {
+            room_id: kept,
+            feature: "shop".to_owned(),
+        });
+    });
+
+    join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+
+    assert_eq!(features_of(&mac, kept), ["shop"]);
+    assert_same_maps(&mac, &ipad);
+}
+
+#[test]
+fn an_undo_takes_back_a_row_that_outlasted_an_old_delete() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(feature(retired, "shop"));
+        batch.upsert(feature(kept, "shop"));
+    });
+    mac.apply(|batch| {
+        batch.delete(Key::RoomFeature {
+            room_id: kept,
+            feature: "shop".to_owned(),
+        });
+    });
+    let created = join_on(&mac, kept, retired);
+    assert_eq!(features_of(&mac, kept), ["shop"]);
+
+    undo_on(&mac, kept, retired, created);
+    converge(&mac, &ipad);
+
+    assert_eq!(features_of(&mac, kept), Vec::<String>::new());
+    assert_eq!(features_of(&mac, retired), ["shop"]);
+    assert_same_maps(&mac, &ipad);
+}
+
+/// A delete since the join is the player's word about the room as it stands.
+#[test]
+fn a_delete_made_since_the_join_holds_against_a_late_copy() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(feature(retired, "shop"));
+    });
+    converge(&mac, &ipad);
+
+    join_on(&mac, kept, retired);
+    mac.apply(|batch| {
+        batch.delete(Key::RoomFeature {
+            room_id: kept,
+            feature: "shop".to_owned(),
+        });
+    });
+    // A change of its own, so this device merges rather than fast-forwards.
+    ipad.apply(|batch| {
+        batch.upsert(note(kept, "Written elsewhere", T3));
+    });
+    converge(&mac, &ipad);
+
+    assert_eq!(features_of(&ipad, kept), Vec::<String>::new());
+    assert_same_maps(&mac, &ipad);
+}
+
 #[test]
 fn a_restore_from_before_a_join_keeps_the_rooms_joined() {
     let (_folder, mac, ipad, kept, retired) = two_squares();
     mac.apply(|batch| {
         batch.upsert(note(retired, "Beggars at night", T2));
+        batch.upsert(sighting(retired, "a beggar"));
         batch.save_map_version("manual", "Before the join", T2);
     });
     join_on(&mac, kept, retired);
@@ -2019,16 +2119,19 @@ fn a_restore_from_before_a_join_keeps_the_rooms_joined() {
     let (rows, cancelled) = joins_over_version(reader.map_version(version).unwrap(), &meta);
     assert!(cancelled.is_empty());
     assert!(rows.rooms.iter().all(|room| room.id != retired));
+    let now = Timestamp::now();
     mac.apply(|batch| {
-        batch.restore_map_version(version, Timestamp::now());
+        batch.restore_map_version(version, now);
     });
-    let rejoin = rejoin_restored(ServerRows::load(&reader).unwrap());
+    let rejoin = rejoin_restored(ServerRows::load(&reader).unwrap(), now);
     mac.writer.commit(rejoin).unwrap();
 
     assert_eq!(copies_of(&mac, "Temple Square"), [kept]);
     assert_eq!(note_of(&mac, kept).as_deref(), Some("Beggars at night"));
+    assert_eq!(sightings_of(&mac, kept), ["a beggar"]);
     converge(&mac, &ipad);
     assert_eq!(copies_of(&ipad, "Temple Square"), [kept]);
+    assert_eq!(sightings_of(&ipad, kept), ["a beggar"]);
     assert_same_maps(&mac, &ipad);
 }
 

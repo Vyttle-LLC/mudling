@@ -697,7 +697,7 @@ impl Engine {
         }
         self.writer.commit(batch).map_err(say)?;
         let restored_rows = ServerRows::load(&reader).map_err(say)?;
-        let rejoin = merge::rejoin_restored(restored_rows);
+        let rejoin = merge::rejoin_restored(restored_rows, now);
         self.writer.commit(rejoin).map_err(say)?;
         let change = self.map.finish_restore(restored);
         self.map_changed = false;

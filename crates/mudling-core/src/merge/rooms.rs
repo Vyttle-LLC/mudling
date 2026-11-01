@@ -84,7 +84,8 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
 /// Moves what still hangs off a room the player joined to another. Tombstones
 /// take the record's time, not this merge's, so two devices merging at once
 /// write one file. A delete in the retired room stays there: moved with its
-/// room, it would take a row the kept room has of its own.
+/// room, it would take a row the kept room has of its own. And a delete in the
+/// kept room from before the join was about that room's row, not this one.
 fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows) {
     let mut joins = standing_joins(ours, theirs);
     let held = room_ids(ours).into_iter().chain(room_ids(theirs));
@@ -107,20 +108,19 @@ fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows) {
         })
         .collect::<Vec<_>>();
     let moves: BTreeMap<RoomId, RoomId> = joins.iter().map(|(id, (to, _))| (*id, *to)).collect();
-    let deleted: BTreeMap<Key, Timestamp> = ours
-        .tombstones
-        .iter()
-        .chain(&theirs.tombstones)
-        .map(|tombstone| (tombstone.key.clone(), tombstone.deleted))
-        .collect();
+    let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
+    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
+        let newest = deleted.entry(tombstone.key.clone()).or_default();
+        *newest = tombstone.deleted.max(*newest);
+    }
     for side in [&mut *ours, &mut *theirs] {
         let map = &mut side.map;
-        forget_deleted(&mut map.exits, &moves, &deleted);
-        forget_deleted(&mut map.links, &moves, &deleted);
-        forget_deleted(&mut map.doorways, &moves, &deleted);
-        forget_deleted(&mut map.notes, &moves, &deleted);
-        forget_deleted(&mut map.features, &moves, &deleted);
-        forget_deleted(&mut map.sightings, &moves, &deleted);
+        ready_to_move(&mut map.exits, &joins, &deleted);
+        ready_to_move(&mut map.links, &joins, &deleted);
+        ready_to_move(&mut map.doorways, &joins, &deleted);
+        ready_to_move(&mut map.notes, &joins, &deleted);
+        ready_to_move(&mut map.features, &joins, &deleted);
+        ready_to_move(&mut map.sightings, &joins, &deleted);
     }
     gather_notes(&mut ours.map, &mut theirs.map, &moves);
     repoint_rows(&mut ours.map, &moves);
@@ -169,18 +169,34 @@ fn standing_joins(ours: &ServerRows, theirs: &ServerRows) -> BTreeMap<RoomId, (R
         .collect()
 }
 
-/// Drops the rows in `retired` rooms that a tombstone of their own rules out.
-fn forget_deleted<T: Keyed>(
+/// Readies a retired room's rows to move: drops those a tombstone of their own
+/// rules out, and gives the rest the time of any delete at their new key from
+/// before the join, which they outrank as any later edit does. A delete at that
+/// key since the join still rules them out.
+fn ready_to_move<T: Keyed>(
     rows: &mut Vec<T>,
-    retired: &BTreeMap<RoomId, RoomId>,
+    joins: &BTreeMap<RoomId, (RoomId, Timestamp)>,
     deleted: &BTreeMap<Key, Timestamp>,
 ) {
-    let in_retired = |key: &Key| matches!(key, Key::Room(id) if retired.contains_key(id));
-    rows.retain(|row| {
-        !row.owners().iter().any(in_retired)
-            || deleted
-                .get(&row.key())
-                .is_none_or(|at| *at <= row.updated())
+    rows.retain_mut(|row| {
+        let room = row.owners().into_iter().next();
+        let join = room.and_then(|owner| match owner {
+            Key::Room(id) => joins.get(&id).map(|join| (id, *join)),
+            _ => None,
+        });
+        let Some((retired, (kept, at))) = join else {
+            return true;
+        };
+        let mut key = row.key();
+        if deleted.get(&key).is_some_and(|gone| *gone > row.updated()) {
+            return false;
+        }
+        repoint_key(&mut key, &BTreeMap::from([(retired, kept)]));
+        if let Some(gone) = deleted.get(&key).filter(|gone| **gone <= at) {
+            let updated = row.updated_mut();
+            *updated = (*updated).max(*gone);
+        }
+        true
     });
 }
 

@@ -17,6 +17,10 @@
 //! and what it holds for the retired room lands on the kept room. A version
 //! with the retired room but not the kept one has no room to join to, so the
 //! record goes and the retired room is a room again.
+//!
+//! A join's record is never older than a delete this device knows of, however
+//! its clock stands, so what it moves outranks every delete from before it.
+//! `rooms.rs` lets a delete made since the join rule a moved row out.
 
 use super::follow_current_room;
 use super::records::merge_server;
@@ -87,12 +91,19 @@ pub(crate) fn join_rooms(
         updated: now,
     });
     let mut local = rows.clone();
+    let at = past_deletes(rows, now);
     local.meta.retain(|row| row.key != joined_key(retired));
-    local.meta.push(join_row((kept, retired), now));
+    local.meta.push(join_row((kept, retired), at));
     batch.extend(carried(local, &[retired], &[kept]));
     let moves = RoomMoves::from([(retired, Some(kept))]);
     follow_current_room(reader, &moves, &mut batch).map_err(|error| error.to_string())?;
     Ok((batch, label))
+}
+
+/// `now`, or the newest delete in `rows` if that's later.
+fn past_deletes(rows: &ServerRows, now: Timestamp) -> Timestamp {
+    let deletes = rows.tombstones.iter().map(|tombstone| tombstone.deleted);
+    deletes.fold(now, Timestamp::max)
 }
 
 fn join_row((kept, retired): RoomPair, updated: Timestamp) -> Meta {
@@ -112,21 +123,24 @@ pub(crate) fn undo_join(
     (version_id, created): (i64, Timestamp),
     now: Timestamp,
 ) -> Result<Batch, String> {
-    let standing = rows
-        .meta
-        .iter()
-        .any(|row| row.key == joined_key(retired) && row.value == kept.to_string());
+    let standing = (rows.meta.iter())
+        .find(|row| row.key == joined_key(retired) && row.value == kept.to_string());
     let holds = |id: RoomId| rows.map.rooms.iter().any(|room| room.id == id);
-    if !standing || holds(retired) {
+    let Some(record) = standing.filter(|_| !holds(retired)) else {
         return Err("that join has been undone already".to_owned());
-    }
+    };
     if !holds(kept) {
         return Err("that room has since been joined to another: undo that first".to_owned());
     }
     let ids = [kept, retired];
+    // The join as it ran, with the deletes it saw: not one made since.
     let view = ServerRows {
         map: before.clone(),
-        meta: vec![join_row((kept, retired), created)],
+        meta: vec![record.clone()],
+        tombstones: (rows.tombstones.iter())
+            .filter(|tombstone| tombstone.deleted <= record.updated)
+            .cloned()
+            .collect(),
         ..ServerRows::default()
     };
     let joined = about(&merge_server(view.clone(), view).map, &ids);
@@ -284,8 +298,10 @@ fn void_keys(void: &[RoomId]) -> Vec<Key> {
 }
 
 /// What moves the rooms a restore just brought back onto the rooms that hold
-/// them now. Nothing, if it brought none back.
-pub(crate) fn rejoin_restored(rows: ServerRows) -> Batch {
+/// them now. Nothing, if it brought none back. Their records take the
+/// restore's time, since the deletes it just wrote are from before they move.
+pub(crate) fn rejoin_restored(mut rows: ServerRows, now: Timestamp) -> Batch {
+    let at = past_deletes(&rows, now);
     let held: HashSet<RoomId> = rows.map.rooms.iter().map(|room| room.id).collect();
     let joins = joins_in(&rows.meta);
     let back: Vec<(RoomId, RoomId)> = (joins.into_iter())
@@ -296,5 +312,10 @@ pub(crate) fn rejoin_restored(rows: ServerRows) -> Batch {
     }
     let retired: Vec<RoomId> = back.iter().map(|(retired, _)| *retired).collect();
     let kept: Vec<RoomId> = back.iter().map(|(_, kept)| *kept).collect();
+    for row in &mut rows.meta {
+        if retired.iter().any(|id| row.key == joined_key(*id)) {
+            row.updated = at;
+        }
+    }
     carried(rows, &retired, &kept)
 }
