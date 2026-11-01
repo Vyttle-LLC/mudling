@@ -3,6 +3,7 @@
 
 use mudling_core::ansi::{Color, Span, Style};
 use mudling_core::line::{Encoding, Line, LinePipeline};
+use mudling_core::plugin::inspect::Clocked;
 use mudling_core::plugin::points::{Keywords, LoginReply, RoomIdentity};
 use mudling_core::plugin::{
     Layer, MapSignal, PendingKind, Plugin, PluginError, PluginEvent, PluginHost, PluginId, Point,
@@ -10,6 +11,7 @@ use mudling_core::plugin::{
 };
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Built from components, so paths compare equal on every OS.
@@ -632,6 +634,54 @@ fn each_enabled_plugin_s_cost_is_sampled() {
         (0, None),
         "off, so not timed"
     );
+}
+
+#[test]
+fn the_whole_read_of_a_sampled_line_is_timed_with_every_plugin_at_once() {
+    let mut host = PluginHost::new([testland(), defaults()]).unwrap();
+    assert_eq!(host.line_cost(), None, "nothing sampled yet");
+    host.set_cost_sampling(2);
+    for _ in 0..10 {
+        events(&mut host, "Ana says 'hi'");
+    }
+    let cost = host.line_cost().unwrap();
+    assert_eq!(cost.samples, 5);
+    assert!(cost.max_us > 0.0);
+}
+
+#[test]
+fn the_inspector_s_clock_names_who_claimed_a_line_and_how() {
+    let text = "[[pattern]]\nname = \"said\"\npattern = '''says'''\n\n\
+        [[color]]\npattern = '''glows'''\nfg = 1\n";
+    let tiny = plugin(&[
+        ("plugin.toml", &with("[points]\ntext = \"text.toml\"\n")),
+        ("text.toml", text),
+    ])
+    .unwrap();
+    let mut host = PluginHost::new([tiny]).unwrap();
+    let mut read = |text: &str| {
+        let mut sent = Vec::new();
+        let mut clocked = Clocked::new(&mut sent);
+        host.read_line(&line(text), &mut clocked);
+        (clocked.into_claims(), sent.len())
+    };
+
+    let (claims, sent) = read("Ana says hello");
+    assert_eq!(sent, 1, "the event still reaches the real sink");
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].plugin, id("tiny"));
+    assert_eq!(claims[0].events, [Arc::from("said")]);
+
+    let (claims, sent) = read("It glows");
+    assert_eq!(sent, 0);
+    assert_eq!(claims.len(), 1, "coloring a line claims it");
+    assert!(claims[0].events.is_empty());
+
+    let (claims, _) = read("Ana says it glows");
+    assert_eq!(claims.len(), 1, "one claim, however many of its rules");
+    assert_eq!(claims[0].events, [Arc::from("said")]);
+
+    assert_eq!(read("Nothing here").0, []);
 }
 
 #[test]

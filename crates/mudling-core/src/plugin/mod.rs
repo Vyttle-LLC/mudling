@@ -8,6 +8,7 @@
 //! a table. It delivers matches to a [`PluginSink`] as [`PluginEvent`]s.
 
 mod host;
+pub mod inspect;
 pub mod luau;
 pub mod manifest;
 mod matcher;

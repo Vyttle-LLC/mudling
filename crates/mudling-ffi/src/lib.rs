@@ -7,9 +7,9 @@
 use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, CuesState, Diff, GearState, ItemsState, MapState, MobsState, RoomState,
-    RulesState, SettingsState, SheetState, Store, StoreHub, StoreKind, SyncState, TargetState,
-    TerminalChange, TerminalState, Versioned, VitalsState,
+    CharactersState, CuesState, Diff, GearState, InspectorState, ItemsState, MapState, MobsState,
+    RoomState, RulesState, SettingsState, SheetState, Store, StoreHub, StoreKind, SyncState,
+    TargetState, TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -34,6 +34,7 @@ pub enum StoreKind {
     Sync,
     Rules,
     Cues,
+    Inspector,
 }
 
 /// Told when changes are waiting, at most once per drained batch. It's
@@ -119,6 +120,7 @@ impl Session {
             sync,
             rules,
             cues,
+            inspector,
         } = batch;
         [
             terminal.map(TerminalState::diff),
@@ -135,6 +137,7 @@ impl Session {
             sync.map(SyncState::diff),
             rules.map(RulesState::diff),
             cues.map(CuesState::diff),
+            inspector.map(InspectorState::diff),
         ]
         .into_iter()
         .flatten()
@@ -207,6 +210,10 @@ macro_rules! with_store {
             }
             StoreKind::Cues => {
                 type $S = CuesState;
+                $body
+            }
+            StoreKind::Inspector => {
+                type $S = InspectorState;
                 $body
             }
         }
@@ -420,6 +427,29 @@ impl Bridged for CuesState {
 
     fn diff(diff: Diff<Self>) -> StoreDiff {
         let fields = HashMap::from([("sounds".to_owned(), diff.change.join("\n"))]);
+        StoreDiff::Fields {
+            store: Self::KIND,
+            revision: diff.revision.0,
+            fields,
+        }
+    }
+}
+
+/// The inspector has no screen on iOS yet, so only its size crosses.
+impl Bridged for InspectorState {
+    fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
+        StoreSnapshot::Fields {
+            store: Self::KIND,
+            revision: versioned.revision().0,
+            fields: HashMap::from([(
+                "lines".to_owned(),
+                versioned.value().lines.len().to_string(),
+            )]),
+        }
+    }
+
+    fn diff(diff: Diff<Self>) -> StoreDiff {
+        let fields = HashMap::from([("lines".to_owned(), diff.change.lines.len().to_string())]);
         StoreDiff::Fields {
             store: Self::KIND,
             revision: diff.revision.0,
