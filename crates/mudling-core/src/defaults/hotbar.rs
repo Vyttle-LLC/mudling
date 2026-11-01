@@ -5,7 +5,7 @@ use super::commands::CHAIN_SEPARATOR;
 use crate::persist::{Meta, Timestamp};
 
 /// The `meta` key a server's chips are kept under, as a JSON list.
-const HOTBAR_META: &str = "hotbar.chips";
+pub(crate) const HOTBAR_META: &str = "hotbar.chips";
 
 /// Adds `typed` as a chip, each line a chained command. Returns whether it
 /// went on: not when blank, or when it's there already.

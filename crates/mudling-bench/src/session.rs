@@ -7,6 +7,8 @@
 //!
 //! - **Whole line:** each source line as one read, with `Char.Vitals` and a
 //!   prompt every few lines, as a game sends them.
+//! - **With logging:** the same lines with both logs on, as the disk's speed
+//!   mustn't reach play.
 //! - **One more plugin:** two sessions read each line in turn, one with the
 //!   last game plugin and one without; the gate is the difference in their
 //!   p99s. Its hooks run and its Map rules read every line, as in play.
@@ -24,6 +26,7 @@
 use crate::plugin_host::PLUGIN_BUDGET_US;
 use crate::{HEAP_BYTES, heap_mb, verdict};
 use mudling_core::defaults::triggers::{Highlight, TriggerRule};
+use mudling_core::logs::{LogSettings, Logs};
 use mudling_core::map::Mark;
 use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::{Layer, Plugin};
@@ -69,6 +72,9 @@ pub struct Report {
     /// held to the same budget. A name of its own: `whole_line` is the
     /// workload the base measures, which `compare` reads it against.
     pub whole_line_200_triggers: Summary,
+    /// The same lines with the debug and chat logs both on, held to the same
+    /// budget.
+    pub whole_line_logging: Summary,
     pub without_game_plugin: Summary,
     pub with_game_plugin: Summary,
     pub one_more_plugin_p99_us: f64,
@@ -96,8 +102,13 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         .map(|(index, line)| read(index, line))
         .collect();
 
-    let whole_line = measure_lines(&reads, plugins, &[]);
-    let whole_line_200_triggers = measure_lines(&reads, plugins, &player_triggers(source));
+    let whole_line = measure_lines(Bench::new(plugins.to_vec()), &reads, &[]);
+    let whole_line_200_triggers = measure_lines(
+        Bench::new(plugins.to_vec()),
+        &reads,
+        &player_triggers(source),
+    );
+    let whole_line_logging = measure_lines(Bench::logging(plugins.to_vec()), &reads, &[]);
     let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads, plugins);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
     let Moves {
@@ -111,6 +122,7 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         lines: count,
         within_budget: whole_line.p99_us <= LINE_BUDGET_US
             && whole_line_200_triggers.p99_us <= LINE_BUDGET_US
+            && whole_line_logging.p99_us <= LINE_BUDGET_US
             && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
             && mapping.p99_us <= MOVE_BUDGET_US
             && wandering.p99_us <= MOVE_BUDGET_US
@@ -119,6 +131,7 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
             && cold_start.p99_us <= COLD_START_BUDGET_US,
         whole_line,
         whole_line_200_triggers,
+        whole_line_logging,
         without_game_plugin,
         with_game_plugin,
         one_more_plugin_p99_us,
@@ -152,6 +165,12 @@ pub fn print(report: &Report) {
         report.whole_line_200_triggers,
         report.line_budget_us,
         verdict(report.whole_line_200_triggers.p99_us <= report.line_budget_us)
+    );
+    println!(
+        "  whole line, both logs on: {}; budget p99 ≤ {} µs: {}",
+        report.whole_line_logging,
+        report.line_budget_us,
+        verdict(report.whole_line_logging.p99_us <= report.line_budget_us)
     );
     println!(
         "  one more plugin: {} without, {} with; +{:.2} µs p99; budget ≤ {} µs: {}",
@@ -289,6 +308,20 @@ impl Bench {
         Bench::on(folder, plugins)
     }
 
+    /// A session keeping both logs.
+    pub fn logging(plugins: Vec<Plugin>) -> Bench {
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        let mut settings = LogSettings {
+            debug: true,
+            ..LogSettings::default()
+        };
+        settings.set_chat(HOST, true);
+        Logs::in_data_folder(folder.path())
+            .save_settings(&settings)
+            .expect("the settings save");
+        Bench::on(folder, plugins)
+    }
+
     /// A session on `folder`, which may hold what an earlier one saved.
     fn on(folder: tempfile::TempDir, plugins: Vec<Plugin>) -> Bench {
         let hub = Arc::new(StoreHub::new(|| {}));
@@ -361,8 +394,7 @@ fn save_marks(folder: &Path, marks: i64) {
     writer.flush().expect("the marks reach the disk");
 }
 
-fn measure_lines(reads: &[Bytes], plugins: &[Plugin], triggers: &[TriggerRule]) -> Summary {
-    let mut bench = Bench::new(plugins.to_vec());
+fn measure_lines(mut bench: Bench, reads: &[Bytes], triggers: &[TriggerRule]) -> Summary {
     for trigger in triggers {
         let edit = RuleEdit::SaveTrigger(trigger.clone());
         bench.engine.edit(edit, Timestamp(0));

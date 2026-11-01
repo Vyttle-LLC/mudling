@@ -11,10 +11,14 @@
 use crate::dock::{Side, Slot};
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
+use crate::map_view::harness::duplicated_map;
+use crate::measure;
+use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{App, AsyncApp, Context, Entity, Window, px};
-use mudling_core::persist;
+use mudling_core::logs::{Kind, LogFile};
+use mudling_core::persist::{self, Timestamp};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -212,13 +216,14 @@ const PROBE_LINES: [&str; 2] = [
 ];
 
 /// What a screen reader must find in the open settings sheet.
-const SETTINGS_CONTROLS: [&str; 13] = [
+const SETTINGS_CONTROLS: [&str; 14] = [
     "Servers & characters",
     "Plugins",
     "Triggers & aliases",
     "Appearance",
     "Shortcuts",
     "Data & sync",
+    "Logs",
     "Vault",
     "Close settings",
     "Theme",
@@ -227,6 +232,46 @@ const SETTINGS_CONTROLS: [&str; 13] = [
     "Floating card",
     "Show prompt lines",
 ];
+
+/// The server the Logs section's sample log is for.
+const LOG_SERVER: &str = "mud.example";
+/// What a screen reader must find in the Logs section with one chat log kept.
+const LOGS_CONTROLS: [&str; 5] = [
+    "Keep debug logs, on",
+    "Keep chat logs for mud.example, on",
+    "Clear chat logs",
+    "Pin chat log of mud.example, 2026-03-01 00:04",
+    "Export chat log of mud.example, 2026-03-01 00:04",
+];
+
+/// A log to show, with no file behind it: the check clicks nothing.
+fn sample_log() -> LogFile {
+    LogFile {
+        kind: Kind::Chat,
+        path: "sample.log".into(),
+        server: LOG_SERVER.to_owned(),
+        started: Timestamp(1_772_323_440_000),
+        bytes: 2_500_000,
+        pinned: false,
+        live: false,
+    }
+}
+/// What a screen reader must find in Data & sync, filled with made-up rows.
+const DATA_CONTROLS: [&str; 3] = ["Sync now", "Hide history", "Stop syncing"];
+/// Text Data & sync shows, read from its nodes' values.
+const DATA_TEXT: [&str; 3] = ["ssh-agent", "Last synced", "Never synced"];
+/// What a screen reader must find in Vault, filled with made-up rows.
+const VAULT_CONTROLS: [&str; 7] = [
+    "Reveal the password for Sample on mud.example",
+    "Change the password for Sample on mud.example",
+    "Add a password",
+    "Lock the vault after",
+    "Lock now",
+    "Change master password",
+    "Enter the old master password",
+];
+/// Typed into a masked field, and must reach no node. Made up for this check.
+const TYPED_SECRET: &str = "ax-check typed secret";
 
 /// The HUD's meters, by name, with a value each must read as.
 const HUD_METERS: [(&str, &str); 4] = [
@@ -346,6 +391,21 @@ const MAP_HISTORY_CONTROLS: [&str; 3] = [
     "Restore the map from Today, 11:42, 14 rooms",
 ];
 const KEEP_THE_MAP: &str = "Keep this map";
+/// The map the join checks tidy up.
+const SAMPLE_SIDE: i64 = 6;
+const SAMPLE_REPEAT: i64 = 3;
+const SAMPLE_ROOM: i64 = (1 << 40) + 7;
+const REVIEW_CONTROLS: [&str; 4] = [
+    "Skip this pair",
+    "Not the same",
+    "Join these rooms",
+    "Close Review",
+];
+const PICK_CONTROLS: [&str; 3] = [
+    "Join the rooms picked",
+    "Clear the rooms picked",
+    "Pick Square 1, 1 to join",
+];
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// The Character tab on its sample, by accessibility role and name.
 const CHARACTER_CONTROLS: [(&str, &str); 2] = [
@@ -1017,6 +1077,118 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
 
         in_window(
+            &|shell, _, cx| {
+                shell.show_sample_map(&duplicated_map(SAMPLE_SIDE, SAMPLE_REPEAT), SAMPLE_ROOM, cx);
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.find_duplicates_now(cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = |names: &[&'static str], tree: &Option<AxElement>| -> Vec<&'static str> {
+            let shown = |name: &&str| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref()
+                    .is_some_and(|tree| !tree.find(named).is_empty())
+            };
+            names.iter().filter(|name| !shown(name)).copied().collect()
+        };
+        let unnamed = missing(&["Review duplicates"], &tree);
+        checks.push(Check {
+            name: "the line above the map has a named way into Review",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let says_duplicates = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| {
+                    (text.as_deref()).is_some_and(|t| t.contains("look like duplicates"))
+                };
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+        });
+        checks.push(Check {
+            name: "the line above the map is a status a screen reader hears",
+            passed: says_duplicates.len() == 1,
+            detail: format!("{} element(s)", says_duplicates.len()),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.review_sample(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&REVIEW_CONTROLS, &tree);
+        checks.push(Check {
+            name: "Review names its buttons, and a way to close it",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let copies = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let copy = |t: &String| t.starts_with("First copy") || t.starts_with("Second copy");
+                e.title.as_ref().is_some_and(copy)
+            })
+        });
+        checks.push(Check {
+            name: "Review names both copies",
+            passed: copies.len() == 2,
+            detail: format!("{} element(s)", copies.len()),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "Review takes focus, on its first button",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == REVIEW_CONTROLS[0]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(&|_, window, cx| window.focus_next(cx), cx);
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the next tab stop in Review is Not the same",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == REVIEW_CONTROLS[1]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map().update(cx, |map, cx| {
+                    map.close_review(window, cx);
+                    map.pick_sample(cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&PICK_CONTROLS, &tree);
+        checks.push(Check {
+            name: "picking rooms names Join and Clear, and the room's own button",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let picked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| text.as_deref() == Some("2 rooms picked");
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+        });
+        checks.push(Check {
+            name: "what's picked is a status a screen reader hears",
+            passed: picked.len() == 1,
+            detail: format!("{} element(s)", picked.len()),
+        });
+
+        in_window(
             &|shell, window, cx| {
                 shell.open_find(window, cx);
                 chat.update(cx, |chat, cx| chat.type_in_find(FIND_PROBE, window, cx));
@@ -1086,6 +1258,101 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("{accesskit_focus:?}"),
         });
 
+        let on_logs = in_window(
+            &|shell, _, cx| {
+                shell.show_sample_logs(LOG_SERVER, sample_log(), cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing: Vec<_> = LOGS_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the Logs section names its switches, pin, export and clear",
+            passed: on_logs.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+
+        let named_in = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
+            let unnamed = |name: &&'static str| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            };
+            names.iter().copied().filter(unnamed).collect()
+        };
+        let opened = in_window(
+            &|shell, window, cx| measure::open_sample_section(shell, Section::Data, window, cx),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &DATA_CONTROLS);
+        checks.push(Check {
+            name: "Data & sync names its controls",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        let unread: Vec<_> = DATA_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "Data & sync's text reaches the tree",
+            passed: unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
+        });
+
+        let opened = in_window(
+            &|shell, window, cx| {
+                measure::open_sample_section(shell, Section::Vault, window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &VAULT_CONTROLS);
+        checks.push(Check {
+            name: "Vault names its controls",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+
+        in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.type_sample_password(TYPED_SECRET, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let masked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.subrole.as_deref() == Some("AXSecureTextField"))
+        });
+        let leaks = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                [&e.title, &e.value]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| text.contains(TYPED_SECRET))
+            })
+        });
+        checks.push(Check {
+            name: "a masked field reaches the tree as a mask and nothing else does",
+            passed: !masked.is_empty() && leaks.is_empty(),
+            detail: format!("{} masked, {} leaks", masked.len(), leaks.len()),
+        });
+
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");
         persist::save_server(sample_data.path(), SAMPLE_SERVER, 4000)
@@ -1103,14 +1370,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let named_here = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
-            let unnamed = |name: &&'static str| {
-                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
-                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
-            };
-            names.iter().copied().filter(unnamed).collect()
-        };
-        let missing = named_here(&tree, &EMPTY_STATE_CONTROLS);
+        let missing = named_in(&tree, &EMPTY_STATE_CONTROLS);
         checks.push(Check {
             name: "the empty state names its cards and controls",
             passed: reached_empty_state.is_some() && missing.is_empty(),
@@ -1152,7 +1412,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let missing = named_here(&tree, &ADD_FORM_CONTROLS);
+        let missing = named_in(&tree, &ADD_FORM_CONTROLS);
         checks.push(Check {
             name: "the Add form names its field and buttons",
             passed: missing.is_empty(),

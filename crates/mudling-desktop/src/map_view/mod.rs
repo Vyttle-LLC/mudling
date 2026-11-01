@@ -10,6 +10,7 @@
 
 mod camera;
 pub mod harness;
+mod join;
 mod model;
 mod paint;
 mod sheet;
@@ -18,16 +19,21 @@ use crate::assets::HEADING_FONT;
 use crate::map_history;
 use crate::theme::{MapColors, Theme};
 use gpui::{
-    AnyView, Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels, Point, Render,
-    ScrollDelta, ScrollEvent, StyleRefinement, Window, canvas, div, point, prelude::*, px,
+    AnyView, Bounds, Context, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels,
+    Point, Render, ScrollDelta, ScrollEvent, StyleRefinement, Window, canvas, div, point,
+    prelude::*, px,
 };
+pub use join::{PickRoom, bind_keys};
+use model::ScanStep;
 pub use model::{MapModel, Selection, Walk};
 use mudling_core::map::RoomId;
+use mudling_core::session::MapEdit;
 use mudling_core::store::{Diff, MapState, Versioned};
 pub use sheet::Pip;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Instant;
 
 /// A press that moves further than this is a drag, not a click.
 const CLICK_SLOP: f32 = 4.;
@@ -59,10 +65,21 @@ pub struct MapView {
     below: Option<AnyView>,
     /// What's shown of the selected room.
     card: Option<AnyView>,
+    review_button: FocusHandle,
+    review_first: FocusHandle,
+    join_button: FocusHandle,
+    undo_button: FocusHandle,
+    /// Review was open at the last draw, so a join may just have ended it.
+    review_open: bool,
+    /// A timer will ask about duplicates again.
+    scan_waiting: bool,
 }
 
 /// Sent when a room is selected, and again when its walk is known.
 impl EventEmitter<Selection> for MapView {}
+
+/// Sent for a shell to hand the session: joins and answers about duplicates.
+impl EventEmitter<MapEdit> for MapView {}
 
 impl MapView {
     pub fn new(
@@ -77,6 +94,12 @@ impl MapView {
             bounds: Rc::default(),
             below: None,
             card: None,
+            review_button: cx.focus_handle().tab_stop(true),
+            review_first: cx.focus_handle().tab_stop(true),
+            join_button: cx.focus_handle().tab_stop(true),
+            undo_button: cx.focus_handle().tab_stop(true),
+            review_open: false,
+            scan_waiting: false,
         };
         view.start_work(cx);
         view
@@ -133,6 +156,40 @@ impl MapView {
             })
             .detach();
         }
+        if self.layout == MapLayout::Panel && !self.scan_waiting {
+            self.look_for_duplicates(cx);
+        }
+    }
+
+    /// Off the UI thread, and not on every change: see [`MapModel::scan_step`].
+    fn look_for_duplicates(&mut self, cx: &mut Context<MapView>) {
+        match self.model.scan_step(Instant::now()) {
+            ScanStep::Nothing => {}
+            ScanStep::Run(job) => {
+                let found = cx.background_spawn(async move { job.run() });
+                cx.spawn(async move |view, cx| {
+                    let found = found.await;
+                    view.update(cx, |view, cx| {
+                        view.model.finish_scan(found, Instant::now());
+                        view.start_work(cx);
+                        cx.notify();
+                    })
+                })
+                .detach();
+            }
+            ScanStep::WaitFor(wait) => {
+                self.scan_waiting = true;
+                let timer = cx.background_executor().timer(wait);
+                cx.spawn(async move |view, cx| {
+                    timer.await;
+                    view.update(cx, |view, cx| {
+                        view.scan_waiting = false;
+                        view.start_work(cx);
+                    })
+                })
+                .detach();
+            }
+        }
     }
 
     fn view_size(&self) -> (f32, f32) {
@@ -173,7 +230,9 @@ impl MapView {
             return;
         }
         let point = self.in_view(event.position);
-        if self.model.click(point, self.view_size()).is_some() {
+        if event.modifiers.shift && self.model.pick_at(point, self.view_size()) {
+            cx.notify();
+        } else if self.model.click(point, self.view_size()).is_some() {
             if let Some(selection) = self.model.selection().cloned() {
                 cx.emit(selection);
             }
@@ -211,6 +270,7 @@ impl MapView {
     }
 
     fn map_surface(&self, colors: MapColors, cx: &mut Context<MapView>) -> impl IntoElement {
+        let theme = *cx.global::<Theme>();
         let model = &self.model;
         let scene = paint::Scene {
             sheet: model.sheet().clone(),
@@ -219,6 +279,10 @@ impl MapView {
             selected: model
                 .selection()
                 .and_then(|selection| model.sheet().square_of(selection.room)),
+            marked: model.marked().clone(),
+            picked: (model.picks().iter())
+                .filter_map(|room| model.sheet().square_of(*room))
+                .collect(),
             colors,
         };
         let bounds = self.bounds.clone();
@@ -252,7 +316,8 @@ impl MapView {
                 )
                 .on_scroll(cx.listener(Self::scrolled))
                 .on_pinch(cx.listener(Self::pinched))
-                .child(self.legend(colors, cx)),
+                .child(self.legend(colors, cx))
+                .children(self.pill(&theme, cx)),
         }
     }
 
@@ -436,8 +501,13 @@ fn chevron(up: bool, color: Hsla) -> impl IntoElement {
 }
 
 impl Render for MapView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<MapView>) -> impl IntoElement {
-        let colors = cx.global::<Theme>().map;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<MapView>) -> impl IntoElement {
+        self.keep_focus(window, cx);
+        let theme = *cx.global::<Theme>();
+        let colors = theme.map;
+        let review = self.model.review_pair();
+        let selected = self.model.selection().map(|selection| selection.room);
+        let card_shown = selected.is_some() && review.is_none();
         match self.layout {
             MapLayout::Inset => div().size_full().child(self.map_surface(colors, cx)),
             MapLayout::Panel => div()
@@ -445,13 +515,18 @@ impl Render for MapView {
                 .flex()
                 .flex_col()
                 .child(self.header(colors, cx))
+                .children(self.duplicates_line(&theme, cx))
                 .child(
                     div()
                         .debug_selector(|| "map-surface".to_owned())
                         .flex_1()
                         .min_h(MIN_SURFACE)
-                        .child(self.map_surface(colors, cx)),
+                        .map(|slot| match review {
+                            Some(pair) => slot.child(self.review_pane(pair, &theme, cx)),
+                            None => slot.child(self.map_surface(colors, cx)),
+                        }),
                 )
+                .children(selected.and_then(|room| self.room_actions(room, &theme, cx)))
                 // In a short window this scrolls, and the map keeps its share.
                 .child(
                     div()
@@ -459,7 +534,7 @@ impl Render for MapView {
                         .debug_selector(|| "map-below".to_owned())
                         .min_h_0()
                         .overflow_y_scroll()
-                        .when(self.model.selection().is_some(), |below| {
+                        .when(card_shown, |below| {
                             below.children(
                                 self.card
                                     .clone()
@@ -483,8 +558,15 @@ impl Render for MapView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map_view::harness::{grid_map, versioned};
-    use gpui::{Modifiers, TestAppContext, WindowAppearance};
+    use crate::map_view::harness::{duplicated_map, grid_map, room, store_of, versioned};
+    use gpui::{
+        Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
+        WindowAppearance,
+    };
+    use mudling_core::map::{Building, Direction, JoinDone, LastJoin, MapChange, MapDoor};
+    use mudling_core::persist::Timestamp;
+    use mudling_core::store::Revision;
+    use std::cell::RefCell;
 
     #[gpui::test]
     fn clicking_a_room_selects_it_and_finds_the_walk(cx: &mut TestAppContext) {
@@ -507,6 +589,359 @@ mod tests {
             panic!("the grid is linked");
         };
         assert_eq!(steps.len(), 3);
+    }
+
+    fn heard_edits(
+        view: &Entity<MapView>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Vec<MapEdit>>> {
+        let heard: Rc<RefCell<Vec<MapEdit>>> = Rc::default();
+        let log = heard.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(view, move |_, edit: &MapEdit, _| {
+                log.borrow_mut().push(edit.clone());
+            })
+            .detach();
+        });
+        heard
+    }
+
+    /// A view of `map`, with the look for duplicates it started still to run.
+    fn unscanned_view(
+        map: MapState,
+        cx: &mut TestAppContext,
+    ) -> (Entity<MapView>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(WindowAppearance::Dark));
+            crate::bind_keys(cx);
+        });
+        cx.add_window_view(|_, cx| MapView::new(versioned(map), MapLayout::Panel, cx))
+    }
+
+    fn duplicated_view(cx: &mut TestAppContext) -> (Entity<MapView>, &mut VisualTestContext) {
+        let (view, cx) = unscanned_view(duplicated_map(9, 3), cx);
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    /// Enter activates a focused control when it's let go.
+    fn press_enter(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+    }
+
+    fn click_on(name: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds(name);
+        let bounds = bounds.unwrap_or_else(|| panic!("{name} is on show"));
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// The session's answer, as it comes through the map store.
+    fn answer(
+        view: &Entity<MapView>,
+        attempt: u64,
+        outcome: Result<JoinDone, String>,
+        cx: &mut VisualTestContext,
+    ) {
+        let diff = Diff {
+            revision: Revision(attempt + 1),
+            change: MapChange {
+                last_join: Some(LastJoin { attempt, outcome }),
+                ..MapChange::default()
+            },
+        };
+        view.update(cx, |view, cx| view.apply(&diff, cx));
+        cx.run_until_parked();
+    }
+
+    fn joined() -> Result<JoinDone, String> {
+        Ok(JoinDone::Joined {
+            label: "Joined two copies of a square".to_owned(),
+            created: Timestamp(5),
+        })
+    }
+
+    fn pick_two_by_keyboard(view: &Entity<MapView>, cx: &mut VisualTestContext) {
+        let first = view.read_with(cx, |view, _| view.model.first_room());
+        for room in [first, first + 1] {
+            view.update(cx, |view, cx| view.go_to(room, cx));
+            cx.run_until_parked();
+            view.update_in(cx, |view, window, cx| view.pick_selected(window, cx));
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn the_finder_runs_by_itself_and_never_joins_anything(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
+        let heard: Rc<RefCell<Vec<MapEdit>>> = Rc::default();
+        let log = heard.clone();
+        // Listening from before the view exists: its first look starts in `new`.
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            cx.subscribe_self(move |_, edit: &MapEdit, _| log.borrow_mut().push(edit.clone()))
+                .detach();
+            MapView::new(versioned(duplicated_map(9, 3)), MapLayout::Panel, cx)
+        });
+
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, _| {
+            assert!(!view.model.duplicates().pairs.is_empty());
+        });
+        assert!(heard.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn shift_clicking_where_no_room_can_be_picked_clicks_as_before(cx: &mut TestAppContext) {
+        let mut street = room(1, 0, 0);
+        street.links.insert(Direction::East, 20);
+        let mut hall = room(20, 7, 7);
+        hall.building = Some(20);
+        let keep = Building {
+            id: 20,
+            doors: vec![MapDoor {
+                outside: 1,
+                direction: Direction::East,
+                inside: 20,
+            }],
+            footprint: None,
+        };
+        let (view, cx) = unscanned_view(store_of(vec![street, hall], vec![keep]), cx);
+        cx.run_until_parked();
+        let (bounds, camera) =
+            view.read_with(cx, |view, _| (view.bounds.get(), view.model.camera()));
+        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let (x, y) = camera.to_view((1., 0.), size);
+
+        cx.simulate_click(bounds.origin + point(px(x), px(y)), Modifiers::shift());
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, _| {
+            assert!(view.model.building_name().is_some(), "the house opened");
+            assert!(view.model.picks().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn shift_clicking_a_second_room_and_join_tells_the_session(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let heard = heard_edits(&view, cx);
+        let (bounds, camera) =
+            view.read_with(cx, |view, _| (view.bounds.get(), view.model.camera()));
+        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let at = |square| {
+            let (x, y) = camera.to_view(square, size);
+            bounds.origin + point(px(x), px(y))
+        };
+        cx.simulate_click(at((2., 1.)), Modifiers::none());
+        cx.simulate_click(at((3., 1.)), Modifiers::shift());
+        cx.run_until_parked();
+        let pair = view.read_with(cx, |view, _| view.model.picked_pair());
+        let pair = pair.expect("Shift-click picks both rooms");
+
+        let join = cx.debug_bounds("Join the rooms picked");
+        let join = join.expect("the pill offers Join");
+        cx.simulate_click(join.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            *heard.borrow(),
+            [MapEdit::Join {
+                first: pair.0,
+                second: pair.1
+            }]
+        );
+        view.read_with(cx, |view, _| assert!(view.model.picks().is_empty()));
+    }
+
+    #[gpui::test]
+    fn the_keyboard_opens_review_answers_and_closes_it(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let heard = heard_edits(&view, cx);
+        let review = cx.debug_bounds("Review duplicates");
+        let review = review.expect("the line above the map offers Review");
+        cx.simulate_click(review.center(), Modifiers::none());
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.review_first.is_focused(window), "on Skip");
+        });
+
+        // On to Not the same, as the dock's Tab goes, and press it.
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        press_enter(cx);
+        assert!(matches!(heard.borrow()[..], [MapEdit::NotSame { .. }]));
+
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.review_first, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(!view.model.reviewing());
+            assert!(view.review_button.is_focused(window), "back on Review");
+        });
+    }
+
+    #[gpui::test]
+    fn the_keyboard_picks_two_rooms_joins_undoes_and_keeps_its_place(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let heard = heard_edits(&view, cx);
+        pick_two_by_keyboard(&view, cx);
+        view.update_in(cx, |view, window, _| {
+            assert_eq!(view.model.picks().len(), 2);
+            assert!(view.join_button.is_focused(window), "Enter joins from here");
+        });
+
+        press_enter(cx);
+        answer(&view, 1, joined(), cx);
+        view.update_in(cx, |view, window, _| {
+            assert!(view.undo_button.is_focused(window), "Join gave way to Undo");
+        });
+
+        press_enter(cx);
+        assert!(matches!(
+            heard.borrow()[..],
+            [MapEdit::Join { .. }, MapEdit::UndoJoin { .. }]
+        ));
+        view.update_in(cx, |view, window, _| {
+            assert!(view.review_button.is_focused(window), "Undo has gone");
+        });
+    }
+
+    #[gpui::test]
+    fn picking_by_keyboard_in_review_leaves_focus_off_a_join_that_is_not_there(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = duplicated_view(cx);
+        let first = view.read_with(cx, |view, _| view.model.first_room());
+        view.update(cx, |view, cx| view.go_to(first, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| view.pick_selected(window, cx));
+        click_on("Review duplicates", cx);
+        view.update(cx, |view, cx| view.go_to(first + 1, cx));
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, cx| view.pick_selected(window, cx));
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, _| {
+            assert!(view.model.reviewing());
+            assert_eq!(view.model.picks().len(), 1, "nothing was picked");
+            assert!(!view.join_button.is_focused(window));
+            assert!(
+                view.review_first.is_focused(window),
+                "focus stayed in Review"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_refused_join_leaves_the_keyboard_on_a_control_that_is_there(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        pick_two_by_keyboard(&view, cx);
+
+        press_enter(cx);
+        answer(&view, 1, Err("a sync is landing".to_owned()), cx);
+
+        view.update_in(cx, |view, window, _| {
+            assert!(view.review_button.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn a_mouse_join_leaves_the_keyboard_where_it_was(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        view.update(cx, |view, cx| view.pick_sample(cx));
+        cx.run_until_parked();
+
+        click_on("Join the rooms picked", cx);
+        answer(&view, 1, joined(), cx);
+
+        view.update_in(cx, |view, window, _| {
+            assert!(!view.undo_button.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn review_says_how_a_join_went_and_offers_undo_there(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let heard = heard_edits(&view, cx);
+        click_on("Review duplicates", cx);
+        let pair = |view: &MapView| view.model.review_pair().map(|shown| shown.pair);
+        let asked = view.read_with(cx, |view, _| pair(view));
+
+        click_on("Join these rooms", cx);
+        answer(&view, 1, joined(), cx);
+
+        view.read_with(cx, |view, _| {
+            assert!(view.model.reviewing(), "more pairs wait");
+            assert_ne!(pair(view), asked);
+        });
+        assert!(cx.debug_bounds("map-review-note").is_some());
+        click_on("Undo the join", cx);
+        assert!(matches!(
+            heard.borrow()[..],
+            [MapEdit::Join { .. }, MapEdit::UndoJoin { .. }]
+        ));
+        assert!(cx.debug_bounds("map-review-note").is_none());
+    }
+
+    #[gpui::test]
+    fn a_refused_join_in_review_says_why_and_keeps_its_pair(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        click_on("Review duplicates", cx);
+        let pair = |view: &MapView| view.model.review_pair().map(|shown| shown.pair);
+        let asked = view.read_with(cx, |view, _| pair(view));
+
+        click_on("Join these rooms", cx);
+        answer(&view, 1, Err("a sync is landing".to_owned()), cx);
+
+        view.read_with(cx, |view, _| assert_eq!(pair(view), asked));
+        assert!(cx.debug_bounds("map-review-note").is_some());
+        assert!(cx.debug_bounds("Undo the join").is_none());
+    }
+
+    #[gpui::test]
+    fn close_leaves_review_with_nothing_answered(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let heard = heard_edits(&view, cx);
+        click_on("Review duplicates", cx);
+
+        click_on("Close Review", cx);
+
+        assert!(heard.borrow().is_empty());
+        view.update_in(cx, |view, window, _| {
+            assert!(!view.model.reviewing());
+            assert!(view.review_button.is_focused(window), "back on Review");
+        });
+    }
+
+    #[gpui::test]
+    fn the_last_join_in_review_lands_on_undo(cx: &mut TestAppContext) {
+        let copy = |id, x| {
+            let mut copy = room(id, x, 0);
+            copy.name = "A square".to_owned();
+            copy
+        };
+        let rooms = vec![copy(1 << 40, 0), copy((1 << 40) + 1, 1)];
+        let (view, cx) = unscanned_view(store_of(rooms, Vec::new()), cx);
+        cx.run_until_parked();
+        click_on("Review duplicates", cx);
+        click_on("Join these rooms", cx);
+
+        answer(&view, 1, joined(), cx);
+
+        view.update_in(cx, |view, window, _| {
+            assert!(!view.model.reviewing(), "nothing's left to review");
+            assert!(view.undo_button.is_focused(window));
+        });
+        assert!(cx.debug_bounds("Undo the join").is_some());
     }
 
     #[test]

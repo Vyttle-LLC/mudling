@@ -14,14 +14,17 @@ use crate::gear::sets::{self, GearNow, GearRules, WearPlan};
 use crate::gear::{GearBook, ItemMatcher};
 use crate::line::Line;
 use crate::map::{
-    Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
+    Derived, JoinFacts, LastJoin, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep,
+    Whereabouts,
 };
 use crate::net::DisconnectReason;
 use crate::persist::{GearSet, Timestamp};
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
+use crate::repo::AppSettings;
 use crate::scrollback::Scrollback;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -92,6 +95,8 @@ pub struct MapState {
     whereabouts: Whereabouts,
     revision: u64,
     derived: Option<Arc<Derived>>,
+    joins: Arc<JoinFacts>,
+    last_join: Option<LastJoin>,
 }
 
 impl MapState {
@@ -125,6 +130,16 @@ impl MapState {
         self.derived.as_ref()
     }
 
+    /// What views need to tidy up duplicates.
+    pub fn joins(&self) -> &Arc<JoinFacts> {
+        &self.joins
+    }
+
+    /// How the player's last join or undo went.
+    pub fn last_join(&self) -> Option<&LastJoin> {
+        self.last_join.as_ref()
+    }
+
     /// The fewest moves between two rooms. A search can cross the whole map,
     /// so a view runs it off the UI thread, on a clone of this state.
     pub fn route(&self, start: RoomId, goal: RoomId) -> Option<Vec<WalkStep>> {
@@ -147,7 +162,15 @@ impl StoreState for MapState {
         if let Some(derived) = &change.derived {
             self.derived = Some(Arc::clone(derived));
         }
-        !change.rooms.is_empty() || !change.removed.is_empty() || change.whereabouts.is_some()
+        if let Some(joins) = &change.joins {
+            self.joins = Arc::clone(joins);
+        }
+        self.last_join = change.last_join.clone().or(self.last_join.take());
+        !change.rooms.is_empty()
+            || !change.removed.is_empty()
+            || change.whereabouts.is_some()
+            || change.joins.is_some()
+            || change.last_join.is_some()
     }
 
     /// The pending diff can't outgrow the map: a room appears in it once.
@@ -163,6 +186,8 @@ impl StoreState for MapState {
         earlier.marks.extend(later.marks);
         earlier.revision = later.revision;
         earlier.derived = later.derived.or(earlier.derived.take());
+        earlier.joins = later.joins.or(earlier.joins.take());
+        earlier.last_join = later.last_join.or(earlier.last_join.take());
     }
 }
 
@@ -643,11 +668,33 @@ macro_rules! whole_value_stores {
     };
 }
 
+/// How sync stands, for Data & sync and the sprocket badge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SyncState {
+    /// The repo in use; `None` keeps everything local.
+    pub repo: Option<PathBuf>,
+    /// A sync is running now.
+    pub syncing: bool,
+    /// When a sync last finished.
+    pub last_sync: Option<Timestamp>,
+    /// What the last sync that changed anything changed, in a line.
+    pub changed: Option<String>,
+    /// Sessions on this device the remote hasn't got yet.
+    pub unsynced: usize,
+    /// What's stopping sync, in plain words. Never quotes a secret.
+    pub problem: Option<String>,
+    /// The settings the app should use: a merge may have brought newer ones.
+    pub settings: AppSettings,
+    /// Where `secrets.vault` lives now, for the app to open it there.
+    pub vault_file: PathBuf,
+}
+
 whole_value_stores!(
     RoomState,
     MobsState,
     TargetState,
     SettingsState,
+    SyncState,
     RulesState,
     SheetState,
 );

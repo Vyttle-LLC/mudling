@@ -403,6 +403,13 @@ impl TitleBar {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn saved_row_handles(&self) -> Vec<FocusHandle> {
+        (self.elsewhere.iter())
+            .map(|(_, focus)| focus.clone())
+            .collect()
+    }
+
     pub fn set_bare(&mut self, bare: bool, cx: &mut Context<TitleBar>) {
         self.bare = bare;
         cx.notify();

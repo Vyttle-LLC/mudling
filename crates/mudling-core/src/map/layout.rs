@@ -10,9 +10,34 @@ use super::room::{ExitState, MapRoom, RoomId};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
-/// Ids the map gives rooms that have no game number, when the game numbers
-/// its rooms: far above any game's numbers, so the two never meet.
-pub(super) const UNNUMBERED_IDS: RoomId = 1 << 40;
+/// Where the ids the map gives rooms with no game number start: far above any
+/// game's numbers, so the two never meet.
+pub(crate) const UNNUMBERED_IDS: RoomId = 1 << 40;
+/// Such an id is a device's prefix above a count of the rooms it found, so two
+/// devices can't give two rooms one id for a merge to choose between. Every id
+/// stays under 2^53, which JSON readers and Luau's numbers hold exactly.
+const COUNT_BITS: u32 = 28;
+const PREFIXES: std::ops::Range<i64> = (UNNUMBERED_IDS >> COUNT_BITS)..(1 << (53 - COUNT_BITS));
+
+/// A new device's prefix, drawn once and then kept in its database.
+pub(super) fn draw_id_prefix() -> i64 {
+    let mut bytes = [0; 8];
+    getrandom::fill(&mut bytes).expect("the OS provides randomness");
+    let span = PREFIXES.end - PREFIXES.start;
+    PREFIXES.start + i64::from_le_bytes(bytes).rem_euclid(span)
+}
+
+pub(super) fn is_id_prefix(value: i64) -> bool {
+    PREFIXES.contains(&value)
+}
+
+pub(super) fn first_id(prefix: i64) -> RoomId {
+    prefix << COUNT_BITS
+}
+
+pub(super) fn id_prefix(id: RoomId) -> i64 {
+    id >> COUNT_BITS
+}
 
 type Map<K, V> = imbl::HashMap<K, V>;
 

@@ -269,6 +269,10 @@ fn what_was_saved_comes_back_in_the_next_session() {
             .read(|map: &Versioned<MapState>| map.value().rooms().len() == 2)
     });
     let stores = session.stores();
+    // The map is published before the gear is, so the map arriving isn't it.
+    wait_for("the gear to load", || {
+        stores.read(|gear: &Versioned<GearState>| !gear.value().0.is_empty())
+    });
     let character = stores.read(|c: &Versioned<CharactersState>| c.value().0.clone());
     assert_eq!(
         character.get("skills.dodge"),
@@ -407,7 +411,9 @@ fn a_whole_session_on_a_real_connection() {
 
     drop(server);
     wait_for_status(&session, closed_by_server());
+    assert!(!every_store(&session).contains("hunter2"));
     session.quit().wait().unwrap();
+    assert!(!contains(&database_bytes(folder.path()), b"hunter2"));
 }
 
 #[test]

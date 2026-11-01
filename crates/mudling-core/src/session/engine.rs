@@ -22,7 +22,12 @@ use crate::defaults::hud::{self, Field, FieldMap};
 use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
 use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
-use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, VERSION_AUTOSAVE, VERSION_SAFETY};
+use crate::logs::SessionLogs;
+use crate::map::{
+    Direction, JoinDone, LastJoin, LiveMap, MapChange, MapRoom, Mark, RoomId, VERSION_AUTOSAVE,
+    VERSION_JOIN, VERSION_SAFETY, room_pair, undo_pair,
+};
+use crate::merge::{self, RoomMoves, repoint_batch};
 use crate::net::DisconnectReason;
 use crate::persist::{
     self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
@@ -35,6 +40,7 @@ use crate::plugin::{
     Layer, MapSignal, PendingKind, Plugin, PluginEvent, PluginHost, PluginId, PluginSink,
     ServerInfo,
 };
+use crate::repo::format::ServerRows;
 use crate::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
     CuesState, GearState, MapRestore, MapState, Memo, MobsState, RoomState, RulesState,
@@ -48,7 +54,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -127,10 +133,11 @@ impl AddedNames {
 }
 
 /// One server's session, for a core thread. Lines and moves keep to memory
-/// and queue their disk writes on the writer threads; opening, finishing, and
-/// an override coming on with the server's name (which reloads the map) wait
-/// on the disk, as does a restore of the map, which nothing may build on
-/// until it's safe.
+/// and queue their disk writes on the writer threads; opening, finishing, a
+/// merge landing, and an override coming on with the server's name (each of
+/// those two reloads the map) wait on the disk, as does a restore of the map,
+/// which nothing may build on until it's safe, and a join or its undo, which
+/// rebuild the map from what they wrote.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -141,6 +148,7 @@ pub struct Engine {
     history_writer: HistoryWriter,
     database: Database,
     writer: Writer,
+    logs: SessionLogs,
     plugins: PluginHost,
     map: LiveMap,
     walk: WalkSyntax,
@@ -183,6 +191,8 @@ pub struct Engine {
     gear: GearKeeper,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
+    /// Rows waiting out a merge, while one lands.
+    held: Option<Batch>,
     /// Rooms changed since the last version of the map was saved. A new
     /// session counts as such a change: it opens with a version.
     map_changed: bool,
@@ -191,6 +201,7 @@ pub struct Engine {
     /// Hears when versions on their way to the disk have landed.
     versions_landing: Option<Receiver<()>>,
     restores: u64,
+    joins_answered: u64,
     output: Vec<u8>,
     lines: Vec<Line>,
     events: Vec<PluginEvent>,
@@ -241,6 +252,7 @@ impl Engine {
         let walk = WalkSyntax::of(&plugins);
         let mut engine = Engine {
             map: LiveMap::new(Box::new(PluginRules::of(&plugins))),
+            logs: SessionLogs::new(&config.data_folder, &config.host),
             config,
             hub,
             typing,
@@ -269,10 +281,12 @@ impl Engine {
             blank_shown: true,
             gear: GearKeeper::default(),
             batch: Batch::new(),
+            held: None,
             map_changed: true,
             version_saved: now,
             versions_landing: None,
             restores: 0,
+            joins_answered: 0,
             output: Vec::new(),
             lines: Vec::new(),
             events: Vec::new(),
@@ -334,6 +348,7 @@ impl Engine {
             mssp_name: None,
             gmcp_enabled: false,
         });
+        self.logs.connection_started();
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
@@ -362,6 +377,9 @@ impl Engine {
     pub fn connected(&mut self) {
         self.settings.connection = ConnectionStatus::Connected;
         self.publish_settings();
+        if let Some(sync) = &self.config.sync {
+            sync.connected();
+        }
     }
 
     /// The server's next bytes, in any chunking. Corrupt compressed data
@@ -467,7 +485,8 @@ impl Engine {
     }
 
     /// Applies a change the player made to the map. The next settle saves it
-    /// and publishes it, as it does a change the game made.
+    /// and publishes it, as it does a change the game made. A join or its
+    /// undo lands here and now.
     pub fn edit_map(&mut self, edit: MapEdit, now: Timestamp) {
         match edit {
             MapEdit::Note { room, text } => self.map.set_notes(room, &text),
@@ -477,7 +496,93 @@ impl Engine {
                 present,
             } => self.map.set_feature(room, &feature, present),
             MapEdit::Mark { title, mark, set } => self.map.mark_mob(&title, mark, set, now),
+            MapEdit::NotSame { first, second } => self.map.mark_not_same(first, second),
+            MapEdit::Join { first, second } => {
+                self.answer_join(now, |engine| engine.join_rooms(first, second, now));
+            }
+            MapEdit::UndoJoin { created } => {
+                self.answer_join(now, |engine| engine.undo_join(created, now));
+            }
         }
+    }
+
+    /// Runs a join or its undo, each of which rebuilds the map from what it
+    /// wrote, and tells views how it went. A merge landing counts as a
+    /// failure, as it does for a restore.
+    fn answer_join(
+        &mut self,
+        now: Timestamp,
+        run: impl FnOnce(&mut Engine) -> Result<JoinDone, String>,
+    ) {
+        self.settle(now);
+        let outcome = if self.is_holding_writes() {
+            Err("a sync is landing, so try again in a moment".to_owned())
+        } else {
+            run(self)
+        };
+        if let Err(error) = &outcome {
+            self.notice(format!("the map didn't change: {error}"));
+        }
+        self.joins_answered += 1;
+        self.hub.write::<MapState>(MapChange {
+            revision: self.map.revision(),
+            last_join: Some(LastJoin {
+                attempt: self.joins_answered,
+                outcome,
+            }),
+            ..MapChange::default()
+        });
+    }
+
+    fn join_rooms(
+        &mut self,
+        first: RoomId,
+        second: RoomId,
+        now: Timestamp,
+    ) -> Result<JoinDone, String> {
+        if !self.map.joinable(first, second) {
+            return Err("only two different rooms with no game number can join".to_owned());
+        }
+        let pair = room_pair(first, second);
+        let (rows, reader) = self.saved_rows()?;
+        let (batch, label) = merge::join_rooms(&rows, pair, &reader, now)?;
+        self.write_map_edit(batch)?;
+        Ok(JoinDone::Joined {
+            label,
+            created: now,
+        })
+    }
+
+    fn undo_join(&mut self, created: Timestamp, now: Timestamp) -> Result<JoinDone, String> {
+        let (rows, reader) = self.saved_rows()?;
+        let gone = || "that join can't be undone any more".to_owned();
+        let pair = undo_pair(&rows.meta, created).ok_or_else(gone)?;
+        let versions = reader.map_versions().map_err(say)?;
+        let version = versions
+            .iter()
+            .find(|version| version.kind == VERSION_JOIN && version.created == created)
+            .ok_or_else(gone)?;
+        let before = reader.map_version(version.id).map_err(say)?;
+        let batch = merge::undo_join(&rows, &before, pair, (version.id, created), now)?;
+        self.write_map_edit(batch)?;
+        Ok(JoinDone::Undone)
+    }
+
+    /// What the database holds, once everything queued has reached it.
+    fn saved_rows(&mut self) -> Result<(ServerRows, persist::Reader), String> {
+        self.writer.flush().map_err(say)?;
+        let reader = self.database.reader().map_err(say)?;
+        let rows = ServerRows::load(&reader).map_err(say)?;
+        Ok((rows, reader))
+    }
+
+    /// Writes rows worked out from the database, then rebuilds the map from it.
+    fn write_map_edit(&mut self, batch: Batch) -> Result<(), String> {
+        self.writer.commit(batch).map_err(say)?;
+        self.reload_map().map_err(say)?;
+        self.settings.map_versions += 1;
+        self.publish_settings();
+        Ok(())
     }
 
     /// Applies a change the player made to their gear, and saves it. A set
@@ -613,6 +718,7 @@ impl Engine {
                 }
             }
         }
+        notices.extend(self.logs.take_notices());
         for notice in notices {
             self.notice(notice);
         }
@@ -685,26 +791,45 @@ impl Engine {
     }
 
     /// Puts a saved version of the map back, after saving the map as it is
-    /// now. On failure the map stays as it was, on the disk and in memory.
+    /// now. On failure the map stays as it was, on the disk and in memory. A
+    /// merge landing counts as a failure: it would rebuild the map under the
+    /// restore, and the restore writes past the rows held for it.
     pub fn restore_map(&mut self, version_id: i64, now: Timestamp) {
         self.settle(now);
-        let outcome = self.apply_map_version(version_id, now);
+        let outcome = if self.is_holding_writes() {
+            Err("a sync is landing, so try again in a moment".to_owned())
+        } else {
+            self.apply_map_version(version_id, now).map(|()| version_id)
+        };
         if let Err(error) = &outcome {
             self.notice(format!("couldn't restore the map: {error}"));
         }
         self.restores += 1;
         self.settings.map_restore = Some(MapRestore {
             attempt: self.restores,
-            outcome: outcome.map(|()| version_id).map_err(|e| e.to_string()),
+            outcome,
         });
         self.settings.map_versions += 1;
         self.publish_settings();
     }
 
-    fn apply_map_version(&mut self, version_id: i64, now: Timestamp) -> Result<(), persist::Error> {
-        let rows = self.database.reader()?.map_version(version_id)?;
-        let restored = self.map.prepare_restore(&rows);
-        self.writer.commit(restored.batch(version_id, now))?;
+    /// A version from before a join comes back with the join still made, so
+    /// a restore never brings a retired room back as a duplicate: see
+    /// `merge::join`.
+    fn apply_map_version(&mut self, version_id: i64, now: Timestamp) -> Result<(), String> {
+        let reader = self.database.reader().map_err(say)?;
+        let meta = reader.meta().map_err(say)?;
+        let version = reader.map_version(version_id).map_err(say)?;
+        let mut batch = LiveMap::restore_batch(version_id, now);
+        for key in merge::joins_cancelled_by(&version, &meta) {
+            batch.delete(key);
+        }
+        self.writer.commit(batch).map_err(say)?;
+        let restored_rows = ServerRows::load(&reader).map_err(say)?;
+        let rejoin = merge::rejoin_restored(restored_rows, now);
+        self.writer.commit(rejoin).map_err(say)?;
+        let restored = self.map.prepare_restore(&reader.map().map_err(say)?);
+        self.writer.commit(restored.place(now)).map_err(say)?;
         let change = self.map.finish_restore(restored);
         self.map_changed = false;
         self.version_saved = now;
@@ -798,6 +923,11 @@ impl Engine {
         self.publish_settings();
     }
 
+    /// The player saved new log settings.
+    pub fn logging_changed(&mut self) {
+        self.logs.follow_settings();
+    }
+
     /// The connection ended. Runs what its hooks still hold, so nothing they
     /// read is lost; that can wait on a slow hook, so call it on a core
     /// thread.
@@ -820,6 +950,8 @@ impl Engine {
             };
             self.gear.finish_change(&mut link.gear, &mut saving);
         }
+        self.logs.connection_ended(Some(&reason.to_string()));
+        let was_connected = self.settings.connection == ConnectionStatus::Connected;
         self.link = None;
         self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
@@ -846,6 +978,74 @@ impl Engine {
             self.hub
                 .write::<CharactersState>(CharactersState::no_affects());
         }
+        if let Some(sync) = self.config.sync.as_ref().filter(|_| was_connected) {
+            // Sync exports only once the session's last rows are in.
+            let (drained, last_rows_in) = sync_channel(1);
+            if self.writer.notify_when_drained(drained).is_ok() {
+                sync.disconnected(last_rows_in);
+            }
+        }
+    }
+
+    /// Sends what's queued for the database on its way, and keeps later rows
+    /// here until [`Engine::release_writes`]. `drained` answers once the queue
+    /// is done, with no waiting on this thread.
+    pub(super) fn hold_writes(&mut self, drained: SyncSender<()>) {
+        self.held.get_or_insert_default();
+        if let Err(error) = self.writer.notify_when_drained(drained) {
+            self.notice(error.to_string());
+        }
+    }
+
+    pub(super) fn is_holding_writes(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// A merge has landed: writes what was held, moved off any retired room,
+    /// and rebuilds the map, the player's rules (triggers, aliases, hotbar
+    /// and notepad) and whoever plays (sheet, sets and worn gear) from the
+    /// database, since a merge may have brought newer ones. Rows of the merge's window reach the disk first so the new map
+    /// holds them. This waits on the disk, which only a merge during play
+    /// costs.
+    pub(super) fn release_writes(&mut self, moves: &RoomMoves) {
+        self.settle(Timestamp::now());
+        let Some(mut held) = self.held.take() else {
+            return;
+        };
+        repoint_batch(&mut held, moves);
+        self.submit(held);
+        if let Err(error) = self
+            .writer
+            .flush()
+            .map_err(SessionError::from)
+            .and_then(|()| self.reload_map())
+            .and_then(|()| self.load_rules())
+            .map(|()| self.reload_character())
+        {
+            self.notice(error.to_string());
+        }
+    }
+
+    /// Replaces the map with what the database holds, for a merge it can't
+    /// have seen. Views lose the rooms that are gone.
+    fn reload_map(&mut self) -> Result<(), SessionError> {
+        let revision = self.map.revision();
+        self.load_saved()?;
+        self.map.follows_revision(revision);
+        let removed = self.hub.read(|map: &Versioned<MapState>| {
+            map.value()
+                .rooms()
+                .map(|room| room.id)
+                .filter(|id| !self.map.holds(*id))
+                .collect()
+        });
+        self.hub.write::<MapState>(MapChange {
+            removed,
+            whereabouts: Some(self.map.whereabouts()),
+            revision: self.map.revision(),
+            ..MapChange::default()
+        });
+        Ok(())
     }
 
     /// The connection can't go on: closes it, saying why.
@@ -860,8 +1060,12 @@ impl Engine {
             self.close_connection(DisconnectReason::ClosedByClient, now);
         }
         self.settle(now);
+        if let Some(held) = self.held.take() {
+            self.submit(held);
+        }
         let flushed = self.writer.flush();
         let saved = self.history_writer.finish();
+        self.logs.finish();
         flushed?;
         saved.map_err(SessionError::History)
     }
@@ -869,6 +1073,7 @@ impl Engine {
     fn server_said(&mut self, event: Event, now: Timestamp) {
         match event {
             Event::Data(text) => {
+                self.logs.server_text(&text);
                 let Some(link) = &mut self.link else { return };
                 link.pipeline.push(&text, &mut self.lines);
                 self.read_lines(now);
@@ -894,7 +1099,10 @@ impl Engine {
                     self.route_events(now);
                 }
             }
-            Event::Gmcp { package, data } => self.gmcp(&package, &data, now),
+            Event::Gmcp { package, data } => {
+                self.logs.gmcp(&package, &data);
+                self.gmcp(&package, &data, now);
+            }
             Event::GmcpEnabled => {
                 if let Some(link) = &mut self.link {
                     link.gmcp_enabled = true;
@@ -902,6 +1110,9 @@ impl Engine {
                 self.subscribe_gmcp();
             }
             Event::Echo(echo) => {
+                let line_open =
+                    (self.link.as_ref()).is_some_and(|link| link.pipeline.pending().is_some());
+                self.logs.echo_changed(!echo, line_open);
                 self.settings.echo_off = !echo;
                 self.publish_settings();
             }
@@ -1537,6 +1748,7 @@ impl Engine {
         }
         let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
         if !(blank && self.blank_shown) {
+            self.logs.shown(&line);
             self.terminal.push(line);
         }
         self.blank_shown = blank;
@@ -1616,6 +1828,30 @@ impl Engine {
             self.publish_sheet();
             return;
         }
+        self.batch.upsert(Character {
+            id: self.playing.clone(),
+            server_id: self.config.host.clone(),
+            name: self.playing.clone(),
+            updated: now,
+        });
+        self.load_character(true);
+    }
+
+    /// After a merge: whoever plays has what the merge brought, and nobody
+    /// has anything another's rows could have left. They are still playing,
+    /// so what the game last said of their level and affects stays.
+    fn reload_character(&mut self) {
+        if !self.playing.is_empty() {
+            self.load_character(false);
+        }
+    }
+
+    /// Takes what the database holds of whoever plays: their sheet, worn gear
+    /// and sets, and the values hooks read back. Another character's rows,
+    /// which the database holds too, don't come into it. `replacing` is whether
+    /// this is a new character or game, whose level and affects aren't known
+    /// yet, and not the same one reloaded, whose live ones stay.
+    fn load_character(&mut self, replacing: bool) {
         let saved = (self.database.reader())
             .and_then(|reader| reader.characters())
             .unwrap_or_else(|error| {
@@ -1624,19 +1860,15 @@ impl Engine {
                     .push(format!("couldn't load the character: {error}"));
                 persist::CharacterRows::default()
             });
-        self.batch.upsert(Character {
-            id: self.playing.clone(),
-            server_id: self.config.host.clone(),
-            name: self.playing.clone(),
-            updated: now,
-        });
         self.sheet = Sheet::of(&self.playing, &saved);
         self.gear.wear_of(&self.playing, saved.worn.clone());
         self.gear.sets_of(&self.playing, &saved.gear_sets);
         // What hooks read back, and the HUD's level: whoever played before
         // has theirs replaced, or blanked.
-        let mut values: BTreeMap<String, HookValue> =
-            BTreeMap::from([(CHARACTER_LEVEL.to_owned(), HookValue::Text(String::new()))]);
+        let mut values: BTreeMap<String, HookValue> = BTreeMap::new();
+        if replacing {
+            values.insert(CHARACTER_LEVEL.to_owned(), HookValue::Text(String::new()));
+        }
         let mine = saved
             .stats
             .iter()
@@ -1645,8 +1877,10 @@ impl Engine {
             mine.filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?))),
         );
         self.hub.write::<CharactersState>(CharactersState(values));
-        self.hub
-            .write::<CharactersState>(CharactersState::no_affects());
+        if replacing {
+            self.hub
+                .write::<CharactersState>(CharactersState::no_affects());
+        }
         self.publish_sheet();
     }
 
@@ -1773,6 +2007,10 @@ impl Engine {
     }
 
     fn submit(&mut self, batch: Batch) {
+        if let Some(held) = &mut self.held {
+            held.extend(batch);
+            return;
+        }
         let queued = !batch.is_empty();
         if let Err(error) = self.writer.submit(batch) {
             self.notice(error.to_string());
@@ -1839,6 +2077,11 @@ impl Engine {
     pub(super) fn connect_timeout(&self) -> Duration {
         self.config.connect_timeout
     }
+}
+
+/// An error as a view shows it.
+fn say(error: impl fmt::Display) -> String {
+    error.to_string()
 }
 
 /// An id for a new rule. Rows load in id order and the first rule to match

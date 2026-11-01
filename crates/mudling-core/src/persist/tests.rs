@@ -520,8 +520,11 @@ fn map_versions_save_list_and_restore() {
     writer.submit(batch).unwrap();
     writer.flush().unwrap();
 
-    // The live map is the first version again, stamped with the restore's
-    // time; sightings keep when the mob was seen.
+    // The live map is the first version again. What the restore changed or
+    // brought back (both rooms, room 1's exit and note, and every link, which
+    // went with room 1) is stamped with the restore's time. What was the same
+    // already, room 2's exits, doorways and features, keeps its time, and
+    // sightings keep when the mob was seen.
     let mut expected = small_map();
     expected
         .rooms
@@ -530,23 +533,16 @@ fn map_versions_save_list_and_restore() {
     expected
         .exits
         .iter_mut()
+        .filter(|e| e.room_id == 1)
         .for_each(|e| e.updated = restored_at);
     expected
         .links
         .iter_mut()
         .for_each(|l| l.updated = restored_at);
     expected
-        .doorways
-        .iter_mut()
-        .for_each(|d| d.updated = restored_at);
-    expected
         .notes
         .iter_mut()
         .for_each(|n| n.updated = restored_at);
-    expected
-        .features
-        .iter_mut()
-        .for_each(|f| f.updated = restored_at);
     assert_eq!(reader.map().unwrap(), expected);
 
     // Deleting a version deletes its rows; the other stays.
@@ -556,6 +552,208 @@ fn map_versions_save_list_and_restore() {
     writer.flush().unwrap();
     assert_eq!(reader.map_versions().unwrap().len(), 1);
     assert_eq!(reader.map_version(first).unwrap(), MapRows::default());
+}
+
+fn tombstones(database: &Database) -> Vec<Tombstone> {
+    database.reader().unwrap().tombstones().unwrap()
+}
+
+#[test]
+fn a_delete_leaves_a_tombstone_newer_than_the_row_it_replaces() {
+    let (_folder, database) = open();
+    let far_ahead = Timestamp(Timestamp::now().0 + 86_400_000);
+    let mut batch = Batch::new();
+    batch.upsert(Room {
+        updated: far_ahead,
+        ..room(1, "A road")
+    });
+    commit(&database, batch);
+
+    let mut batch = Batch::new();
+    batch.delete(Key::Room(1));
+    commit(&database, batch);
+
+    let [tombstone] = tombstones(&database).try_into().unwrap();
+    assert_eq!(tombstone.key, Key::Room(1));
+    assert!(tombstone.deleted > far_ahead);
+}
+
+#[test]
+fn only_a_real_delete_of_a_synced_record_leaves_a_tombstone() {
+    let (_folder, database) = open();
+    let mut batch = small_map_batch();
+    batch.save_map_version("manual", "A version", T1);
+    batch.delete(Key::Room(999));
+    commit(&database, batch);
+    let version = database.reader().unwrap().map_versions().unwrap()[0].id;
+
+    let mut batch = Batch::new();
+    batch.delete(Key::MapVersion(version));
+    commit(&database, batch);
+
+    assert!(tombstones(&database).is_empty());
+}
+
+#[test]
+fn adopt_keeps_the_newer_row_and_takes_a_tie_from_the_file() {
+    let (_folder, database) = open();
+    let mut batch = Batch::new();
+    batch.upsert(Room {
+        updated: T2,
+        ..room(1, "Here")
+    });
+    commit(&database, batch);
+    let name = || {
+        database.reader().unwrap().map().unwrap().rooms[0]
+            .name
+            .clone()
+    };
+
+    let mut older = Batch::new();
+    older.adopt(Room {
+        updated: T1,
+        ..room(1, "Older")
+    });
+    commit(&database, older);
+    assert_eq!(name(), "Here");
+
+    let mut tied = Batch::new();
+    tied.adopt(Room {
+        updated: T2,
+        ..room(1, "Edited by hand")
+    });
+    commit(&database, tied);
+    assert_eq!(name(), "Edited by hand");
+}
+
+#[test]
+fn a_child_of_a_deleted_room_is_skipped_rather_than_failing_the_batch() {
+    let (_folder, database) = open();
+    let mut batch = Batch::new();
+    batch.upsert(room(1, "A road"));
+    commit(&database, batch);
+    let mut batch = Batch::new();
+    batch.delete(Key::Room(1));
+    commit(&database, batch);
+
+    let far_ahead = Timestamp(Timestamp::now().0 + 86_400_000);
+    let mut arrived = Batch::new();
+    arrived.adopt(Exit {
+        room_id: 1,
+        direction: "north".to_owned(),
+        state: "open".to_owned(),
+        updated: far_ahead,
+    });
+    commit(&database, arrived);
+
+    assert!(database.reader().unwrap().map().unwrap().exits.is_empty());
+}
+
+#[test]
+fn restoring_a_version_leaves_tombstones_for_what_it_drops() {
+    let (_folder, database) = open();
+    let mut batch = Batch::new();
+    batch.upsert(room(1, "A road"));
+    batch.save_map_version("manual", "Before", T1);
+    batch.upsert(room(2, "A hill"));
+    batch.upsert(Exit {
+        room_id: 1,
+        direction: "nörd".to_owned(),
+        state: "open".to_owned(),
+        updated: T1,
+    });
+    commit(&database, batch);
+    let version = database.reader().unwrap().map_versions().unwrap()[0].id;
+
+    let mut batch = Batch::new();
+    batch.restore_map_version(version, T2);
+    commit(&database, batch);
+
+    let exit = Key::Exit {
+        room_id: 1,
+        direction: "nörd".to_owned(),
+    };
+    assert_eq!(
+        tombstones(&database),
+        [
+            Tombstone {
+                key: Key::Room(2),
+                deleted: T2
+            },
+            Tombstone {
+                key: exit.clone(),
+                deleted: T2
+            }
+        ]
+    );
+
+    // SQL wrote those keys and serde writes this one; they must be one row.
+    let mut batch = Batch::new();
+    batch.bury(Tombstone {
+        key: exit,
+        deleted: Timestamp(T2.0 + 1),
+    });
+    commit(&database, batch);
+    assert_eq!(tombstones(&database).len(), 2);
+}
+
+#[test]
+fn a_buried_key_spares_a_newer_row_and_old_tombstones_can_be_forgotten() {
+    let (_folder, database) = open();
+    let mut batch = Batch::new();
+    batch.upsert(Room {
+        updated: T2,
+        ..room(1, "A road")
+    });
+    batch.bury(Tombstone {
+        key: Key::Room(1),
+        deleted: T1,
+    });
+    commit(&database, batch);
+    assert_eq!(database.reader().unwrap().map().unwrap().rooms.len(), 1);
+
+    let mut batch = Batch::new();
+    batch.forget_tombstones(T2);
+    commit(&database, batch);
+    assert!(tombstones(&database).is_empty());
+}
+
+#[test]
+fn a_buried_key_takes_older_children_from_a_newer_row() {
+    let (_folder, database) = open();
+    let exit = |direction: &str, updated| Exit {
+        room_id: 1,
+        direction: direction.to_owned(),
+        state: "open".to_owned(),
+        updated,
+    };
+    let mut batch = Batch::new();
+    batch.upsert(room(2, "A hill"));
+    batch.upsert(Room {
+        updated: T2,
+        ..room(1, "A road")
+    });
+    batch.upsert(exit("north", T1));
+    batch.upsert(exit("south", T2));
+    batch.upsert(Link {
+        room_id: 2,
+        direction: "east".to_owned(),
+        to_room: 1,
+        updated: T1,
+    });
+    commit(&database, batch);
+
+    let mut batch = Batch::new();
+    batch.bury(Tombstone {
+        key: Key::Room(1),
+        deleted: T2,
+    });
+    commit(&database, batch);
+
+    let map = database.reader().unwrap().map().unwrap();
+    assert_eq!(map.rooms.len(), 2);
+    assert_eq!(map.exits, [exit("south", T2)]);
+    assert!(map.links.is_empty());
 }
 
 #[test]

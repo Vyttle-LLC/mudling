@@ -4,6 +4,7 @@
 //! Values a game decides (directions, door states, features, mob marks,
 //! slots, stat keys) are plain strings: the schema has no game's words.
 
+use super::batch::Key;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{Row, Statement, ToSql, params};
 use serde::de::DeserializeOwned;
@@ -56,7 +57,7 @@ pub(crate) trait Stored: Sized {
 }
 
 /// The server this database belongs to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Server {
     pub id: String,
     pub name: String,
@@ -98,7 +99,7 @@ impl Stored for Server {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Character {
     pub id: String,
     pub server_id: String,
@@ -129,7 +130,7 @@ impl Stored for Character {
 pub const NOTEPAD: &str = "notes.notepad";
 
 /// A small per-server value, such as the room the player was last in.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub key: String,
     pub value: String,
@@ -154,7 +155,7 @@ impl Stored for Meta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Room {
     pub id: i64,
     pub name: String,
@@ -226,7 +227,7 @@ impl Stored for Room {
 
 /// An exit the room lists now. When the room stops listing it, the row goes,
 /// but a [`Link`] or [`Doorway`] that way stays.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Exit {
     pub room_id: i64,
     pub direction: String,
@@ -263,7 +264,7 @@ impl Stored for Exit {
 
 /// An explored connection: going `direction` from the room led to `to_room`.
 /// Deleting either room deletes the link.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub room_id: i64,
     pub direction: String,
@@ -298,7 +299,7 @@ impl Stored for Link {
 }
 
 /// A direction that has shown a door at some point, open or shut.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Doorway {
     pub room_id: i64,
     pub direction: String,
@@ -326,7 +327,7 @@ impl Stored for Doorway {
 }
 
 /// The player's own notes on a room.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoomNote {
     pub room_id: i64,
     pub text: String,
@@ -353,7 +354,7 @@ impl Stored for RoomNote {
 }
 
 /// Something worth remembering about a room (water, a shop, danger).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoomFeature {
     pub room_id: i64,
     pub feature: String,
@@ -381,7 +382,7 @@ impl Stored for RoomFeature {
 }
 
 /// A mob seen in a room; `updated` is when it was last seen.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sighting {
     pub room_id: i64,
     pub mob: String,
@@ -409,7 +410,7 @@ impl Stored for Sighting {
 
 /// A mark on a mob, or a kind of mob, by name: learned (aggressive) or set
 /// by the player (drops gear, matters).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MobMark {
     pub name: String,
     pub mark: String,
@@ -435,7 +436,7 @@ impl Stored for MobMark {
 }
 
 /// One stat or score fact about a character, by key ("level", "str").
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CharacterStat {
     pub character_id: String,
     pub key: String,
@@ -468,7 +469,7 @@ impl Stored for CharacterStat {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
     pub character_id: String,
     pub name: String,
@@ -512,7 +513,7 @@ impl Stored for Skill {
 }
 
 /// A spell or skill affecting the character now.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Affect {
     pub character_id: String,
     pub name: String,
@@ -546,7 +547,7 @@ impl Stored for Affect {
 }
 
 /// An item the character wears, at its place in the game's slot order.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Worn {
     pub character_id: String,
     pub position: i64,
@@ -589,7 +590,7 @@ impl Stored for Worn {
 
 /// A named set of gear to change into. It's one record: its pieces change
 /// together.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GearSet {
     pub id: String,
     pub character_id: String,
@@ -641,7 +642,7 @@ impl Stored for GearSet {
 }
 
 /// One copy of an item, by the game's id for it (GMCP).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GearCopy {
     pub id: String,
     pub name: String,
@@ -675,7 +676,7 @@ impl Stored for GearCopy {
 }
 
 /// What every copy of an item shares, by its plain name.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ItemFacts {
     pub name: String,
     /// The words commands use for it.
@@ -718,7 +719,7 @@ impl Stored for ItemFacts {
 /// One identify of an item: the history an estimate is built from. `base`
 /// is what every copy does; `added` is what was added to this copy (an
 /// enchant), by what added it, so estimates can leave it out.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Identification {
     pub id: String,
     /// The item's plain name.
@@ -868,6 +869,32 @@ impl Stored for Alias {
     }
 }
 
+/// A record deleted on some device, kept so that a copy elsewhere doesn't
+/// bring it back. It outranks copies of the record, and of the rows that hang
+/// off it, last changed before `deleted`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub key: Key,
+    pub deleted: Timestamp,
+}
+
+impl Stored for Tombstone {
+    const UPSERT: &'static str = "INSERT INTO tombstones (key, deleted) VALUES (?1, ?2)
+        ON CONFLICT (key) DO UPDATE SET deleted = max(deleted, excluded.deleted)";
+    const SELECT: &'static str = "SELECT key, deleted FROM tombstones ORDER BY key";
+
+    fn upsert(&self, statement: &mut Statement<'_>) -> rusqlite::Result<usize> {
+        statement.execute(params![Json(&self.key), self.deleted])
+    }
+
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Tombstone {
+            key: row.get::<_, Json<_>>(0)?.0,
+            deleted: row.get(1)?,
+        })
+    }
+}
+
 /// A saved version of the map, as listed: the header row only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapVersion {
@@ -910,6 +937,8 @@ pub(crate) struct MapTable {
     pub version: &'static str,
     pub columns: &'static str,
     pub order_by: &'static str,
+    /// SQL for a row's [`Key`] as JSON, as serde writes it.
+    pub key_json: &'static str,
     /// Restoring stamps rows with the restore's time. A sighting's time is
     /// when the mob was seen, so it's kept.
     pub restore_stamps_updated: bool,
@@ -920,12 +949,14 @@ const fn map_table(
     version: &'static str,
     columns: &'static str,
     order_by: &'static str,
+    key_json: &'static str,
 ) -> MapTable {
     MapTable {
         live,
         version,
         columns,
         order_by,
+        key_json,
         restore_stamps_updated: true,
     }
 }
@@ -935,36 +966,42 @@ pub(crate) const ROOMS: MapTable = map_table(
     "version_rooms",
     "id, name, area, environment, description, x, y, z, building, tangled, maze",
     "id",
+    "json_object('room', id)",
 );
 pub(crate) const EXITS: MapTable = map_table(
     "exits",
     "version_exits",
     "room_id, direction, state",
     "room_id, direction",
+    "json_object('exit', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const LINKS: MapTable = map_table(
     "links",
     "version_links",
     "room_id, direction, to_room",
     "room_id, direction",
+    "json_object('link', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const DOORWAYS: MapTable = map_table(
     "doorways",
     "version_doorways",
     "room_id, direction",
     "room_id, direction",
+    "json_object('doorway', json_object('room_id', room_id, 'direction', direction))",
 );
 pub(crate) const NOTES: MapTable = map_table(
     "room_notes",
     "version_room_notes",
     "room_id, text",
     "room_id",
+    "json_object('room_note', room_id)",
 );
 pub(crate) const FEATURES: MapTable = map_table(
     "room_features",
     "version_room_features",
     "room_id, feature",
     "room_id, feature",
+    "json_object('room_feature', json_object('room_id', room_id, 'feature', feature))",
 );
 pub(crate) const SIGHTINGS: MapTable = MapTable {
     restore_stamps_updated: false,
@@ -973,6 +1010,7 @@ pub(crate) const SIGHTINGS: MapTable = MapTable {
         "version_sightings",
         "room_id, mob",
         "room_id, mob",
+        "json_object('sighting', json_object('room_id', room_id, 'mob', mob))",
     )
 };
 
@@ -981,7 +1019,7 @@ pub(crate) const MAP_TABLES: [MapTable; 7] =
     [ROOMS, EXITS, LINKS, DOORWAYS, NOTES, FEATURES, SIGHTINGS];
 
 /// A small value object kept as JSON text in one column.
-struct Json<T>(T);
+pub(super) struct Json<T>(pub T);
 
 impl<T: Serialize> ToSql for Json<&T> {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {

@@ -5,9 +5,14 @@
 //! and runs when the settings store says the list changed. A restore asks
 //! first, then goes through the session, whose answer comes back the same
 //! way: the live map itself follows through the map store.
+//!
+//! A join sits in the list as a change of its own, with Undo in place of
+//! Restore. Undoing takes back that join and nothing else, and the note over
+//! the map says how it went. A restore leaves joined rooms joined.
 
 use crate::assets::UI_FONT;
 use crate::room_panel::{button, section_label};
+use crate::shell::FocusCommandBar;
 use crate::theme::Theme;
 use crate::title_bar::FocusNextControl;
 use chrono::{DateTime, Datelike, Local};
@@ -15,6 +20,7 @@ use gpui::{
     App, Context, FocusHandle, KeyBinding, Pixels, Role, ScrollHandle, SharedString, Task, Window,
     actions, div, prelude::*, px,
 };
+use mudling_core::map::VERSION_JOIN;
 use mudling_core::persist::{MapVersion, Timestamp};
 use mudling_core::session::MapHistory;
 use mudling_core::store::SettingsState;
@@ -45,7 +51,10 @@ pub fn bind_keys(cx: &mut App) {
 struct Row {
     id: i64,
     when: SharedString,
+    /// How many rooms, or what the join was called.
     rooms: SharedString,
+    /// For a join, what names it to undo.
+    joined: Option<Timestamp>,
     restore: FocusHandle,
 }
 
@@ -57,10 +66,15 @@ impl Row {
         restore: Option<FocusHandle>,
         cx: &mut Context<MapHistoryView>,
     ) -> Row {
+        let joined = (version.kind == VERSION_JOIN).then_some(version.created);
         Row {
             id: version.id,
             when: when(version.created, now).into(),
-            rooms: rooms(version.room_count).into(),
+            rooms: match joined {
+                Some(_) => version.label.clone().into(),
+                None => rooms(version.room_count).into(),
+            },
+            joined,
             restore: restore.unwrap_or_else(|| cx.focus_handle().tab_stop(true)),
         }
     }
@@ -96,6 +110,9 @@ pub struct MapHistoryView {
     scroll: ScrollHandle,
     /// The row last scrolled to for its Restore taking focus.
     in_view: Option<usize>,
+    /// A join being undone with focus on its row, and that row's place, for
+    /// focus to land on what's there once the row goes.
+    undoing: Option<(i64, usize)>,
 }
 
 impl MapHistoryView {
@@ -116,6 +133,7 @@ impl MapHistoryView {
             keep: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             in_view: None,
+            undoing: None,
         };
         view.show(settings, cx);
         view
@@ -195,6 +213,33 @@ impl MapHistoryView {
         cx.notify();
     }
 
+    fn undo_join(&mut self, (id, number): (i64, usize), created: Timestamp, window: &Window) {
+        if self
+            .row(id)
+            .is_some_and(|row| row.restore.is_focused(window))
+        {
+            self.undoing = Some((id, number));
+        }
+        if let Some(history) = &self.history {
+            history.undo_join(created);
+        }
+    }
+
+    /// Once an undone join's row has gone, takes focus to the row in its place
+    /// or the last one, or to the command bar if the list is empty.
+    fn land_after_undo(&mut self, window: &mut Window, cx: &mut Context<MapHistoryView>) {
+        let Some((_, number)) = self.undoing.filter(|(id, _)| self.row(*id).is_none()) else {
+            return;
+        };
+        self.undoing = None;
+        cx.defer_in(window, move |view, window, cx| {
+            match view.rows.get(number).or(view.rows.last()) {
+                Some(row) => window.focus(&row.restore, cx),
+                None => window.dispatch_action(Box::new(FocusCommandBar), cx),
+            }
+        });
+    }
+
     fn restore(&mut self, window: &mut Window, cx: &mut Context<MapHistoryView>) {
         let Some(id) = self.asking else { return };
         self.keep_the_map(window, cx);
@@ -235,8 +280,9 @@ impl MapHistoryView {
     ) -> impl IntoElement {
         let title = self.row_title(id);
         let text = format!(
-            "Put the map back to {title}? Changes to rooms, notes and features since then \
-             go, but the map as it is now stays in this list."
+            "Put the map back to {title}? Changes since then go, but today's map stays in \
+             this list. Joined rooms stay joined, unless this map lacks the room kept: that \
+             join is cancelled."
         );
         div()
             .key_context(QUESTION_CONTEXT)
@@ -293,6 +339,11 @@ impl MapHistoryView {
         cx: &mut Context<MapHistoryView>,
     ) -> impl IntoElement + use<> {
         let id = row.id;
+        let (verb, spoken) = match row.joined {
+            Some(_) => ("Undo", format!("Undo {}", row.title())),
+            None => ("Restore", format!("Restore the map from {}", row.title())),
+        };
+        let joined = row.joined;
         div()
             .id(("map-version", number))
             .role(Role::ListItem)
@@ -316,17 +367,16 @@ impl MapHistoryView {
                     .child(row.rooms.clone()),
             )
             .child(
-                button(
-                    ("map-version-restore", number),
-                    format!("Restore the map from {}", row.title()).into(),
-                    theme,
-                )
-                .track_focus(&row.restore)
-                .px_2()
-                .border_color(gpui::transparent_black())
-                .text_color(theme.accent)
-                .child("Restore")
-                .on_click(cx.listener(move |view, _, window, cx| view.ask(id, window, cx))),
+                button(("map-version-restore", number), spoken.into(), theme)
+                    .track_focus(&row.restore)
+                    .px_2()
+                    .border_color(gpui::transparent_black())
+                    .text_color(theme.accent)
+                    .child(verb)
+                    .on_click(cx.listener(move |view, _, window, cx| match joined {
+                        Some(created) => view.undo_join((id, number), created, window),
+                        None => view.ask(id, window, cx),
+                    })),
             )
     }
 
@@ -361,6 +411,7 @@ impl MapHistoryView {
                 id: id as i64,
                 when: when.into(),
                 rooms: rooms(count).into(),
+                joined: None,
                 restore: cx.focus_handle().tab_stop(true),
             })
             .collect();
@@ -378,6 +429,7 @@ impl MapHistoryView {
 impl Render for MapHistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.follow_focus(window);
+        self.land_after_undo(window, cx);
         let theme = *cx.global::<Theme>();
         let empty = (self.rows.is_empty() || self.unread).then(|| {
             let text = if self.unread { NOT_READ } else { NOTHING_SAVED };
@@ -659,6 +711,46 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.asking, None);
             assert_eq!(view.line, Some(Line::Failed));
+        });
+    }
+
+    /// A join's row, and an autosave's. Undoing the join takes its row away.
+    #[gpui::test]
+    fn undoing_a_join_by_keyboard_lands_on_the_row_in_its_place(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(WindowAppearance::Dark));
+            crate::bind_keys(cx);
+        });
+        let (view, cx) =
+            cx.add_window_view(|_, cx| MapHistoryView::new(None, &SettingsState::default(), cx));
+        let version = |id, kind: &str| MapVersion {
+            id,
+            created: Timestamp(id),
+            kind: kind.into(),
+            label: "Joined two copies of a square".into(),
+            room_count: 2,
+            areas: Default::default(),
+            updated: Timestamp(id),
+        };
+        view.update(cx, |view, cx| {
+            let versions = vec![version(2, VERSION_JOIN), version(1, "autosave")];
+            view.take_versions(Some(versions), cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.rows[0].restore, cx);
+        });
+        cx.run_until_parked();
+
+        press_enter(cx);
+        view.update(cx, |view, cx| {
+            view.take_versions(Some(vec![version(1, "autosave")]), cx);
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, _| {
+            assert!(view.rows[0].restore.is_focused(window));
+            assert_eq!(view.undoing, None);
         });
     }
 

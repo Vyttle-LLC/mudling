@@ -7,11 +7,119 @@
 
 use super::camera::Camera;
 use super::sheet::{Hit, Place, Sheet};
-use mudling_core::map::{GridPoint, RoomId, WalkStep};
+use mudling_core::map::{
+    Direction, Duplicates, GridPoint, JoinDone, MapRoom, RoomId, RoomPair, WalkStep,
+    likely_duplicates, mapper_of, room_pair,
+};
+use mudling_core::persist::Timestamp;
 use mudling_core::store::{Diff, MapState, Revision, Versioned};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 type SheetKey = (Revision, Place);
+/// The rooms as of a revision, and how many pairs the player had answered.
+type ScanKey = (Revision, usize);
+
+/// The least time between looks for duplicates: a walk through new rooms
+/// changes the map on every move, and nothing here needs to keep up with it.
+const SCAN_GAP: Duration = Duration::from_secs(2);
+
+/// A look for duplicates, on a cheap clone of the map.
+pub struct DuplicatesJob {
+    key: ScanKey,
+    map: MapState,
+}
+
+impl DuplicatesJob {
+    pub fn run(self) -> (ScanKey, Duplicates) {
+        let rooms = self.map.rooms().map(|room| &**room);
+        let found = likely_duplicates(rooms, &self.map.joins().not_same);
+        (self.key, found)
+    }
+}
+
+/// What the view does about duplicates next.
+pub enum ScanStep {
+    Nothing,
+    Run(DuplicatesJob),
+    /// Too soon after the last look: ask again after this long.
+    WaitFor(Duration),
+}
+
+/// The note over the map after a join.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinNote {
+    Joined { label: String, created: Timestamp },
+    Failed(String),
+}
+
+/// One room of a pair, as Review words it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomCopy {
+    pub name: String,
+    pub mapped: &'static str,
+    pub held: String,
+    pub sightings: String,
+}
+
+impl RoomCopy {
+    fn of(room: &MapRoom, this_device: i64) -> RoomCopy {
+        let notes = room.notes.lines().filter(|line| !line.trim().is_empty());
+        let features: Vec<&str> = room.features.iter().map(String::as_str).collect();
+        let features = match features.len() {
+            0 => "no features".to_owned(),
+            count => format!("{} ({})", counted(count, "feature"), features.join(", ")),
+        };
+        let held = match notes.count() {
+            0 => format!("No notes · {features}"),
+            count => format!("{} · {features}", counted(count, "note")),
+        };
+        RoomCopy {
+            name: room.name.clone(),
+            mapped: if mapper_of(room.id) == this_device {
+                "Mapped on this device"
+            } else {
+                "Mapped on your other device"
+            },
+            held,
+            sightings: match room.sightings.len() {
+                0 => "No sightings".to_owned(),
+                count => counted(count, "sighting"),
+            },
+        }
+    }
+}
+
+fn counted(count: usize, thing: &str) -> String {
+    match count {
+        1 => format!("1 {thing}"),
+        count => format!("{count} {thing}s"),
+    }
+}
+
+/// The ways two rooms lead to different places. Joined, the newer link stays.
+fn ways_that_differ(first: &MapRoom, second: &MapRoom) -> Vec<Direction> {
+    Direction::ALL
+        .into_iter()
+        .filter(|way| {
+            let (a, b) = (first.links.get_copied(*way), second.links.get_copied(*way));
+            a.is_some() && b.is_some() && a != b
+        })
+        .collect()
+}
+
+/// Two copies side by side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewPair {
+    pub pair: RoomPair,
+    pub copies: [RoomCopy; 2],
+    /// Which pair this is, from one.
+    pub number: usize,
+    pub of: usize,
+    /// What a join can't keep both of, in the player's words.
+    pub warning: Option<String>,
+}
 
 /// A sheet to build, on a cheap clone of the map.
 pub struct SheetJob {
@@ -104,6 +212,22 @@ pub struct MapModel {
     selection: Option<Selection>,
     walk_for: Option<WalkKey>,
     walking: Option<WalkKey>,
+    duplicates: Arc<Duplicates>,
+    /// `duplicates.rooms`, for a tile's color without a tree walk per frame.
+    marked: Arc<HashSet<RoomId>>,
+    scanned: Option<ScanKey>,
+    scanning: Option<ScanKey>,
+    scan_finished: Option<Instant>,
+    /// Rooms picked to join, at most two.
+    picks: Vec<RoomId>,
+    /// Which pair Review shows; `None` when it's closed.
+    reviewing: Option<usize>,
+    /// The pair sent to the session, until it answers. It stays in Review
+    /// until then: a join can be refused.
+    joining: Option<RoomPair>,
+    join_note: Option<JoinNote>,
+    /// The last answer taken from the store.
+    answered: u64,
 }
 
 impl MapModel {
@@ -111,6 +235,7 @@ impl MapModel {
     pub fn new(snapshot: Versioned<MapState>) -> MapModel {
         let mut model = MapModel {
             rooms_changed: snapshot.revision(),
+            answered: snapshot.value().last_join().map_or(0, |last| last.attempt),
             map: snapshot,
             following: true,
             ..MapModel::default()
@@ -125,7 +250,31 @@ impl MapModel {
         if !diff.change.rooms.is_empty() || !diff.change.removed.is_empty() {
             self.rooms_changed = diff.revision;
         }
+        self.take_join_answer();
+        let map = self.map.value();
+        self.picks.retain(|room| map.room(*room).is_some());
         self.track_player();
+    }
+
+    fn take_join_answer(&mut self) {
+        let Some(last) = self.map.value().last_join().cloned() else {
+            return;
+        };
+        if last.attempt == self.answered {
+            return;
+        }
+        self.answered = last.attempt;
+        let joining = self.joining.take();
+        self.join_note = match last.outcome {
+            Ok(JoinDone::Joined { label, created, .. }) => {
+                if let Some(pair) = joining {
+                    self.answer_pair(pair, Some(pair.1));
+                }
+                Some(JoinNote::Joined { label, created })
+            }
+            Ok(JoinDone::Undone) => None,
+            Err(error) => Some(JoinNote::Failed(error)),
+        };
     }
 
     fn track_player(&mut self) {
@@ -343,6 +492,200 @@ impl MapModel {
         true
     }
 
+    /// Whether to look for duplicates now. A look costs a walk of the map off
+    /// the UI thread, and a line from the game costs nothing here: only a
+    /// change to the rooms or to the player's answers asks for one.
+    pub fn scan_step(&mut self, now: Instant) -> ScanStep {
+        let key = (self.rooms_changed, self.map.value().joins().not_same.len());
+        if self.scanned == Some(key) || self.scanning.is_some() {
+            return ScanStep::Nothing;
+        }
+        if let Some(wait) = self
+            .scan_finished
+            .and_then(|last| SCAN_GAP.checked_sub(now - last))
+        {
+            return ScanStep::WaitFor(wait);
+        }
+        self.scanning = Some(key);
+        ScanStep::Run(DuplicatesJob {
+            key,
+            map: self.map.value().clone(),
+        })
+    }
+
+    /// Looks on this thread, whatever a look under way would find. For the
+    /// images and checks, which can't wait for one.
+    #[cfg(any(test, target_os = "macos"))]
+    pub fn scan_now(&mut self) {
+        let job = DuplicatesJob {
+            key: (self.rooms_changed, self.map.value().joins().not_same.len()),
+            map: self.map.value().clone(),
+        };
+        self.finish_scan(job.run(), Instant::now());
+    }
+
+    pub fn finish_scan(&mut self, (key, found): (ScanKey, Duplicates), now: Instant) {
+        self.scanning = None;
+        self.scan_finished = Some(now);
+        self.scanned = Some(key);
+        self.set_duplicates(found);
+    }
+
+    fn set_duplicates(&mut self, found: Duplicates) {
+        self.marked = Arc::new(found.rooms.iter().copied().collect());
+        self.duplicates = Arc::new(found);
+        if let Some(index) = self.reviewing {
+            let last = self.duplicates.pairs.len().checked_sub(1);
+            self.reviewing = last.map(|last| index.min(last));
+        }
+    }
+
+    pub fn duplicates(&self) -> &Duplicates {
+        &self.duplicates
+    }
+
+    /// The lowest id on the map, for a measured walk.
+    pub fn first_room(&self) -> RoomId {
+        let first = self.map.value().rooms().next();
+        first.map_or(0, |room| room.id)
+    }
+
+    pub fn marked(&self) -> &Arc<HashSet<RoomId>> {
+        &self.marked
+    }
+
+    // MARK: Review
+
+    pub fn open_review(&mut self) {
+        self.reviewing = (!self.duplicates.pairs.is_empty()).then_some(0);
+    }
+
+    pub fn close_review(&mut self) {
+        self.reviewing = None;
+    }
+
+    pub fn reviewing(&self) -> bool {
+        self.reviewing.is_some()
+    }
+
+    /// The pair after this one, or the first again after the last.
+    pub fn skip_pair(&mut self) {
+        self.join_note = None;
+        let pairs = self.duplicates.pairs.len();
+        self.reviewing = self.reviewing.map(|index| (index + 1) % pairs.max(1));
+    }
+
+    /// Stops asking about `pair`, ahead of the next look at the map. Each pair
+    /// that held a room `retired` by joining it goes too.
+    pub fn answer_pair(&mut self, pair: RoomPair, retired: Option<RoomId>) {
+        let mut found = (*self.duplicates).clone();
+        found.pairs.retain(|answered| {
+            *answered != pair && retired.is_none_or(|id| answered.0 != id && answered.1 != id)
+        });
+        found.rooms = found.pairs.iter().flat_map(|(a, b)| [*a, *b]).collect();
+        self.set_duplicates(found);
+    }
+
+    pub fn review_pair(&self) -> Option<ReviewPair> {
+        let index = self.reviewing?;
+        let pair = *self.duplicates.pairs.get(index)?;
+        let map = self.map.value();
+        let (first, second) = (&**map.room(pair.0)?, &**map.room(pair.1)?);
+        let this_device = map.joins().this_device;
+        let ways = ways_that_differ(first, second);
+        let warning = (!ways.is_empty()).then(|| {
+            let names: Vec<&str> = ways.iter().map(|way| way.name()).collect();
+            format!(
+                "Their links differ: {}. The newer one stays for each.",
+                names.join(", ")
+            )
+        });
+        Some(ReviewPair {
+            pair,
+            copies: [
+                RoomCopy::of(first, this_device),
+                RoomCopy::of(second, this_device),
+            ],
+            number: index + 1,
+            of: self.duplicates.pairs.len(),
+            warning,
+        })
+    }
+
+    // MARK: Picking rooms to join
+
+    pub fn picks(&self) -> &[RoomId] {
+        &self.picks
+    }
+
+    pub fn clear_picks(&mut self) {
+        self.picks.clear();
+    }
+
+    /// Whether the map can join `room` at all.
+    pub fn can_pick(&self, room: RoomId) -> bool {
+        self.duplicates.joinable && self.map.value().room(room).is_some()
+    }
+
+    /// Adds `room`, or takes it back off. A third room takes the oldest's place.
+    pub fn pick(&mut self, room: RoomId) {
+        if !self.can_pick(room) {
+            return;
+        }
+        if let Some(picked) = self.picks.iter().position(|id| *id == room) {
+            self.picks.remove(picked);
+            return;
+        }
+        if self.picks.len() == 2 {
+            self.picks.remove(0);
+        }
+        self.picks.push(room);
+    }
+
+    /// A Shift-click: picks the selected room as well, if nothing is picked.
+    /// Returns whether a room was there to pick: if not, the click is an
+    /// ordinary one.
+    pub fn pick_at(&mut self, point: (f32, f32), size: (f32, f32)) -> bool {
+        let Some(Hit::Room(room)) = self.sheet.hit(self.camera.to_grid(point, size)) else {
+            return false;
+        };
+        if self.picks.is_empty()
+            && let Some(selected) = self.selection.as_ref().map(|selection| selection.room)
+            && selected != room
+        {
+            self.pick(selected);
+        }
+        self.pick(room);
+        true
+    }
+
+    /// The two rooms to join, once two are picked.
+    pub fn picked_pair(&self) -> Option<RoomPair> {
+        match self.picks[..] {
+            [first, second] => Some(room_pair(first, second)),
+            _ => None,
+        }
+    }
+
+    /// The session has been asked to join `pair`.
+    pub fn await_join(&mut self, pair: RoomPair) {
+        self.joining = Some(pair);
+        self.join_note = None;
+        self.picks.clear();
+    }
+
+    pub fn joining(&self) -> Option<RoomPair> {
+        self.joining
+    }
+
+    pub fn join_note(&self) -> Option<&JoinNote> {
+        self.join_note.as_ref()
+    }
+
+    pub fn clear_join_note(&mut self) {
+        self.join_note = None;
+    }
+
     // MARK: Clicking
 
     pub fn selection(&self) -> Option<&Selection> {
@@ -373,6 +716,8 @@ impl MapModel {
     /// selected, a house opens its building's map.
     pub fn click(&mut self, point: (f32, f32), size: (f32, f32)) -> Option<Hit> {
         let hit = self.sheet.hit(self.camera.to_grid(point, size))?;
+        self.picks.clear();
+        self.join_note = None;
         match hit {
             // The selected room keeps its walk; another room needs its own.
             Hit::Room(room) if self.selection.as_ref().is_none_or(|s| s.room != room) => {
@@ -400,8 +745,8 @@ impl MapModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map_view::harness::{grid_map, room, store_of, versioned};
-    use mudling_core::map::{Building, Direction, MapChange, MapDoor, Whereabouts};
+    use crate::map_view::harness::{duplicated_map, grid_map, room, store_of, versioned};
+    use mudling_core::map::{Building, LastJoin, MapChange, MapDoor, Whereabouts};
 
     const VIEW: (f32, f32) = (400., 300.);
 
@@ -681,6 +1026,216 @@ mod tests {
         move_to(&mut model, 0, 3);
         finish_walk(&mut model);
         assert!(matches!(walk_of(&model), Some(Walk::Steps(_))));
+    }
+
+    fn duplicated_model() -> MapModel {
+        let mut model = MapModel::new(versioned(duplicated_map(9, 3)));
+        build_sheet(&mut model);
+        scan(&mut model);
+        model
+    }
+
+    fn scan(model: &mut MapModel) {
+        let ScanStep::Run(job) = model.scan_step(Instant::now()) else {
+            panic!("a look was due");
+        };
+        // Long enough ago that the next change can look at once.
+        model.finish_scan(job.run(), Instant::now() - SCAN_GAP);
+    }
+
+    #[test]
+    fn rooms_that_read_alike_are_marked_and_a_numbered_map_never_is() {
+        let model = duplicated_model();
+        assert!(!model.duplicates().pairs.is_empty());
+        assert_eq!(model.marked().len(), model.duplicates().rooms.len());
+
+        let mut numbered = grid_model();
+        scan(&mut numbered);
+        assert!(numbered.duplicates().rooms.is_empty());
+        let room = numbered.first_room();
+        numbered.pick(room);
+        assert!(numbered.picks().is_empty(), "nothing to join on this game");
+    }
+
+    #[test]
+    fn a_move_asks_for_no_look_and_a_changed_room_waits_its_turn() {
+        let mut model = MapModel::new(versioned(duplicated_map(4, 2)));
+        let ScanStep::Run(job) = model.scan_step(Instant::now()) else {
+            panic!("the first look is due");
+        };
+        model.finish_scan(job.run(), Instant::now());
+
+        let first = model.first_room();
+        move_to(&mut model, first, 2);
+        assert!(matches!(model.scan_step(Instant::now()), ScanStep::Nothing));
+
+        model.apply(&Diff {
+            revision: Revision(3),
+            change: MapChange {
+                revision: 3,
+                rooms: vec![Arc::new(room(first + 1_000, 20, 20))],
+                ..MapChange::default()
+            },
+        });
+        assert!(matches!(
+            model.scan_step(Instant::now()),
+            ScanStep::WaitFor(_)
+        ));
+        let later = Instant::now() + SCAN_GAP * 2;
+        assert!(matches!(model.scan_step(later), ScanStep::Run(_)));
+    }
+
+    #[test]
+    fn a_shift_click_picks_the_selected_room_too_and_a_click_lets_go() {
+        let mut model = duplicated_model();
+        let first = model.camera().to_view((2., 1.), VIEW);
+        let second = model.camera().to_view((3., 1.), VIEW);
+        model.click(first, VIEW);
+
+        model.pick_at(second, VIEW);
+
+        assert_eq!(model.picks().len(), 2);
+        let pair = model.picked_pair().expect("two rooms are picked");
+        assert!(pair.0 < pair.1, "lower id first");
+
+        model.click(first, VIEW);
+        assert!(model.picks().is_empty());
+    }
+
+    #[test]
+    fn picking_a_room_again_takes_it_back_and_a_third_replaces_the_oldest() {
+        let mut model = duplicated_model();
+        let base = model.first_room();
+        model.pick(base);
+        model.pick(base);
+        assert!(model.picks().is_empty());
+
+        model.pick(base);
+        model.pick(base + 1);
+        model.pick(base + 2);
+        assert_eq!(model.picks(), [base + 1, base + 2]);
+    }
+
+    #[test]
+    fn review_walks_the_pairs_and_an_answer_stops_the_question() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let first = model.review_pair().expect("there are pairs");
+        assert_eq!(first.number, 1);
+        assert_eq!(first.copies[0].mapped, "Mapped on your other device");
+
+        model.skip_pair();
+        let second = model.review_pair().expect("there are more");
+        assert_eq!(second.number, 2);
+        assert_ne!(second.pair, first.pair);
+
+        let total = second.of;
+        model.answer_pair(second.pair, None);
+        let next = model.review_pair().expect("there are more");
+        assert_eq!(next.of, total - 1);
+        assert_ne!(next.pair, second.pair);
+
+        model.answer_pair(next.pair, Some(next.pair.1));
+        let retired = next.pair.1;
+        assert!(
+            (model.duplicates().pairs.iter()).all(|pair| pair.0 != retired && pair.1 != retired),
+            "a retired room is asked about no more"
+        );
+    }
+
+    #[test]
+    fn review_says_what_each_copy_holds() {
+        let mut held = room(1 << 40, 0, 0);
+        held.notes = "Shop by the well\nBeggars at night".to_owned();
+        held.features.insert("shop".to_owned());
+        held.sightings.insert("a pilgrim".to_owned(), Timestamp(1));
+
+        let copy = RoomCopy::of(&held, 0);
+        assert_eq!(copy.held, "2 notes · 1 feature (shop)");
+        assert_eq!(copy.sightings, "1 sighting");
+
+        let bare = RoomCopy::of(&room(1 << 40, 1, 0), 0);
+        assert_eq!(bare.held, "No notes · no features");
+        assert_eq!(bare.sightings, "No sightings");
+    }
+
+    #[test]
+    fn review_warns_of_a_way_that_leads_two_places() {
+        let (mut first, mut second) = (room(1 << 40, 0, 0), room((1 << 40) + 1, 0, 0));
+        first.links.insert(Direction::North, 5);
+        second.links.insert(Direction::North, 6);
+        second.links.insert(Direction::East, 7);
+        assert_eq!(ways_that_differ(&first, &second), [Direction::North]);
+    }
+
+    fn answered(attempt: u64, outcome: Result<JoinDone, String>) -> Diff<MapState> {
+        Diff {
+            revision: Revision(attempt + 1),
+            change: MapChange {
+                last_join: Some(LastJoin { attempt, outcome }),
+                ..MapChange::default()
+            },
+        }
+    }
+
+    #[test]
+    fn the_note_over_the_map_follows_the_sessions_answers() {
+        let mut model = duplicated_model();
+        let created = Timestamp(5);
+        model.apply(&answered(
+            1,
+            Ok(JoinDone::Joined {
+                label: "Joined two copies of a square".to_owned(),
+                created,
+            }),
+        ));
+        assert!(matches!(
+            model.join_note(),
+            Some(JoinNote::Joined { created: at, .. }) if *at == created
+        ));
+
+        model.apply(&answered(2, Ok(JoinDone::Undone)));
+        assert_eq!(model.join_note(), None);
+
+        model.apply(&answered(3, Err("no".to_owned())));
+        assert_eq!(model.join_note(), Some(&JoinNote::Failed("no".to_owned())));
+    }
+
+    #[test]
+    fn a_pair_goes_only_once_the_session_has_joined_it() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let pair = model.review_pair().expect("there are pairs").pair;
+
+        model.await_join(pair);
+        assert_eq!(model.review_pair().map(|shown| shown.pair), Some(pair));
+
+        model.apply(&answered(
+            1,
+            Ok(JoinDone::Joined {
+                label: "Joined".to_owned(),
+                created: Timestamp(5),
+            }),
+        ));
+        assert_ne!(model.review_pair().map(|shown| shown.pair), Some(pair));
+        assert_eq!(model.joining(), None);
+    }
+
+    #[test]
+    fn a_refused_join_keeps_its_pair_and_says_why() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let pair = model.review_pair().expect("there are pairs").pair;
+
+        model.await_join(pair);
+        model.apply(&answered(1, Err("a sync is landing".to_owned())));
+
+        assert_eq!(model.review_pair().map(|shown| shown.pair), Some(pair));
+        assert_eq!(
+            model.join_note(),
+            Some(&JoinNote::Failed("a sync is landing".to_owned()))
+        );
+        assert_eq!(model.joining(), None);
     }
 
     #[test]

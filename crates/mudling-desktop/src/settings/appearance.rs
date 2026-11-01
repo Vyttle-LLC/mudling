@@ -16,7 +16,7 @@ const LATER_NOTE: &str = "Line width, panels and motion aren't here yet.";
 const PROMPTS_ON_NOTE: &str = "On while the HUD is hidden: nothing else shows their numbers.";
 const SAMPLE: &str = "The chat will read like this, with 80 columns to itself.";
 
-fn toggled(on: bool) -> accesskit::Toggled {
+pub(super) fn toggled(on: bool) -> accesskit::Toggled {
     on.into()
 }
 

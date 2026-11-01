@@ -44,23 +44,28 @@ use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
 use crate::map::{Mark, RoomId};
+use crate::merge::RoomMoves;
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Database, GearSet, MapVersion, SERVERS_FOLDER, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
 use crate::store::{ConnectionStatus, SettingsState, StoreHub};
+use crate::sync::Syncer;
 use crate::telnet::Bytes;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 
 /// How long a clean quit waits for the socket to close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a quit waits for a merge to land.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often a connection looks for a quiet read to send.
 const QUIET_READ_CHECK: Duration = Duration::from_secs(1);
 
@@ -83,6 +88,9 @@ pub struct SessionConfig {
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
     pub credentials: Option<Credentials>,
+    /// Told when the connection opens and closes, and allowed to reach the
+    /// session around a merge.
+    pub sync: Option<Syncer>,
     pub client_name: String,
     pub client_version: String,
     pub hook_limits: HookLimits,
@@ -99,6 +107,7 @@ impl SessionConfig {
             enabled: Vec::new(),
             approved: Vec::new(),
             credentials: None,
+            sync: None,
             client_name: "MUDling".to_owned(),
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             hook_limits: HookLimits::default(),
@@ -210,6 +219,14 @@ pub enum MapEdit {
         mark: Mark,
         set: bool,
     },
+    /// Two rooms are one. `MapState::last_join` says how it went.
+    Join { first: RoomId, second: RoomId },
+    /// Two rooms that look alike aren't one: stop suggesting them.
+    NotSame { first: RoomId, second: RoomId },
+    /// Undoes the join whose version was saved at `created`, on the device
+    /// that made it.
+    /// `MapState::last_join` says how it went.
+    UndoJoin { created: Timestamp },
 }
 
 enum Input {
@@ -225,9 +242,64 @@ enum Input {
     WearSet { character: String, id: String },
     Cancel,
     Replay(Vec<Bytes>),
+    HoldWrites(SyncSender<()>),
+    ReleaseWrites(RoomMoves),
     TurnPluginOn(PluginId),
+    LoggingChanged,
     RestoreMap(i64),
     Quit,
+}
+
+/// How the sync thread reaches a running session, around a merge. A merge can
+/// retire a room the map holds in memory, and a row written for a retired room
+/// comes back as a duplicate or fails its whole batch. So the session holds
+/// its rows while the merge lands, moves them onto the rooms that stayed, and
+/// reloads. Play carries on throughout; only rows wait.
+#[derive(Clone)]
+pub(crate) struct SessionLink {
+    server: String,
+    inbox: WeakUnboundedSender<Input>,
+}
+
+impl SessionLink {
+    pub(crate) fn server(&self) -> &str {
+        &self.server
+    }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        self.inbox.upgrade().is_some()
+    }
+
+    /// Asks the session to hold its rows, unless it has ended. `drained`
+    /// answers once what it already queued has reached the database, and the
+    /// session stays reachable until [`HeldSession::release`], even if it's
+    /// quit by then.
+    pub(crate) fn hold(&self, drained: SyncSender<()>) -> Option<HeldSession> {
+        let inbox = self.inbox.upgrade()?;
+        inbox.send(Input::HoldWrites(drained)).ok()?;
+        Some(HeldSession {
+            server: self.server.clone(),
+            inbox,
+        })
+    }
+}
+
+/// A session holding its rows.
+pub(crate) struct HeldSession {
+    server: String,
+    inbox: UnboundedSender<Input>,
+}
+
+impl HeldSession {
+    pub(crate) fn server(&self) -> &str {
+        &self.server
+    }
+
+    /// Lets held rows go, moved by `moves`, and rebuilds the map from the
+    /// database.
+    pub(crate) fn release(self, moves: RoomMoves) {
+        let _ = self.inbox.send(Input::ReleaseWrites(moves));
+    }
 }
 
 /// A running session. Every method returns at once.
@@ -261,6 +333,14 @@ impl MapHistory {
     pub fn restore(&self, version_id: i64) -> bool {
         self.inbox.send(Input::RestoreMap(version_id)).is_ok()
     }
+
+    /// Undoes the join saved as the version from `created`.
+    /// `MapState::last_join` says how it went. Returns false if the session
+    /// has stopped, so nothing will.
+    pub fn undo_join(&self, created: Timestamp) -> bool {
+        let edit = MapEdit::UndoJoin { created };
+        self.inbox.send(Input::EditMap(edit)).is_ok()
+    }
 }
 
 /// A session on its way out; see [`Session::quit`].
@@ -287,6 +367,12 @@ impl Session {
         let hub = Arc::new(StoreHub::new(waker));
         let typing = Arc::new(Mutex::new(Typing::default()));
         let (inbox, inputs) = mpsc::unbounded_channel();
+        if let Some(sync) = &config.sync {
+            sync.attach(SessionLink {
+                server: config.host.clone(),
+                inbox: inbox.downgrade(),
+            });
+        }
         let map_history = MapHistory {
             database: Database::at(&config.data_folder.join(SERVERS_FOLDER), &config.host),
             inbox: inbox.clone(),
@@ -395,6 +481,13 @@ impl Session {
     /// line, on a clean count of overruns.
     pub fn turn_plugin_on(&self, plugin: PluginId) {
         self.queue(Input::TurnPluginOn(plugin));
+    }
+
+    /// The player saved new [`LogSettings`]: a running connection follows.
+    ///
+    /// [`LogSettings`]: crate::logs::LogSettings
+    pub fn logging_changed(&self) {
+        self.queue(Input::LoggingChanged);
     }
 
     /// The links the enabled plugins find in `line`, for a shell to offer.
@@ -539,7 +632,10 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Replay(chunks)) if socket.is_none() => replay(&mut engine, chunks),
                 Some(Input::Replay(_)) => {}
+                Some(Input::HoldWrites(done)) => engine.hold_writes(done),
+                Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
+                Some(Input::LoggingChanged) => engine.logging_changed(),
                 Some(Input::RestoreMap(version_id)) => {
                     engine.restore_map(version_id, Timestamp::now());
                 }
@@ -574,7 +670,20 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
     if let Some(socket) = socket {
         close(socket, &mut engine).await;
     }
+    wait_for_release(&mut engine, &mut inputs).await;
     engine.finish()
+}
+
+/// A session that ends during a merge lets it land first, so its last rows go
+/// where the merge says. A sync that never answers doesn't hold up a quit.
+async fn wait_for_release(engine: &mut Engine, inputs: &mut UnboundedReceiver<Input>) {
+    while engine.is_holding_writes() {
+        match tokio::time::timeout(RELEASE_TIMEOUT, inputs.recv()).await {
+            Ok(Some(Input::ReleaseWrites(moves))) => engine.release_writes(&moves),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 /// Closes a socket and waits for it, so the server sees a clean close.
@@ -611,4 +720,328 @@ fn replay(engine: &mut Engine, chunks: Vec<Bytes>) {
         drop(engine.take_output());
     }
     engine.close_connection(DisconnectReason::ClosedByServer, Timestamp::now());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::defaults::hotbar::HOTBAR_META;
+    use crate::map::{LiveMap, Whereabouts};
+    use crate::persist::SERVERS_FOLDER;
+    use crate::persist::{
+        Batch, Character, CharacterStat, Database, GearSet, Key, Meta, NOTEPAD, Room,
+    };
+    use crate::plugin::luau::{HookOutput, StoreWrite, Value};
+    use crate::store::{
+        Affect, CHARACTER_LEVEL, CharactersState, ItemsState, MapState, RulesState, SheetState,
+        Versioned,
+    };
+    use std::sync::mpsc::sync_channel;
+    use std::time::Instant;
+
+    const HOST: &str = "mud.example.org";
+    const IAC: u8 = 255;
+
+    /// The game saying the player is in room `number`, as GMCP.
+    fn in_room(number: i64) -> Bytes {
+        let info = format!(
+            r#"Room.Info {{"num": {number}, "name": "Room {number}", "zone": "Fields",
+                "environment": "field", "exits": {{"n": {}}}, "details": []}}"#,
+            number + 2
+        );
+        let mut bytes = vec![IAC, 251, 201, IAC, 250, 201];
+        bytes.extend_from_slice(info.as_bytes());
+        bytes.extend_from_slice(&[IAC, 240]);
+        Bytes::from(bytes)
+    }
+
+    fn engine(folder: &std::path::Path, hub: &Arc<StoreHub>) -> Engine {
+        let config = SessionConfig::new(folder, HOST, 4000);
+        let mut engine = Engine::open(config, Arc::clone(hub), Arc::default()).unwrap();
+        engine.start_connection().unwrap();
+        engine.connected();
+        engine
+    }
+
+    fn walk_to(engine: &mut Engine, number: i64) {
+        let now = Timestamp::now();
+        engine.send("n", now);
+        engine.receive(in_room(number), now).unwrap();
+        engine.settle(now);
+    }
+
+    fn room_ids(folder: &std::path::Path) -> Vec<i64> {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let rooms = database.reader().unwrap().map().unwrap().rooms;
+        rooms.into_iter().map(|room| room.id).collect()
+    }
+
+    /// What a merge does to the database: room 2 goes, and room 3 takes its
+    /// place.
+    fn retire_room_2(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        batch.upsert(Room {
+            id: 3,
+            name: "Room 2".to_owned(),
+            area: "Fields".to_owned(),
+            environment: "field".to_owned(),
+            description: String::new(),
+            x: 0,
+            y: 2,
+            z: 0,
+            building: None,
+            tangled: false,
+            maze: false,
+            updated: Timestamp::now(),
+        });
+        batch.delete(Key::Room(2));
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    fn whereabouts(hub: &StoreHub) -> Whereabouts {
+        hub.read(|map: &Versioned<MapState>| map.value().whereabouts())
+    }
+
+    /// A row for a child of the retired room would fail its whole batch if it
+    /// reached the database unmoved, so the new room would be lost with it.
+    #[test]
+    fn rows_written_during_a_merge_survive_it_and_the_map_follows() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        walk_to(&mut engine, 1);
+        walk_to(&mut engine, 2);
+
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+        assert_eq!(room_ids(folder.path()), [1, 2]);
+
+        retire_room_2(folder.path());
+        walk_to(&mut engine, 4);
+        assert_eq!(room_ids(folder.path()), [1, 3], "rows wait for the merge");
+
+        engine.release_writes(&RoomMoves::from([(2, Some(3))]));
+
+        assert_eq!(room_ids(folder.path()), [1, 3, 4]);
+        hub.read(|map: &Versioned<MapState>| {
+            assert!(map.value().room(2).is_none());
+            assert!(map.value().room(3).is_some());
+        });
+        assert_eq!(whereabouts(&hub).room, Some(4));
+        let notices =
+            hub.read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
+        assert_eq!(notices, Vec::<String>::new());
+        engine.finish().unwrap();
+    }
+
+    /// What a merge does to the rules: a newer notepad and hotbar arrive in
+    /// the database.
+    fn merge_brings_notes_and_hotbar(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        for (key, value) in [
+            (NOTEPAD, "from the other device"),
+            (HOTBAR_META, r#"["look"]"#),
+        ] {
+            batch.upsert(Meta {
+                key: key.to_owned(),
+                value: value.to_owned(),
+                updated: Timestamp::now(),
+            });
+        }
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn the_notepad_and_hotbar_follow_a_merge() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        engine.edit(RuleEdit::SetNotepad("mine".to_owned()), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_notes_and_hotbar(folder.path());
+        engine.release_writes(&RoomMoves::new());
+
+        hub.read(|rules: &Versioned<RulesState>| {
+            assert_eq!(rules.value().notepad, "from the other device");
+            assert_eq!(rules.value().hotbar, ["look"]);
+        });
+        engine.finish().unwrap();
+    }
+
+    /// What another device brings: sets and a stat for each of two characters,
+    /// the one playing and another who never played here.
+    fn merge_brings_two_characters(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        for (owner, strength) in [("alda", "14"), ("bryn", "9")] {
+            batch.upsert(Character {
+                id: owner.to_owned(),
+                server_id: HOST.to_owned(),
+                name: owner.to_owned(),
+                updated: Timestamp::now(),
+            });
+            batch.upsert(CharacterStat {
+                character_id: owner.to_owned(),
+                key: "character.str".to_owned(),
+                value: strength.to_owned(),
+                updated: Timestamp::now(),
+            });
+            batch.upsert(GearSet {
+                id: format!("{owner}-set"),
+                character_id: owner.to_owned(),
+                name: format!("{owner}'s set"),
+                container: None,
+                pieces: Vec::new(),
+                updated: Timestamp::now(),
+            });
+        }
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn whoever_plays_has_what_a_merge_brought_and_none_of_another_characters() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        let named = StoreWrite {
+            plugin: PluginId::try_from("sample-game".to_owned()).unwrap(),
+            store: "character".to_owned(),
+            key: "name".to_owned(),
+            value: Value::Text("Alda".to_owned()),
+        };
+        engine.hook_output(HookOutput::StoreWrite(named), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_two_characters(folder.path());
+        engine.release_writes(&RoomMoves::new());
+        engine.settle(Timestamp::now());
+
+        hub.read(|sheet: &Versioned<SheetState>| {
+            assert_eq!(sheet.value().character, "alda");
+            assert_eq!(sheet.value().stats.get("str"), Some(&Value::Number(14.)));
+        });
+        hub.read(|items: &Versioned<ItemsState>| {
+            let sets: Vec<_> = items
+                .value()
+                .sets
+                .iter()
+                .map(|set| set.id.as_str())
+                .collect();
+            assert_eq!(sets, ["alda-set"]);
+        });
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_merge_landing_leaves_the_affects_and_level_of_whoever_still_plays() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        let named = StoreWrite {
+            plugin: PluginId::try_from("sample-game".to_owned()).unwrap(),
+            store: "character".to_owned(),
+            key: "name".to_owned(),
+            value: Value::Text("Alda".to_owned()),
+        };
+        engine.hook_output(HookOutput::StoreWrite(named), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let affect = Affect {
+            name: "bless".to_owned(),
+            detail: "12 hours".to_owned(),
+        };
+        hub.write::<CharactersState>(CharactersState::listing(std::slice::from_ref(&affect)));
+        hub.write::<CharactersState>(CharactersState(
+            [(CHARACTER_LEVEL.to_owned(), Value::Number(12.))].into(),
+        ));
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_two_characters(folder.path());
+        engine.release_writes(&RoomMoves::new());
+
+        hub.read(|characters: &Versioned<CharactersState>| {
+            assert_eq!(characters.value().affects(), [affect]);
+            assert_eq!(
+                characters.value().0.get(CHARACTER_LEVEL),
+                Some(&Value::Number(12.))
+            );
+        });
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_restore_waits_out_a_merge_landing() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        walk_to(&mut engine, 1);
+        let database = Database::open(&folder.path().join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        writer
+            .submit(LiveMap::save_version(
+                "manual",
+                "One room",
+                Timestamp::now(),
+            ))
+            .unwrap();
+        writer.flush().unwrap();
+        walk_to(&mut engine, 2);
+        let version = database.reader().unwrap().map_versions().unwrap()[0].id;
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        engine.restore_map(version, Timestamp::now());
+
+        let restore = hub.read(|settings: &Versioned<SettingsState>| {
+            settings.value().map_restore.clone().unwrap()
+        });
+        assert!(restore.outcome.is_err(), "{restore:?}");
+        assert_eq!(room_ids(folder.path()), [1, 2], "the map was left alone");
+        engine.release_writes(&RoomMoves::new());
+        engine.restore_map(version, Timestamp::now());
+        assert_eq!(
+            room_ids(folder.path()),
+            [1],
+            "restoring works once it's over"
+        );
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_session_quit_during_a_merge_waits_for_it_to_land() {
+        let folder = tempfile::tempdir().unwrap();
+        let session = Session::open(SessionConfig::new(folder.path(), HOST, 4000), || {}).unwrap();
+        let link = SessionLink {
+            server: HOST.to_owned(),
+            inbox: session.inbox.downgrade(),
+        };
+        let (drained, queue_empty) = sync_channel(1);
+        let held = link.hold(drained).unwrap();
+        queue_empty.recv().unwrap();
+
+        let quitting = session.quit();
+        let began = Instant::now();
+        held.release(RoomMoves::new());
+
+        quitting.wait().unwrap();
+        assert!(began.elapsed() < RELEASE_TIMEOUT);
+    }
 }

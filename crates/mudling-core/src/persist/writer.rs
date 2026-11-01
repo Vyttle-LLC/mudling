@@ -110,6 +110,12 @@ impl Writer {
         }
     }
 
+    /// Answers on `done` once every batch queued so far is committed or has
+    /// failed. This returns at once, and leaves failures for the next collection.
+    pub(crate) fn notify_when_drained(&self, done: SyncSender<()>) -> Result<(), Error> {
+        self.send(Message::Flush(done))
+    }
+
     /// A receiver that hears once every batch queued so far is committed or
     /// has failed. This never waits on the disk; checking it doesn't either.
     pub fn caught_up(&self) -> Result<Receiver<()>, Error> {

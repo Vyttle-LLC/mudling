@@ -5,6 +5,7 @@
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
+//!                            [--settings-section data|vault|logs]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -23,7 +24,8 @@
 //! off), with its data in a throwaway folder. `--long-lines` joins its lines
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
-//! sheet open, `--hud` with the HUD in that place, `--find-open` with the find
+//! sheet open, `--settings-section` with that section open and filled with
+//! made-up rows, `--hud` with the HUD in that place, `--find-open` with the find
 //! bar open and results showing, `--find-panel` with the Find panel showing and
 //! being typed in, `--notes-open` with a note being typed in the Notes tab,
 //! `--gear-open` with the Gear tab open on a full gear database,
@@ -86,14 +88,18 @@ use gpui::{
 };
 use launcher::{Launcher, Target, bundled_plugins, installed_plugins, replaced};
 use measure::HudRun;
+use mudling_core::git;
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
+use mudling_core::sync::{RepoSettings, SyncConfig, Syncer};
+use mudling_core::vault::OsKeyStore;
 use room_panel::Verbs;
-use settings::{PluginRow, SavedSettings};
-use shell::{Game, QUIT_WAIT, Shell};
+use settings::{PluginRow, SavedSettings, Section, app_settings};
+use shell::{Game, LEAVE_WAIT, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use theme::Appearance;
@@ -104,7 +110,8 @@ const REPLAY_HOST: &str = "replay";
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
+                     [--settings-open] [--settings-section data|vault|logs] \
+                     [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
                      [--sample-map <rooms>]] [--ax-check]";
@@ -126,6 +133,7 @@ struct Options {
     stream_for: Duration,
     report: PathBuf,
     settings_open: bool,
+    settings_section: Option<Section>,
     hud: Option<HudRun>,
     find_open: bool,
     find_panel: bool,
@@ -139,6 +147,7 @@ struct Options {
 
 fn main() -> ExitCode {
     let launched = Instant::now();
+    git::prepare();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--map-harness") {
         // Its own app, kept in the background like `in_background` below.
@@ -171,28 +180,29 @@ fn main() -> ExitCode {
     let waker = move || {
         let _ = wake.unbounded_send(());
     };
+    let kept_settings = keep_settings(&options);
     let opened = load_feed(&options).and_then(|feed| {
-        let (game, launcher) = match feed {
-            Some(_) => (Some(open_replay(&options, waker)?), None),
+        let (game, launcher, syncer) = match feed {
+            Some(_) => (Some(open_replay(&options, waker)?), None, None),
             None => {
-                let launcher = launcher_for(&options, waker)?;
+                let syncer = start_sync(&options, kept_settings.as_ref(), waker.clone());
+                let launcher = launcher_for(&options, waker)?.with_sync(syncer.clone());
                 let target = options.host.clone().zip(options.port);
                 let game = target
-                    .map(|(host, port)| launcher.open(&Target { host, port }, None))
+                    .map(|(host, port)| launcher.open(&Target { host, port }, None, None))
                     .transpose()?;
-                (game, Some(launcher))
+                (game, Some(launcher), syncer)
             }
         };
-        Ok((feed, game, launcher))
+        Ok((feed, game, launcher, syncer))
     });
-    let (feed, game, launcher) = match opened {
+    let (feed, game, launcher, syncer) = match opened {
         Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::from(2);
         }
     };
-    let kept_settings = keep_settings(&options);
     let feed = feed.map(|mut feed| {
         let history = stream::next_reads(&mut feed, SCROLLBACK_LINES as u64);
         (feed, history)
@@ -248,6 +258,9 @@ fn main() -> ExitCode {
                 if let Some((saved, choice)) = kept_settings {
                     shell.restore_settings(saved, choice, window, cx);
                 }
+                if let Some(syncer) = syncer {
+                    shell.use_sync(syncer, Arc::new(OsKeyStore), window, cx);
+                }
                 // The accessibility check reads the chat and the command bar.
                 if let Some(launcher) = launcher.filter(|_| !options.ax_check) {
                     shell.use_launcher(launcher, window, cx);
@@ -293,7 +306,12 @@ fn main() -> ExitCode {
                 });
                 if options.settings_open {
                     window
-                        .update(cx, |shell, window, cx| shell.open_settings(window, cx))
+                        .update(cx, |shell, window, cx| match options.settings_section {
+                            Some(section) => {
+                                measure::open_sample_section(shell, section, window, cx);
+                            }
+                            None => shell.open_settings(window, cx),
+                        })
                         .expect("the measured window is open");
                 }
                 if let Some(hud) = options.hud {
@@ -346,6 +364,7 @@ fn main() -> ExitCode {
 pub(crate) fn bind_keys(cx: &mut App) {
     input::bind_keys(cx);
     map_history::bind_keys(cx);
+    map_view::bind_keys(cx);
     shell::bind_keys(cx);
     hud::bind_keys(cx);
     title_bar::bind_keys(cx);
@@ -370,6 +389,26 @@ fn keep_settings(options: &Options) -> Option<(SavedSettings, Appearance)> {
         .ok()
 }
 
+/// Starts sync for a window that keeps the player's settings. Measured runs
+/// and checks keep none, so they leave the player's repo alone too. Returns at
+/// once: the first sync runs on sync's own thread.
+fn start_sync(
+    options: &Options,
+    kept: Option<&(SavedSettings, Appearance)>,
+    waker: impl Fn() + Send + Sync + 'static,
+) -> Option<Syncer> {
+    let (saved, appearance) = kept?;
+    let choices = saved.sync_choices();
+    let config = SyncConfig {
+        repo: choices.repo.map(RepoSettings::new),
+        settings: app_settings(*appearance, choices.settings_updated),
+        ..SyncConfig::new(data_folder(options).ok()?)
+    };
+    Syncer::start(config, waker)
+        .inspect_err(|error| eprintln!("sync won't run: {error}"))
+        .ok()
+}
+
 /// Ends the session, then the app, without holding up the UI thread.
 fn shut_down(shell: &Entity<Shell>, cx: &mut App) {
     let Some(saved) = shell.update(cx, |shell, cx| shell.leave(cx)) else {
@@ -382,9 +421,9 @@ fn shut_down(shell: &Entity<Shell>, cx: &mut App) {
     .detach();
 }
 
-/// Waits for [`Shell::leave`]'s task, up to [`QUIT_WAIT`].
+/// Waits for [`Shell::leave`]'s task, up to [`LEAVE_WAIT`].
 async fn wait_for_save(saved: Task<()>, cx: &AsyncApp) {
-    let timeout = cx.background_executor().timer(QUIT_WAIT);
+    let timeout = cx.background_executor().timer(LEAVE_WAIT);
     if let Either::Right(_) = future::select(saved, timeout).await {
         eprintln!("the session didn't finish saving in time");
     }
@@ -488,6 +527,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         stream_for: Duration::from_secs(20),
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
+        settings_section: None,
         hud: None,
         find_open: false,
         find_panel: false,
@@ -531,6 +571,15 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 )
             }
             "--settings-open" => options.settings_open = true,
+            "--settings-section" => {
+                options.settings_open = true;
+                options.settings_section = Some(match value()?.as_str() {
+                    "data" => Section::Data,
+                    "vault" => Section::Vault,
+                    "logs" => Section::Logs,
+                    _ => return Err("--settings-section needs data, vault or logs".into()),
+                });
+            }
             "--hud" => {
                 options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)
             }

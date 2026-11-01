@@ -19,7 +19,8 @@
 //!
 //! `--long-lines` measures all of this with lines that wrap.
 //!
-//! `--settings-open` runs all of this with the settings sheet open.
+//! `--settings-open` runs all of this with the settings sheet open, and
+//! `--settings-section` with Data & sync, Vault or Logs open and filled.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -62,6 +63,7 @@ use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
+use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{
@@ -70,6 +72,7 @@ use gpui::{
 use mudling_core::defaults::hud::Vital;
 use mudling_core::gear::sets::GearRules;
 use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
+use mudling_core::logs::{Kind, LogFile, LogSettings};
 use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
 use mudling_core::persist::{
     self, Batch, Database, Exit, GearPiece, GearSet, Link, Meta, Room, Sighting, StatMap, Timestamp,
@@ -86,6 +89,7 @@ use mudling_core::store::{
     Target, TargetState, Versioned, VitalsState, WornItem,
 };
 use mudling_core::telnet::gmcp;
+use mudling_core::vault::EntryKey;
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -1147,6 +1151,7 @@ struct FrameReport {
     load_average_1m: Option<f64>,
     scope: &'static str,
     settings_open: bool,
+    settings_section: Option<String>,
     hud: Option<String>,
     find_open: bool,
     find_panel: bool,
@@ -1162,6 +1167,47 @@ struct FrameReport {
     split_within_budget: Option<bool>,
     phases: BTreeMap<String, Summary>,
     info: BTreeMap<String, f64>,
+}
+
+const SAMPLE_HOST: &str = "mud.example";
+const SAMPLE_VAULT_CHARACTER: &str = "Sample";
+
+/// Opens the sheet on `section`, with Data & sync and Vault full of made-up
+/// rows. They run on no repo and no vault, so nothing of the player's is read.
+pub fn open_sample_section(
+    shell: &mut Shell,
+    section: Section,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    shell.open_settings(window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.select(section, cx);
+        sheet.show_sample_data(cx);
+        let entries = [SAMPLE_VAULT_CHARACTER, "Other"]
+            .map(|character| EntryKey::new(SAMPLE_HOST, character))
+            .to_vec();
+        sheet.show_sample_vault(entries, 1, cx);
+        sheet.show_logs(LogSettings::default(), sample_logs(), cx);
+    });
+}
+
+/// Made-up logs with no files behind them.
+pub fn sample_logs() -> Vec<LogFile> {
+    let log = |kind, started, bytes, pinned, live| LogFile {
+        kind,
+        path: "sample.log".into(),
+        server: "mud.example".to_owned(),
+        started: Timestamp(started),
+        bytes,
+        pinned,
+        live,
+    };
+    vec![
+        log(Kind::Debug, 1_793_500_000_000, 2_500_000, false, true),
+        log(Kind::Debug, 1_793_400_000_000, 31_000_000, true, false),
+        log(Kind::Chat, 1_793_300_000_000, 840_000, false, false),
+    ]
 }
 
 /// Runs the app as a measured child and writes the report to `report_path`.
@@ -1234,7 +1280,14 @@ pub fn run_parent(
         load_average_1m,
         scope: "chat, command bar and both side panels open, the Room panel and the hotbar filled; \
                 the chat split from the split phase on",
-        settings_open: child_args.iter().any(|arg| arg == "--settings-open"),
+        settings_open: child_args
+            .iter()
+            .any(|arg| arg == "--settings-open" || arg == "--settings-section"),
+        settings_section: child_args
+            .iter()
+            .position(|arg| arg == "--settings-section")
+            .and_then(|flag| child_args.get(flag + 1))
+            .cloned(),
         hud: child_args
             .iter()
             .position(|arg| arg == "--hud")
@@ -1277,10 +1330,10 @@ fn print_report(report: &FrameReport) {
     }
     println!(
         "settings sheet: {}",
-        if report.settings_open {
-            "open"
-        } else {
-            "closed"
+        match (&report.settings_section, report.settings_open) {
+            (Some(section), _) => section,
+            (None, true) => "open",
+            (None, false) => "closed",
         }
     );
     if let Some(hud) = &report.hud {

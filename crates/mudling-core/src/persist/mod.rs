@@ -39,6 +39,7 @@ mod schema;
 mod writer;
 
 pub use batch::{Batch, Key, Record};
+pub(crate) use batch::{Change, Keyed};
 pub use reader::{CharacterRows, GearRows, MapRows, Reader};
 pub use records::*;
 pub(crate) use saved::REMOVED;

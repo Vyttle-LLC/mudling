@@ -1,0 +1,24 @@
+{
+  "format": "mudling-vault",
+  "version": 1,
+  "vault_id": "GAaasE27h6cBV111V0lLlg==",
+  "key_fingerprint": "j8wukELI5Mv2suSCQdoPqQ==",
+  "kdf": {
+    "memory_kib": 8,
+    "iterations": 1,
+    "parallelism": 1
+  },
+  "salt": "iHE7tj9dsIGGMg6m/rSFLg==",
+  "master_password": {
+    "check": "adQHWCfLRj/UYPh5VmkHWvpPJYqk14SAx6kyc0XMVbE=",
+    "vault_key": "bj56uCHDU7ANC03GfqGbKMylkrFSu1qkLmtExxa/LoatQyrCbkglQuriVjaGjYnFkk4tQq2h8LFVmvwNfnW6Op7yyg8JY4wn"
+  },
+  "recovery_key": {
+    "check": "dFdqu9Zpe6l+Xpg7NHW1PbdFbJUBQtPdrkXtbYLJHyY=",
+    "vault_key": "kDiH/we7+t62upJ9DpuNzWKorYA5Gp8dEH6ErJpg0uYlZq9Lfs9s4pBhOSCgcPmdhLQ+82sLrbeIBBZRsklGeXK6O4iqDoLj"
+  },
+  "digest": "14eLuO+Pnc6Tiyfn0xAA4WRrBFXlTxF3DRH5Bed3mJY=",
+  "entries": {
+    "6a12c187295872f19b53a53fb6743ccd": "7mhwTPShEtNKANmIFQgd/Fw+IuR1GfinfAyTH1ZMYWVOq8hx4Jz/wOC6yAPS83K2F96Rb9NNkW3EeITSOK1ukqssp0pBPfyYbgCfc8UKv+RRGBQmJy1p44Pu23HrA9drnt5ShmP8XBfV+8LEPFxsO6Sp7eyDelp0BVzJoBKAStfwMFNQ116KQ2xY057Hlyk0ZXJiclQWedGal+KxPKKTbHL/ZkSoTSYyqr1SWMkyuC89sa7ekjCj9Tgai3npu5mC6RUJhNJzvLArdozgxlqZbt6ZHP5Iw/Thn7NjyE5em6hooZkR8rfFiIDt1E8L71ei8Pv3vYYPfRnRNfwbPyTKau6nP4+xhBTjbqgNl493DzyELdgsb2OzBHz3VgowOjObbrWBpNga/1A="
+  }
+}

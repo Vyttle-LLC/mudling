@@ -12,7 +12,8 @@
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
-use crate::map_view::harness::sample_map;
+use crate::map_view::harness::{duplicated_map, sample_map};
+use crate::measure;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
@@ -27,6 +28,7 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::logs::LogSettings;
 use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
@@ -119,12 +121,27 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
             None,
             cx,
         );
+        sheet.show_logs(sample_log_settings(), measure::sample_logs(), cx);
     });
     shell.open_settings(window, cx);
     shell
         .settings_sheet()
         .update(cx, |sheet, cx| sheet.select(section, cx));
 }
+
+fn sample_log_settings() -> LogSettings {
+    let mut settings = LogSettings {
+        debug: true,
+        ..LogSettings::default()
+    };
+    settings.set_chat("mud.example", true);
+    settings
+}
+
+/// The map the join scenes tidy up.
+const SAMPLE_SIDE: i64 = 12;
+const SAMPLE_REPEAT: i64 = 9;
+const SAMPLE_ROOM: i64 = (1 << 40) + 13;
 
 /// What arrives while the split is open.
 const LOOT: [&str; 2] = [
@@ -298,6 +315,27 @@ fn open_map_marks(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     shell.show_sample_map(&sample_map(20, false), 24, cx);
     crate::measure::fill_room_panel(shell, None, cx);
     shell.open_panels(cx);
+}
+
+/// The map with rooms that look like duplicates.
+fn open_duplicates(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    shell.show_sample_map(&duplicated_map(SAMPLE_SIDE, SAMPLE_REPEAT), SAMPLE_ROOM, cx);
+    shell.open_panels(cx);
+    shell
+        .map()
+        .update(cx, |map, cx| map.find_duplicates_now(cx));
+}
+
+fn open_review(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_duplicates(shell, window, cx);
+    shell
+        .map()
+        .update(cx, |map, cx| map.review_sample(window, cx));
+}
+
+fn open_picked(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_duplicates(shell, window, cx);
+    shell.map().update(cx, |map, cx| map.pick_sample(cx));
 }
 
 /// The Notes tab, as the canvas draws it.
@@ -644,6 +682,12 @@ fn window_images() {
     render("note-editing-dark", Dark, WIDE, edit_a_note);
     render("map-marks-dark", Dark, WIDE, open_map_marks);
     render("map-marks-light", Light, WIDE, open_map_marks);
+    render("map-duplicates-dark", Dark, WIDE, open_duplicates);
+    render("map-duplicates-light", Light, WIDE, open_duplicates);
+    render("map-review-dark", Dark, WIDE, open_review);
+    render("map-review-light", Light, WIDE, open_review);
+    render("map-picked-dark", Dark, WIDE, open_picked);
+    render("map-picked-light", Light, WIDE, open_picked);
     render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
         shell.show_sample_empty_state(&sample_saved(), window, cx);
     });
@@ -689,11 +733,34 @@ fn window_images() {
         ("settings-shortcuts-dark", Dark, Section::Shortcuts),
         ("settings-servers-dark", Dark, Section::Servers),
         ("settings-vault-dark", Dark, Section::Vault),
+        ("settings-logs-dark", Dark, Section::Logs),
+        ("settings-logs-light", Light, Section::Logs),
     ] {
         render(name, appearance, WIDE, move |shell, window, cx| {
             open_sheet(shell, section, window, cx);
         });
     }
+    for (name, appearance, section) in [
+        ("settings-data-dark", Dark, Section::Data),
+        ("settings-data-light", Light, Section::Data),
+        ("settings-vault-filled-dark", Dark, Section::Vault),
+        ("settings-vault-filled-light", Light, Section::Vault),
+    ] {
+        render(name, appearance, WIDE, move |shell, window, cx| {
+            measure::open_sample_section(shell, section, window, cx);
+        });
+    }
+    render(
+        "settings-vault-form-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_section(shell, Section::Vault, window, cx);
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.type_sample_password("not a real one", window, cx);
+            });
+        },
+    );
     render("settings-narrow-dark", Dark, NARROW, |shell, window, cx| {
         open_sheet(shell, Section::Plugins, window, cx);
     });

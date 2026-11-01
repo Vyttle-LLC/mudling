@@ -8,8 +8,8 @@ use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
     CharactersState, CuesState, Diff, GearState, ItemsState, MapState, MobsState, RoomState,
-    RulesState, SettingsState, SheetState, Store, StoreHub, StoreKind, TargetState, TerminalChange,
-    TerminalState, Versioned, VitalsState,
+    RulesState, SettingsState, SheetState, Store, StoreHub, StoreKind, SyncState, TargetState,
+    TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -31,6 +31,7 @@ pub enum StoreKind {
     Gear,
     Items,
     Settings,
+    Sync,
     Rules,
     Cues,
 }
@@ -115,6 +116,7 @@ impl Session {
             gear,
             items,
             settings,
+            sync,
             rules,
             cues,
         } = batch;
@@ -130,6 +132,7 @@ impl Session {
             gear.map(GearState::diff),
             items.map(ItemsState::diff),
             settings.map(SettingsState::diff),
+            sync.map(SyncState::diff),
             rules.map(RulesState::diff),
             cues.map(CuesState::diff),
         ]
@@ -192,6 +195,10 @@ macro_rules! with_store {
             }
             StoreKind::Settings => {
                 type $S = SettingsState;
+                $body
+            }
+            StoreKind::Sync => {
+                type $S = SyncState;
                 $body
             }
             StoreKind::Rules => {
@@ -373,6 +380,21 @@ impl FieldStore for SettingsState {
             ("connection".to_owned(), format!("{:?}", self.connection)),
             ("echo_off".to_owned(), self.echo_off.to_string()),
         ])
+    }
+}
+
+impl FieldStore for SyncState {
+    fn fields(&self) -> HashMap<String, String> {
+        let mut fields = HashMap::from([
+            ("syncing".to_owned(), self.syncing.to_string()),
+            ("unsynced".to_owned(), self.unsynced.to_string()),
+        ]);
+        for (name, text) in [("changed", &self.changed), ("problem", &self.problem)] {
+            if let Some(text) = text {
+                fields.insert(name.to_owned(), text.clone());
+            }
+        }
+        fields
     }
 }
 

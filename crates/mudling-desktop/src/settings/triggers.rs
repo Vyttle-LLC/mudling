@@ -156,8 +156,8 @@ fn row_button(
         .child(label)
 }
 
-/// Turns a rule on or off.
-fn switch(
+/// Turns something on or off.
+pub(super) fn switch(
     id: String,
     what: &str,
     on: bool,
@@ -472,7 +472,7 @@ impl SettingsSheet {
         );
     }
 
-    fn fill_field(
+    pub(super) fn fill_field(
         &self,
         pane: &mut Pane,
         field: &Entity<CommandInput>,

@@ -17,8 +17,8 @@ pub use payload::{
     Affect, CHARACTER_AFFECTS, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME,
     CHARACTER_POSITION, CarriedBag, CarriedItem, CharactersState, ConnectionStatus, CuesState,
     GearState, Improved, Item, ItemsState, MapRestore, MapState, MobsState, Occupant, RoomContents,
-    RoomState, RulesState, SettingsState, SheetState, SkillRow, TERMINAL_CAPACITY, Target,
-    TargetState, TerminalChange, TerminalState, VitalsState, WornItem,
+    RoomState, RulesState, SettingsState, SheetState, SkillRow, SyncState, TERMINAL_CAPACITY,
+    Target, TargetState, TerminalChange, TerminalState, VitalsState, WornItem,
 };
 
 /// How many real changes a store has seen. A shell compares revisions to
@@ -178,6 +178,7 @@ store_set! {
     gear: GearState => Gear,
     items: ItemsState => Items,
     settings: SettingsState => Settings,
+    sync: SyncState => Sync,
     rules: RulesState => Rules,
     cues: CuesState => Cues,
 }
