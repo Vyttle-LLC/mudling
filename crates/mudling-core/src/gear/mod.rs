@@ -11,6 +11,7 @@
 //! [`ItemsState`](crate::store::ItemsState).
 
 mod matcher;
+pub mod sets;
 
 pub use matcher::{ItemMatcher, ItemMention, MIN_NAME_LEN};
 
@@ -494,6 +495,29 @@ impl GearBook {
         }
         let entry = self.item_mut(item);
         entry.facts.keywords = Some(keywords.to_owned());
+        entry.facts.updated = now;
+        batch.upsert(entry.facts.clone());
+        true
+    }
+
+    /// The words the player gave the item, for when a guess also names
+    /// something else; none leaves it to the guess. Returns whether they were
+    /// news.
+    pub fn set_keywords(
+        &mut self,
+        words: &str,
+        item: &str,
+        now: Timestamp,
+        batch: &mut Batch,
+    ) -> bool {
+        let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+        let keywords = (!words.is_empty()).then_some(words);
+        let known = self.items.get(&plain_name(item));
+        if known.is_some_and(|known| known.facts.keywords == keywords) {
+            return false;
+        }
+        let entry = self.item_mut(item);
+        entry.facts.keywords = keywords;
         entry.facts.updated = now;
         batch.upsert(entry.facts.clone());
         true

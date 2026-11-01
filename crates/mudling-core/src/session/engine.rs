@@ -11,7 +11,7 @@ use super::map_rules::PluginRules;
 use super::quiet::{Moment, QuietReads, Seen};
 use super::sheet::Sheet;
 use super::values::{self, HubView};
-use super::{MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
+use super::{GearEdit, MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
 use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::commands::{
@@ -480,6 +480,71 @@ impl Engine {
         }
     }
 
+    /// Applies a change the player made to their gear, and saves it. A set
+    /// belongs to who it was made for: if they've gone, so has the change.
+    pub fn edit_gear(&mut self, edit: GearEdit, now: Timestamp) {
+        let plays = |character: &str| !character.is_empty() && character == self.playing;
+        match edit {
+            GearEdit::SaveSet(mut set) if plays(&set.character_id) => {
+                if set.id.is_empty() {
+                    self.rules_made += 1;
+                    set.id = rule_id(self.rules_made);
+                }
+                set.updated = now;
+                self.gear.save_set(set, &mut self.batch);
+            }
+            GearEdit::RemoveSet { character, id } if plays(&character) => {
+                self.gear.remove_set(&id, &mut self.batch);
+            }
+            GearEdit::SetKeywords { item, words } => {
+                let mut saving = Saving {
+                    now,
+                    batch: &mut self.batch,
+                };
+                self.gear.set_keywords(&words, &item, &mut saving);
+            }
+            GearEdit::SaveSet(_) | GearEdit::RemoveSet { .. } => {}
+        }
+    }
+
+    /// Puts on `character`'s set `id`, from what's known now. With echo off it
+    /// would go as a password, so it does nothing, and it isn't the player's
+    /// typing: aliases and history stay out of it.
+    pub fn wear_set(&mut self, character: &str, id: &str, now: Timestamp) {
+        if self.settings.echo_off || character.is_empty() || character != self.playing {
+            return;
+        }
+        let Some(link) = &mut self.link else { return };
+        let Some((name, plan)) = self.gear.wear(id, &mut link.gear, now) else {
+            return;
+        };
+        for item in &plan.missing {
+            self.notice(format!(
+                "{name}: couldn't find {item}. It isn't worn, carried or in a bag."
+            ));
+        }
+        if plan.commands.is_empty() && plan.missing.is_empty() {
+            self.notice(format!("{name} is already on."));
+        }
+        for command in &plan.commands {
+            self.send_gear_command(command, now);
+        }
+    }
+
+    /// A gear command MUDling worked out. It's never a password, so with echo
+    /// off it goes nowhere.
+    fn send_gear_command(&mut self, command: &str, now: Timestamp) {
+        if self.settings.echo_off {
+            return;
+        }
+        if let Some(link) = &mut self.link {
+            link.quiet.player_acted(command, now);
+        }
+        self.show_pending();
+        self.show(Line::command(command));
+        self.issue(command, now);
+    }
+
     /// A command a shell's button sent. It's never a password, so with echo
     /// off it goes nowhere: a click made a frame before the server asked for
     /// one mustn't land in the password box.
@@ -939,6 +1004,7 @@ impl Engine {
     /// Sends what the plugins matched to the map and to the hooks.
     fn route_events(&mut self, now: Timestamp) {
         let Some(link) = &mut self.link else { return };
+        let (mut gear_commands, mut gear_notices) = (Vec::new(), Vec::new());
         for event in self.events.drain(..) {
             match event.map_signal {
                 Some(MapSignal::Exits) => self.map.exits_line(),
@@ -961,7 +1027,7 @@ impl Engine {
                 batch: &mut self.batch,
             };
             let (inventory, watch) = (&mut link.inventory, &mut link.gear);
-            (self.gear).event(
+            let put_away = (self.gear).event(
                 &event,
                 &self.plugins,
                 inventory,
@@ -969,7 +1035,15 @@ impl Engine {
                 &self.hub,
                 &mut saving,
             );
+            gear_commands.extend(put_away);
+            gear_notices.extend((self.gear).put_answered(&event, &self.plugins, watch));
             link.hooks.event(event);
+        }
+        for notice in gear_notices {
+            self.notice(notice);
+        }
+        for command in gear_commands {
+            self.send_gear_command(&command, now);
         }
     }
 
@@ -1013,6 +1087,13 @@ impl Engine {
         if let Some(entries) = link.inventory.read(package, json) {
             self.hub.write::<CharactersState>(CharactersState(entries));
             self.gear.carried_changed(&link.inventory, &mut link.gear);
+            if link.gmcp_enabled {
+                for bag in link.inventory.bags_to_ask() {
+                    gmcp::encode(inventory::ASK_BAG, &bag, &mut self.output);
+                }
+            }
+        } else if link.inventory.read_bag(package, json) {
+            self.gear.bags_changed(&link.inventory);
         }
         let heard = link.game.read(package, json);
         // The first room means the character is in the game. Asking for the
@@ -1522,6 +1603,7 @@ impl Engine {
         }
         if self.playing.is_empty() {
             self.sheet = Sheet::default();
+            self.gear.sets_of("", &[]);
             self.publish_sheet();
             return;
         }
@@ -1541,6 +1623,7 @@ impl Engine {
         });
         self.sheet = Sheet::of(&self.playing, &saved);
         self.gear.wear_of(&self.playing, saved.worn.clone());
+        self.gear.sets_of(&self.playing, &saved.gear_sets);
         // What hooks read back, and the HUD's level: whoever played before
         // has theirs replaced, or blanked.
         let mut values: BTreeMap<String, HookValue> =

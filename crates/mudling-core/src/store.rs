@@ -15,7 +15,8 @@ pub use hub::StoreHub;
 pub use memo::Memo;
 pub use payload::{
     Affect, CHARACTER_AFFECTS, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME,
-    CHARACTER_POSITION, CarriedItem, CharactersState, ConnectionStatus, CuesState, GearState,
+    CHARACTER_POSITION, CarriedBag, CarriedItem, CharactersState, ConnectionStatus, CuesState,
+    GearState,
     Improved, Item, ItemsState, MapRestore, MapState, MobsState, Occupant, RoomContents, RoomState,
     RulesState, SettingsState, SheetState, SkillRow, TERMINAL_CAPACITY, Target, TargetState,
     TerminalChange, TerminalState, VitalsState, WornItem,

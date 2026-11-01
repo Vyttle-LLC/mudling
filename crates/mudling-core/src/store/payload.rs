@@ -10,13 +10,14 @@ use crate::defaults::aliases::AliasRule;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
+use crate::gear::sets::{self, GearNow, GearRules, WearPlan};
 use crate::gear::{GearBook, ItemMatcher};
 use crate::line::Line;
 use crate::map::{
     Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
 };
 use crate::net::DisconnectReason;
-use crate::persist::Timestamp;
+use crate::persist::{GearSet, Timestamp};
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
 use crate::scrollback::Scrollback;
@@ -217,8 +218,29 @@ pub struct ItemsState {
     /// Every row of the game's list, empty slots too.
     pub worn: Arc<[WornItem]>,
     pub carried: Arc<[CarriedItem]>,
+    /// The bags among `carried`, and what the game last said is in them.
+    pub bags: Arc<[CarriedBag]>,
     /// The plugin's wear slots, in the game's order.
     pub slots: Arc<[String]>,
+    /// Who `sets` are the sets of: empty until this connection names them.
+    pub character: Arc<str>,
+    pub sets: Arc<[GearSet]>,
+    pub rules: Arc<GearRules>,
+}
+
+impl ItemsState {
+    pub fn gear_now(&self) -> GearNow<'_> {
+        GearNow {
+            worn: &self.worn,
+            carried: &self.carried,
+            bags: &self.bags,
+        }
+    }
+
+    /// What putting `set` on takes right now, as Wear would send it.
+    pub fn plan(&self, set: &GearSet) -> WearPlan {
+        sets::plan(set, self.gear_now(), &self.book, &self.rules)
+    }
 }
 
 impl StoreState for ItemsState {
@@ -252,6 +274,16 @@ pub struct CarriedItem {
     pub id: String,
     /// As the game shows it, tags included.
     pub name: String,
+}
+
+/// A bag the character carries, and what's in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedBag {
+    /// The game's id for it.
+    pub id: String,
+    /// As the game shows it, tags included.
+    pub name: String,
+    pub items: Vec<CarriedItem>,
 }
 
 /// The character's name, in [`CharactersState`].

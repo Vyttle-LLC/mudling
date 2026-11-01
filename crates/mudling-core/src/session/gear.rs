@@ -10,16 +10,20 @@
 //! The rules a plugin declares for wearing and removing say when gear moved,
 //! and their `item` capture what moved. What an item does is measured from
 //! `Char.Status` around that moment, as hooks can't see it in time.
+//!
+//! A character's gear sets are theirs, and show only once this connection has
+//! named them. While one goes on, [`GearWatch`] holds what its plan expects.
 
 use super::inventory::Inventory;
 use super::values::from_row;
 use crate::defaults::hud::Vital;
-use crate::gear::{GEAR_STATS, GearBook, ItemMatcher, ItemRef, Reading, plain_name};
-use crate::persist::{Batch, GearRows, Key, Meta, StatMap, Timestamp, Worn};
+use crate::gear::sets::{self, GearRules, PutAway, WearPlan};
+use crate::gear::{GEAR_STATS, GearBook, ItemMatcher, ItemRef, Reading, plain_name, shown_name};
+use crate::persist::{Batch, GearRows, GearSet, Key, Meta, StatMap, Timestamp, Worn};
 use crate::plugin::luau::Value;
 use crate::plugin::{PluginEvent, PluginHost, Point};
 use crate::store::{
-    CHARACTER_NAME, CarriedItem, CharactersState, GearState, ItemsState, StoreHub, Versioned,
+    CHARACTER_NAME, CarriedBag, CarriedItem, CharactersState, GearState, ItemsState, StoreHub, Versioned,
     VitalsState, WornItem,
 };
 use crate::telnet::gmcp;
@@ -42,6 +46,9 @@ const SLOT_PREFIX: &str = "slot.";
 const KEYWORDS_PREFIX: &str = "keywords.";
 const WORD_PREFIX: &str = "keyword.";
 const NAME_PREFIX: &str = "name.";
+/// What a `gear` key names, before a slot.
+const HOLDS_PREFIX: &str = "holds.";
+const VERB_PREFIX: &str = "verb.";
 /// Where the database kept what's in typed rows now.
 const OLD_GEAR_META: &str = "plugin.gear.";
 const OLD_IDENTIFY_META: &str = "plugin.identify.";
@@ -52,6 +59,10 @@ const OLD_FIELDS: [&str; 7] = [
 
 /// A wear or remove rule's capture naming the item.
 const ITEM_CAPTURE: &str = "item";
+/// How a `put` rule's name ends when the game refused the put. One that went
+/// in captures the item.
+const DID_NOT_FIT: &str = ".did_not_fit";
+const NOT_CARRIED: &str = ".not_carried";
 const STATUS: &str = "Char.Status";
 const VITALS: &str = "Char.Vitals";
 
@@ -129,6 +140,12 @@ pub(super) struct GearWatch {
     change: Option<GearChange>,
     /// Copies put on this connection, by plain name, oldest first.
     worn_copies: Vec<(String, String)>,
+    /// What a set going on still has to put away.
+    put_away: Option<PutAway>,
+    /// Copies a set's plan named, by plain name, oldest first: the game takes
+    /// them, whatever the first of the name is.
+    naming_on: Vec<(String, String)>,
+    naming_off: Vec<(String, String)>,
 }
 
 impl GearWatch {
@@ -151,6 +168,11 @@ impl GearWatch {
             noted = true;
         }
         noted
+    }
+
+    fn named(copies: &mut Vec<(String, String)>, key: &str) -> Option<String> {
+        let at = copies.iter().position(|(name, _)| name == key)?;
+        Some(copies.remove(at).1)
     }
 
     fn copy_worn_as(&self, key: &str, taken: &[usize]) -> Option<usize> {
@@ -182,6 +204,13 @@ pub(super) struct Saving<'a> {
 enum Moved {
     On,
     Off,
+}
+
+fn is_put(plugins: &PluginHost, event: &PluginEvent) -> bool {
+    event.point == Point::Gear
+        && (plugins.declared(|points| points.gear.as_ref()))
+            .flat_map(|(_, gear)| &gear.put)
+            .any(|rule| &*event.name == rule.name.as_str())
 }
 
 fn moved(plugins: &PluginHost, event: &PluginEvent) -> Option<Moved> {
@@ -217,6 +246,11 @@ pub(super) struct GearKeeper {
     matcher_built: Option<Receiver<ItemMatcher>>,
     worn: Vec<WornItem>,
     carried: Vec<CarriedItem>,
+    bags: Vec<CarriedBag>,
+    /// Who `sets` belongs to: only ever who this connection named.
+    sets_of: String,
+    sets: Arc<[GearSet]>,
+    rules: Arc<GearRules>,
     /// The record's saved rows, for ids a table can't give.
     saved_worn: Vec<Worn>,
     /// What went on, until its hook says which slot it's in.
@@ -271,6 +305,7 @@ impl GearKeeper {
             let Some(value) = from_row(&entry.value).filter(|_| !filed) else {
                 continue;
             };
+            self.slot_fact(key, &value);
             if let (Some(item), Value::Text(word)) = (key.strip_prefix(WORD_PREFIX), &value) {
                 self.book.note_word(word, item);
             }
@@ -307,6 +342,97 @@ impl GearKeeper {
         self.changed = true;
     }
 
+    /// `character`'s saved sets, from the record's rows. Nobody's are none.
+    pub(super) fn sets_of(&mut self, character: &str, saved: &[GearSet]) {
+        let theirs = saved.iter().filter(|set| set.character_id == character);
+        self.sets = theirs.cloned().collect();
+        character.clone_into(&mut self.sets_of);
+        self.changed = true;
+    }
+
+    /// Whether `id` is one of the sets on show.
+    fn set(&self, id: &str) -> Option<&GearSet> {
+        self.sets.iter().find(|set| set.id == id)
+    }
+
+    /// Saves a set of the character on show, in place if it's known.
+    pub(super) fn save_set(&mut self, set: GearSet, batch: &mut Batch) {
+        batch.upsert(set.clone());
+        let mut sets = self.sets.to_vec();
+        match sets.iter_mut().find(|known| known.id == set.id) {
+            Some(known) => *known = set,
+            None => sets.push(set),
+        }
+        self.sets = sets.into();
+        self.changed = true;
+    }
+
+    pub(super) fn remove_set(&mut self, id: &str, batch: &mut Batch) {
+        if self.set(id).is_none() {
+            return;
+        }
+        batch.delete(Key::GearSet(id.to_owned()));
+        self.sets = (self.sets.iter())
+            .filter(|set| set.id != id)
+            .cloned()
+            .collect();
+        self.changed = true;
+    }
+
+    /// The words the player gave an item.
+    pub(super) fn set_keywords(&mut self, words: &str, item: &str, saving: &mut Saving<'_>) {
+        let changed = (self.book).set_keywords(words, item, saving.now, saving.batch);
+        self.note_book(changed);
+    }
+
+    fn gear_now(&self) -> sets::GearNow<'_> {
+        sets::GearNow {
+            worn: &self.worn,
+            carried: &self.carried,
+            bags: &self.bags,
+        }
+    }
+
+    fn target(&self, name: &str, copy: Option<&str>) -> String {
+        sets::target(name, copy, self.gear_now(), &self.book, &self.rules)
+    }
+
+    /// Plans putting on the set `id`, and has `watch` follow it as it goes.
+    /// Gives its name and plan.
+    pub(super) fn wear(
+        &self,
+        id: &str,
+        watch: &mut GearWatch,
+        now: Timestamp,
+    ) -> Option<(String, WearPlan)> {
+        let set = self.set(id)?;
+        let plan = sets::plan(set, self.gear_now(), &self.book, &self.rules);
+        if plan.commands.is_empty() {
+            return Some((set.name.clone(), plan));
+        }
+        let pieces = sets::fitting(&set.pieces, &self.book, &self.rules);
+        watch.put_away = set.container.as_ref().map(|container| {
+            let bag = self.gear_now().bag_id(container);
+            PutAway::new(
+                self.target(container, bag),
+                shown_name(container),
+                pieces.iter().map(|piece| piece.item.clone()),
+                plan.removed.iter().map(|item| item.name.clone()),
+                now,
+            )
+        });
+        let copies = |items: &[sets::Moved]| {
+            let named = items.iter().filter_map(|item| {
+                let copy = item.copy.clone()?;
+                Some((plain_name(&item.name), copy))
+            });
+            named.collect::<Vec<_>>()
+        };
+        watch.naming_off = copies(&plan.removed);
+        watch.naming_on = copies(&plan.wearing);
+        Some((set.name.clone(), plan))
+    }
+
     fn note_book(&mut self, changed: bool) {
         self.book_changed |= changed;
         self.names_changed |= changed;
@@ -317,6 +443,9 @@ impl GearKeeper {
     /// what they wear.
     pub(super) fn follow(&mut self, playing: &str) {
         self.playing = playing.to_owned();
+        if playing.is_empty() {
+            self.sets_of("", &[]);
+        }
         if playing.is_empty() || self.worn_by == playing {
             return;
         }
@@ -371,7 +500,19 @@ impl GearKeeper {
         }
     }
 
+    /// What a hook said about a slot. It says it again each connection, so a
+    /// saved one only matters until then.
+    fn slot_fact(&mut self, key: &str, value: &Value) {
+        let rules = Arc::make_mut(&mut self.rules);
+        if let (Some(slot), Some(holds)) = (key.strip_prefix(HOLDS_PREFIX), whole(value)) {
+            self.changed |= rules.note_holds(slot, holds.max(1) as usize);
+        } else if let (Some(slot), Some(verb)) = (key.strip_prefix(VERB_PREFIX), text(value)) {
+            self.changed |= rules.note_slot_verb(slot, verb);
+        }
+    }
+
     fn gear_fact(&mut self, key: &str, value: &Value, now: Timestamp, batch: &mut Batch) {
+        self.slot_fact(key, value);
         let Some(value) = text(value) else { return };
         let changed = if let Some(item) = key.strip_prefix(SLOT_PREFIX) {
             let at = (self.going_on.iter()).position(|held| plain_name(&held.name) == item);
@@ -507,12 +648,42 @@ impl GearKeeper {
                 name: item.name.clone(),
             })
             .collect();
+        self.bags = inventory.bags();
         let carried = &self.carried;
         (watch.worn_copies).retain(|(_, id)| !carried.iter().any(|item| item.id == *id));
         self.changed = true;
     }
 
-    /// Notes gear going on or coming off, from a plugin's event.
+    /// A bag's contents changed.
+    pub(super) fn bags_changed(&mut self, inventory: &Inventory) {
+        self.bags = inventory.bags();
+        self.changed = true;
+    }
+
+    /// Notes what the game said of a put while a set goes on. Gives a notice
+    /// if something stayed out.
+    pub(super) fn put_answered(
+        &mut self,
+        event: &PluginEvent,
+        plugins: &PluginHost,
+        watch: &mut GearWatch,
+    ) -> Option<String> {
+        let away = watch.put_away.as_mut().filter(|_| is_put(plugins, event))?;
+        if let Some(item) = event.capture(ITEM_CAPTURE) {
+            away.went_in(item);
+        } else if event.name.ends_with(NOT_CARRIED) {
+            away.was_not_carried();
+        } else if event.name.ends_with(DID_NOT_FIT) {
+            let (item, container) = away.did_not_fit()?;
+            return Some(format!(
+                "{item} didn't fit in {container}, so it's still carried."
+            ));
+        }
+        None
+    }
+
+    /// Notes gear going on or coming off, from a plugin's event. Gives the
+    /// command that puts it away, if a set going on wants that.
     pub(super) fn event(
         &mut self,
         event: &PluginEvent,
@@ -521,13 +692,9 @@ impl GearKeeper {
         watch: &mut GearWatch,
         hub: &StoreHub,
         saving: &mut Saving<'_>,
-    ) {
-        let Some(moved) = moved(plugins, event) else {
-            return;
-        };
-        let Some(name) = event.capture(ITEM_CAPTURE) else {
-            return;
-        };
+    ) -> Option<String> {
+        let moved = moved(plugins, event)?;
+        let name = event.capture(ITEM_CAPTURE)?;
         if watch
             .change
             .as_ref()
@@ -545,7 +712,8 @@ impl GearKeeper {
         let key = plain_name(name);
         let copy = match moved {
             Moved::On => {
-                let copy = inventory.wore(&key);
+                let named = GearWatch::named(&mut watch.naming_on, &key);
+                let copy = inventory.wore(&key, named.as_deref());
                 let held = Held {
                     name: name.to_owned(),
                     copy: copy.clone(),
@@ -558,10 +726,13 @@ impl GearKeeper {
                 copy
             }
             Moved::Off => {
-                let at = watch.worn_copies.iter().position(|(worn, _)| *worn == key);
+                let named = GearWatch::named(&mut watch.naming_off, &key);
+                let is_named = |id: &String| named.as_ref().is_none_or(|named| named == id);
+                let at = (watch.worn_copies.iter())
+                    .position(|(worn, id)| *worn == key && is_named(id));
                 let noted = at.map(|at| watch.worn_copies.remove(at).1);
-                let listed = self.take_off(&key);
-                let copy = noted.or(listed);
+                let listed = self.take_off(&key, named.as_deref());
+                let copy = named.or(noted).or(listed);
                 let held = Held {
                     name: name.to_owned(),
                     copy: copy.clone(),
@@ -577,11 +748,21 @@ impl GearKeeper {
             self.carried_changed(inventory, watch);
             hub.write::<CharactersState>(CharactersState(inventory.entries()));
         }
+        if moved != Moved::Off {
+            return None;
+        }
+        let container = watch.put_away.as_mut()?.came_off(name, saving.now)?;
+        Some(self.rules.put_away(&self.target(name, copy.as_deref()), container))
     }
 
-    /// Empties the first worn row of the plain name `key`, returning its copy.
-    fn take_off(&mut self, key: &str) -> Option<String> {
-        let at = (self.worn.iter()).position(|worn| plain_name(&worn.item) == key)?;
+    /// Empties the worn row of the copy `named`, or else the first of the
+    /// plain name `key`, returning its copy.
+    fn take_off(&mut self, key: &str, named: Option<&str>) -> Option<String> {
+        let of_name = |worn: &WornItem| plain_name(&worn.item) == key;
+        let exact = named.and_then(|_| {
+            (self.worn.iter()).position(|worn| of_name(worn) && worn.copy.as_deref() == named)
+        });
+        let at = exact.or_else(|| self.worn.iter().position(of_name))?;
         self.worn[at].item.clear();
         self.changed = true;
         self.worn[at].copy.take()
@@ -653,6 +834,11 @@ impl GearKeeper {
             self.slots_of = plugins.generation();
             let declared = plugins.declared(|points| points.gear.as_ref());
             self.slots = declared.flat_map(|(_, gear)| gear.slots.clone()).collect();
+            let commands = || plugins.declared(|points| points.commands.as_ref());
+            let verbs = commands().flat_map(|(_, commands)| commands.verbs.clone());
+            let keywords = commands().filter_map(|(_, commands)| commands.keywords.clone());
+            let keywords = keywords.last().unwrap_or_default();
+            Arc::make_mut(&mut self.rules).use_words(verbs.collect(), keywords);
             self.changed = true;
         }
         if std::mem::take(&mut self.book_changed) {
@@ -668,7 +854,11 @@ impl GearKeeper {
             matcher: Arc::clone(&self.matcher),
             worn: self.worn.as_slice().into(),
             carried: self.carried.as_slice().into(),
+            bags: self.bags.as_slice().into(),
             slots: Arc::clone(&self.slots),
+            character: self.sets_of.as_str().into(),
+            sets: Arc::clone(&self.sets),
+            rules: Arc::clone(&self.rules),
         });
     }
 
