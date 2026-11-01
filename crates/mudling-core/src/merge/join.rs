@@ -132,6 +132,7 @@ pub(crate) fn undo_join(
         return Err("that room has since been joined to another: undo that first".to_owned());
     }
     let ids = [kept, retired];
+    let before = &leading_to_rooms_held(before, rows, retired);
     // The join as it ran, with the deletes it saw: not one made since.
     let view = ServerRows {
         map: before.clone(),
@@ -228,6 +229,27 @@ pub(crate) fn undo_join(
         },
     );
     Ok(batch)
+}
+
+/// `before`, with its links as they'd stand today once `retired` is back. A
+/// neighbour joined since is reached at the room that holds it now, and a link
+/// at either end of a room that's gone since goes with it.
+fn leading_to_rooms_held(before: &MapRows, rows: &ServerRows, retired: RoomId) -> MapRows {
+    let mut moved = joins_in(&rows.meta);
+    moved.remove(&retired);
+    let holder = |id: RoomId| moved.get(&id).copied().unwrap_or(id);
+    let mut held: HashSet<RoomId> = rows.map.rooms.iter().map(|room| room.id).collect();
+    held.insert(retired);
+    let mut before = before.clone();
+    for room in &mut before.rooms {
+        room.building = room.building.map(holder);
+    }
+    for link in &mut before.links {
+        link.room_id = holder(link.room_id);
+        link.to_room = holder(link.to_room);
+    }
+    (before.links).retain(|link| held.contains(&link.room_id) && held.contains(&link.to_room));
+    before
 }
 
 /// Takes one record type back from what the join made it to what it was,

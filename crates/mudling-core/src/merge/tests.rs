@@ -2007,6 +2007,161 @@ fn joining_a_pair_again_after_an_undo_holds() {
     assert_same_maps(&mac, &ipad);
 }
 
+/// A device's own new delete sits in `ours`, and the other side's older one
+/// comes after it. The record is still undone.
+#[test]
+fn undoing_a_second_join_holds_against_the_first_undos_older_delete() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    let created = join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+    undo_on(&mac, kept, retired, created);
+    converge(&mac, &ipad);
+    let created = join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+    ipad.apply(|batch| {
+        batch.upsert(note(copies_of(&ipad, "A gate")[0], "Elsewhere", T3));
+    });
+    ipad.sync();
+
+    undo_on(&mac, kept, retired, created);
+    converge(&mac, &ipad);
+
+    assert_eq!(copies_of(&mac, "Temple Square"), [kept, retired]);
+    assert!(joins_of(&mac).is_empty());
+    assert_same_maps(&mac, &ipad);
+}
+
+/// Two copies of a room, a third that holds things, and a way into it.
+/// Returns the three, and the gate that leads to the third.
+fn three_squares() -> (TempDir, Device, Device, [i64; 3], i64) {
+    let (folder, mac, ipad, first, second) = two_squares();
+    let third = (1 << 41) + first;
+    let gate = copies_of(&mac, "A gate")[0];
+    mac.apply(|batch| {
+        batch.upsert(room(third, "Temple Square", T1));
+        batch.upsert(note(third, "Beggars at night", T2));
+        batch.upsert(feature(third, "fountain"));
+        batch.upsert(sighting(third, "a beggar"));
+        batch.upsert(Link {
+            room_id: gate,
+            direction: "east".to_owned(),
+            to_room: third,
+            updated: T2,
+        });
+    });
+    converge(&mac, &ipad);
+    (folder, mac, ipad, [first, second, third], gate)
+}
+
+/// A room brought back keeps the tombstone it was retired under, and that
+/// delete wasn't about what joins it later.
+#[test]
+fn a_room_brought_back_by_an_undo_takes_what_joins_it_later() {
+    let (_folder, mac, ipad, [first, second, third], gate) = three_squares();
+    let created = join_on(&mac, first, second);
+    undo_on(&mac, first, second, created);
+
+    join_on(&mac, second, third);
+    converge(&mac, &ipad);
+
+    for device in [&mac, &ipad] {
+        assert_eq!(note_of(device, second).as_deref(), Some("Beggars at night"));
+        assert_eq!(features_of(device, second), ["fountain"]);
+        assert_eq!(sightings_of(device, second), ["a beggar"]);
+        let links = device.database.reader().unwrap().map().unwrap().links;
+        let way_in = |link: &&Link| link.room_id == gate && link.direction == "east";
+        assert_eq!(links.iter().find(way_in).unwrap().to_room, second);
+    }
+    assert_same_maps(&mac, &ipad);
+}
+
+/// Each pair of a duplicated corridor neighbours the next.
+#[test]
+fn a_join_undoes_after_its_neighbour_was_joined_too() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    let gates = copies_of(&mac, "A gate");
+    let squares = join_on(&mac, kept, retired);
+    join_on(&mac, gates[0], gates[1]);
+
+    undo_on(&mac, kept, retired, squares);
+    converge(&mac, &ipad);
+
+    assert_eq!(copies_of(&mac, "Temple Square"), [kept, retired]);
+    assert_eq!(copies_of(&mac, "A gate"), [gates[0]]);
+    let rows = mac.database.reader().unwrap().map().unwrap();
+    let held = [kept, retired, gates[0]];
+    assert!(rows.links.iter().all(|link| held.contains(&link.to_room)));
+    let from_back = rows.links.iter().find(|link| link.room_id == retired);
+    assert_eq!(from_back.unwrap().to_room, gates[0]);
+    assert_same_maps(&mac, &ipad);
+}
+
+#[test]
+fn neighbouring_joins_undo_newest_first_too() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    let gates = copies_of(&mac, "A gate");
+    let squares = join_on(&mac, kept, retired);
+    let gate_join = join_on(&mac, gates[0], gates[1]);
+
+    undo_on(&mac, gates[0], gates[1], gate_join);
+    undo_on(&mac, kept, retired, squares);
+    converge(&mac, &ipad);
+
+    assert_eq!(copies_of(&mac, "Temple Square"), [kept, retired]);
+    assert_eq!(copies_of(&mac, "A gate"), gates);
+    assert_same_maps(&mac, &ipad);
+}
+
+/// An edit older than the join, on a device that hadn't heard of it: the join
+/// made a newer note, but it never saw this text.
+#[test]
+fn an_older_edit_of_the_kept_room_made_elsewhere_survives_the_join() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Original", T1));
+    });
+    converge(&mac, &ipad);
+    ipad.apply(|batch| {
+        batch.upsert(note(kept, "Shop by the well", T2));
+    });
+    mac.apply(|batch| {
+        batch.upsert(note(retired, "Beggars at night", T3));
+    });
+    join_on(&mac, kept, retired);
+
+    converge(&mac, &ipad);
+
+    let gathered = note_of(&mac, kept).unwrap();
+    assert!(gathered.contains("Shop by the well"), "{gathered}");
+    assert!(gathered.contains("Beggars at night"), "{gathered}");
+    assert_same_maps(&mac, &ipad);
+}
+
+/// Once both devices have heard, newest wins again: a note rewritten since
+/// isn't gathered back with what it replaced.
+#[test]
+fn a_kept_note_rewritten_after_the_join_has_landed_stays_rewritten() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Original", T1));
+        batch.upsert(note(retired, "Beggars at night", T2));
+    });
+    join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+
+    let later = Timestamp(Timestamp::now().0 + 1_000);
+    ipad.apply(|batch| {
+        batch.upsert(note(kept, "Rewritten", later));
+    });
+    mac.apply(|batch| {
+        batch.upsert(feature(kept, "shop"));
+    });
+    converge(&mac, &ipad);
+
+    assert_eq!(note_of(&mac, kept).as_deref(), Some("Rewritten"));
+    assert_same_maps(&mac, &ipad);
+}
+
 /// Undo leaves deletes on the kept room, later than the rows it puts back. A
 /// second join's rows are not what those deletes were about.
 #[test]
