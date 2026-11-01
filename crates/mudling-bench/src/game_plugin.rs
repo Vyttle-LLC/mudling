@@ -6,7 +6,7 @@
 //! Luau hooks run on their own thread, off the line, and aren't counted.
 
 use crate::plugin_host::{Counter, PLUGIN_BUDGET_US, realistic_plugins, split};
-use crate::verdict;
+use crate::{BudgetScale, verdict};
 use mudling_core::line::Line;
 use mudling_core::plugin::{Plugin, PluginHost};
 use mudling_core::stats::Summary;
@@ -30,7 +30,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(dir: &Path, source: &[String]) -> Result<Report, String> {
+pub fn run(dir: &Path, source: &[String], scale: BudgetScale) -> Result<Report, String> {
     let plugin = Plugin::load(dir).map_err(|error| error.to_string())?;
     let id = plugin.id().clone();
     let patterns = plugin
@@ -83,17 +83,18 @@ pub fn run(dir: &Path, source: &[String]) -> Result<Report, String> {
         .and_then(|cost| cost.per_line)
         .map_or(0.0, |summary| summary.p99_us);
     let marginal_p99_us = host_with.p99_us - host_without.p99_us;
+    let budget_us = scale.time_us(PLUGIN_BUDGET_US);
     Ok(Report {
         plugin: id.to_string(),
         patterns,
         lines: lines.len(),
         events: sink.events.saturating_sub(ignored.events),
-        within_budget: marginal_p99_us <= PLUGIN_BUDGET_US,
+        within_budget: marginal_p99_us <= budget_us,
         host_without,
         host_with,
         marginal_p99_us,
         alone_p99_us,
-        budget_us: PLUGIN_BUDGET_US,
+        budget_us,
     })
 }
 
