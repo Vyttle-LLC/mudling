@@ -60,6 +60,11 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
                 &["gear_panel::CloseEditor"],
             ),
             row(
+                "Leave a gear piece's words, keeping the set",
+                &["escape"],
+                &["gear_panel::CloseWords"],
+            ),
+            row(
                 "Keep the map when asked to restore one",
                 &["escape"],
                 &["map_history::KeepTheMap"],

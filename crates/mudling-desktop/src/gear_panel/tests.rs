@@ -2,6 +2,7 @@ use super::sets::SetAction;
 use super::*;
 use crate::input::CommandInput;
 use crate::measure::{sample_items, sample_items_with_sets};
+use crate::room_panel::press_key;
 use crate::theme::Theme;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
 use mudling_core::session::GearEdit;
@@ -466,6 +467,86 @@ fn the_editor_closes_when_its_character_goes(cx: &mut TestAppContext) {
         panel.show_items(items, cx);
     });
     assert!(!is_editing(&panel, cx));
+}
+
+/// Tabs on from the container's button to the first bag choice, and presses it.
+#[gpui::test]
+fn choosing_a_bag_by_keyboard_leaves_focus_on_the_container_button(cx: &mut TestAppContext) {
+    let (panel, cx) = panel_with_sets(cx);
+    click_on("Edit Levelling", cx);
+    click_on("What comes off goes in: a canvas backpack", cx);
+    let button = panel.read_with(cx, |panel, _| {
+        panel.editor.as_ref().unwrap().container_stop().clone()
+    });
+    cx.update(|window, cx| {
+        window.focus(&button, cx);
+        window.focus_next(cx);
+    });
+    cx.run_until_parked();
+    press_key("enter", cx);
+    cx.run_until_parked();
+
+    let chosen = panel.read_with(cx, |panel, _| {
+        let editor = panel.editor.as_ref().unwrap();
+        editor.container().map(str::to_owned)
+    });
+    assert_eq!(chosen, None, "the first choice keeps things carried");
+    assert!(cx.update(|window, _| button.is_focused(window)));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!is_editing(&panel, cx), "focus is still in the editor");
+}
+
+/// Words open on the amulet, the last piece. The robe takes the vest's place
+/// in the body slot, which moves the amulet up and leaves the robe last.
+#[gpui::test]
+fn adding_a_piece_closes_the_words_field_so_it_cant_land_on_another(cx: &mut TestAppContext) {
+    let (panel, cx) = panel_with_sets(cx);
+    let acted = acted(&panel, cx);
+    click_on("Edit Levelling", cx);
+    click_on("Words for an amulet of the moon", cx);
+    click_on("Add a linen robe, worn: body", cx);
+
+    let names = panel.read_with(cx, |panel, _| {
+        let pieces = panel.editor.as_ref().unwrap().pieces();
+        (pieces.iter())
+            .map(|piece| piece.item.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        names,
+        [
+            "a black hematite ring",
+            "a Tiamat mask",
+            "an amulet of the moon",
+            "a linen robe"
+        ]
+    );
+    assert!(cx.debug_bounds("Save words").is_none());
+    assert!(acted.borrow().is_empty());
+}
+
+#[gpui::test]
+fn escape_in_the_words_field_leaves_it_and_keeps_the_edits(cx: &mut TestAppContext) {
+    let (panel, cx) = panel_with_sets(cx);
+    let acted = acted(&panel, cx);
+    click_on("Edit Levelling", cx);
+    click_on("Drop a Tiamat mask", cx);
+    click_on("Words for a black hematite ring", cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(is_editing(&panel, cx));
+    assert!(cx.debug_bounds("Save words").is_none());
+    let pieces = panel.read_with(cx, |panel, _| panel.editor.as_ref().unwrap().pieces().len());
+    assert_eq!(pieces, 3, "the drop stands");
+    assert!(acted.borrow().is_empty(), "no words were saved");
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        !is_editing(&panel, cx),
+        "anywhere else it leaves the editor"
+    );
 }
 
 #[gpui::test]

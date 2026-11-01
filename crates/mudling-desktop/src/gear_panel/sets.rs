@@ -167,6 +167,8 @@ pub(super) struct Editor {
     at_hand: Vec<Candidate>,
     preview: WearPlan,
     preview_stop: FocusHandle,
+    /// Takes focus back when a bag is chosen by keyboard.
+    container_stop: FocusHandle,
     /// Takes focus when deleting asks first.
     keep: FocusHandle,
     _field_events: [Subscription; 2],
@@ -191,6 +193,11 @@ impl Editor {
     #[cfg(test)]
     pub(super) fn preview_stop(&self) -> &FocusHandle {
         &self.preview_stop
+    }
+
+    #[cfg(test)]
+    pub(super) fn container_stop(&self) -> &FocusHandle {
+        &self.container_stop
     }
 
     #[cfg(test)]
@@ -353,6 +360,7 @@ impl GearPanel {
             at_hand: Vec::new(),
             preview: WearPlan::default(),
             preview_stop: cx.focus_handle().tab_stop(true),
+            container_stop: cx.focus_handle().tab_stop(true),
             keep: cx.focus_handle().tab_stop(true),
             _field_events: [typing, submitted],
         };
@@ -611,6 +619,7 @@ impl GearPanel {
         let open = editor.picking_container;
         let label = format!("{CONTAINER_LABEL}: {chosen}");
         let picker = button("gear-set-container", label.into(), theme)
+            .track_focus(&editor.container_stop)
             .aria_expanded(open)
             .h(BUTTON_HEIGHT)
             .px_2()
@@ -637,13 +646,21 @@ impl GearPanel {
                     .text_size(px(12.))
                     .text_color(theme.text)
                     .when(selected, |button| button.bg(theme.selected))
-                    .on_click(cx.listener(move |panel, _, _, cx| {
-                        let bag = bag.clone();
-                        panel.edit_set(cx, |editor, _| {
-                            editor.container = bag;
-                            editor.picking_container = false;
-                        });
-                    }))
+                    .on_click(
+                        cx.listener(move |panel, event: &gpui::ClickEvent, window, cx| {
+                            let bag = bag.clone();
+                            panel.edit_set(cx, |editor, _| {
+                                editor.container = bag;
+                                editor.picking_container = false;
+                            });
+                            // The choices have gone, and the focus with them.
+                            if let Some(editor) =
+                                panel.editor.as_ref().filter(|_| event.is_keyboard())
+                            {
+                                window.focus(&editor.container_stop, cx);
+                            }
+                        }),
+                    )
                     .child(name)
             });
         let choices: Vec<_> = choices.collect();
@@ -761,6 +778,11 @@ impl GearPanel {
                     panel.save_words(words, window, cx);
                 }));
             div()
+                .key_context(super::WORDS_CONTEXT)
+                .on_action(cx.listener(|panel, _: &super::CloseWords, window, cx| {
+                    panel.edit_set(cx, |editor, _| editor.words_of = None);
+                    window.focus(&panel.focus_handle, cx);
+                }))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -835,10 +857,14 @@ impl GearPanel {
             )
             .on_click(
                 cx.listener(move |panel, event: &gpui::ClickEvent, window, cx| {
+                    let open = panel.editor.as_ref();
+                    let words_open = open.is_some_and(|editor| editor.words_of.is_some());
+                    // Adding can shift the pieces, so the field can't stay on one.
                     panel.edit_set(cx, |editor, items| {
                         add_piece(&mut editor.pieces, &pressed, items);
+                        editor.words_of = None;
                     });
-                    if event.is_keyboard() {
+                    if event.is_keyboard() || words_open {
                         window.focus(&panel.focus_handle, cx);
                     }
                 }),

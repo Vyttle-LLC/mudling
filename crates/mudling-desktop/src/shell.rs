@@ -1874,10 +1874,10 @@ pub mod tests {
     use mudling_core::defaults::aliases::AliasRule;
     use mudling_core::defaults::hud::Vital;
     use mudling_core::map::MapChange;
-    use mudling_core::persist;
+    use mudling_core::persist::{self, GearPiece, GearSet, Timestamp};
     use mudling_core::plugin::Plugin;
     use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
-    use mudling_core::session::SessionConfig;
+    use mudling_core::session::{GearEdit, SessionConfig};
     use mudling_core::store::{Diff, Revision, TerminalState};
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
@@ -3405,27 +3405,68 @@ pub mod tests {
         assert_eq!(played.heard_command(), "look", "nothing went before it");
     }
 
+    /// The session refuses too while it knows echo is off, so what's the
+    /// shell's alone is the moment its copy says off and the session's says on:
+    /// the server has given echo back, and no frame has told the shell.
     #[gpui::test]
-    fn wearing_a_set_is_refused_while_echo_is_off(cx: &mut TestAppContext) {
+    fn wearing_a_set_is_refused_while_the_shell_sees_echo_off(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.connected();
+        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Items.List {"location": "inv", "items": [{"id": "7", "name": "a linen robe"}]}"#);
+        played.frames_until("the robe", |shell, _| {
+            !shell.copies.items.value().carried.is_empty()
+        });
+        played.shell.update(played.cx, |shell, _| {
+            let game = shell.game.as_ref().expect("a game is on");
+            game.session.edit_gear(GearEdit::SaveSet(GearSet {
+                id: String::new(),
+                character_id: "bren".to_owned(),
+                name: "Robe".to_owned(),
+                container: None,
+                pieces: vec![GearPiece {
+                    item: "a linen robe".to_owned(),
+                    slot: None,
+                    copy_id: None,
+                }],
+                updated: Timestamp(0),
+            }));
+        });
+        played.frames_until("the set", |shell, _| {
+            !shell.copies.items.value().sets.is_empty()
+        });
+        let (panel, wear) = played.shell.read_with(played.cx, |shell, _| {
+            let id = shell.copies.items.value().sets[0].id.clone();
+            let wear = SetAction::Wear {
+                character: "bren".to_owned(),
+                id,
+                by_keyboard: true,
+            };
+            (shell.gear_panel.clone(), wear)
+        });
+
         played.say(&[IAC, WILL, ECHO]);
         played.frames_until("echo off", |shell, _| {
             shell.copies.settings.value().echo_off
         });
-        let panel = played
-            .shell
-            .read_with(played.cx, |shell, _| shell.gear_panel.clone());
-        panel.update(played.cx, |_, cx| {
-            cx.emit(SetAction::Wear {
-                character: "tamsin".to_owned(),
-                id: "1".to_owned(),
-                by_keyboard: true,
-            });
-        });
-        played.cx.run_until_parked();
-
         played.say(&[IAC, WONT, ECHO]);
+        let started = Instant::now();
+        while played.shell.read_with(played.cx, |shell, _| {
+            let game = shell.game.as_ref().expect("a game is on");
+            let stores = game.session.stores();
+            stores.read(|settings: &Versioned<SettingsState>| settings.value().echo_off)
+        }) {
+            assert!(
+                started.elapsed() < WAIT,
+                "timed out waiting for the session"
+            );
+            sleep(Duration::from_millis(1));
+        }
+        panel.update(played.cx, |_, cx| cx.emit(wear.clone()));
+        played.shell.read_with(played.cx, |shell, _| {
+            assert!(shell.copies.settings.value().echo_off, "no frame went by");
+        });
+
         played.frames_until("echo on", |shell, _| {
             !shell.copies.settings.value().echo_off
         });
@@ -3433,6 +3474,13 @@ pub mod tests {
             shell.submit("look", cx);
         });
         assert_eq!(played.heard_command(), "look", "nothing went before it");
+
+        panel.update(played.cx, |_, cx| cx.emit(wear));
+        assert_eq!(
+            played.heard_command(),
+            "wear 7",
+            "the set could go all along"
+        );
     }
 
     #[gpui::test]

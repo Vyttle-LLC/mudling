@@ -30,10 +30,12 @@ use mudling_core::store::{CHARACTER_LEVEL, CarriedItem, CharactersState, ItemsSt
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-actions!(gear_panel, [CloseEditor]);
+actions!(gear_panel, [CloseEditor, CloseWords]);
 
 /// The set editor's key context.
 const EDITOR_CONTEXT: &str = "GearSetEditor";
+/// The Words field's, nearer than the editor's: its Escape leaves only the field.
+const WORDS_CONTEXT: &str = "GearSetWords";
 const BUTTON_HEIGHT: Pixels = px(28.);
 const FILTER_HEIGHT: Pixels = px(30.);
 /// How many items the panel remembers the chat naming.
@@ -52,7 +54,10 @@ const HELD_SLOTS: [&str; 2] = ["held", "light"];
 const WIELD_SLOT: &str = "wield";
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", CloseEditor, Some(EDITOR_CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseEditor, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("escape", CloseWords, Some(WORDS_CONTEXT)),
+    ]);
 }
 
 /// The two views.
