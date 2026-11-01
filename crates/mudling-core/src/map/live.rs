@@ -184,20 +184,13 @@ impl LiveMap {
         if is("Room.WrongDir") {
             self.tracker.move_failed(now);
         } else if is("Room.Players") || is("Room.AddPlayer") {
-            self.mobs_here(&info::mob_titles(json), now);
+            self.note_sightings(&info::mob_titles(json), now);
         } else if is("Char.Status") {
             self.status(json);
         } else if is("Char.Items.List") || is("Char.Items.Add") {
             self.items_here(json);
         }
         None
-    }
-
-    fn mobs_here(&mut self, titles: &[String], now: Timestamp) {
-        self.note_sightings(titles, now);
-        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
-            self.note_feature(feature::AGGRESSIVE_MOB);
-        }
     }
 
     /// A door changed in place, which brings no Room.Info.
