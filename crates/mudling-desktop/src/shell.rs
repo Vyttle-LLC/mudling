@@ -1218,10 +1218,6 @@ impl Shell {
     }
 
     /// Opens both panels: the frame budget holds with everything open.
-    pub fn map_history(&self) -> &Entity<MapHistoryView> {
-        &self.map_history
-    }
-
     pub fn open_panels(&self, cx: &mut Context<Shell>) {
         for side in [Side::Left, Side::Right] {
             self.dock(side)
@@ -1496,6 +1492,11 @@ impl Shell {
 
     pub fn find_panel(&self) -> Entity<FindPanel> {
         self.find_panel.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn map_history(&self) -> &Entity<MapHistoryView> {
+        &self.map_history
     }
 
     #[cfg(target_os = "macos")]
