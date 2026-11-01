@@ -7,6 +7,7 @@ set -eu
 sudo apt-get update
 sudo apt-get install -y \
     pkg-config \
+    libasound2-dev \
     libfontconfig-dev \
     libfreetype-dev \
     libwayland-dev \

@@ -21,6 +21,14 @@ key = "c"
 [[prompt]]
 pattern = '''^{prompt}'''
 
+# The greeting on login, its last word before the punctuation the name:
+# "Welcome back to the AVATAR System, Hero Bren." or "Welcome back to the
+# AVATAR System Bren, hope you get beyond level ...".
+[[pattern]]
+name = "character.welcome"
+pattern = '''^{prompt}?Welcome back to the AVATAR System,?(?: \w+)* (?<name>\w+)(?:[,.!]|\s*$)'''
+hook = "on_welcome"
+
 # `aff` with nothing on: Avatar's "You are not under the affects of any
 # spells", or the ROM wording "You are not affected by any spells". A whole
 # answer on one line, so no table.

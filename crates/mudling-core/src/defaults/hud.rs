@@ -3,9 +3,11 @@
 //! The defaults read the keys of the first `Char.Vitals` message and match
 //! them by common names (`hp`, `HP`, `health`; `maxhp`, `max_hp`; …). A
 //! plugin's HUD point maps fields itself, and its mapping wins, the highest
-//! layer last.
+//! layer last. Affects come only from a plugin's HUD point: GMCP has no
+//! common name for them.
 
 use crate::plugin::PluginHost;
+use crate::store::Affect;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -20,6 +22,10 @@ pub enum Vital {
     MaxMana,
     Moves,
     MaxMoves,
+    /// Experience still to earn for the next level.
+    ToNextLevel,
+    /// The whole of this level's experience.
+    MaxToNextLevel,
     /// A vital only a plugin names, such as a game's own resource.
     Other(String),
 }
@@ -44,6 +50,8 @@ impl Vital {
             "maxmoves" | "maxmove" | "movesmax" | "maxmv" | "mvmax" | "maxmovement" => {
                 Vital::MaxMoves
             }
+            "tnl" | "tonextlevel" | "exptnl" | "experiencetnl" => Vital::ToNextLevel,
+            "maxtnl" | "tnlmax" | "maxexptnl" | "experiencetnlmax" => Vital::MaxToNextLevel,
             _ => Vital::Other(name.to_owned()),
         }
     }
@@ -57,6 +65,8 @@ impl Vital {
             Vital::MaxMana => "maxmana",
             Vital::Moves => "moves",
             Vital::MaxMoves => "maxmoves",
+            Vital::ToNextLevel => "tnl",
+            Vital::MaxToNextLevel => "maxtnl",
             Vital::Other(name) => name,
         }
     }
@@ -131,6 +141,28 @@ impl HudFields {
     }
 }
 
+/// Where the highest layer's HUD point says affects are listed.
+pub fn affects_field(host: &PluginHost) -> Option<Field> {
+    host.declared(|points| points.hud.as_ref())
+        .filter_map(|(_, hud)| Field::parse(hud.affects.as_deref()?))
+        .last()
+}
+
+/// What `message` lists at `field`, an object of each affect and how long it
+/// lasts; anything else there means none. `None` if it doesn't say. A game
+/// may file an affect under a kind, as `Kind: name`.
+pub fn affects(field: &Field, message: &Map<String, Value>) -> Option<Vec<Affect>> {
+    let listed = message.get(&field.key)?;
+    let Some(listed) = listed.as_object() else {
+        return Some(Vec::new());
+    };
+    let named = |(name, detail): (&String, &Value)| Affect {
+        name: name.rsplit(": ").next().unwrap_or(name).to_owned(),
+        detail: detail.as_str().unwrap_or_default().to_owned(),
+    };
+    Some(listed.iter().map(named).collect())
+}
+
 /// The vitals `message` (of `package`, in any case, as GMCP allows) holds,
 /// by `fields`. Games send numbers or numeric strings; anything else is
 /// skipped.
@@ -147,4 +179,43 @@ pub fn values(fields: &FieldMap, package: &str, message: &Map<String, Value>) ->
             Some((vital.clone(), value))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn message(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn experience_to_the_next_level_is_a_vital_by_its_common_names() {
+        assert_eq!(Vital::from_name("tnl"), Vital::ToNextLevel);
+        assert_eq!(Vital::from_name("max_tnl"), Vital::MaxToNextLevel);
+        assert_eq!(
+            Vital::from_name(Vital::ToNextLevel.name()),
+            Vital::ToNextLevel
+        );
+    }
+
+    #[test]
+    fn affects_read_with_their_kind_dropped_and_nothing_listed_means_none() {
+        let field = Field::parse("Char.Status.affects").unwrap();
+        let listed = message(json!({"affects": {"Kind: bless": "for 6 hours", "fatigue": 3}}));
+        let affects = affects_of(&field, &listed);
+        assert_eq!(affects[0].name, "bless");
+        assert_eq!(affects[0].detail, "for 6 hours");
+        assert_eq!(affects[1].name, "fatigue");
+        assert_eq!(affects[1].detail, "");
+
+        assert_eq!(affects_of(&field, &message(json!({"affects": null}))), []);
+        assert_eq!(affects_of(&field, &message(json!({"affects": ""}))), []);
+        assert_eq!(super::affects(&field, &message(json!({"hp": 1}))), None);
+    }
+
+    fn affects_of(field: &Field, message: &Map<String, Value>) -> Vec<Affect> {
+        super::affects(field, message).unwrap()
+    }
 }

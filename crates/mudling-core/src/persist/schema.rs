@@ -13,7 +13,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Migration `i` takes the schema from version `i` to version `i + 1`.
 /// Append new ones; never edit one that has shipped.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 pub const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -282,4 +282,23 @@ CREATE TABLE version_sightings (
     updated    INTEGER NOT NULL,
     PRIMARY KEY (version_id, room_id, mob)
 ) WITHOUT ROWID;
+"#;
+
+const V2: &str = r#"
+CREATE TABLE triggers (
+    id      TEXT PRIMARY KEY,
+    scope   TEXT NOT NULL,
+    matches TEXT NOT NULL,
+    action  TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    updated INTEGER NOT NULL
+);
+
+CREATE TABLE aliases (
+    id        TEXT PRIMARY KEY,
+    scope     TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    expansion TEXT NOT NULL,
+    updated   INTEGER NOT NULL
+);
 "#;

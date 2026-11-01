@@ -7,8 +7,9 @@
 use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, Diff, GearState, MapState, MobsState, RoomState, SettingsState, Store,
-    StoreHub, StoreKind, TerminalChange, TerminalState, Versioned, VitalsState,
+    CharactersState, CuesState, Diff, GearState, MapState, MobsState, RoomState, RulesState,
+    SettingsState, Store, StoreHub, StoreKind, TargetState, TerminalChange, TerminalState,
+    Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -25,8 +26,11 @@ pub enum StoreKind {
     Map,
     Mobs,
     Characters,
+    Target,
     Gear,
     Settings,
+    Rules,
+    Cues,
 }
 
 /// Told when changes are waiting, at most once per drained batch. It's
@@ -104,8 +108,11 @@ impl Session {
             map,
             mobs,
             characters,
+            target,
             gear,
             settings,
+            rules,
+            cues,
         } = batch;
         [
             terminal.map(TerminalState::diff),
@@ -114,8 +121,11 @@ impl Session {
             map.map(MapState::diff),
             mobs.map(MobsState::diff),
             characters.map(CharactersState::diff),
+            target.map(TargetState::diff),
             gear.map(GearState::diff),
             settings.map(SettingsState::diff),
+            rules.map(RulesState::diff),
+            cues.map(CuesState::diff),
         ]
         .into_iter()
         .flatten()
@@ -158,12 +168,24 @@ macro_rules! with_store {
                 type $S = CharactersState;
                 $body
             }
+            StoreKind::Target => {
+                type $S = TargetState;
+                $body
+            }
             StoreKind::Gear => {
                 type $S = GearState;
                 $body
             }
             StoreKind::Settings => {
                 type $S = SettingsState;
+                $body
+            }
+            StoreKind::Rules => {
+                type $S = RulesState;
+                $body
+            }
+            StoreKind::Cues => {
+                type $S = CuesState;
                 $body
             }
         }
@@ -177,9 +199,11 @@ trait Bridged: Store {
     fn diff(diff: Diff<Self>) -> StoreDiff;
 }
 
+/// The lines' text, without the prompts the HUD repeats.
 fn texts<'a>(lines: impl IntoIterator<Item = &'a Line>) -> Vec<String> {
     lines
         .into_iter()
+        .filter_map(Line::without_prompt)
         .map(|line| line.plain().to_owned())
         .collect()
 }
@@ -288,12 +312,62 @@ impl FieldStore for MobsState {
     }
 }
 
+impl FieldStore for TargetState {
+    fn fields(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .flat_map(|target| {
+                let number = |name: &str, value: Option<i64>| {
+                    value.map(|value| (name.to_owned(), value.to_string()))
+                };
+                [
+                    Some(("name".to_owned(), target.name.clone())),
+                    number("level", target.level),
+                    number("health", target.health),
+                    number("max_health", target.max_health),
+                ]
+            })
+            .flatten()
+            .collect()
+    }
+}
+
 impl FieldStore for SettingsState {
     fn fields(&self) -> HashMap<String, String> {
         HashMap::from([
             ("connection".to_owned(), format!("{:?}", self.connection)),
             ("echo_off".to_owned(), self.echo_off.to_string()),
         ])
+    }
+}
+
+impl FieldStore for RulesState {
+    fn fields(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("triggers".to_owned(), self.triggers.len().to_string()),
+            ("aliases".to_owned(), self.aliases.len().to_string()),
+            ("hotbar".to_owned(), self.hotbar.join("\n")),
+        ])
+    }
+}
+
+/// Cues aren't state: each diff names the sounds to play once.
+impl Bridged for CuesState {
+    fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
+        StoreSnapshot::Fields {
+            store: Self::KIND,
+            revision: versioned.revision().0,
+            fields: HashMap::new(),
+        }
+    }
+
+    fn diff(diff: Diff<Self>) -> StoreDiff {
+        let fields = HashMap::from([("sounds".to_owned(), diff.change.join("\n"))]);
+        StoreDiff::Fields {
+            store: Self::KIND,
+            revision: diff.revision.0,
+            fields,
+        }
     }
 }
 

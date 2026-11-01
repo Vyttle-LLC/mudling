@@ -2,7 +2,7 @@
 //! prototype's `CommandChain`, `CommandVariety` and `Speedwalk` did them, with
 //! the game's syntax from the Commands point.
 
-use crate::map;
+use crate::map::Direction;
 use crate::plugin::PluginHost;
 use crate::plugin::points::Speedwalk;
 
@@ -63,7 +63,7 @@ impl CommandVariety {
             .last
             .as_deref()
             .is_some_and(|last| last.eq_ignore_ascii_case(command));
-        let sent = match map::Direction::parse(command).filter(|_| repeats) {
+        let sent = match Direction::parse(command).filter(|_| repeats) {
             Some(direction) if command.eq_ignore_ascii_case(direction.name()) => {
                 direction.name()[..1].to_owned()
             }
@@ -72,45 +72,6 @@ impl CommandVariety {
         };
         self.last = Some(sent.clone());
         sent
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    North,
-    East,
-    South,
-    West,
-    Up,
-    Down,
-}
-
-impl Direction {
-    fn from_letter(letter: char) -> Option<Direction> {
-        Some(match letter.to_ascii_lowercase() {
-            'n' => Direction::North,
-            'e' => Direction::East,
-            's' => Direction::South,
-            'w' => Direction::West,
-            'u' => Direction::Up,
-            'd' => Direction::Down,
-            _ => return None,
-        })
-    }
-
-    pub fn word(self) -> &'static str {
-        match self {
-            Direction::North => "north",
-            Direction::East => "east",
-            Direction::South => "south",
-            Direction::West => "west",
-            Direction::Up => "up",
-            Direction::Down => "down",
-        }
-    }
-
-    fn letter(self) -> &'static str {
-        &self.word()[..1]
     }
 }
 
@@ -154,7 +115,7 @@ impl WalkSyntax {
             self.open_door
                 .as_deref()
                 .unwrap_or(OPEN_DOOR)
-                .replace("{dir}", direction.word())
+                .replace("{dir}", direction.name())
         };
         let mut commands = Vec::new();
         let mut runs: Vec<(u32, Direction)> = Vec::new();
@@ -165,7 +126,7 @@ impl WalkSyntax {
             }
             match &self.speedwalk {
                 None => commands.extend(std::iter::repeat_n(
-                    step.direction.word().to_owned(),
+                    step.direction.name().to_owned(),
                     step.count as usize,
                 )),
                 Some(_) => match runs.last_mut() {
@@ -246,8 +207,8 @@ fn parse_step(text: &str) -> Option<(Step, &str)> {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    let letter = rest.chars().next()?;
-    let direction = Direction::from_letter(letter)?;
+    let letter = rest.get(..1)?;
+    let direction = Direction::parse(letter)?;
     let rest = &rest[1..];
     let rest = if door { rest.strip_prefix(']')? } else { rest };
     Some((

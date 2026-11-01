@@ -8,7 +8,7 @@
 //! - Reading a 10,000-room map at startup (informational: the session times
 //!   the cold start).
 
-use crate::{BudgetScale, millis, verdict};
+use crate::{millis, verdict};
 use mudling_core::persist::{Batch, Database, Exit, Link, Room, Sighting, Timestamp, Writer};
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -63,7 +63,7 @@ impl Report {
     }
 }
 
-pub fn run(scale: BudgetScale) -> Report {
+pub fn run() -> Report {
     let folder = tempfile::tempdir().expect("a temporary folder");
     let folder = folder.path();
     let (enqueue, paced_commit, burst_drain) = measure_moves(folder);
@@ -74,16 +74,14 @@ pub fn run(scale: BudgetScale) -> Report {
     let paced_commit = Summary::of(&paced_commit).expect("commits were timed");
     let list = Summary::of(&list).expect("lists were timed");
     let burst_moves_per_second = BURST_MOVES as f64 / burst_drain.as_secs_f64();
-    let enqueue_budget_us = scale.time_us(ENQUEUE_BUDGET_US);
-    let list_budget_us = scale.time_us(LIST_BUDGET_US);
     Report {
-        enqueue_within_budget: enqueue.p99_us <= enqueue_budget_us,
+        enqueue_within_budget: enqueue.p99_us <= ENQUEUE_BUDGET_US,
         // The mean, not the slowest: a queue keeps up when it's served faster
         // than it fills, whatever one fsync does on a shared disk.
         writer_keeps_up: paced_commit.mean_us < SPEEDWALK_INTERVAL.as_secs_f64() * 1e6
             && burst_moves_per_second > 1.0 / SPEEDWALK_INTERVAL.as_secs_f64(),
-        list_within_budget: list.p99_us <= list_budget_us
-            && list_cold.as_secs_f64() * 1e6 <= list_budget_us,
+        list_within_budget: list.p99_us <= LIST_BUDGET_US
+            && list_cold.as_secs_f64() * 1e6 <= LIST_BUDGET_US,
         enqueue,
         paced_commit,
         burst_moves: BURST_MOVES,
@@ -97,8 +95,8 @@ pub fn run(scale: BudgetScale) -> Report {
         startup_map_rooms: STARTUP_MAP_ROOMS,
         startup_map_exits,
         startup_read: Summary::of(&startup_read).expect("startups were timed"),
-        enqueue_budget_us,
-        list_budget_us,
+        enqueue_budget_us: ENQUEUE_BUDGET_US,
+        list_budget_us: LIST_BUDGET_US,
     }
 }
 

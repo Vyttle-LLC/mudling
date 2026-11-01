@@ -180,6 +180,62 @@ fn a_stall_at_the_pager_with_vitals_awaited_leaves_the_table_open() {
     assert_eq!(skill("skills.zeal.learned"), Some(Value::Number(90.0)));
 }
 
+/// Char.Status says null for spells only `aff` shows, as the logs do.
+#[test]
+fn the_hud_has_what_aff_read_and_what_gmcp_lists_each_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let status = |engine: &mut Engine, message: &[u8]| {
+        let mut bytes = vec![IAC, SB, GMCP];
+        bytes.extend_from_slice(message);
+        bytes.extend_from_slice(&[IAC, SE]);
+        engine.receive(Bytes::from(bytes), now).unwrap();
+        engine.settle(now);
+    };
+    let affects = || {
+        hub.read(|character: &Versioned<CharactersState>| {
+            let affects = character.value().affects().into_iter();
+            affects
+                .map(|affect| (affect.name, affect.detail))
+                .collect::<Vec<_>>()
+        })
+    };
+    status(&mut engine, br#"Char.Status {"affects": null}"#);
+
+    let mut table = Vec::new();
+    for line in include_str!("fixtures/affects.txt").lines() {
+        table.extend_from_slice(line.as_bytes());
+        table.extend_from_slice(b"\r\n");
+    }
+    engine.receive(Bytes::from(table), now).unwrap();
+    engine.receive(Bytes::from_static(PROMPT), now).unwrap();
+    engine.quiet(now);
+    let started = Instant::now();
+    while affects().is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(5), "no affects");
+        engine.settle(now);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let names: Vec<String> = affects().into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["armor", "bless", "sanctuary"]);
+
+    status(
+        &mut engine,
+        br#"Char.Status {"affects": {"Spell: bless": "for 6 hours", "Racial fatigue": "for 2 hours"}}"#,
+    );
+    let listed = affects();
+    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert_eq!(listed[1], ("bless".to_owned(), "for 6 hours".to_owned()));
+    assert_eq!(listed[3].0, "Racial fatigue");
+
+    status(&mut engine, br#"Char.Status {"affects": null}"#);
+    assert_eq!(affects().len(), 3, "null says nothing of what aff read");
+
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+    assert_eq!(affects(), [], "a dropped connection clears both");
+}
+
 #[test]
 fn a_room_keeps_the_description_after_its_exits_line() {
     let folder = tempfile::tempdir().unwrap();

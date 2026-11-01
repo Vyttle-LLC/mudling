@@ -7,7 +7,7 @@
 //! own cost is amortized over the lines that don't reach it: here a table row
 //! in every [`HOOKED_EVERY`] lines.
 
-use crate::{BudgetScale, verdict};
+use crate::verdict;
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
     HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, OVERRUNS_TO_TURN_OFF, StateView, Value,
@@ -98,7 +98,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(scale: BudgetScale) -> Report {
+pub fn run() -> Report {
     let trivial = plugin(&[
         ("plugin.toml", TRIVIAL_MANIFEST),
         ("text.toml", TRIVIAL_TEXT),
@@ -117,9 +117,8 @@ pub fn run(scale: BudgetScale) -> Report {
     let (columns, columns_overruns) = time_hook(&columns, &rows);
     let runaway_stopped = time_runaway(&runaway, &rows[..RUNAWAY_CALLS]);
     let columns_amortized_p99_us = (columns.p99_us + hand_off.p99_us) / HOOKED_EVERY;
-    let plugin_budget_us = scale.time_us(PLUGIN_BUDGET_US);
-    let within_budget = hand_off.p99_us <= plugin_budget_us
-        && columns_amortized_p99_us <= plugin_budget_us
+    let within_budget = hand_off.p99_us <= PLUGIN_BUDGET_US
+        && columns_amortized_p99_us <= PLUGIN_BUDGET_US
         && trivial_overruns.acceptable(CALLS)
         && columns_overruns.acceptable(CALLS);
     Report {
@@ -132,7 +131,7 @@ pub fn run(scale: BudgetScale) -> Report {
         runaway_stopped,
         hooked_every: HOOKED_EVERY,
         columns_amortized_p99_us,
-        plugin_budget_us,
+        plugin_budget_us: PLUGIN_BUDGET_US,
         within_budget,
     }
 }

@@ -13,7 +13,7 @@ use serde_json::Value as Json;
 use std::sync::Arc;
 
 /// The plugin stores about gear rather than the character.
-const GEAR_STORES: [&str; 3] = ["gear", "equipment", "identify"];
+const GEAR_STORES: [&str; 2] = ["gear", "identify"];
 /// Where a gear value's `meta` key starts.
 pub(super) const GEAR_META_PREFIX: &str = "plugin.";
 

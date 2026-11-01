@@ -13,10 +13,12 @@ instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
 > Early days. The headless core is here: the connection layer (telnet, GMCP,
 > MCCP2), line pipeline, plugin host with Luau hooks, versioned stores, map,
 > persistence and completion, with the Avatar game plugin on top. The desktop
-> shell is still the Phase 0 spike and doesn't use most of the core yet: a gpui
-> window with a virtualized chat, a command input with IME, and a first
-> accessibility pass. See [docs/phase-0-spike.md](docs/phase-0-spike.md) for
-> what the spike proved.
+> shell plays on it: a gpui window that opens saved servers, with a chat you
+> can search and read back through, a Room panel with a D-pad, a hotbar of
+> commands, the character's HUD, and settings for plugins, triggers, aliases
+> and shortcuts. It is built for the keyboard and screen readers as well as
+> the mouse. [docs/phase-0-spike.md](docs/phase-0-spike.md) records the spike
+> it grew from. The iOS app is still to come.
 
 ## Building
 
@@ -35,7 +37,7 @@ MUDling is a Cargo workspace:
 ```sh
 cargo build --release
 cargo test
-cargo run --release -p mudling-bench                 # the core's budgets (--check gates them; --budget-scale <n> relaxes the time ones)
+cargo run --release -p mudling-bench                 # the core's budgets (--check exits 1 on a miss)
 cargo run --release -p mudling-desktop -- --synthetic # the chat, with made-up lines
 ```
 
@@ -44,6 +46,13 @@ gpui needs.
 
 Release builds carry line-table debug info, so daily builds are release
 builds that still give useful backtraces.
+
+**Benchmarks.** `mudling-bench --check` holds the core to PRD §6's numbers. Run
+it locally, on a quiet machine, before each phase's pull request. CI runs the
+benchmark and keeps its report, but gates none of the numbers: GitHub's shared
+runners read up to 4× over them and vary 2× from run to run. What CI does gate
+is `mudling-bench compare`, which runs a pull request's build and its base's in
+turns on one machine and fails a loss of more than 10%.
 
 **gpui is pinned** to `gpui-pre 0.3.10`, an exact published snapshot of Zed's
 `main` (zed@08cbb88). The crates.io `gpui` release (0.2.2) predates gpui's

@@ -40,6 +40,33 @@ fn blank_lines_around_a_hidden_prompt_show_as_one() {
     assert_eq!(driven.terminal(), ["a", "", "b"]);
 }
 
+/// A hidden prompt that the server pads with spaces is still no line.
+#[test]
+fn blank_lines_around_a_padded_hidden_prompt_show_as_one() {
+    let mut driven = learned();
+    driven.say(b"a\r\n\r\n");
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp>   \r\n\r\nb\r\n");
+    assert_eq!(driven.terminal(), ["a", "", "b"]);
+}
+
+/// A command lands in the middle of a prompt the HUD repeats. What came before
+/// it is already out, but the rest is the same prompt and stays hidden.
+#[test]
+fn the_rest_of_a_known_prompt_a_command_split_stays_hidden() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19");
+    driven.send("look");
+    driven.say(b"hp> ");
+    driven.say(b"You see a stag.\r\n");
+    assert_eq!(driven.terminal(), ["<19", "look", "You see a stag."]);
+    assert_eq!(
+        driven.terminal_with_prompts(),
+        ["<20hp> ", "<19", "look", "hp> ", "You see a stag."]
+    );
+}
+
 #[test]
 fn a_blank_line_follows_a_command() {
     let mut driven = Driven::new();
@@ -81,6 +108,40 @@ fn the_rest_of_a_line_shows_after_the_command_that_split_it() {
         driven.terminal(),
         ["A long ", "look", "line", "west", " ends.", "Next."]
     );
+}
+
+/// A chat that shows the prompts the HUD repeats still has each reply after
+/// the command it answers: the prompts are marked, not moved or dropped.
+#[test]
+fn with_prompts_shown_a_reply_still_follows_its_command() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> ");
+    driven.send("save");
+    driven.say(b"Saved.");
+    driven.say(b"\n\r");
+    assert_eq!(
+        driven.terminal_with_prompts(),
+        ["<20hp> ", "<19hp> ", "save", "Saved."]
+    );
+    assert_eq!(driven.terminal(), ["save", "Saved."]);
+}
+
+/// A command splits a line the server hasn't ended: what came before shows
+/// first, then the command, then the rest, and the next line is whole.
+#[test]
+fn with_prompts_shown_a_command_still_splits_the_line_it_interrupts() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp> ");
+    driven.say(b"You see a stag");
+    driven.send("look");
+    driven.say(b" here.\r\nNext.\r\n");
+    let expected = ["You see a stag", "look", " here.", "Next."];
+    assert_eq!(driven.terminal(), expected);
+    let mut with_prompts = vec!["<20hp> ", "<19hp> "];
+    with_prompts.extend(expected);
+    assert_eq!(driven.terminal_with_prompts(), with_prompts);
 }
 
 #[test]

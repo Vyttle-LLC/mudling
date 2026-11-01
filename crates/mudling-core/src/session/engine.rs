@@ -2,49 +2,62 @@
 //! stores, database writes and bytes to send out. [`crate::session::Session`]
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
+use super::game::GameFeed;
 use super::inventory::{self, Inventory};
+use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
-use super::{SessionConfig, SessionError, Typing};
+use super::{RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
+use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::commands::{
     CommandVariety, WalkSyntax, chain_lines, parse_speedwalk, split_chain,
 };
 use crate::defaults::detect::{ServerSignals, suggest};
-use crate::defaults::hud::{self, FieldMap};
-use crate::defaults::{self, Defaults, PendingAction};
+use crate::defaults::hud::{self, Field, FieldMap};
+use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
+use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::net::DisconnectReason;
-use crate::persist::{self, Batch, Character, Database, Server, Timestamp, Writer};
-use crate::plugin::luau::{HookOutput, HookSink, LuauHooks, StoreWrite};
+use crate::persist::{
+    self, Batch, Character, Database, Key, REMOVED, SERVERS_FOLDER, Server, Timestamp,
+    UNNAMED_CHARACTER, Writer,
+};
+use crate::plugin::luau::{
+    HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
+};
 use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
 use crate::store::{
-    CharactersState, ConnectionStatus, GearState, MapState, Memo, MobsState, RoomState,
-    SettingsState, StoreHub, TerminalChange, TerminalState, Versioned, VitalsState,
+    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState,
+    MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub, TargetState,
+    TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-/// Under the data folder, one database per server.
-const SERVERS_FOLDER: &str = "servers";
-/// Who the session plays when no credentials name a character.
-const UNNAMED_CHARACTER: &str = "player";
 /// GMCP modules every server is asked for.
 const CORE_GMCP: [&str; 3] = ["Core 1", "Char 1", "Room 1"];
 /// The word list map words are kept under.
 const MAP_WORDS: &str = "map";
+/// How many room names and mob titles are remembered as added to the map's
+/// words, each, before the memory starts over.
+const NAMES_REMEMBERED: usize = 4096;
 /// Notices kept for a shell to show.
 const MOST_NOTICES: usize = 32;
+/// How often plugin costs are published: each one sorts its samples.
+const COSTS_EVERY_MS: i64 = 2_000;
 
 /// What one connection knows: made fresh for each, so a reconnect learns the
 /// server's prompt again from nothing.
@@ -54,6 +67,8 @@ struct Link {
     defaults: Defaults,
     inventory: Inventory,
     inventory_asked: bool,
+    game: GameFeed,
+    latency: Latency,
     login: Option<Login>,
     variety: CommandVariety,
     /// How much of the pending line the chat already shows.
@@ -62,6 +77,9 @@ struct Link {
     hook_outputs: UnboundedReceiver<HookOutput>,
     /// Plugins already reported for hook events dropped on a full queue.
     drops_noticed: HashSet<PluginId>,
+    /// The notices of overruns, this connection, which the plugin being
+    /// turned off then takes the place of.
+    overrun_notices: Vec<(PluginId, String)>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
 }
@@ -72,6 +90,27 @@ struct HookOutputs(UnboundedSender<HookOutput>);
 impl HookSink for HookOutputs {
     fn output(&mut self, output: HookOutput) {
         let _ = self.0.send(output);
+    }
+}
+
+/// The room names and mob titles whose words the map's words already hold.
+/// A mob's name depends on the plugins, so a change of them starts it over.
+#[derive(Default)]
+struct AddedNames {
+    generation: u64,
+    rooms: HashSet<String>,
+    mobs: HashSet<String>,
+}
+
+impl AddedNames {
+    fn keep_to(&mut self, generation: u64) {
+        let full = self.rooms.len() > NAMES_REMEMBERED || self.mobs.len() > NAMES_REMEMBERED;
+        if self.generation != generation || full {
+            *self = AddedNames {
+                generation,
+                ..AddedNames::default()
+            };
+        }
     }
 }
 
@@ -95,9 +134,31 @@ pub struct Engine {
     link: Option<Link>,
     character_id: String,
     settings: SettingsState,
+    rules: RulesState,
+    /// The triggers in the matcher: those on, for this character.
+    running_triggers: Vec<TriggerRule>,
+    /// Sounds for the cues store, at the next settle.
+    sounds: Vec<String>,
+    /// How many rules this session has given an id.
+    rules_made: u32,
     /// Which fields hold the vitals, by plugin set and whether any were
     /// learned yet.
     hud_fields: Memo<(u64, bool), FieldMap>,
+    /// Where affects are listed, by plugin set.
+    affects_field: Memo<u64, Option<Field>>,
+    /// The room's contents changed since the last settle.
+    contents_changed: bool,
+    /// The game or a plugin named the character, at the next settle.
+    character_renamed: bool,
+    /// Who plays on this connection, by id: what the login, the game or a
+    /// plugin has said since it opened, and nothing from an earlier one.
+    playing: String,
+    /// When plugin costs were last published.
+    costs_published: Option<Timestamp>,
+    /// The plugin set the shared link rules came from.
+    link_rules_of: u64,
+    /// What the map's words already hold, to add each only once.
+    added_names: AddedNames,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
     /// The last line shown was a blank one from the server, or none has been.
@@ -150,6 +211,8 @@ impl Engine {
             name: character_id.clone(),
             updated: now,
         });
+        // Playing on a server the player removed puts it back on their list.
+        batch.delete(Key::Meta(REMOVED.to_owned()));
         writer.submit(batch)?;
 
         let plugins = PluginHost::new([defaults::plugin()])?;
@@ -167,7 +230,18 @@ impl Engine {
             link: None,
             character_id,
             settings,
+            rules: RulesState::default(),
+            running_triggers: Vec::new(),
+            sounds: Vec::new(),
+            rules_made: 0,
             hud_fields: Memo::default(),
+            affects_field: Memo::default(),
+            contents_changed: false,
+            character_renamed: false,
+            playing: String::new(),
+            costs_published: None,
+            link_rules_of: 0,
+            added_names: AddedNames::default(),
             terminal: Vec::new(),
             blank_shown: true,
             batch: Batch::new(),
@@ -179,6 +253,7 @@ impl Engine {
         engine.enable_plugins_for_server();
         engine.load_saved()?;
         engine.walk = WalkSyntax::of(&engine.plugins);
+        engine.load_rules()?;
         engine.publish_settings();
         Ok(engine)
     }
@@ -211,18 +286,38 @@ impl Engine {
             defaults: Defaults::default(),
             inventory: Inventory::default(),
             inventory_asked: false,
+            game: GameFeed::default(),
+            latency: Latency::default(),
             login: self.new_login(),
             variety: CommandVariety::default(),
             pending_shown: 0,
             hooks,
             hook_outputs,
             drops_noticed: HashSet::new(),
+            overrun_notices: Vec::new(),
             mssp_name: None,
             gmcp_enabled: false,
         });
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
+        // Each connection starts unnamed. Until the game says who plays, it's
+        // who's logging in, if anyone is.
+        self.playing = (self.config.credentials.as_ref())
+            .map(|credentials| credentials.name.to_lowercase())
+            .unwrap_or_default();
+        if let Some(credentials) = self
+            .config
+            .credentials
+            .as_ref()
+            .filter(|_| self.character_name().is_none())
+        {
+            let name = HookValue::Text(credentials.name.clone());
+            let change = [(CHARACTER_NAME.to_owned(), name)];
+            self.hub
+                .write::<CharactersState>(CharactersState(change.into()));
+        }
+        self.rules_follow_the_character();
         Ok(())
     }
 
@@ -238,9 +333,14 @@ impl Engine {
         let Some(link) = &mut self.link else {
             return Ok(());
         };
+        let answered = link.latency.received(now);
         let mut parsed = Vec::new();
         let fed = link.parser.feed(bytes, &mut parsed);
         self.output.extend(link.parser.take_output());
+        if answered.is_some() {
+            self.settings.latency = answered;
+            self.publish_settings();
+        }
         for event in parsed {
             self.server_said(event, now);
         }
@@ -279,7 +379,55 @@ impl Engine {
         drop(typing);
         self.show_pending();
         self.show(Line::command(typed));
-        self.issue(typed, now);
+        self.issue_expanded(typed, now);
+    }
+
+    /// A command the player pressed. With echo off it would go as a password,
+    /// so it does nothing. It isn't typing: history doesn't keep it.
+    pub fn press(&mut self, command: &str, now: Timestamp) {
+        if self.link.is_some() && !self.settings.echo_off {
+            self.show_pending();
+            self.show(Line::command(command));
+            self.issue_expanded(command, now);
+        }
+    }
+
+    /// Applies a change the player made and saves it.
+    pub fn edit(&mut self, edit: RuleEdit, now: Timestamp) {
+        match edit {
+            RuleEdit::SaveTrigger(rule) => self.save_trigger(rule, now),
+            RuleEdit::RemoveTrigger(id) => {
+                let triggers = &mut self.rules.triggers;
+                if let Some(at) = triggers.iter().position(|rule| rule.id == id) {
+                    let rule = triggers.remove(at);
+                    self.remove_row(&rule.home, persist::Key::Trigger(rule.id));
+                    self.run_triggers();
+                }
+            }
+            RuleEdit::SaveAlias(rule) => self.save_alias(rule, now),
+            RuleEdit::RemoveAlias(id) => {
+                let aliases = &mut self.rules.aliases;
+                if let Some(at) = aliases.iter().position(|rule| rule.id == id) {
+                    let rule = aliases.remove(at);
+                    self.remove_row(&rule.home, persist::Key::Alias(rule.id));
+                    self.run_aliases();
+                }
+            }
+            RuleEdit::SetHotbar(chips) => {
+                self.batch.upsert(hotbar::to_meta(&chips, now));
+                self.rules.hotbar = chips;
+            }
+        }
+        self.publish_rules();
+    }
+
+    /// A command a shell's button sent. It's never a password, so with echo
+    /// off it goes nowhere: a click made a frame before the server asked for
+    /// one mustn't land in the password box.
+    pub fn send_action(&mut self, command: &str, now: Timestamp) {
+        if !self.settings.echo_off {
+            self.send(command, now);
+        }
     }
 
     /// Publishes what changed since the last settle: the stores, and the
@@ -307,6 +455,18 @@ impl Engine {
         if let Some(commit) = self.map.commit(now) {
             self.publish_map(commit.change);
             self.submit(commit.batch);
+        }
+        if std::mem::take(&mut self.contents_changed) {
+            self.publish_room();
+        }
+        if std::mem::take(&mut self.character_renamed) {
+            self.rules_follow_the_character();
+        }
+        self.publish_plugin_costs(now);
+        self.share_link_rules();
+        if !self.sounds.is_empty() {
+            let sounds = std::mem::take(&mut self.sounds);
+            self.hub.write::<CuesState>(sounds);
         }
         if !self.terminal.is_empty() {
             let lines = std::mem::take(&mut self.terminal);
@@ -350,17 +510,51 @@ impl Engine {
                     gmcp::encode(inventory::ASK, "", &mut self.output);
                 }
             }
-            HookOutput::HookFailed(failed) => self.notice(format!(
-                "{}'s hook {} failed: {}",
-                failed.plugin,
-                failed.hook.as_str(),
-                failed.message
-            )),
-            HookOutput::PluginDisabled(disabled) => self.notice(format!(
-                "{} was turned off: {:?}",
-                disabled.plugin, disabled.reason
-            )),
+            HookOutput::HookFailed(failed) => {
+                let notice = format!(
+                    "{}'s hook {} failed: {}",
+                    failed.plugin,
+                    failed.hook.as_str(),
+                    failed.message
+                );
+                if let Some(link) = self.link.as_mut().filter(|_| failed.overran) {
+                    link.overrun_notices.push((failed.plugin, notice.clone()));
+                }
+                self.notice(notice);
+            }
+            HookOutput::PluginDisabled(disabled) => self.plugin_turned_off(disabled),
         }
+    }
+
+    /// Lists the plugin as turned off, in place of the overruns that led there.
+    fn plugin_turned_off(&mut self, disabled: PluginDisabled) {
+        if let Some(link) = &mut self.link {
+            let overruns = std::mem::take(&mut link.overrun_notices);
+            let (folded, others): (Vec<_>, Vec<_>) = overruns
+                .into_iter()
+                .partition(|(plugin, _)| *plugin == disabled.plugin);
+            link.overrun_notices = others;
+            let notices = &mut self.settings.notices;
+            notices.retain(|notice| !folded.iter().any(|(_, overrun)| overrun == notice));
+        }
+        let off = &mut self.settings.turned_off;
+        off.retain(|off| off.plugin != disabled.plugin);
+        off.push(disabled);
+        self.publish_settings();
+    }
+
+    /// Brings back a plugin the core turned off. A plugin that's on, or
+    /// isn't installed, stays as it is.
+    pub fn turn_plugin_on(&mut self, plugin: &PluginId) {
+        if let Err(error) = self.plugins.set_enabled(plugin, true) {
+            self.notice(format!("{plugin} couldn't be turned on: {error}"));
+            return;
+        }
+        if let Some(link) = &mut self.link {
+            link.hooks.turn_back_on(plugin);
+        }
+        self.settings.turned_off.retain(|off| off.plugin != *plugin);
+        self.publish_settings();
     }
 
     /// The connection ended. Runs what its hooks still hold, so nothing they
@@ -382,7 +576,28 @@ impl Engine {
         self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
         self.settings.echo_off = false;
+        self.settings.latency = None;
         self.publish_settings();
+        self.publish_room();
+        self.hub.write::<TargetState>(TargetState(None));
+        let (had_position, had_affects) =
+            self.hub.read(|characters: &Versioned<CharactersState>| {
+                let characters = characters.value();
+                (
+                    characters.0.contains_key(CHARACTER_POSITION),
+                    !characters.affects().is_empty(),
+                )
+            });
+        if had_position {
+            let position = HookValue::Text(String::new());
+            let change = [(CHARACTER_POSITION.to_owned(), position)];
+            self.hub
+                .write::<CharactersState>(CharactersState(change.into()));
+        }
+        if had_affects {
+            self.hub
+                .write::<CharactersState>(CharactersState::no_affects());
+        }
     }
 
     /// The connection can't go on: closes it, saying why.
@@ -400,7 +615,7 @@ impl Engine {
         let flushed = self.writer.flush();
         let saved = self.history_writer.finish();
         flushed?;
-        Ok(saved?)
+        saved.map_err(SessionError::History)
     }
 
     fn server_said(&mut self, event: Event, now: Timestamp) {
@@ -467,6 +682,8 @@ impl Engine {
             let coloring = self
                 .plugins
                 .read_line_from(&line, output_at, &mut self.events);
+            let response = self.trigger_response();
+            let Some(link) = &mut self.link else { return };
             answer_login(&mut link.login, text, encoding, &mut self.output);
             let body = &text[prompt.unwrap_or(0)..];
             if prompt.is_none() || !body.is_empty() {
@@ -474,22 +691,51 @@ impl Engine {
             }
             self.route_events(now);
             let Some(link) = &mut self.link else { return };
-            let hide = link.defaults.hide_prompts && link.defaults.hud.has_learned();
+            let hud_repeats_it = link.defaults.hide_prompts && link.defaults.hud.has_learned();
             let shown = if coloring.is_empty() {
                 line.clone()
             } else {
                 line.colored(&coloring)
             };
-            let hidden = prompt.filter(|_| hide).unwrap_or(0);
-            let from = hidden.max(std::mem::take(&mut link.pending_shown));
-            if from == 0 {
-                self.show(shown);
-            } else if from < text.len() {
-                self.show(shown.after(from));
+            let shown = match response.color {
+                Some(color) => shown.highlighted(output_at, color.style()),
+                None => shown,
+            };
+            // What a command sent before this line ended already showed of it
+            // isn't shown again, hidden or not.
+            let already_shown = std::mem::take(&mut link.pending_shown);
+            self.sounds.extend(response.sounds);
+            if response.hides {
+                continue;
+            }
+            let prompt_len = prompt.filter(|_| hud_repeats_it).unwrap_or(0);
+            if already_shown == 0 {
+                self.show(match prompt_len {
+                    0 => shown,
+                    len => shown.with_prompt(len),
+                });
+            } else if already_shown < text.len() {
+                // What a command cut off is out already; the rest of the prompt
+                // is still the prompt, so it stays marked.
+                let rest = shown.after(already_shown);
+                self.show(match prompt_len.saturating_sub(already_shown) {
+                    0 => rest,
+                    len => rest.with_prompt(len),
+                });
             }
         }
         // The buffer is kept: it's reused for every read.
         self.lines = lines;
+    }
+
+    /// What the triggers ask of the line just read. While the server asks
+    /// for a password none of them acts: nothing in that exchange is game text.
+    fn trigger_response(&self) -> TriggerResponse {
+        match self.plugins.triggered() {
+            [] => TriggerResponse::default(),
+            _ if self.settings.echo_off => TriggerResponse::default(),
+            matched => TriggerResponse::to(matched, &self.running_triggers),
+        }
     }
 
     /// Sends what the plugins matched to the map and to the hooks.
@@ -550,11 +796,41 @@ impl Engine {
         if let Some(entries) = link.inventory.read(package, json) {
             self.hub.write::<CharactersState>(CharactersState(entries));
         }
-        // The first room means the character is in the game.
-        if !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info") {
+        let heard = link.game.read(package, json);
+        self.contents_changed |= heard.contents;
+        if let Some(HookValue::Text(name)) = heard.character.get(CHARACTER_NAME) {
+            self.playing = name.to_lowercase();
+            self.character_renamed = true;
+        }
+        if !heard.character.is_empty() {
+            let lasting = heard
+                .character
+                .iter()
+                .filter(|(key, _)| *key != CHARACTER_POSITION);
+            for (key, value) in lasting {
+                self.batch.upsert(persist::CharacterStat {
+                    character_id: self.character_id.clone(),
+                    key: key.clone(),
+                    value: values::to_row(value),
+                    updated: now,
+                });
+            }
+            self.hub
+                .write::<CharactersState>(CharactersState(heard.character));
+        }
+        if let Some(target) = heard.target {
+            self.hub.write::<TargetState>(target);
+        }
+        // The first room means the character is in the game. Asking for the
+        // modules again has a server send their values, which it may not
+        // have done when the character came in.
+        let entered_game = !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info");
+        if entered_game {
             link.inventory_asked = true;
             gmcp::encode(inventory::ASK, "", &mut self.output);
+            self.ask_for_modules();
         }
+        let Some(link) = &self.link else { return };
         let learned = link.defaults.hud.has_learned();
         let hud = &link.defaults.hud;
         let plugins = &self.plugins;
@@ -569,7 +845,21 @@ impl Engine {
             let vitals = hud::values(fields, package, &message).into_iter().collect();
             self.hub.write::<VitalsState>(VitalsState(vitals));
         }
+        let affects_field = self
+            .affects_field
+            .get(plugins.generation(), || hud::affects_field(plugins));
+        if let Some(field) = affects_field
+            && field.package.eq_ignore_ascii_case(package)
+            && let Ok(message) = serde_json::from_str::<Map<String, Value>>(json)
+            && let Some(affects) = hud::affects(field, &message)
+        {
+            self.hub
+                .write::<CharactersState>(CharactersState::listing(&affects));
+        }
         self.map.gmcp(package, json, now);
+        if !heard.mobs.is_empty() {
+            self.map.note_sightings(&heard.mobs, now);
+        }
         if package.eq_ignore_ascii_case("Core.Hello") {
             self.game_signal_arrived(now);
         }
@@ -654,6 +944,164 @@ impl Engine {
         link.pipeline.set_encoding(encoding);
         link.login = login;
         self.subscribe_gmcp();
+        self.run_aliases();
+        self.rules.separator = self.plugins.settings().separator.clone();
+        self.publish_rules();
+    }
+
+    /// Loads what the player set up for this server, and the `all`-scoped
+    /// rules the other saved servers keep.
+    fn load_rules(&mut self) -> Result<(), SessionError> {
+        let reader = self.database.reader()?;
+        let host = self.config.host.clone();
+        let mut triggers: Vec<TriggerRule> = reader
+            .triggers()?
+            .into_iter()
+            .map(|row| TriggerRule::from_row(row, &host))
+            .collect();
+        let mut aliases: Vec<AliasRule> = reader
+            .aliases()?
+            .into_iter()
+            .map(|row| AliasRule::from_row(row, &host))
+            .collect();
+        let hotbar = hotbar::from_meta(&reader.meta()?);
+        let others = persist::other_servers_rows(&self.config.data_folder, &host);
+        for (home, row) in others.triggers {
+            let rule = TriggerRule::from_row(row, &home);
+            if rule.scope == Scope::All {
+                triggers.push(rule);
+            }
+        }
+        for (home, row) in others.aliases {
+            let rule = AliasRule::from_row(row, &home);
+            if rule.scope == Scope::All {
+                aliases.push(rule);
+            }
+        }
+        for problem in others.problems {
+            self.notice(format!("couldn't read the rules of {problem}"));
+        }
+        self.rules = RulesState {
+            server: host,
+            character: self.playing_as(),
+            separator: self.plugins.settings().separator.clone(),
+            triggers,
+            aliases,
+            hotbar,
+        };
+        self.run_triggers();
+        self.run_aliases();
+        self.publish_rules();
+        Ok(())
+    }
+
+    /// Hands the matcher the triggers that apply to this character.
+    fn run_triggers(&mut self) {
+        let character = self.playing_as();
+        let mut running = Vec::new();
+        let mut patterns = Vec::new();
+        for rule in &self.rules.triggers {
+            if rule.enabled
+                && rule.scope.covers(&character)
+                && let Some(pattern) = rule.compiled()
+            {
+                running.push(rule.clone());
+                patterns.push(pattern);
+            }
+        }
+        match self.plugins.set_triggers(patterns) {
+            Ok(()) => self.running_triggers = running,
+            Err(error) => self.notice(format!("couldn't use the triggers: {error}")),
+        }
+    }
+
+    /// Hands the command path the aliases that apply to this character: the
+    /// player's, then the plugins', the highest layer first.
+    fn run_aliases(&self) {
+        let character = self.playing_as();
+        let players = (self.rules.aliases.iter())
+            .filter(|rule| rule.enabled && rule.problem().is_none())
+            .filter(|rule| rule.scope.covers(&character))
+            .map(|rule| (rule.name.as_str(), rule.expansion.as_str()));
+        let layers: Vec<_> = self
+            .plugins
+            .declared(|points| points.commands.as_ref())
+            .collect();
+        let plugins = (layers.iter().rev())
+            .flat_map(|(_, commands)| &commands.aliases)
+            .map(|alias| (alias.name.as_str(), alias.expansion.as_str()));
+        lock(&self.typing).aliases = AliasSet::new(players.chain(plugins));
+    }
+
+    fn publish_rules(&self) {
+        self.hub.write::<RulesState>(self.rules.clone());
+    }
+
+    fn save_trigger(&mut self, mut rule: TriggerRule, now: Timestamp) {
+        let at = (self.rules.triggers.iter()).position(|saved| saved.id == rule.id);
+        self.find_home(&mut rule.id, &mut rule.home, &rule.scope, |id| {
+            persist::Key::Trigger(id)
+        });
+        let mut batch = Batch::new();
+        batch.upsert(rule.to_row(now));
+        self.write_rows(&rule.home.clone(), batch);
+        match at {
+            Some(at) => self.rules.triggers[at] = rule,
+            None => self.rules.triggers.push(rule),
+        }
+        self.run_triggers();
+    }
+
+    fn save_alias(&mut self, mut rule: AliasRule, now: Timestamp) {
+        let at = (self.rules.aliases.iter()).position(|saved| saved.id == rule.id);
+        self.find_home(&mut rule.id, &mut rule.home, &rule.scope, |id| {
+            persist::Key::Alias(id)
+        });
+        let mut batch = Batch::new();
+        batch.upsert(rule.to_row(now));
+        self.write_rows(&rule.home.clone(), batch);
+        match at {
+            Some(at) => self.rules.aliases[at] = rule,
+            None => self.rules.aliases.push(rule),
+        }
+        self.run_aliases();
+    }
+
+    /// Gives a new rule an id and this server for a home. A rule that stops
+    /// being for every server leaves the other server's database for this one.
+    fn find_home(
+        &mut self,
+        id: &mut String,
+        home: &mut String,
+        scope: &Scope,
+        key: impl Fn(String) -> persist::Key,
+    ) {
+        if id.is_empty() {
+            self.rules_made += 1;
+            *id = rule_id(self.rules_made);
+        }
+        if home.is_empty() {
+            home.clone_from(&self.config.host);
+        } else if *home != self.config.host && *scope != Scope::All {
+            self.remove_row(home, key(id.clone()));
+            home.clone_from(&self.config.host);
+        }
+    }
+
+    fn remove_row(&mut self, home: &str, key: persist::Key) {
+        let mut batch = Batch::new();
+        batch.delete(key);
+        self.write_rows(home, batch);
+    }
+
+    /// Saves `batch` to the database of `home`: this server's writer for its
+    /// own, and a short wait on the disk for a rule another server keeps.
+    fn write_rows(&mut self, home: &str, batch: Batch) {
+        if home == self.config.host {
+            self.submit(batch);
+        } else if let Err(error) = persist::write_to_server(&self.config.data_folder, home, batch) {
+            self.notice(format!("couldn't save to {home}: {error}"));
+        }
     }
 
     /// Loads the map, the mobs and the plugin stores from the database,
@@ -675,13 +1123,19 @@ impl Engine {
             mobs.marks.extend(names.map(|name| (mark, name.clone())));
         }
         self.hub.write::<MobsState>(mobs);
-        let character = stats
-            .iter()
-            .filter(|stat| stat.character_id == self.character_id)
-            .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
-            .collect();
-        self.hub
-            .write::<CharactersState>(CharactersState(character));
+        let character = CharactersState(
+            stats
+                .iter()
+                .filter(|stat| stat.character_id == self.character_id)
+                .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
+                .collect(),
+        );
+        let had_affects = !character.affects().is_empty();
+        self.hub.write::<CharactersState>(character);
+        if had_affects {
+            self.hub
+                .write::<CharactersState>(CharactersState::no_affects());
+        }
         let gear = meta
             .iter()
             .filter_map(|entry| {
@@ -693,22 +1147,46 @@ impl Engine {
         Ok(())
     }
 
-    /// What the player or a hook sent, as the lines that go out. Each step
-    /// tells the map what to expect, one per move, however they're packed.
+    /// [`Engine::issue`], with the player's aliases expanded. Only the
+    /// player's own commands come this way: a hook's go as the hook wrote them.
+    fn issue_expanded(&mut self, typed: &str, now: Timestamp) {
+        let expanded = lock(&self.typing).aliases.expand_chain(typed);
+        match expanded {
+            Some(commands) => self.issue_commands(&commands, now),
+            None => self.issue(typed, now),
+        }
+    }
+
+    /// What the player or a hook sent, as the lines that go out.
     fn issue(&mut self, typed: &str, now: Timestamp) {
-        let encoding = self.encoding();
         if typed.trim().is_empty() {
-            write_line("", encoding, &mut self.output);
+            self.note_sent(now);
+            write_line("", self.encoding(), &mut self.output);
             return;
         }
+        self.issue_commands(&split_chain(typed), now);
+    }
+
+    /// Starts the clock on the round trip a command begins.
+    fn note_sent(&mut self, now: Timestamp) {
+        if let Some(link) = &mut self.link {
+            link.latency.sent(now);
+        }
+    }
+
+    /// Each step tells the map what to expect, one per move, however they're
+    /// packed.
+    fn issue_commands(&mut self, chain: &[impl AsRef<str>], now: Timestamp) {
+        self.note_sent(now);
+        let encoding = self.encoding();
         let mut commands = Vec::new();
-        for command in split_chain(typed) {
+        for command in chain.iter().map(AsRef::as_ref) {
             match self.walk.expand(command) {
                 Some(expanded) => {
                     let steps = parse_speedwalk(command).expect("it expanded");
                     for step in steps {
                         for _ in 0..step.count {
-                            self.map.sent(step.direction.word(), now);
+                            self.map.sent(step.direction.name(), now);
                         }
                     }
                     commands.extend(expanded);
@@ -746,9 +1224,14 @@ impl Engine {
         self.show(line);
     }
 
-    /// Queues a line for the terminal. Runs of blank lines show as one, so
-    /// the prompts hidden between them leave no gaps.
+    /// Queues a line for the terminal. Runs of blank lines show as one, and a
+    /// prompt the HUD repeats, which a chat may hide, counts as no line at
+    /// all, so the blanks around it join one run.
     fn show(&mut self, line: Line) {
+        if line.is_only_prompt() {
+            self.terminal.push(line);
+            return;
+        }
         let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
         if !(blank && self.blank_shown) {
             self.terminal.push(line);
@@ -761,6 +1244,13 @@ impl Engine {
             store, key, value, ..
         } = write;
         let key = format!("{store}.{key}");
+        self.contents_changed |= key == CHARACTER_NAME;
+        if key == CHARACTER_NAME
+            && let HookValue::Text(name) = &value
+        {
+            self.playing = name.to_lowercase();
+            self.character_renamed = true;
+        }
         let row = values::to_row(&value);
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
@@ -779,6 +1269,34 @@ impl Engine {
                 updated: now,
             });
         }
+    }
+
+    /// Who is playing, by id: what a rule for one character names. Empty
+    /// until this connection has been told. The name saved from an earlier
+    /// one doesn't count: on the desktop every character shares a session id.
+    fn playing_as(&self) -> String {
+        self.playing.clone()
+    }
+
+    /// The character's name changed, so which rules apply to them did too.
+    fn rules_follow_the_character(&mut self) {
+        let character = self.playing_as();
+        if self.rules.character != character {
+            self.rules.character = character;
+            self.run_triggers();
+            self.run_aliases();
+            self.publish_rules();
+        }
+    }
+
+    /// Who the character is, as far as anything has said.
+    fn character_name(&self) -> Option<String> {
+        self.hub.read(|characters: &Versioned<CharactersState>| {
+            match characters.value().0.get(CHARACTER_NAME) {
+                Some(HookValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            }
+        })
     }
 
     fn take_hook_outputs(&mut self, now: Timestamp) {
@@ -812,24 +1330,55 @@ impl Engine {
     }
 
     fn publish_room(&self) {
+        let character = self.character_name();
         self.hub.write::<RoomState>(RoomState {
             room: self.map.shared_current_room(),
             whereabouts: self.map.whereabouts(),
+            contents: self.link.as_ref().map_or_else(Default::default, |link| {
+                link.game.contents(character.as_deref())
+            }),
         });
     }
 
+    fn publish_plugin_costs(&mut self, now: Timestamp) {
+        let due = self
+            .costs_published
+            .is_none_or(|last| now.0 - last.0 >= COSTS_EVERY_MS);
+        if self.link.is_some() && due {
+            self.costs_published = Some(now);
+            self.settings.plugin_costs = self.plugins.costs();
+            self.publish_settings();
+        }
+    }
+
+    /// Hands a shell the rules [`Session::links`] runs, when they changed.
+    ///
+    /// [`Session::links`]: super::Session::links
+    fn share_link_rules(&mut self) {
+        let generation = self.plugins.generation();
+        if self.link_rules_of != generation {
+            self.link_rules_of = generation;
+            lock(&self.typing).link_rules = self.plugins.link_rules().cloned().collect();
+        }
+    }
+
     /// Room and mob names, for Tab. Only names go in: never what's typed.
-    fn add_map_words(&self, rooms: &[Arc<MapRoom>]) {
+    /// A room changes with every sighting, and its names are already in.
+    fn add_map_words(&mut self, rooms: &[Arc<MapRoom>]) {
         if rooms.is_empty() {
             return;
         }
+        self.added_names.keep_to(self.plugins.generation());
         let mut typing = lock(&self.typing);
         for room in rooms {
-            typing.known.add_words(MAP_WORDS, words_of(&room.name));
+            if self.added_names.rooms.insert(room.name.clone()) {
+                typing.known.add_words(MAP_WORDS, words_of(&room.name));
+            }
             for title in room.sightings.keys() {
-                typing
-                    .known
-                    .add_words(MAP_WORDS, words_of(&self.map.mobs().name(title)));
+                if self.added_names.mobs.insert(title.clone()) {
+                    let name = self.map.mobs().name(title);
+                    typing.known.add_words(MAP_WORDS, words_of(&name));
+                }
             }
         }
     }
@@ -851,17 +1400,21 @@ impl Engine {
         if !self.link.as_ref().is_some_and(|link| link.gmcp_enabled) {
             return;
         }
+        gmcp::encode_hello(
+            &self.config.client_name,
+            &self.config.client_version,
+            &mut self.output,
+        );
+        self.ask_for_modules();
+    }
+
+    fn ask_for_modules(&mut self) {
         let mut modules: Vec<String> = CORE_GMCP.map(str::to_owned).into();
         for (_, connection) in self.plugins.declared(|points| points.connection.as_ref()) {
             modules.extend(connection.gmcp.iter().cloned());
         }
         modules.sort();
         modules.dedup();
-        gmcp::encode_hello(
-            &self.config.client_name,
-            &self.config.client_version,
-            &mut self.output,
-        );
         gmcp::encode_supports_set(&modules, &mut self.output);
     }
 
@@ -899,6 +1452,14 @@ impl Engine {
     }
 }
 
+/// An id for a new rule. Rows load in id order and the first rule to match
+/// wins, so ids sort by when they were made; the random end keeps two devices'
+/// apart.
+fn rule_id(made: u32) -> String {
+    let random = RandomState::new().build_hasher().finish() as u32;
+    format!("{:012x}{made:04x}{random:08x}", Timestamp::now().0)
+}
+
 /// Answers `text` if it's a login prompt still to come.
 fn answer_login(login: &mut Option<Login>, text: &str, encoding: Encoding, output: &mut Vec<u8>) {
     let Some(prompts) = login else { return };
@@ -917,4 +1478,28 @@ fn write_line(text: &str, encoding: Encoding, output: &mut Vec<u8>) {
 
 fn lock(typing: &Mutex<Typing>) -> MutexGuard<'_, Typing> {
     typing.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_names_added_start_over_with_new_plugins_and_when_full() {
+        let mut added = AddedNames::default();
+        added.keep_to(1);
+        assert!(added.mobs.insert("a grey wolf".to_owned()));
+        added.keep_to(1);
+        assert!(!added.mobs.insert("a grey wolf".to_owned()), "remembered");
+
+        added.keep_to(2);
+        assert!(added.mobs.insert("a grey wolf".to_owned()), "new plugins");
+
+        for number in 0..=NAMES_REMEMBERED {
+            added.rooms.insert(format!("Room {number}"));
+        }
+        added.keep_to(2);
+        assert!(added.rooms.is_empty(), "full");
+        assert!(added.mobs.is_empty());
+    }
 }
