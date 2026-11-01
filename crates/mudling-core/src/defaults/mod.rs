@@ -6,7 +6,7 @@
 //! prompts are its pager, which a game plugin's replaces. What must be
 //! learned at runtime is Rust, reading the same lines and settings:
 //!
-//! - [`prompt`]: the prompt, from the line after GMCP `Char.Vitals`;
+//! - [`prompt`]: the prompt, from the text after GMCP `Char.Vitals`;
 //! - [`hud`]: which `Char.Vitals` fields hold which vitals;
 //! - [`commands`]: chaining with the game's separator, and speedwalk;
 //! - [`TablePager`]: answering the pager while a table is read;
@@ -25,6 +25,10 @@
 //!                               Wait => {}
 //!                           }
 //! ```
+//!
+//! A [`Defaults`] holds what one connection learned, and reads the lines of
+//! one [`crate::line::LinePipeline`], so each new pipeline gets a fresh one:
+//! see [`crate::session`], which makes both for every connection.
 
 pub mod commands;
 pub mod detect;
@@ -66,8 +70,8 @@ pub struct Defaults {
     pub prompt: PromptLearner,
     pub hud: HudFields,
     pub pager: TablePager,
-    /// Prompt lines are hidden by default: the HUD shows the same numbers
-    /// (PRD §8). The shell reads this; a setting turns it off.
+    /// Prompt lines are hidden by default where the HUD shows the same
+    /// numbers (PRD §8). A setting turns it off.
     pub hide_prompts: bool,
     gmcp_hello: Option<String>,
 }
@@ -115,13 +119,24 @@ impl Defaults {
         self.prompt.read_line(line)
     }
 
+    /// A line ended at a prompt signal that is the pager's prompt, read in
+    /// place of [`Defaults::read_line`]: it holds no prompt.
+    pub fn read_pager_line(&mut self) {
+        self.prompt.pager_line();
+    }
+
     /// The pending text, and what the plugin host made of it.
     pub fn read_pending(
         &mut self,
         pending: &Pending<'_>,
         kind: Option<PendingKind>,
     ) -> PendingAction {
-        let learned = self.prompt.read_pending(pending);
+        let learned = if matches!(kind, Some(PendingKind::Pager { .. })) {
+            self.prompt.pager_pending(pending);
+            false
+        } else {
+            self.prompt.read_pending(pending)
+        };
         match kind {
             Some(PendingKind::Pager { key }) if self.pager.answer(pending.number) => {
                 PendingAction::Send(key)

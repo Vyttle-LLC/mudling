@@ -13,7 +13,7 @@
 //!   a realistic set (defaults, a 150-pattern game, an override) and for six
 //!   and twenty uniform plugins.
 
-use crate::HEAP_BYTES;
+use crate::{BudgetScale, HEAP_BYTES};
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::points::Text;
 use mudling_core::plugin::{DEFAULT_COST_SAMPLING, Plugin, PluginEvent, PluginHost, PluginSink};
@@ -77,7 +77,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(source: &[String]) -> Report {
+pub fn run(source: &[String], scale: BudgetScale) -> Report {
     let count = source.len().max(MIN_LINES);
     let plugins = synthetic_plugins(PLUGINS);
     let patterns = pattern_count(&plugins);
@@ -131,8 +131,10 @@ pub fn run(source: &[String]) -> Report {
     ];
 
     let one_more_plugin_p99_us = all.p99_us - without_one.p99_us;
+    let line_budget_us = scale.time_us(LINE_BUDGET_US);
+    let plugin_budget_us = scale.time_us(PLUGIN_BUDGET_US);
     let within_budget =
-        whole_line.p99_us <= LINE_BUDGET_US && one_more_plugin_p99_us <= PLUGIN_BUDGET_US;
+        whole_line.p99_us <= line_budget_us && one_more_plugin_p99_us <= plugin_budget_us;
     Report {
         lines: count,
         plugins: PLUGINS,
@@ -145,8 +147,8 @@ pub fn run(source: &[String]) -> Report {
         sampled_lines: summary(&sampled),
         sampled_p99_us,
         host_heap,
-        line_budget_us: LINE_BUDGET_US,
-        plugin_budget_us: PLUGIN_BUDGET_US,
+        line_budget_us,
+        plugin_budget_us,
         within_budget,
     }
 }
@@ -317,8 +319,7 @@ pub(crate) fn split(source: &[String], count: usize) -> Vec<Line> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(count);
     for raw in source.iter().cycle().take(count) {
-        pipeline.push(raw.as_bytes(), &mut lines);
-        pipeline.push(b"\n", &mut lines);
+        pipeline.push_line(raw.as_bytes(), &mut lines);
     }
     lines
 }

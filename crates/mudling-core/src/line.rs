@@ -35,19 +35,45 @@ pub enum Encoding {
     Latin1,
 }
 
+impl Encoding {
+    /// `text` as the server reads it. Latin-1 can't hold every character;
+    /// those it can't become `?`.
+    pub fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Encoding::Utf8 => text.as_bytes().to_vec(),
+            Encoding::Latin1 => text
+                .chars()
+                .map(|c| u8::try_from(c).unwrap_or(b'?'))
+                .collect(),
+        }
+    }
+}
+
 /// What finished a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnd {
     Newline,
-    /// GA or EOR from the server, or a reader that recognized a prompt.
+    /// GA or EOR from the server, the connection going quiet, or a reader
+    /// that recognized a prompt.
     PromptEnd,
     /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next,
     /// including an escape sequence the cut fell inside.
     Cut,
 }
 
-/// A link or action over a byte range of a line's plain text. Nothing
-/// produces these yet; MXP and plugins will.
+/// Who a line came from, so the chat can tell them apart by color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineKind {
+    #[default]
+    Server,
+    /// A command the player sent, echoed into the chat.
+    Command,
+}
+
+/// A link or action over a byte range of a line's plain text. Plugins' link
+/// rules find them on request, through
+/// [`crate::plugin::PluginHost::links`]; nothing sets them on a line yet,
+/// which MXP will.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub start: u32,
@@ -70,10 +96,41 @@ struct LineData {
     styled: Box<[Span]>,
     links: Box<[Link]>,
     end: LineEnd,
+    kind: LineKind,
 }
 
 impl Line {
-    fn new(raw: &str, plain: &str, styled: &[Span], end: LineEnd) -> Self {
+    /// A command the player sent, as the chat echoes it.
+    pub fn command(text: &str) -> Self {
+        Line::build(text, text, &[], LineEnd::Newline, LineKind::Command)
+    }
+
+    /// This line with `styled` as its styles, for coloring a plugin gives a
+    /// line the server sent without any.
+    pub fn colored(&self, styled: &[Span]) -> Self {
+        Line::build(self.raw(), self.plain(), styled, self.end(), self.kind())
+    }
+
+    /// This line from byte `at` of its plain text on, for showing what
+    /// follows a prompt. Escape codes aren't kept: the raw text is the plain
+    /// text that's left.
+    pub fn after(&self, at: usize) -> Self {
+        let offset = at as u32;
+        let styled: Vec<Span> = self
+            .styled()
+            .iter()
+            .filter(|span| span.end > offset)
+            .map(|span| Span {
+                start: span.start.max(offset) - offset,
+                end: span.end - offset,
+                style: span.style,
+            })
+            .collect();
+        let plain = &self.plain()[at..];
+        Line::build(plain, plain, &styled, self.end(), self.kind())
+    }
+
+    fn build(raw: &str, plain: &str, styled: &[Span], end: LineEnd, kind: LineKind) -> Self {
         let (text, plain_start) = if raw == plain {
             (Box::from(raw), 0)
         } else {
@@ -89,6 +146,7 @@ impl Line {
             styled: styled.into(),
             links: Box::default(),
             end,
+            kind,
         }))
     }
 
@@ -116,6 +174,10 @@ impl Line {
     pub fn end(&self) -> LineEnd {
         self.0.end
     }
+
+    pub fn kind(&self) -> LineKind {
+        self.0.kind
+    }
 }
 
 /// The line still arriving: everything received since the last line ended.
@@ -128,6 +190,22 @@ pub struct Pending<'a> {
     /// line keeps its number while it grows, so a reader can tell half a
     /// prompt split by the network from a new one.
     pub number: u64,
+}
+
+impl Pending<'_> {
+    /// The text so far from byte `at` of its plain text on, for showing
+    /// before the line ends. Only a display's line: the pipeline still
+    /// finishes the whole line for its readers.
+    pub fn shown_from(&self, at: usize) -> Line {
+        let whole = Line::build(
+            self.raw,
+            self.plain,
+            self.styled,
+            LineEnd::Cut,
+            LineKind::Server,
+        );
+        whole.after(at)
+    }
 }
 
 /// Turns one connection's server text into lines. Feed it the bytes of each
@@ -181,9 +259,16 @@ impl LinePipeline {
         self.append(rest, lines);
     }
 
+    /// Reads `text` as a whole line, for text something else already split.
+    pub fn push_line(&mut self, text: &[u8], lines: &mut Vec<Line>) {
+        self.push(text, lines);
+        self.push(b"\n", lines);
+    }
+
     /// The server marked a prompt (GA or EOR): the pending text is a whole
-    /// line. A reader that recognizes the pending text as a prompt (servers
-    /// that send no GA) calls this too. Returns `None` if nothing is pending.
+    /// line. The connection going quiet ends it the same way, as does a
+    /// reader that recognizes the pending text as a prompt (servers that send
+    /// no GA). Returns `None` if nothing is pending.
     pub fn prompt_end(&mut self) -> Option<Line> {
         if self.raw.is_empty() && self.utf8_tail.is_empty() {
             return None;
@@ -195,9 +280,11 @@ impl LinePipeline {
 
     /// The text received since the last line ended, if any. It may be a
     /// prompt, or only the first part of a line or prompt the network split:
-    /// it can still grow, and it isn't a [`Line`] until it ends.
+    /// it can still grow, and it isn't a [`Line`] until it ends. A UTF-8 code
+    /// point still waiting for its end counts, with no text yet: this is
+    /// `Some` exactly when [`LinePipeline::prompt_end`] would end a line.
     pub fn pending(&self) -> Option<Pending<'_>> {
-        (!self.raw.is_empty()).then_some(Pending {
+        (!self.raw.is_empty() || !self.utf8_tail.is_empty()).then_some(Pending {
             raw: &self.raw,
             plain: &self.plain,
             styled: &self.styled,
@@ -299,7 +386,7 @@ impl LinePipeline {
         if end != LineEnd::Cut {
             self.ansi.end_line();
         }
-        let line = Line::new(&self.raw, &self.plain, &self.styled, end);
+        let line = Line::build(&self.raw, &self.plain, &self.styled, end, LineKind::Server);
         self.raw.clear();
         self.plain.clear();
         self.styled.clear();
@@ -538,6 +625,24 @@ mod tests {
     #[test]
     fn a_code_point_cut_off_by_a_line_end_is_replaced() {
         assert_eq!(plain_lines(&[b"a\xe4\xb8", b"\nb"]).0, ["a\u{FFFD}"]);
+    }
+
+    #[test]
+    fn pending_and_prompt_end_agree_while_a_code_point_is_held() {
+        let mut pipeline = LinePipeline::default();
+        pipeline.push(b"\xe4", &mut Vec::new());
+        assert_eq!(pipeline.pending().map(|pending| pending.raw), Some(""));
+        assert_eq!(pipeline.prompt_end().unwrap().plain(), "\u{FFFD}");
+        assert_eq!(pipeline.pending(), None);
+        assert_eq!(pipeline.prompt_end(), None);
+    }
+
+    #[test]
+    fn a_line_after_an_offset_keeps_only_what_follows() {
+        let (lines, _) = lines_and_pending(&[b"<1hp> \x1b[31mred\x1b[0m rest\n"]);
+        let rest = lines[0].after("<1hp> ".len());
+        assert_eq!((rest.raw(), rest.plain()), ("red rest", "red rest"));
+        assert_eq!((rest.styled()[0].start, rest.styled()[0].end), (0, 3));
     }
 
     #[test]

@@ -1,0 +1,31 @@
+Wheat Field
+[Exits: north east south west]
+Wheat waves.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","South":"O","West":"O"}}
+[MAP] move east
+Wheat Field
+[Exits: north south west]
+Text 1.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","South":"O","West":"O"}}
+[MAP] move east
+[GMCP] Room.WrongDir "east"
+[MAP] move north
+Wheat Field
+[Exits: north south west]
+Wheat waves.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","South":"O","West":"O"}}
+[MAP] move south
+Wheat Field
+[Exits: north south west]
+Text 1.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","South":"O","West":"O"}}
+[MAP] move south
+Wheat Field
+[Exits: north east west]
+Text 2.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","West":"O"}}
+[MAP] move west
+Wheat Field
+[Exits: north east west]
+Wheat waves.
+[GMCP] Room.Info {"name":"Wheat Field","zone":"{1 4} A  Greenfield","environment":"field","exits":{"North":"O","East":"O","West":"O"}}

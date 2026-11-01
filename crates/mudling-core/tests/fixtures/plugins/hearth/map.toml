@@ -1,0 +1,3 @@
+[[failed_move]]
+name = "map.failed_move"
+pattern = '''^You can't go that way\.$'''

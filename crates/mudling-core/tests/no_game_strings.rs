@@ -21,6 +21,10 @@ const DENYLIST: &[&str] = &[
     "<worn on finger>",
     "<worn about body>",
     "Welcome back to the",
+    // Its item names, as examples of keywords.
+    "pixie crossbow",
+    "sash of the guard",
+    "captain's",
 ];
 
 #[test]

@@ -4,11 +4,13 @@
 //! stores, drains diffs on its frame tick and sends commands. Lines never
 //! cross one at a time; only store updates do.
 
+use mudling_core::Line;
+use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, Diff, Fields, GearState, MapState, MobsState, RoomState, SettingsState, Store,
-    StoreHub, StoreKind, TerminalChange, TerminalLine, TerminalState, Versioned, VitalsState,
+    CharactersState, Diff, GearState, MapState, MobsState, RoomState, SettingsState, Store,
+    StoreHub, StoreKind, TerminalChange, TerminalState, Versioned, VitalsState,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub use mudling_core as core;
@@ -49,7 +51,7 @@ pub enum StoreSnapshot {
 }
 
 /// A store's changes in one frame. Applied in order to its snapshot, they
-/// give the core's state.
+/// give the core's state; `fields` are the named values that changed.
 #[derive(uniffi::Enum)]
 pub enum StoreDiff {
     TerminalAppended {
@@ -124,7 +126,7 @@ impl Session {
     /// yet.
     pub fn send_command(&self, command: String) {
         self.hub
-            .write::<TerminalState>(TerminalChange::Append(vec![TerminalLine { text: command }]));
+            .write::<TerminalState>(TerminalChange::Append(vec![Line::command(&command)]));
     }
 }
 
@@ -175,15 +177,18 @@ trait Bridged: Store {
     fn diff(diff: Diff<Self>) -> StoreDiff;
 }
 
-fn texts<'a>(lines: impl IntoIterator<Item = &'a TerminalLine>) -> Vec<String> {
-    lines.into_iter().map(|line| line.text.clone()).collect()
+fn texts<'a>(lines: impl IntoIterator<Item = &'a Line>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| line.plain().to_owned())
+        .collect()
 }
 
 impl Bridged for TerminalState {
     fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
         StoreSnapshot::Terminal {
             revision: versioned.revision().0,
-            lines: texts(versioned.value().lines()),
+            lines: texts(versioned.value().lines().iter()),
         }
     }
 
@@ -191,50 +196,124 @@ impl Bridged for TerminalState {
         let TerminalChange::Append(lines) = diff.change;
         StoreDiff::TerminalAppended {
             revision: diff.revision.0,
-            lines: lines.into_iter().map(|line| line.text).collect(),
+            lines: texts(&lines),
         }
     }
 }
 
-fn fields_map(Fields(fields): &Fields) -> HashMap<String, String> {
-    fields
+impl Bridged for MapState {
+    fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
+        let map = versioned.value();
+        let fields = HashMap::from([
+            ("revision".to_owned(), map.revision().to_string()),
+            ("rooms".to_owned(), map.rooms().len().to_string()),
+        ]);
+        StoreSnapshot::Fields {
+            store: Self::KIND,
+            revision: versioned.revision().0,
+            fields,
+        }
+    }
+
+    fn diff(diff: Diff<Self>) -> StoreDiff {
+        let fields = HashMap::from([("revision".to_owned(), diff.change.revision.to_string())]);
+        StoreDiff::Fields {
+            store: Self::KIND,
+            revision: diff.revision.0,
+            fields,
+        }
+    }
+}
+
+/// The stores that cross as named fields, each both as a state and as a
+/// change.
+trait FieldStore: Store<Change = Self> {
+    fn fields(&self) -> HashMap<String, String>;
+}
+
+fn value_fields(values: &BTreeMap<String, Value>) -> HashMap<String, String> {
+    let text = |value: &Value| match value {
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Text(value) => value.clone(),
+    };
+    values
         .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
+        .map(|(key, value)| (key.clone(), text(value)))
         .collect()
 }
 
-/// The placeholder stores all cross as their named fields.
-macro_rules! bridge_fields_stores {
-    ($($state:ident),+) => {
-        $(impl Bridged for $state {
-            fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
-                StoreSnapshot::Fields {
-                    store: Self::KIND,
-                    revision: versioned.revision().0,
-                    fields: fields_map(&versioned.value().0),
-                }
-            }
-
-            fn diff(diff: Diff<Self>) -> StoreDiff {
-                StoreDiff::Fields {
-                    store: Self::KIND,
-                    revision: diff.revision.0,
-                    fields: fields_map(&diff.change.0),
-                }
-            }
-        })+
-    };
+impl FieldStore for VitalsState {
+    fn fields(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .map(|(vital, value)| (vital.name().to_owned(), value.to_string()))
+            .collect()
+    }
 }
 
-bridge_fields_stores!(
-    VitalsState,
-    RoomState,
-    MapState,
-    MobsState,
-    CharactersState,
-    GearState,
-    SettingsState
-);
+impl FieldStore for CharactersState {
+    fn fields(&self) -> HashMap<String, String> {
+        value_fields(&self.0)
+    }
+}
+
+impl FieldStore for GearState {
+    fn fields(&self) -> HashMap<String, String> {
+        value_fields(&self.0)
+    }
+}
+
+impl FieldStore for RoomState {
+    fn fields(&self) -> HashMap<String, String> {
+        self.room
+            .iter()
+            .flat_map(|room| {
+                [
+                    ("id".to_owned(), room.id.to_string()),
+                    ("name".to_owned(), room.name.clone()),
+                    ("zone".to_owned(), room.zone.clone()),
+                ]
+            })
+            .collect()
+    }
+}
+
+impl FieldStore for MobsState {
+    fn fields(&self) -> HashMap<String, String> {
+        self.marks
+            .iter()
+            .map(|(mark, name)| (name.clone(), mark.name().to_owned()))
+            .collect()
+    }
+}
+
+impl FieldStore for SettingsState {
+    fn fields(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("connection".to_owned(), format!("{:?}", self.connection)),
+            ("echo_off".to_owned(), self.echo_off.to_string()),
+        ])
+    }
+}
+
+impl<S: FieldStore> Bridged for S {
+    fn snapshot(versioned: &Versioned<Self>) -> StoreSnapshot {
+        StoreSnapshot::Fields {
+            store: Self::KIND,
+            revision: versioned.revision().0,
+            fields: versioned.value().fields(),
+        }
+    }
+
+    fn diff(diff: Diff<Self>) -> StoreDiff {
+        StoreDiff::Fields {
+            store: Self::KIND,
+            revision: diff.revision.0,
+            fields: diff.change.fields(),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

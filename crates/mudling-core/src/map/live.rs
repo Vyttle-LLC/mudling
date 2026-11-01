@@ -2,8 +2,8 @@
 //! write come out.
 
 use super::buildings::MapDoor;
-use super::geometry::{Direction, GridPoint};
-use super::info::RoomInfo;
+use super::geometry::{DirMap, Direction, GridPoint};
+use super::info::{self, ExitInfo, RoomInfo, RoomItems};
 use super::layout::{Layout, Step, UNNUMBERED_IDS};
 use super::mobs::{MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
@@ -35,6 +35,8 @@ pub struct LiveMap {
     dark_line: bool,
     /// A line said the player is in a maze.
     maze_line: bool,
+    /// The last word on the room's items showed a fountain.
+    fountain_here: bool,
     /// The map as last committed.
     committed: Layout,
     committed_whereabouts: Whereabouts,
@@ -133,11 +135,15 @@ impl LiveMap {
         layout.current = value(CURRENT_ROOM).filter(|id| layout.contains(*id));
         layout.islands = value(ISLANDS).unwrap_or(0);
         layout.clear_dirty();
-        LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks))
+        let mut map = LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks));
+        // After the map takes it as saved, so the next commit writes what moved.
+        map.tracker.layout.rebuild_buildings();
+        map
     }
 
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {
         let tracker = Tracker::new(layout.clone());
+        let mobs = mobs.named_by(rules.mob_namer());
         let mut map = LiveMap {
             rules,
             tracker,
@@ -145,6 +151,7 @@ impl LiveMap {
             text: RoomText::default(),
             dark_line: false,
             maze_line: false,
+            fountain_here: false,
             committed: layout,
             committed_whereabouts: Whereabouts::default(),
             revision: 0,
@@ -162,13 +169,48 @@ impl LiveMap {
     /// A GMCP message from the telnet layer. Returns what arriving in a
     /// room revealed, for a Room.Info.
     pub fn gmcp(&mut self, package: &str, json: &str, now: Timestamp) -> Option<Arrived> {
-        if package.eq_ignore_ascii_case("Room.Info") {
-            self.room_info(json, now)
-        } else {
-            if package.eq_ignore_ascii_case("Room.WrongDir") {
-                self.tracker.move_failed(now);
-            }
-            None
+        let is = |name: &str| package.eq_ignore_ascii_case(name);
+        if is("Room.Info") {
+            return self.room_info(json, now);
+        }
+        if is("Room.WrongDir") {
+            self.tracker.move_failed(now);
+        } else if is("Room.Players") || is("Room.AddPlayer") {
+            self.mobs_here(&info::mob_titles(json), now);
+        } else if is("Char.Status") {
+            self.status(json);
+        } else if is("Char.Items.List") || is("Char.Items.Add") {
+            self.items_here(json);
+        }
+        None
+    }
+
+    fn mobs_here(&mut self, titles: &[String], now: Timestamp) {
+        self.note_sightings(titles, now);
+        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
+            self.note_feature(feature::AGGRESSIVE_MOB);
+        }
+    }
+
+    /// A door changed in place, which brings no Room.Info.
+    fn status(&mut self, json: &str) {
+        // Most Char.Status are vitals: don't parse them for this.
+        if !json.contains(info::ROOM_EXITS) {
+            return;
+        }
+        if let Some(exits) = info::status_exits(json, &*self.rules) {
+            let exits = exit_states(&exits);
+            self.tracker
+                .update_current_rooms(|room| room.note_exits(exits.clone()));
+        }
+    }
+
+    fn items_here(&mut self, json: &str) {
+        if let Some(items) = RoomItems::read(json) {
+            self.fountain_here = items.fountain || (self.fountain_here && !items.whole);
+        }
+        if self.fountain_here {
+            self.note_feature(feature::FOUNTAIN);
         }
     }
 
@@ -177,26 +219,15 @@ impl LiveMap {
     pub fn room_info(&mut self, json: &str, now: Timestamp) -> Option<Arrived> {
         let info = RoomInfo::parse(json, &*self.rules)?;
         let dark = std::mem::take(&mut self.dark_line) || self.rules.dark_room(&info);
-        let maze = std::mem::take(&mut self.maze_line);
+        let maze =
+            std::mem::take(&mut self.maze_line) || self.rules.maze_room(&info.zone, &info.name);
         let description = self.text.take_description(&info.name, &*self.rules);
         let numbered = self.rules.identity() == RoomIdentity::Number;
         let step = Step {
             direction: None,
             number: info.number.filter(|_| numbered),
             indoor: self.rules.indoor(&info.environment),
-            exits: info
-                .exits
-                .iter()
-                .map(|(direction, exit)| {
-                    (
-                        direction,
-                        ExitState {
-                            state: exit.state.clone(),
-                            closed: exit.closed,
-                        },
-                    )
-                })
-                .collect(),
+            exits: exit_states(&info.exits),
             targets: info
                 .exits
                 .iter()
@@ -220,20 +251,53 @@ impl LiveMap {
     pub fn line(&mut self, line: &str, now: Timestamp) {
         self.text.read(line);
         if self.rules.failed_move(line) {
-            self.tracker.move_failed(now);
+            self.move_failed(now);
         }
         if let Some(direction) = self.rules.fled(line) {
-            self.tracker.expect_move(direction, now);
+            self.fled(direction, now);
         }
         self.dark_line |= self.rules.darkness(line);
         self.maze_line |= self.rules.maze(line);
         if let Some(name) = self.rules.aggressor(line) {
-            self.mobs.learn_aggressor(&name);
-            self.note_feature(feature::AGGRESSIVE_MOB);
+            self.aggressor(&name);
         }
         if let Some(mob) = self.rules.arrival(line) {
             self.note_sightings(&[mob], now);
         }
+    }
+
+    /// The line last read listed the room's exits.
+    pub fn exits_line(&mut self) {
+        self.text.exits_read();
+    }
+
+    /// The connection ended: no answer is coming to anything still waiting
+    /// for one, so the next connection's first room is no move's result.
+    pub fn connection_lost(&mut self) {
+        self.tracker.lose_track();
+        self.dark_line = false;
+        self.maze_line = false;
+    }
+
+    /// The game refused a move.
+    pub fn move_failed(&mut self, now: Timestamp) {
+        self.tracker.move_failed(now);
+    }
+
+    /// The player fled, in `direction`.
+    pub fn fled(&mut self, direction: Direction, now: Timestamp) {
+        self.tracker.expect_move(direction, now);
+    }
+
+    /// The room about to be shown is too dark to see.
+    pub fn darkness(&mut self) {
+        self.dark_line = true;
+    }
+
+    /// A mob attacked the player unprovoked, by name.
+    pub fn aggressor(&mut self, name: &str) {
+        self.mobs.learn_aggressor(name);
+        self.note_feature(feature::AGGRESSIVE_MOB);
     }
 
     /// A command the player sent. Moves and looks tell the map what the
@@ -352,6 +416,28 @@ impl LiveMap {
 
     pub fn current_room(&self) -> Option<&MapRoom> {
         self.tracker.layout.current_room()
+    }
+
+    /// The player's room, shared with the map.
+    pub fn shared_current_room(&self) -> Option<Arc<MapRoom>> {
+        let layout = &self.tracker.layout;
+        layout
+            .current
+            .and_then(|id| layout.shared_room(id).cloned())
+    }
+
+    /// The whole map, as one change: what a view starts from.
+    pub fn snapshot(&self) -> MapChange {
+        let layout = &self.tracker.layout;
+        MapChange {
+            revision: self.revision,
+            rooms: layout
+                .rooms()
+                .filter_map(|room| layout.shared_room(room.id).cloned())
+                .collect(),
+            whereabouts: Some(self.whereabouts()),
+            ..MapChange::default()
+        }
     }
 
     pub fn whereabouts(&self) -> Whereabouts {
@@ -534,6 +620,21 @@ impl LiveMap {
         batch.save_map_version(kind, label, now);
         batch
     }
+}
+
+fn exit_states(exits: &DirMap<ExitInfo>) -> DirMap<ExitState> {
+    exits
+        .iter()
+        .map(|(direction, exit)| {
+            (
+                direction,
+                ExitState {
+                    state: exit.state.clone(),
+                    closed: exit.closed,
+                },
+            )
+        })
+        .collect()
 }
 
 fn first_id(rules: &dyn MapRules) -> RoomId {

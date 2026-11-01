@@ -1,0 +1,19 @@
+[[pattern]]
+name = "skill.learned"
+pattern = '''^You are now (?<percent>\d+)% in (?<skill>\w+)\.$'''
+hook = "on_skill"
+
+[[pattern]]
+name = "gear.wore"
+pattern = '''^You wear (?<item>.+)\.$'''
+hook = "on_wear"
+
+[[pattern]]
+name = "greeted"
+pattern = '''^(?<who>\w+) waves at you\.$'''
+hook = "on_wave"
+
+[[color]]
+pattern = '''^(?<who>\w+) says '''
+group = "who"
+fg = 3

@@ -1,6 +1,30 @@
-//! Writing GMCP: frames, and the messages every client sends.
+//! GMCP: writing frames and the messages every client sends, and reading
+//! message bodies.
 
 use super::{command, escape_into, option};
+use serde::de::DeserializeOwned;
+
+/// Reads a GMCP message's JSON. Some games put raw control codes (ANSI
+/// colors) inside JSON strings, which strict JSON rejects; those are escaped
+/// and read again, so the strings still hold them. `None` when it doesn't
+/// fit `T`.
+pub fn from_json<T: DeserializeOwned>(json: &str) -> Option<T> {
+    serde_json::from_str(json)
+        .or_else(|_| serde_json::from_str(&escape_control_characters(json)))
+        .ok()
+}
+
+fn escape_control_characters(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len() + 16);
+    for c in json.chars() {
+        if c < '\u{20}' && !matches!(c, '\t' | '\n' | '\r') {
+            escaped.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
+}
 
 /// Appends `IAC SB GMCP <package> <data> IAC SE` to `out`. An empty `data`
 /// sends the package alone.

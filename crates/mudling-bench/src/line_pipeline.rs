@@ -2,6 +2,7 @@
 //! each replayed line goes through split, decode and ANSI strip on its own,
 //! so every line gets its own timing.
 
+use crate::{BudgetScale, verdict};
 use mudling_core::line::LinePipeline;
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -21,7 +22,7 @@ pub struct Report {
 
 /// Replays `source` (at least [`MIN_LINES`] lines, starting over as needed),
 /// each line ended as Diku-family servers end them, with `\n\r`.
-pub fn run(source: &[String]) -> Report {
+pub fn run(source: &[String], scale: BudgetScale) -> Report {
     let count = source.len().max(MIN_LINES);
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(1);
@@ -37,22 +38,21 @@ pub fn run(source: &[String]) -> Report {
         lines.clear();
     }
     let per_line = Summary::of(&samples).expect("lines were timed");
+    let budget_us = scale.time_us(BUDGET_US);
     Report {
         lines: count,
-        within_budget: per_line.p99_us <= BUDGET_US,
+        within_budget: per_line.p99_us <= budget_us,
         per_line,
-        budget_us: BUDGET_US,
+        budget_us,
     }
 }
 
 pub fn print(report: &Report) {
     println!(
-        "line pipeline over {} lines (split + decode + ANSI strip): p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; budget p99 ≤ {} µs: {}",
+        "line pipeline over {} lines (split + decode + ANSI strip): {}; budget p99 ≤ {} µs: {}",
         report.lines,
-        report.per_line.p50_us,
-        report.per_line.p99_us,
-        report.per_line.max_us,
+        report.per_line,
         report.budget_us,
-        if report.within_budget { "ok" } else { "MISSED" }
+        verdict(report.within_budget)
     );
 }

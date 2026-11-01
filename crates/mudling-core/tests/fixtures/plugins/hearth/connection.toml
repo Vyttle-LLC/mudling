@@ -1,0 +1,9 @@
+gmcp = ["Char.Skills 1"]
+
+[[login]]
+pattern = '''^By what name'''
+send = "name"
+
+[[login]]
+pattern = '''^Password:'''
+send = "password"

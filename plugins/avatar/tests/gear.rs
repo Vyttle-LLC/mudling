@@ -1,7 +1,7 @@
 //! Gear: the eq table in slot order, wear, remove and put, identify (base
 //! against enchant) and examine, from scrubbed fixtures.
 
-use mudling_core::plugin::luau::Value;
+use mudling_core::plugin::luau::{HookOutput, Value};
 use mudling_plugin_avatar::{Transcript, load};
 use std::collections::HashMap;
 
@@ -26,6 +26,17 @@ fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn examine_places_a_weapon() {
+    let gear = read(
+        "You look at a bloodwood spear in your inventory...\n\
+         This item appears meant to be wielded as a weapon.\n\
+         (120h-130m-104v-1210)(-/-)",
+    )
+    .store("gear");
+    assert_eq!(get(&gear, "slot.a bloodwood spear"), &text("wield"));
+}
+
+#[test]
 fn the_slots_are_the_games_fifteen_in_its_order() {
     let plugin = load();
     let slots = &plugin.points.gear.as_ref().unwrap().slots;
@@ -41,7 +52,7 @@ fn the_slots_are_the_games_fifteen_in_its_order() {
 #[test]
 fn equipment_lists_every_row_in_order_empty_slots_included() {
     let transcript = read(include_str!("fixtures/equipment.txt"));
-    let equipment = transcript.store("equipment");
+    let equipment = transcript.store("worn");
     assert_eq!(get(&equipment, "count"), &Value::Number(17.0));
     let rows: Vec<(String, String)> = (1..=17)
         .map(|row| {
@@ -143,6 +154,20 @@ fn wear_remove_and_put_are_events_and_wearing_notes_the_slot() {
     );
     assert_eq!(transcript.events("gear.did_not_fit", &[]).len(), 1);
     assert_eq!(transcript.events("gear.not_carried", &[]).len(), 1);
+}
+
+#[test]
+fn wearing_or_removing_asks_for_the_inventory_again() {
+    let asks = |text: &str| {
+        let transcript = read(text);
+        let outputs = transcript.outputs.iter();
+        outputs
+            .filter(|output| matches!(output, HookOutput::RefreshInventory))
+            .count()
+    };
+    assert_eq!(asks("You wield a long sword."), 1);
+    assert_eq!(asks("You stop using a round shield."), 1);
+    assert_eq!(asks("You put a rope belt in a satchel."), 0);
 }
 
 #[test]

@@ -20,40 +20,12 @@ local SLOTS = {
     ["held"] = "held",
 }
 
--- Words that start an item's name or join its parts, never its noun.
-local ARTICLES = { a = true, an = true, the = true, some = true }
-local PHRASE_ENDS = { of = true, that = true, with = true }
-
--- The word a command should name an item by: the noun ending its first
--- phrase. "a pixie crossbow" → "crossbow", "a sash of the captain's
--- guard" → "sash". The game doesn't take possessives ("remove captain's"
--- fails), so one is never chosen while there's another word.
-local function keyword(name)
-    local words = {}
-    for word in string.gmatch(Readers.plain(name), "[%a']+") do
-        if PHRASE_ENDS[word] and #words > 0 then
-            break
-        end
-        if not ARTICLES[word] then
-            table.insert(words, word)
-        end
-    end
-    for index = #words, 1, -1 do
-        if not string.find(words[index], "'", 1, true) then
-            return words[index]
-        end
-    end
-    -- Only possessives: the name they're made of.
-    local last = words[#words]
-    return last and (string.match(last, "^(.-)'") or last)
-end
-
 local function note_item(write, item, slot)
     local plain = Readers.plain(item)
     if slot then
         write("gear", "slot." .. plain, slot)
     end
-    local word = keyword(item)
+    local word = mud.keyword(plain)
     if word then
         write("gear", "keyword." .. plain, word)
     end
@@ -61,16 +33,14 @@ end
 
 -- ---- eq ----
 
-local finish_equipment = Readers.count_rows("equipment", "count")
+-- `worn` is the character's own: `gear` and `identify` are shared by a
+-- server's characters, and two characters don't wear the same things.
+local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
-    if event.name == "gear.equipment.start" then
-        Readers.open("equipment", finish_equipment)
-        return
-    end
-    local reader = Readers.get("equipment")
+    local kind, reader = Readers.step(event, "equipment", finish_equipment)
     local slot = SLOTS[event.captures.slot]
-    if not reader or not slot then
+    if kind ~= "row" or not slot then
         return
     end
     Readers.row(reader)
@@ -79,8 +49,8 @@ function read_equipment(event)
     if item == "<nothing>" then
         item = ""
     end
-    Readers.write(reader, "equipment", index .. ".slot", slot)
-    Readers.write(reader, "equipment", index .. ".item", item)
+    Readers.write(reader, "worn", index .. ".slot", slot)
+    Readers.write(reader, "worn", index .. ".item", item)
     if item ~= "" then
         note_item(function(...)
             Readers.write(reader, ...)
@@ -109,8 +79,14 @@ local function slot_worn(event)
     return "wield"
 end
 
+-- Avatar sends no Char.Items when gear goes on or comes off, so ask again.
 function on_wore(event)
     note_item(mud.store, event.captures.item, slot_worn(event))
+    mud.refresh_inventory()
+end
+
+function on_removed(event)
+    mud.refresh_inventory()
 end
 
 -- ---- identify ----
@@ -140,6 +116,63 @@ local function add(totals, key, amount)
     totals[key] = (totals[key] or 0) + amount
 end
 
+-- Words the game might accept for an item: a hyphenated word gives its
+-- first part, "red" for "red-eyed".
+local NOT_WORDS = { a = true, an = true, the = true, some = true, of = true }
+
+local function item_words(plain)
+    local words = {}
+    for word in string.gmatch(plain, "[%a'%-]+") do
+        word = string.match(word, "^[^%-]*")
+        if word ~= "" and not NOT_WORDS[word] then
+            words[word] = true
+        end
+    end
+    return words
+end
+
+-- What the character wears and carries, by plain name.
+local function items_at_hand()
+    local items = {}
+    local function note(key)
+        local name = mud.state(key)
+        if name and name ~= "" then
+            items[Readers.plain(name)] = name
+        end
+    end
+    for index = 1, mud.state("worn.count") or 0 do
+        note("worn." .. index .. ".item")
+    end
+    for index = 1, mud.state("inventory.count") or 0 do
+        note("inventory." .. index .. ".name")
+    end
+    return items
+end
+
+-- The spell names only the game's words for an item, so it's the one at hand
+-- sharing the most of them; none when two tie.
+local function item_answering(keywords)
+    local wanted = {}
+    for word in string.gmatch(string.lower(keywords), "%S+") do
+        wanted[word] = true
+    end
+    local best, best_score, tied = nil, 0, false
+    for plain, name in items_at_hand() do
+        local score = 0
+        for word in item_words(plain) do
+            if wanted[word] then
+                score += 1
+            end
+        end
+        if score > best_score then
+            best, best_score, tied = name, score, false
+        elseif score == best_score then
+            tied = true
+        end
+    end
+    return if tied then nil else best
+end
+
 local function finish_identify(reader)
     if not reader.keywords then
         -- Named, but no object followed.
@@ -149,9 +182,10 @@ local function finish_identify(reader)
     local write = function(key, value)
         Readers.write(reader, "identify", prefix .. key, value)
     end
-    if reader.item then
-        write("name", reader.item)
-        Readers.write(reader, "gear", "keywords." .. Readers.plain(reader.item), reader.keywords)
+    local item = reader.item or item_answering(reader.keywords)
+    if item then
+        write("name", item)
+        Readers.write(reader, "gear", "keywords." .. Readers.plain(item), reader.keywords)
     end
     write("type", reader.type)
     write("flags", reader.flags)
@@ -174,17 +208,13 @@ end
 
 function read_identify(event)
     local captures = event.captures
-    if event.name == "gear.identify.named" then
+    local kind, reader = Readers.step(event, "identify", finish_identify)
+    if kind == "start" and captures.item then
         -- A shop names the item on its own line, before the object.
-        Readers.open("identify", finish_identify).item = captures.item
+        reader.item = captures.item
         return
     end
-    if event.name == "gear.identify.object" then
-        local reader = Readers.get("identify")
-        if not reader or reader.keywords then
-            -- The spell's identify, or the next of several.
-            reader = Readers.open("identify", finish_identify)
-        end
+    if kind == "start" then
         reader.keywords = string.match(captures.keywords, "^%s*(.-)%s*$")
         reader.type = captures.type
         -- "glow magic"; a plain item says "none".
@@ -198,8 +228,7 @@ function read_identify(event)
         reader.base, reader.added = {}, {}
         return
     end
-    local reader = Readers.get("identify")
-    if not reader or not reader.keywords then
+    if kind ~= "row" or not reader.keywords then
         return
     end
     Readers.row(reader)
@@ -240,17 +269,21 @@ local function slot_meant(meant)
         return "held"
     elseif string.sub(phrase, 1, 7) == "used as" then
         return "light"
+    elseif string.sub(phrase, 1, 7) == "wielded" then
+        return "wield"
     end
     return SLOTS[phrase]
 end
 
 function read_examine(event)
-    if event.name == "gear.examine.item" then
-        Readers.open("examine").item = event.captures.item
+    local kind, reader = Readers.step(event, "examine")
+    if kind == "start" then
+        reader.item = event.captures.item
+        return
+    elseif kind ~= "row" then
         return
     end
-    local reader = Readers.get("examine")
-    local slot = reader and slot_meant(event.captures.meant)
+    local slot = slot_meant(event.captures.meant)
     if slot then
         Readers.row(reader)
         Readers.write(reader, "gear", "slot." .. Readers.plain(reader.item), slot)

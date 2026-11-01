@@ -129,8 +129,8 @@ impl Matcher {
     }
 
     /// Replaces `out` with the ids of the patterns `text` might match, in
-    /// ascending order: those whose required literals it holds, found in the
-    /// same scan [`Matcher::matching`] makes, and every unfiltered one.
+    /// ascending order: those whose required literals it holds, found in a
+    /// scan of its own, and every unfiltered one.
     pub(crate) fn candidates(&self, text: &str, out: &mut Vec<usize>) {
         out.clear();
         if let Some(prefilter) = &self.prefilter {
@@ -223,7 +223,8 @@ fn consider(hir: &Hir, best: &mut Option<(usize, Seq)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use cpu_time::ThreadTime;
+    use std::time::Duration;
 
     fn matcher(patterns: &[&str]) -> Matcher {
         Matcher::new(patterns, DfaCache::Default).unwrap()
@@ -316,20 +317,27 @@ mod tests {
     fn a_pathological_pattern_runs_in_linear_time() {
         // Catastrophic for a backtracking engine: 2^n paths on a near miss.
         let m = matcher(&[r"^(a+)+$", r"(x+x+)+y", r"^(a|aa)+$"]);
-        let time = |n: usize| {
-            let text = format!("{}!{} y", "a".repeat(n / 2), "x".repeat(n / 2));
-            let started = Instant::now();
+        let near_miss = |n: usize| format!("{}!{} y", "a".repeat(n / 2), "x".repeat(n / 2));
+        // Work is this thread's CPU time, so what else the machine runs
+        // doesn't count, however long it preempts this thread.
+        let work = |text: &str| {
+            let started = ThreadTime::now();
             for _ in 0..10 {
-                assert!(matching(&m, &text).is_empty());
+                assert!(matching(&m, text).is_empty());
             }
             started.elapsed()
         };
-        time(1_000);
-        let (short, long) = (time(10_000), time(100_000));
-        // Ten times the text may cost about ten times the time, never 2^n.
-        assert!(
-            long < short * 40 + Duration::from_millis(5),
-            "{short:?} → {long:?}"
-        );
+        work(&near_miss(1_000));
+        let (short, long) = (near_miss(10_000), near_miss(100_000));
+        // Ten times the text may cost about ten times the work, never 2^n. A
+        // pair run back to back shares a core's speed, which can differ
+        // threefold between cores, so one good pair of a few proves it.
+        let mut pairs = Vec::new();
+        let linear = (0..10).any(|_| {
+            let pair = (work(&short), work(&long));
+            pairs.push(pair);
+            pair.1 < pair.0 * 40 + Duration::from_millis(5)
+        });
+        assert!(linear, "{pairs:?}");
     }
 }

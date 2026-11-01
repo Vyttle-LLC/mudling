@@ -108,25 +108,20 @@ impl StoreHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{
-        Fields, Revision, TerminalChange, TerminalLine, TerminalState, VitalsState,
-    };
+    use crate::defaults::hud::Vital;
+    use crate::line::Line;
+    use crate::store::{Revision, TerminalChange, TerminalState, VitalsState};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn lines(texts: &[&str]) -> TerminalChange {
-        TerminalChange::Append(
-            texts
-                .iter()
-                .map(|text| TerminalLine {
-                    text: (*text).to_owned(),
-                })
-                .collect(),
-        )
+        TerminalChange::Append(texts.iter().map(|text| Line::command(text)).collect())
     }
 
     fn vitals(hp: &str) -> VitalsState {
-        VitalsState(Fields::from([("hp", hp), ("maxhp", "100")]))
+        let hp = hp.parse().expect("a number");
+        VitalsState(BTreeMap::from([(Vital::Hp, hp), (Vital::MaxHp, 100)]))
     }
 
     fn counting_hub() -> (StoreHub, Arc<AtomicUsize>) {

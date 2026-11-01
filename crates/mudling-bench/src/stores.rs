@@ -6,15 +6,21 @@
 //! - **Burst:** a core thread writes 50 lines/s, in bursts, one write per
 //!   line, while a shell ticks every 8 ms and drains once per tick. The shell
 //!   must get at most one batch per frame, and be woken once per batch, not
-//!   once per write.
+//!   once per write: with no writes coalesced, each burst would wake it for
+//!   every line.
 
+use crate::{BudgetScale, verdict};
+use mudling_core::defaults::hud::Vital;
+use mudling_core::map::{LiveMap, MapRoom, PlainRules};
+use mudling_core::persist::Timestamp;
 use mudling_core::replay;
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Fields, RoomState, StoreHub, Stores, TERMINAL_CAPACITY, TerminalChange, TerminalLine,
-    TerminalState, VitalsState,
+    RoomState, StoreHub, Stores, TERMINAL_CAPACITY, TerminalChange, TerminalState, VitalsState,
 };
+use mudling_core::{Line, LinePipeline};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -24,6 +30,7 @@ const FRAME_BUDGET_US: f64 = FRAME.as_micros() as f64;
 const APPLY_ROUNDS: usize = 10_000;
 /// A typical frame while text arrives: a few lines, the vitals and the room.
 const LINES_PER_FRAME: usize = 10;
+const ROOMS: usize = 100;
 const BURST_LINES_PER_SECOND: usize = 50;
 const BURST_LINES: usize = 10;
 const BURST_SECONDS: u64 = 2;
@@ -36,17 +43,20 @@ pub struct Report {
     pub burst_batches: usize,
     pub burst_wakes: usize,
     pub burst_frame: Summary,
+    frame_budget_us: f64,
     pub within_budget: bool,
 }
 
-pub fn run() -> Report {
+pub fn run(scale: BudgetScale) -> Report {
     let frame_apply = measure_frame_apply();
     let burst = measure_burst();
+    let frame_budget_us = scale.time_us(FRAME_BUDGET_US);
     Report {
-        within_budget: frame_apply.p99_us <= FRAME_BUDGET_US
-            && burst.frame.p99_us <= FRAME_BUDGET_US
-            && burst.batches <= burst.frames
+        within_budget: frame_apply.p99_us <= frame_budget_us
+            && burst.frame.p99_us <= frame_budget_us
+            && burst.batches < burst.line_writes
             && burst.wakes <= burst.batches,
+        frame_budget_us,
         frame_apply,
         burst_line_writes: burst.line_writes,
         burst_frames: burst.frames,
@@ -57,43 +67,37 @@ pub fn run() -> Report {
 }
 
 pub fn print(report: &Report) {
-    let verdict = if report.within_budget { "ok" } else { "MISSED" };
-    let apply = &report.frame_apply;
     println!(
-        "store frame apply ({LINES_PER_FRAME} lines + vitals + room, {TERMINAL_CAPACITY}-line terminal): \
-         p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
-        apply.p50_us, apply.p99_us, apply.max_us
+        "store frame apply ({LINES_PER_FRAME} lines + vitals + room, {TERMINAL_CAPACITY}-line terminal): {}",
+        report.frame_apply
     );
-    let frame = &report.burst_frame;
     println!(
         "store burst ({BURST_LINES_PER_SECOND} lines/s): {} line writes in {} batches over {} frames, \
-         {} wakes; frame drain + apply p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs; \
-         budget p99 ≤ {} ms, ≤ 1 batch per frame, ≤ 1 wake per batch: {verdict}",
+         {} wakes; frame drain + apply {}; \
+         budget p99 ≤ {} ms, fewer batches than writes, ≤ 1 wake per batch: {}",
         report.burst_line_writes,
         report.burst_batches,
         report.burst_frames,
         report.burst_wakes,
-        frame.p50_us,
-        frame.p99_us,
-        frame.max_us,
-        FRAME_BUDGET_US / 1e3,
+        report.burst_frame,
+        report.frame_budget_us / 1e3,
+        verdict(report.within_budget)
     );
 }
 
 fn measure_frame_apply() -> Summary {
     let hub = StoreHub::new(|| {});
     let mut shell = subscribed_shell(&hub);
-    hub.write::<TerminalState>(append(
-        replay::synthetic_lines(TERMINAL_CAPACITY).into_iter(),
-    ));
+    hub.write::<TerminalState>(append(parsed_lines(TERMINAL_CAPACITY).into_iter()));
     shell.apply_batch(&hub.drain().expect("the terminal filled"));
 
-    let mut lines = replay::synthetic_lines(1_000).into_iter().cycle();
+    let mut lines = parsed_lines(1_000).into_iter().cycle();
+    let rooms = rooms();
     let mut samples = Vec::with_capacity(APPLY_ROUNDS);
     for round in 0..APPLY_ROUNDS {
         hub.write::<TerminalState>(append(lines.by_ref().take(LINES_PER_FRAME)));
         hub.write::<VitalsState>(vitals(round));
-        hub.write::<RoomState>(room(round));
+        hub.write::<RoomState>(room(&rooms, round));
         let started = Instant::now();
         if let Some(batch) = hub.drain() {
             shell.apply_batch(&batch);
@@ -126,7 +130,7 @@ fn measure_burst() -> Burst {
     let writer = std::thread::spawn({
         let hub = Arc::clone(&hub);
         move || {
-            let mut lines = replay::synthetic_lines(BURST_LINES).into_iter().cycle();
+            let mut lines = parsed_lines(BURST_LINES).into_iter().cycle();
             let started = Instant::now();
             for burst in 0..bursts {
                 std::thread::sleep(
@@ -182,19 +186,42 @@ fn subscribed_shell(hub: &StoreHub) -> Stores {
     }
 }
 
-fn append(texts: impl Iterator<Item = String>) -> TerminalChange {
-    TerminalChange::Append(texts.map(|text| TerminalLine { text }).collect())
+fn parsed_lines(count: usize) -> Vec<Line> {
+    let mut pipeline = LinePipeline::default();
+    let mut lines = Vec::with_capacity(count);
+    for text in replay::synthetic_lines(count) {
+        pipeline.push_line(text.as_bytes(), &mut lines);
+    }
+    lines
+}
+
+fn append(lines: impl Iterator<Item = Line>) -> TerminalChange {
+    TerminalChange::Append(lines.collect())
 }
 
 fn vitals(n: usize) -> VitalsState {
-    let hp = (n % 100).to_string();
-    VitalsState(Fields::from([("hp", hp.as_str()), ("maxhp", "100")]))
+    VitalsState(BTreeMap::from([
+        (Vital::Hp, (n % 100) as i64),
+        (Vital::MaxHp, 100),
+    ]))
 }
 
-fn room(n: usize) -> RoomState {
-    let id = (n % 1_000).to_string();
-    RoomState(Fields::from([
-        ("num", id.as_str()),
-        ("name", "A synthetic room"),
-    ]))
+/// Mapped rooms to move between.
+fn rooms() -> Vec<Arc<MapRoom>> {
+    let mut map = LiveMap::new(Box::new(PlainRules));
+    (0..ROOMS)
+        .map(|id| {
+            let json = format!(r#"{{"num": {id}, "name": "A synthetic room"}}"#);
+            map.room_info(&json, Timestamp(0));
+            let commit = map.commit(Timestamp(0)).expect("the room is new");
+            Arc::clone(&commit.change.rooms[0])
+        })
+        .collect()
+}
+
+fn room(rooms: &[Arc<MapRoom>], n: usize) -> RoomState {
+    RoomState {
+        room: Some(Arc::clone(&rooms[n % rooms.len()])),
+        ..RoomState::default()
+    }
 }

@@ -1,15 +1,15 @@
-//! The chat's scrollback: a fixed-capacity ring buffer of parsed lines.
+//! The chat's scrollback: a fixed-capacity ring buffer of finished lines.
 //!
 //! The buffer is allocated once at its capacity, so an append never
 //! reallocates or moves other lines. Once full, each append drops the oldest
 //! line. A view addresses lines by index, so trimming never re-lays anything
 //! out; [`Scrollback::evicted`] lets a scrolled-up view keep its place.
 
-use crate::ansi::Line;
+use crate::line::Line;
 use aho_corasick::AhoCorasick;
 use std::collections::VecDeque;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Scrollback {
     lines: VecDeque<Line>,
     capacity: usize,
@@ -71,7 +71,7 @@ impl Scrollback {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, line)| matcher.is_match(&*line.text))
+            .filter(|(_, line)| matcher.is_match(line.plain()))
             .map(|(index, _)| index)
             .take(limit)
             .collect()
@@ -81,19 +81,21 @@ impl Scrollback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ansi::AnsiParser;
+    use crate::line::LinePipeline;
 
     fn scrollback_of(capacity: usize, texts: &[&str]) -> Scrollback {
-        let mut parser = AnsiParser::default();
+        let mut pipeline = LinePipeline::default();
+        let mut lines = Vec::new();
         let mut scrollback = Scrollback::with_capacity(capacity);
         for text in texts {
-            scrollback.push(parser.parse_line(text));
+            pipeline.push_line(text.as_bytes(), &mut lines);
         }
+        lines.into_iter().for_each(|line| scrollback.push(line));
         scrollback
     }
 
     fn texts(scrollback: &Scrollback) -> Vec<&str> {
-        scrollback.iter().map(|line| &*line.text).collect()
+        scrollback.iter().map(Line::plain).collect()
     }
 
     #[test]
@@ -101,7 +103,7 @@ mod tests {
         let scrollback = scrollback_of(3, &["a", "b", "c", "d", "e"]);
         assert_eq!(texts(&scrollback), ["c", "d", "e"]);
         assert_eq!(scrollback.evicted(), 2);
-        assert_eq!(scrollback.get(0).map(|l| &*l.text), Some("c"));
+        assert_eq!(scrollback.get(0).map(Line::plain), Some("c"));
     }
 
     #[test]

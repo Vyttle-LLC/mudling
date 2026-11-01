@@ -1,0 +1,19 @@
+# A made-up game for the benchmark: what a real plugin runs, Luau hooks and
+# Map rules, over the fixture's text. Its lines fire every rule here.
+id = "bench-testland"
+name = "Testland (bench)"
+version = "1.0.0"
+api = 1
+license = "MIT"
+layer = "game"
+permissions = ["write_store:fight"]
+
+[servers]
+hosts = ["bench.example"]
+
+[points]
+text = "text.toml"
+map = "map.toml"
+
+[hooks]
+files = ["fight.luau"]

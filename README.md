@@ -35,7 +35,7 @@ MUDling is a Cargo workspace:
 ```sh
 cargo build --release
 cargo test
-cargo run --release -p mudling-bench                 # the core's budgets
+cargo run --release -p mudling-bench                 # the core's budgets (--check gates them; --budget-scale <n> relaxes the time ones)
 cargo run --release -p mudling-desktop -- --synthetic # the chat, with made-up lines
 ```
 

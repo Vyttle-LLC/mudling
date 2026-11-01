@@ -3478,7 +3478,11 @@ dependencies = [
 name = "mudling-plugin-avatar"
 version = "0.0.0"
 dependencies = [
+ "directories",
  "mudling-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
