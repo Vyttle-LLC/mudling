@@ -12,6 +12,7 @@
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
 use crate::hud::HudPlacement;
+use crate::map_view::harness::sample_map;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
@@ -25,6 +26,7 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
@@ -201,6 +203,7 @@ fn sample_rules() -> RulesState {
         server: "mud.example".to_owned(),
         character: "sample".to_owned(),
         separator: None,
+        notepad: String::new(),
         triggers: vec![
             trigger(
                 "tells you",
@@ -234,6 +237,38 @@ fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     shell
         .dock(Side::Right)
         .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+/// The Find panel on its sample, on `filter` if it's named.
+fn open_find_panel(
+    shell: &mut Shell,
+    filter: Option<FindFilter>,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    shell.find_panel().update(cx, |panel, cx| {
+        panel.start_over(crate::measure::sample_find(), cx);
+        panel.choose(filter.unwrap_or_default(), cx);
+    });
+    shell.focus_find_panel(window, cx);
+}
+
+/// The map with its marks and the selected room's card, and the Room panel
+/// with its own card.
+fn open_map_marks(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    shell.show_sample_map(&sample_map(20, false), 24, cx);
+    crate::measure::fill_room_panel(shell, None, cx);
+    shell.open_panels(cx);
+}
+
+/// The Notes tab, as the canvas draws it.
+fn open_notes_tab(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::open_notes(shell, window, cx);
+    shell.notes().update(cx, |notes, cx| notes.finish(cx));
+}
+
+fn edit_a_note(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::open_notes(shell, window, cx);
 }
 
 /// Reads back to the top of the sample, then 14 lines arrive.
@@ -336,6 +371,26 @@ fn window_images() {
     render("panels-open-light", Light, WIDE, |shell, _, cx| {
         shell.open_panels(cx);
     });
+    for (name, appearance) in [("map-history-dark", Dark), ("map-history-light", Light)] {
+        render(name, appearance, WIDE, |shell, _, cx| {
+            shell.open_panels(cx);
+            shell
+                .map_history()
+                .update(cx, |history, cx| history.show_sample(cx));
+        });
+    }
+    render(
+        "map-history-asking-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            shell.open_panels(cx);
+            shell.map_history().update(cx, |history, cx| {
+                history.show_sample(cx);
+                history.ask_about_sample(window, cx);
+            });
+        },
+    );
     render(
         "panels-open-default-size-dark",
         Dark,
@@ -464,6 +519,39 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    render("find-panel-dark", Dark, WIDE, |shell, window, cx| {
+        open_find_panel(shell, None, window, cx);
+    });
+    render("find-panel-light", Light, WIDE, |shell, window, cx| {
+        open_find_panel(shell, None, window, cx);
+    });
+    render("find-panel-items-dark", Dark, WIDE, |shell, window, cx| {
+        open_find_panel(shell, Some(FindFilter::Items), window, cx);
+    });
+    render(
+        "find-panel-searching-dark",
+        Dark,
+        DEFAULT,
+        |shell, window, cx| {
+            open_find_panel(shell, Some(FindFilter::Rooms), window, cx);
+            shell
+                .find_panel()
+                .update(cx, |panel, cx| panel.type_text("no such room", window, cx));
+        },
+    );
+    render(
+        "find-panel-new-map-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            shell.focus_find_panel(window, cx);
+        },
+    );
+    render("notes-tab-dark", Dark, WIDE, open_notes_tab);
+    render("notes-tab-light", Light, WIDE, open_notes_tab);
+    render("note-editing-dark", Dark, WIDE, edit_a_note);
+    render("map-marks-dark", Dark, WIDE, open_map_marks);
+    render("map-marks-light", Light, WIDE, open_map_marks);
     render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
         shell.show_sample_empty_state(&sample_saved(), window, cx);
     });

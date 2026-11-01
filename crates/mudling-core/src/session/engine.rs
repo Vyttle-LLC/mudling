@@ -8,7 +8,7 @@ use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
-use super::{RuleEdit, SessionConfig, SessionError, Typing};
+use super::{MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
 use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::commands::{
@@ -19,11 +19,11 @@ use crate::defaults::hud::{self, Field, FieldMap};
 use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
 use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
-use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
+use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, VERSION_AUTOSAVE, VERSION_SAFETY};
 use crate::net::DisconnectReason;
 use crate::persist::{
-    self, Batch, Character, Database, Key, REMOVED, SERVERS_FOLDER, Server, Timestamp,
-    UNNAMED_CHARACTER, Writer,
+    self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
+    Timestamp, UNNAMED_CHARACTER, Writer,
 };
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
@@ -33,8 +33,8 @@ use crate::plugin::{
 };
 use crate::store::{
     CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState,
-    MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub, TargetState,
-    TerminalChange, TerminalState, Versioned, VitalsState,
+    MapRestore, MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub,
+    TargetState, TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
@@ -43,6 +43,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -58,6 +59,10 @@ const NAMES_REMEMBERED: usize = 4096;
 const MOST_NOTICES: usize = 32;
 /// How often plugin costs are published: each one sorts its samples.
 const COSTS_EVERY_MS: i64 = 2_000;
+/// A changed map is saved as a version this often during play.
+const AUTOSAVE_EVERY_MS: i64 = 5 * 60 * 1000;
+const AUTOSAVED: &str = "Autosave";
+const SESSION_START: &str = "Session start";
 
 /// What one connection knows: made fresh for each, so a reconnect learns the
 /// server's prompt again from nothing.
@@ -117,7 +122,8 @@ impl AddedNames {
 /// One server's session, for a core thread. Lines and moves keep to memory
 /// and queue their disk writes on the writer threads; opening, finishing, and
 /// an override coming on with the server's name (which reloads the map) wait
-/// on the disk.
+/// on the disk, as does a restore of the map, which nothing may build on
+/// until it's safe.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -165,6 +171,14 @@ pub struct Engine {
     blank_shown: bool,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
+    /// Rooms changed since the last version of the map was saved. A new
+    /// session counts as such a change: it opens with a version.
+    map_changed: bool,
+    /// When the last version of the map was saved.
+    version_saved: Timestamp,
+    /// Hears when versions on their way to the disk have landed.
+    versions_landing: Option<Receiver<()>>,
+    restores: u64,
     output: Vec<u8>,
     lines: Vec<Line>,
     events: Vec<PluginEvent>,
@@ -245,6 +259,10 @@ impl Engine {
             terminal: Vec::new(),
             blank_shown: true,
             batch: Batch::new(),
+            map_changed: true,
+            version_saved: now,
+            versions_landing: None,
+            restores: 0,
             output: Vec::new(),
             lines: Vec::new(),
             events: Vec::new(),
@@ -254,6 +272,7 @@ impl Engine {
         engine.load_saved()?;
         engine.walk = WalkSyntax::of(&engine.plugins);
         engine.load_rules()?;
+        engine.settings.map_versions = 1;
         engine.publish_settings();
         Ok(engine)
     }
@@ -261,6 +280,9 @@ impl Engine {
     /// Starts a connection: a fresh parser, pipeline and defaults, and fresh
     /// hook VMs. Bytes can be fed from here on, from a socket or a recording.
     pub fn start_connection(&mut self) -> io::Result<()> {
+        if self.map_changed && self.map.room_count() > 0 {
+            self.save_map_version(VERSION_SAFETY, SESSION_START, Timestamp::now());
+        }
         let (outputs, hook_outputs) = unbounded_channel();
         let state = Arc::new(HubView(Arc::clone(&self.hub)));
         // A hook file's top level runs when it loads, so a game plugin that's
@@ -417,8 +439,30 @@ impl Engine {
                 self.batch.upsert(hotbar::to_meta(&chips, now));
                 self.rules.hotbar = chips;
             }
+            RuleEdit::SetNotepad(text) => {
+                self.batch.upsert(Meta {
+                    key: NOTEPAD.to_owned(),
+                    value: text.clone(),
+                    updated: now,
+                });
+                self.rules.notepad = text;
+            }
         }
         self.publish_rules();
+    }
+
+    /// Applies a change the player made to the map. The next settle saves it
+    /// and publishes it, as it does a change the game made.
+    pub fn edit_map(&mut self, edit: MapEdit, now: Timestamp) {
+        match edit {
+            MapEdit::Note { room, text } => self.map.set_notes(room, &text),
+            MapEdit::Feature {
+                room,
+                feature,
+                present,
+            } => self.map.set_feature(room, &feature, present),
+            MapEdit::Mark { title, mark, set } => self.map.mark_mob(&title, mark, set, now),
+        }
     }
 
     /// A command a shell's button sent. It's never a password, so with echo
@@ -453,6 +497,8 @@ impl Engine {
             self.notice(notice);
         }
         if let Some(commit) = self.map.commit(now) {
+            self.map_changed |=
+                !commit.change.rooms.is_empty() || !commit.change.removed.is_empty();
             self.publish_map(commit.change);
             self.submit(commit.batch);
         }
@@ -475,6 +521,70 @@ impl Engine {
         }
         let batch = std::mem::take(&mut self.batch);
         self.submit(batch);
+        self.autosave_map(now);
+        self.tell_of_landed_versions();
+    }
+
+    fn autosave_map(&mut self, now: Timestamp) {
+        let due = now.0 - self.version_saved.0 >= AUTOSAVE_EVERY_MS;
+        if self.link.is_some() && self.map_changed && due {
+            self.save_map_version(VERSION_AUTOSAVE, AUTOSAVED, now);
+        }
+    }
+
+    /// Queues a version of the map as the writer will have it: call this
+    /// with every commit submitted. A shell hears once it's on the disk.
+    fn save_map_version(&mut self, kind: &str, label: &str, now: Timestamp) {
+        self.submit(LiveMap::save_version(kind, label, now));
+        self.map_changed = false;
+        self.version_saved = now;
+        self.versions_landing = self.writer.caught_up().ok();
+    }
+
+    fn tell_of_landed_versions(&mut self) {
+        let landed = self
+            .versions_landing
+            .as_ref()
+            .is_some_and(|landing| landing.try_recv().is_ok());
+        if landed {
+            self.versions_landing = None;
+            self.settings.map_versions += 1;
+            self.publish_settings();
+        }
+    }
+
+    /// Puts a saved version of the map back, after saving the map as it is
+    /// now. On failure the map stays as it was, on the disk and in memory.
+    pub fn restore_map(&mut self, version_id: i64, now: Timestamp) {
+        self.settle(now);
+        let outcome = self.apply_map_version(version_id, now);
+        if let Err(error) = &outcome {
+            self.notice(format!("couldn't restore the map: {error}"));
+        }
+        self.restores += 1;
+        self.settings.map_restore = Some(MapRestore {
+            attempt: self.restores,
+            outcome: outcome.map(|()| version_id).map_err(|e| e.to_string()),
+        });
+        self.settings.map_versions += 1;
+        self.publish_settings();
+    }
+
+    fn apply_map_version(&mut self, version_id: i64, now: Timestamp) -> Result<(), persist::Error> {
+        let rows = self.database.reader()?.map_version(version_id)?;
+        let restored = self.map.prepare_restore(&rows);
+        self.writer.commit(restored.batch(version_id, now))?;
+        let change = self.map.finish_restore(restored);
+        self.map_changed = false;
+        self.version_saved = now;
+        self.publish_map(change);
+        self.publish_room();
+        Ok(())
+    }
+
+    /// Waits for every write so far: for tests and benchmarks.
+    pub fn flush(&self) {
+        let _ = self.writer.caught_up().map(|done| done.recv());
     }
 
     /// Bytes for the server, since the last call.
@@ -964,7 +1074,9 @@ impl Engine {
             .into_iter()
             .map(|row| AliasRule::from_row(row, &host))
             .collect();
-        let hotbar = hotbar::from_meta(&reader.meta()?);
+        let meta = reader.meta()?;
+        let hotbar = hotbar::from_meta(&meta);
+        let notepad = meta.into_iter().find(|meta| meta.key == NOTEPAD);
         let others = persist::other_servers_rows(&self.config.data_folder, &host);
         for (home, row) in others.triggers {
             let rule = TriggerRule::from_row(row, &home);
@@ -988,6 +1100,7 @@ impl Engine {
             triggers,
             aliases,
             hotbar,
+            notepad: notepad.map_or_else(String::new, |notepad| notepad.value),
         };
         self.run_triggers();
         self.run_aliases();
@@ -1117,7 +1230,10 @@ impl Engine {
         self.add_map_words(&change.rooms);
         self.hub.write::<MapState>(change);
         self.publish_room();
-        let mut mobs = MobsState::default();
+        let mut mobs = MobsState {
+            namer: self.map.mobs().namer().clone(),
+            ..MobsState::default()
+        };
         for mark in Mark::ALL {
             let names = self.map.mobs().marks(mark).iter();
             mobs.marks.extend(names.map(|name| (mark, name.clone())));

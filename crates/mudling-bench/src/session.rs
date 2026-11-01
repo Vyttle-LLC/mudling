@@ -346,6 +346,16 @@ fn save_marks(folder: &Path, marks: i64) {
             updated: Timestamp(0),
         });
     }
+    // A player's own marks: one in ten as many, on whole names.
+    for n in 0..marks / 10 {
+        for mark in [Mark::Gear, Mark::Important] {
+            batch.upsert(MobMark {
+                name: format!("a mob of kind {n}"),
+                mark: mark.name().to_owned(),
+                updated: Timestamp(0),
+            });
+        }
+    }
     writer.submit(batch).expect("the writer runs");
     writer.flush().expect("the marks reach the disk");
 }

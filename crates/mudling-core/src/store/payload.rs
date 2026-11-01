@@ -11,7 +11,9 @@ use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
 use crate::line::Line;
-use crate::map::{MapChange, MapRoom, Mark, MarkChange, RoomId, Whereabouts};
+use crate::map::{
+    Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
+};
 use crate::net::DisconnectReason;
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
@@ -86,6 +88,7 @@ pub struct MapState {
     rooms: imbl::OrdMap<RoomId, Arc<MapRoom>>,
     whereabouts: Whereabouts,
     revision: u64,
+    derived: Option<Arc<Derived>>,
 }
 
 impl MapState {
@@ -97,6 +100,14 @@ impl MapState {
         self.rooms.get(&id)
     }
 
+    /// The room a walk starts from, when the map is sure of one: moves from a
+    /// guess would go astray.
+    pub fn walk_start(&self) -> Option<RoomId> {
+        let whereabouts = &self.whereabouts;
+        let sure = !whereabouts.unsure && whereabouts.dark_position.is_none();
+        whereabouts.room.filter(|_| sure)
+    }
+
     pub fn whereabouts(&self) -> Whereabouts {
         self.whereabouts
     }
@@ -104,6 +115,17 @@ impl MapState {
     /// The core map's revision.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Areas and buildings, as of the last change to the rooms.
+    pub fn derived(&self) -> Option<&Arc<Derived>> {
+        self.derived.as_ref()
+    }
+
+    /// The fewest moves between two rooms. A search can cross the whole map,
+    /// so a view runs it off the UI thread, on a clone of this state.
+    pub fn route(&self, start: RoomId, goal: RoomId) -> Option<Vec<WalkStep>> {
+        crate::map::route(|id| self.room(id).map(|room| &**room), start, goal)
     }
 }
 
@@ -119,6 +141,9 @@ impl StoreState for MapState {
         }
         self.whereabouts = change.whereabouts.unwrap_or(self.whereabouts);
         self.revision = change.revision;
+        if let Some(derived) = &change.derived {
+            self.derived = Some(Arc::clone(derived));
+        }
         !change.rooms.is_empty() || !change.removed.is_empty() || change.whereabouts.is_some()
     }
 
@@ -134,6 +159,7 @@ impl StoreState for MapState {
         earlier.whereabouts = later.whereabouts.or(earlier.whereabouts);
         earlier.marks.extend(later.marks);
         earlier.revision = later.revision;
+        earlier.derived = later.derived.or(earlier.derived.take());
     }
 }
 
@@ -194,6 +220,10 @@ pub const CHARACTER_AFFECTS: &str = "character.affects";
 /// the same rows: its store of that name.
 const READ_AFFECTS: &str = "affects";
 
+/// What the character carries, from GMCP: under this key, `.count`, then
+/// `.<n>.id` and `.<n>.name` for n from 1. Rows past the count are stale.
+pub const CHARACTER_INVENTORY: &str = "inventory";
+
 /// Something affecting the character, as the game words it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Affect {
@@ -244,24 +274,39 @@ impl CharactersState {
         affects
     }
 
+    /// The names of what the character carries.
+    pub fn carried(&self) -> Vec<String> {
+        self.rows(CHARACTER_INVENTORY)
+            .filter_map(|row| self.text(format!("{row}.name")))
+            .collect()
+    }
+
     fn listed(&self, list: &str) -> Vec<Affect> {
-        let text = |key: String| match self.0.get(&key) {
+        self.rows(list)
+            .filter_map(|row| {
+                Some(Affect {
+                    name: self.text(format!("{row}.name"))?,
+                    detail: self.text(format!("{row}.detail")).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    fn text(&self, key: String) -> Option<String> {
+        match self.0.get(&key) {
             Some(Value::Text(text)) => Some(text.clone()),
             _ => None,
-        };
+        }
+    }
+
+    /// The keys of the rows `list` counts.
+    fn rows(&self, list: &str) -> impl Iterator<Item = String> {
         let count = match self.0.get(&format!("{list}.count")) {
             Some(Value::Number(count)) => *count as usize,
             _ => 0,
         };
-        (1..=count)
-            .filter_map(|row| {
-                let row = format!("{list}.{row}");
-                Some(Affect {
-                    name: text(format!("{row}.name"))?,
-                    detail: text(format!("{row}.detail")).unwrap_or_default(),
-                })
-            })
-            .collect()
+        let list = list.to_owned();
+        (1..=count).map(move |row| format!("{list}.{row}"))
     }
 }
 
@@ -316,9 +361,21 @@ pub struct Target {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MobsState {
     pub marks: BTreeSet<(Mark, String)>,
+    /// How this game's room lines name a mob, as the marks hold them.
+    pub namer: MobNamer,
 }
 
 impl MobsState {
+    /// The marks that cover a mob, by its room line.
+    pub fn marks_on(&self, title: &str) -> Vec<Mark> {
+        let covered = |(mark, marked): &&(Mark, String)| mark.covers(marked, title, &self.namer);
+        self.marks
+            .iter()
+            .filter(covered)
+            .map(|(mark, _)| *mark)
+            .collect()
+    }
+
     /// This state with `changes` made.
     pub fn with_changes(&self, changes: &[MarkChange]) -> MobsState {
         let mut marks = self.marks.clone();
@@ -330,7 +387,10 @@ impl MobsState {
                 marks.remove(&mark);
             }
         }
-        MobsState { marks }
+        MobsState {
+            marks,
+            namer: self.namer.clone(),
+        }
     }
 }
 
@@ -368,6 +428,19 @@ pub struct SettingsState {
     /// The plugins the core turned off, and why, until
     /// [`crate::session::Session::turn_plugin_on`] brings one back.
     pub turned_off: Vec<PluginDisabled>,
+    /// Bumps when map history has changed on the disk, so a view lists it
+    /// again. Zero until the database is open.
+    pub map_versions: u64,
+    /// How the last restore of a map version went.
+    pub map_restore: Option<MapRestore>,
+}
+
+/// How a restore of a map version went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapRestore {
+    /// Counts restores, so two that went the same way are two changes.
+    pub attempt: u64,
+    pub outcome: Result<i64, String>,
 }
 
 /// What the player set up for this session: what Settings edits, and the
@@ -384,6 +457,8 @@ pub struct RulesState {
     pub aliases: Vec<AliasRule>,
     /// The hotbar's commands, in order.
     pub hotbar: Vec<String>,
+    /// The server's notepad, in plain text.
+    pub notepad: String,
 }
 
 /// Sounds the triggers asked for: a shell plays each change, once.
@@ -510,6 +585,27 @@ mod tests {
         applied_once.apply(&coalesced);
         assert_eq!(applied_once, in_order);
         assert_eq!(in_order.rooms().len(), 1);
+    }
+
+    #[test]
+    fn the_store_carries_derived_data_and_walks_a_route() {
+        let mut map = LiveMap::new(Box::new(PlainRules));
+        let mut store = MapState::default();
+        store.apply(&walk(
+            &mut map,
+            r#"{"num": 1, "name": "A road", "zone": "Fields", "exits": {"n": 2}}"#,
+        ));
+        map.sent("north", Timestamp(0));
+        store.apply(&walk(
+            &mut map,
+            r#"{"num": 2, "name": "A gate", "zone": "Fields", "exits": {"s": 1}}"#,
+        ));
+
+        let derived = store.derived().expect("rooms changed");
+        assert_eq!(derived.area("Fields").map(|area| area.rooms), Some(2));
+        let steps = store.route(2, 1).expect("the rooms are linked");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(store.route(2, 1), map.route_to(1));
     }
 
     #[test]

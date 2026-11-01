@@ -99,6 +99,22 @@ impl Layout {
         self.rooms.len()
     }
 
+    /// The room here most like `lost`, a room of another map: the same place
+    /// if there's one, then the same area, then the closest square.
+    pub fn nearest_to(&self, lost: &MapRoom) -> Option<RoomId> {
+        self.rooms()
+            .min_by_key(|room| {
+                let away = room.position - lost.position;
+                (
+                    !room.same_place_as(lost),
+                    room.zone != lost.zone,
+                    away.x.abs() + away.y.abs() + away.z.abs(),
+                    room.id,
+                )
+            })
+            .map(|room| room.id)
+    }
+
     pub fn current_room(&self) -> Option<&MapRoom> {
         self.current.and_then(|id| self.room(id))
     }
@@ -489,6 +505,10 @@ impl Layout {
         }
         let maze = twins[0];
         let merged = &twins[1..];
+        let mut notes: Vec<String> = (self.room(maze).map(|room| room.notes.clone()))
+            .filter(|notes| !notes.is_empty())
+            .into_iter()
+            .collect();
         for other in merged {
             for (from, direction) in self.inbound(*other).to_vec() {
                 self.update(from, |room| room.links.insert(direction, maze));
@@ -501,6 +521,12 @@ impl Layout {
                     if !maze.links.contains(direction) {
                         maze.links.insert(direction, *to);
                     }
+                }
+                // What the player said of a room outlasts it.
+                maze.features.extend(room.features.iter().cloned());
+                if !room.notes.is_empty() && !notes.contains(&room.notes) {
+                    notes.push(room.notes.clone());
+                    maze.notes = notes.join("\n\n");
                 }
             });
         }

@@ -44,6 +44,15 @@ impl Batch {
         self
     }
 
+    /// Deletes all but the newest `keep` versions of `kind`.
+    pub fn prune_map_versions(&mut self, kind: &str, keep: i64) -> &mut Batch {
+        self.changes.push(Change::PruneMapVersions {
+            kind: kind.to_owned(),
+            keep,
+        });
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
@@ -65,6 +74,10 @@ pub(crate) enum Change {
         version_id: i64,
         at: Timestamp,
     },
+    PruneMapVersions {
+        kind: String,
+        keep: i64,
+    },
 }
 
 impl Change {
@@ -79,6 +92,15 @@ impl Change {
             } => save_map_version(tx, kind, label, *created),
             Change::RestoreMapVersion { version_id, at } => {
                 restore_map_version(tx, *version_id, *at)
+            }
+            Change::PruneMapVersions { kind, keep } => {
+                tx.prepare_cached(
+                    "DELETE FROM map_versions WHERE kind = ?1 AND id NOT IN
+                         (SELECT id FROM map_versions WHERE kind = ?1
+                          ORDER BY created DESC, id DESC LIMIT ?2)",
+                )?
+                .execute(params![kind, keep])?;
+                Ok(())
             }
         }
     }

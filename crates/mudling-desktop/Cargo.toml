@@ -11,10 +11,15 @@ publish.workspace = true
 name = "mudling-desktop"
 path = "src/main.rs"
 
+[features]
+# `--map-harness --shot` needs gpui's offscreen rendering, built for tests.
+shots = ["gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 mudling-core.workspace = true
 aho-corasick = "1.1"
 mudling-plugin-avatar = { path = "../../plugins/avatar" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true

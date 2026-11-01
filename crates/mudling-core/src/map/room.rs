@@ -15,6 +15,16 @@ pub mod feature {
     pub const FOUNTAIN: &str = "fountain";
     /// Important gear is here.
     pub const GEAR: &str = "gear";
+    pub const SHOP: &str = "shop";
+    pub const TRAINER: &str = "trainer";
+    pub const DANGER: &str = "danger";
+    /// A mob marked for its gear has been seen here.
+    pub const GEAR_MOB: &str = "gear-mob";
+    /// A mob marked as someone who matters has been seen here.
+    pub const IMPORTANT_MOB: &str = "important-mob";
+
+    /// What a player sets on a room. The rest follow the mob marks.
+    pub const PLAYER_SET: [&str; 6] = [AGGRESSIVE_MOB, FOUNTAIN, SHOP, TRAINER, DANGER, GEAR];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +100,12 @@ impl MapRoom {
             && self.building == other.building
             && self.links == other.links
             && self.doorways == other.doorways
+    }
+
+    /// Whether two rooms read as the same place, as a room's id alone can't
+    /// say across versions of a map where ids are handed out in turn.
+    pub(super) fn same_place_as(&self, other: &MapRoom) -> bool {
+        self.name == other.name && self.zone == other.zone
     }
 
     /// Doors in four or more directions: each a way into a story of its own.

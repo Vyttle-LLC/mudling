@@ -86,13 +86,20 @@ impl Database {
             return Err(Error::BadServerName(server.to_owned()));
         }
         std::fs::create_dir_all(folder).map_err(Error::Io)?;
-        let database = Database {
-            path: folder.join(format!("{server}.sqlite")),
-        };
+        let database = Database::at(folder, server);
         let mut connection = database.connect(OpenFlags::default())?;
         use_wal(&connection)?;
         schema::migrate(&mut connection)?;
         Ok(database)
+    }
+
+    /// The database of `server` in `folder`, for reads from a thread of the
+    /// caller's. This neither touches the disk nor makes the file: a reader
+    /// fails until a [`Database::open`] has.
+    pub fn at(folder: &Path, server: &str) -> Database {
+        Database {
+            path: folder.join(format!("{server}.sqlite")),
+        }
     }
 
     /// Whether `server` can name a database file: see [`Database::open`].

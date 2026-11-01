@@ -52,6 +52,25 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
                 &["shell::FocusRoomPanel"],
             ),
             row("Go to the hotbar", &["main-4"], &["shell::FocusHotbar"]),
+            row("Go to the Notes tab", &["main-6"], &["shell::FocusNotes"]),
+            row("Finish a note", &["escape"], &["notes::FinishNote"]),
+            row(
+                "Keep the map when asked to restore one",
+                &["escape"],
+                &["map_history::KeepTheMap"],
+            ),
+            row(
+                "Move along the notes",
+                &["up", "down"],
+                &["notes::PreviousNote", "notes::NextNote"],
+            ),
+            row("Go to a note's room", &["enter"], &["notes::GoToNote"]),
+            row("Walk to a note's room", &["w"], &["notes::WalkToNote"]),
+            row(
+                "Go to the Find panel",
+                &["main-5"],
+                &["shell::FocusFindPanel"],
+            ),
             row(
                 "Search the scrollback",
                 &["main-f"],

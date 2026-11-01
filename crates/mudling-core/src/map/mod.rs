@@ -25,6 +25,7 @@
 //! ```
 
 mod buildings;
+mod find;
 mod geometry;
 mod info;
 mod layout;
@@ -39,13 +40,19 @@ mod text;
 mod tracker;
 
 pub use buildings::MapDoor;
+pub use find::{
+    FindCache, FindFilter, FindKind, FindPlace, FindResults, FindRow, FindStores, MOST_RESULTS,
+    Reach,
+};
 pub use geometry::{DirMap, DirSet, Direction, GridPoint};
 pub use info::{ExitInfo, RoomInfo};
-pub(crate) use live::CURRENT_ROOM;
-pub use live::{Area, Building, Commit, Derived, LiveMap, MapChange, Whereabouts};
+pub use live::{
+    Area, Building, CURRENT_ROOM, Commit, Derived, LiveMap, MapChange, RestoredMap,
+    VERSION_AUTOSAVE, VERSION_SAFETY, Whereabouts,
+};
 pub use mobs::{Mark, MarkChange, MobMemory, MobNamer, mob_name};
 pub use room::{ExitState, MapRoom, RoomId, feature};
-pub use route::WalkStep;
+pub use route::{WalkStep, distances, route, speedwalk};
 pub use rules::{AreaName, MapRules, PlainRules, RoomIdentity};
 pub use tracker::Arrived;
 

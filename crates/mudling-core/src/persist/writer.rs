@@ -51,6 +51,7 @@ impl Failures {
 
 enum Message {
     Batch(Batch),
+    Commit(Batch, SyncSender<rusqlite::Result<()>>),
     Flush(SyncSender<()>),
 }
 
@@ -79,6 +80,16 @@ impl Writer {
         self.send(Message::Batch(batch))
     }
 
+    /// Queues a batch and waits for how it went, for a change the caller
+    /// must not build on until it's safe. This blocks on the disk: call it
+    /// from a core thread. Its failure is returned, not kept for
+    /// [`Writer::take_failures`].
+    pub fn commit(&self, batch: Batch) -> Result<(), Error> {
+        let (reply, done) = mpsc::sync_channel(1);
+        self.send(Message::Commit(batch, reply))?;
+        Ok(done.recv().map_err(|_| Error::WriterStopped)??)
+    }
+
     /// Collects the batches that failed since the last collection. It never
     /// waits on the disk, so a session can call it on every tick.
     pub fn take_failures(&self) -> Failures {
@@ -90,15 +101,21 @@ impl Writer {
     /// then reports the failures not yet collected. This blocks on the
     /// disk: for tests, benchmarks and shutdown.
     pub fn flush(&self) -> Result<(), Error> {
-        let (reply, done) = mpsc::sync_channel(1);
-        self.send(Message::Flush(reply))?;
-        done.recv().map_err(|_| Error::WriterStopped)?;
+        self.caught_up()?.recv().map_err(|_| Error::WriterStopped)?;
         let failures = self.take_failures();
         if failures.is_empty() {
             Ok(())
         } else {
             Err(Error::BatchesFailed(failures))
         }
+    }
+
+    /// A receiver that hears once every batch queued so far is committed or
+    /// has failed. This never waits on the disk; checking it doesn't either.
+    pub fn caught_up(&self) -> Result<Receiver<()>, Error> {
+        let (reply, done) = mpsc::sync_channel(1);
+        self.send(Message::Flush(reply))?;
+        Ok(done)
     }
 
     fn send(&self, message: Message) -> Result<(), Error> {
@@ -127,6 +144,9 @@ fn run(mut connection: Connection, receiver: Receiver<Message>, failures: &Mutex
                         .unwrap_or_else(PoisonError::into_inner)
                         .push(error);
                 }
+            }
+            Message::Commit(batch, reply) => {
+                let _ = reply.send(commit(&mut connection, &batch));
             }
             Message::Flush(reply) => {
                 let _ = reply.send(());

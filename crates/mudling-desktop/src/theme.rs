@@ -3,6 +3,7 @@
 //! font. Values come from the MUDling brand guidelines and the design canvas.
 
 use crate::hud::HudPlacement;
+use crate::map_view::Pip;
 use gpui::{BoxShadow, Global, Hsla, Pixels, WindowAppearance, point, px, rgb, rgba};
 use mudling_core::Color;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,37 @@ const ANSI_ON_PARCHMENT: [u32; 16] = [
     0x333C39, 0xA81E33, 0x1F6B45, 0x7A5A0B, 0x1F4F99, 0x7A2E8E, 0x12707A, 0x5E625F, //
     0x6E7772, 0xC8323F, 0x2F7D3B, 0x8A6A00, 0x2B63C4, 0x9A3FB0, 0x1C8A94, 0x111A16,
 ];
+
+/// The map's colors, sampled from the design canvas in dark and built from
+/// the same brand neutrals in light.
+#[derive(Clone, Copy)]
+pub struct MapColors {
+    pub ground: Hsla,
+    pub edge: Hsla,
+    pub room: Hsla,
+    pub room_border: Hsla,
+    pub link: Hsla,
+    pub you: Hsla,
+    pub aggressive: Hsla,
+    pub building: Hsla,
+    pub maze: Hsla,
+    pub selected: Hsla,
+    pub heading: Hsla,
+    pub muted: Hsla,
+}
+
+impl MapColors {
+    /// What a room's small mark is drawn in.
+    pub fn pip(&self, pip: Pip) -> Hsla {
+        match pip {
+            Pip::Note => self.you,
+            Pip::Gear => self.maze,
+            Pip::Important => self.selected,
+            Pip::Danger => self.aggressive,
+            Pip::Shop | Pip::Trainer | Pip::Fountain => self.building,
+        }
+    }
+}
 
 /// Which appearance the window wears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +149,7 @@ impl Appearance {
 
 #[derive(Clone, Copy)]
 pub struct Theme {
+    pub map: MapColors,
     /// What the player chose, kept here so everything that draws reads it
     /// from one place.
     pub choice: Appearance,
@@ -186,6 +219,20 @@ impl Theme {
         let choice = Appearance::default();
         match appearance {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme {
+                map: MapColors {
+                    ground: rgb(0x0C1210).into(),
+                    edge: rgb(0x1C241F).into(),
+                    room: rgb(0x1B2620).into(),
+                    room_border: rgb(0x363B36).into(),
+                    link: rgb(0x333731).into(),
+                    you: rgb(MOSS).into(),
+                    aggressive: rgb(0xF08A93).into(),
+                    building: rgb(STONE).into(),
+                    maze: rgb(0xE5C04F).into(),
+                    selected: rgb(PARCHMENT).into(),
+                    heading: rgb(PARCHMENT).into(),
+                    muted: rgb(0x8A918C).into(),
+                },
                 choice,
                 background: rgb(NIGHT).into(),
                 surface: rgb(0x151E1B).into(),
@@ -218,6 +265,20 @@ impl Theme {
                 ansi: ANSI_ON_NIGHT,
             },
             WindowAppearance::Light | WindowAppearance::VibrantLight => Theme {
+                map: MapColors {
+                    ground: rgb(0xEFEDE5).into(),
+                    edge: rgb(0xDAD6CB).into(),
+                    room: rgb(0xFFFFFF).into(),
+                    room_border: rgb(0xC9C5B9).into(),
+                    link: rgb(0xB4B0A5).into(),
+                    you: rgb(MOSS_DEEP).into(),
+                    aggressive: rgb(0xA81E33).into(),
+                    building: rgb(0x5E625F).into(),
+                    maze: rgb(0x7A5A0B).into(),
+                    selected: rgb(0x111A16).into(),
+                    heading: rgb(0x111A16).into(),
+                    muted: rgb(0x5E625F).into(),
+                },
                 choice,
                 background: rgb(PARCHMENT).into(),
                 surface: rgb(0xF1EFE8).into(),
