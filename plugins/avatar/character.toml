@@ -78,6 +78,11 @@ name = "character.skill_practiced"
 pattern = '''You practice (?<skill>.+?) with .+?\. Your current skill level is now (?<learned>\d+)\.'''
 hook = "on_practiced"
 
+# Not every game says what a practice left: read the count again.
+[[skill_improved]]
+name = "practice.stale"
+pattern = '''You practice .+? with .+?\. Your current skill level is now \d+\.'''
+
 # Improving through use, in ROM's wording; the new percent isn't given, so
 # it asks for `practice` again.
 [[skill_improved]]

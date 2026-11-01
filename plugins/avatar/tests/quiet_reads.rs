@@ -305,6 +305,71 @@ fn typing_a_fight_and_a_password_stop_the_reads_and_the_pager() {
 }
 
 #[test]
+fn a_greeting_for_someone_else_in_the_game_renames_nobody() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Benjamina");
+    game.read_up_to("aff");
+    game.say("Welcome back to the AVATAR System, Lady Eiri.");
+    // Hooks run in order: once this table lands, the greeting's hook has run.
+    game.say("You are affected by:\nSpell: 'armor'.");
+    game.wait_until("the read", |sheet| !sheet.affects.is_empty());
+    assert_eq!(game.sheet().character, "benjamina");
+}
+
+#[test]
+fn a_greeting_at_login_names_the_character() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::open(folder.path());
+    game.say("Welcome back to the AVATAR System, Lady Eiri.");
+    game.wait_until("the name", |sheet| sheet.character == "eiri");
+}
+
+#[test]
+fn a_practice_lowers_the_practices_left_with_the_live_count() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    game.read_up_to("practice");
+    game.say(PRACTICE);
+    game.wait_until("the list", |sheet| sheet.practices == Some(2));
+    game.tick(LATER);
+    game.say("You practice kick with Ulric. Your current skill level is now 45.");
+    game.gmcp("Char.Status", r#"{"practice": "1"}"#);
+    let now = game.at();
+    game.engine.settle(now);
+    assert_eq!(game.sheet().practices, Some(1));
+    assert_eq!(
+        game.tick(LATER),
+        "practice",
+        "and read again for a game that won't say"
+    );
+}
+
+#[test]
+fn a_late_answer_stays_out_of_the_chat_and_fires_no_trigger() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    let shown = game.chat().len();
+    game.expect_read("score");
+    game.now += 20_000;
+    game.say(include_str!("fixtures/score.txt"));
+    game.wait_until("score", |sheet| sheet.stats.contains_key("str"));
+    assert_eq!(game.chat().len(), shown, "{:?}", game.chat());
+}
+
+#[test]
+fn a_help_page_at_its_pager_holds_the_reads() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    game.receive(b"A long help page.\r\n[B]ack,[H]elp,[R]efresh, or [C]ontinue: ".to_vec());
+    assert_eq!(game.tick(LATER), "", "the pager is the player's");
+    let now = game.at();
+    game.engine.send("c", now);
+    game.engine.take_output();
+    game.say("The rest of the page.");
+    assert_eq!(game.tick(LATER), "score");
+}
+
+#[test]
 fn a_pressed_button_cant_reach_a_password_box() {
     let folder = tempfile::tempdir().unwrap();
     let mut game = Game::enter_as(folder.path(), "Tamsin");

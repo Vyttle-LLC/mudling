@@ -72,8 +72,12 @@ end
 
 -- The login's greeting. Avatar sends a full Char.Status in only some
 -- sessions, so this can be the only word of who the character is.
+-- The line can also reach a character already in the game, naming someone
+-- else. Position only comes once they're in, so with one it's not their name.
 function on_welcome(event)
-    mud.store("character", "name", event.captures.name)
+    if (mud.state("character.position") or "") == "" then
+        mud.store("character", "name", event.captures.name)
+    end
 end
 
 -- ---- practice ----

@@ -27,6 +27,8 @@ const LEARNED: &str = "learned";
 const LEVEL: &str = "level";
 const MANA: &str = "mana";
 const SESSIONS: &str = "practice.sessions";
+/// The same count, as the game keeps it current on the `character` side.
+const LIVE_PRACTICES: &str = "practice";
 const TABLE_READ: &str = "read";
 const COUNT: &str = "count";
 const NAME: &str = "name";
@@ -58,6 +60,13 @@ impl Sheet {
         };
         let state = &mut sheet.state;
         let mine = |id: &str| id == character;
+        let mut practices_at = None;
+        let mut practices = |state: &mut SheetState, value: &Value, at: Timestamp| {
+            if practices_at < Some(at) {
+                practices_at = Some(at);
+                state.practices = whole(value);
+            }
+        };
         for stat in rows.stats.iter().filter(|stat| mine(&stat.character_id)) {
             let Some(value) = super::values::from_row(&stat.value) else {
                 continue;
@@ -66,7 +75,7 @@ impl Sheet {
                 continue;
             };
             match (store, key.rsplit_once('.')) {
-                (SKILLS, _) if key == SESSIONS => state.practices = whole(&value),
+                (SKILLS, _) if key == SESSIONS => practices(state, &value, stat.updated),
                 (SKILLS, Some((_, TABLE_READ))) => {
                     state.skills_read = state.skills_read.max(Some(stat.updated));
                 }
@@ -79,6 +88,9 @@ impl Sheet {
                     state.character_read = state.character_read.max(Some(stat.updated));
                 }
                 (CHARACTER, _) => {
+                    if key == LIVE_PRACTICES {
+                        practices(state, &value, stat.updated);
+                    }
                     state.stats.insert(key.to_owned(), value);
                 }
                 _ => {}
@@ -133,6 +145,9 @@ impl Sheet {
                         self.state.character_read = Some(now);
                     }
                     _ => {
+                        if key == LIVE_PRACTICES {
+                            self.state.practices = whole(value);
+                        }
                         self.state.stats.insert(key.to_owned(), value.clone());
                     }
                 }
@@ -325,6 +340,31 @@ mod tests {
         assert_eq!(sheet.state.practices, Some(4));
         assert_eq!(sheet.state.skills_read, Some(NOW));
         assert!(sheet.state.skills.is_empty());
+    }
+
+    #[test]
+    fn practices_left_follows_whichever_said_it_last() {
+        let mut sheet = sheet();
+        number(&mut sheet, "skills", "practice.sessions", 4.);
+        number(&mut sheet, "character", "practice", 3.);
+        assert_eq!(sheet.state.practices, Some(3), "the live count falls");
+        number(&mut sheet, "skills", "practice.sessions", 8.);
+        assert_eq!(sheet.state.practices, Some(8));
+
+        let stat = |key: &str, value: &str, updated: i64| CharacterStat {
+            character_id: "bren".to_owned(),
+            key: key.to_owned(),
+            value: value.to_owned(),
+            updated: Timestamp(updated),
+        };
+        let rows = CharacterRows {
+            stats: vec![
+                stat("character.practice", "3.0", 9),
+                stat("skills.practice.sessions", "4.0", 2),
+            ],
+            ..CharacterRows::default()
+        };
+        assert_eq!(Sheet::of("bren", &rows).state.practices, Some(3));
     }
 
     #[test]

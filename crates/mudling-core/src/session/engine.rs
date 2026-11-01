@@ -31,7 +31,8 @@ use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
 };
 use crate::plugin::{
-    Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
+    Layer, MapSignal, PendingKind, Plugin, PluginEvent, PluginHost, PluginId, PluginSink,
+    ServerInfo,
 };
 use crate::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
@@ -396,7 +397,7 @@ impl Engine {
     /// server as typed, and nowhere else.
     pub fn send(&mut self, typed: &str, now: Timestamp) {
         let Some(link) = &mut self.link else { return };
-        link.quiet.player_acted(now);
+        link.quiet.player_acted(typed, now);
         if self.settings.echo_off {
             write_line(typed, self.encoding(), &mut self.output);
             return;
@@ -415,7 +416,7 @@ impl Engine {
     /// so it does nothing. It isn't typing: history doesn't keep it.
     pub fn press(&mut self, command: &str, now: Timestamp) {
         if let Some(link) = self.link.as_mut().filter(|_| !self.settings.echo_off) {
-            link.quiet.player_acted(now);
+            link.quiet.player_acted(command, now);
             self.show_pending();
             self.show(Line::command(command));
             self.issue_expanded(command, now);
@@ -947,9 +948,12 @@ impl Engine {
         let encoding = self.encoding();
         let Some(link) = &mut self.link else { return };
         let Some(pending) = link.pipeline.pending() else {
+            link.quiet.pager_waiting(false);
             return;
         };
         let kind = self.plugins.read_pending(&pending);
+        link.quiet
+            .pager_waiting(matches!(kind, Some(PendingKind::Pager { .. })));
         answer_login(&mut link.login, pending.plain, encoding, &mut self.output);
         if self.plugins.table_open() {
             link.defaults.pager.begin_table_read();
@@ -964,6 +968,7 @@ impl Engine {
             PendingAction::Send(key) => {
                 write_line(&key, encoding, &mut self.output);
                 self.plugins.pager_answered();
+                link.quiet.pager_waiting(false);
             }
             PendingAction::EndPrompt => {
                 self.lines.extend(link.pipeline.prompt_end());

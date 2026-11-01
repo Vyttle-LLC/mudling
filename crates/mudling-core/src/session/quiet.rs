@@ -19,7 +19,7 @@
 //! - the character is in the game and has a position;
 //! - the player has sent nothing for [`IDLE_AFTER`] and isn't typing;
 //! - the character isn't fighting, asleep or incapacitated;
-//! - the server isn't asking for a password;
+//! - the server isn't asking for a password, or waiting at a pager;
 //! - [`READ_SPACING`] has passed since the last read, and [`SAME_READ_SPACING`]
 //!   since this table was last read.
 //!
@@ -35,8 +35,13 @@
 //! prompt that ends it and blank lines before it stay out of the chat, and
 //! fire no trigger; a rule named `<reader>.none` marks a one-line answer that
 //! isn't a table. Anything else that arrives shows as usual, and a table the
-//! player asks for after the answer shows too. An answer that hasn't come
-//! after [`ANSWER_WAIT`] is given up on.
+//! player asks for after the answer shows too.
+//!
+//! An answer that hasn't come after [`ANSWER_WAIT`] stops holding up the next
+//! read, but it's still owed: however late its table comes, it stays hidden.
+//! Only the player asking for that table themselves lets go of it, so a read
+//! the game dropped can't swallow what they asked for. If the game was only
+//! slow, they see both.
 
 use crate::persist::Timestamp;
 use crate::plugin::{PluginEvent, PluginHost, Point};
@@ -48,7 +53,7 @@ pub(super) const IDLE_AFTER: i64 = 5_000;
 pub(super) const READ_SPACING: i64 = 2_000;
 /// Between two reads of one table: however often it goes stale.
 pub(super) const SAME_READ_SPACING: i64 = 30_000;
-/// The prototype gave up on an answer after this long.
+/// How long an answer holds up the next read, as long as the prototype waited.
 pub(super) const ANSWER_WAIT: i64 = 6_000;
 /// Positions a game's GMCP gives when a command is unwelcome or can't run, by
 /// how the word starts: `Fight`, `Sleep`, `STUN!`, `DYING`.
@@ -70,13 +75,13 @@ struct Read {
     point: Point,
     due: bool,
     last_read: Option<Timestamp>,
+    /// Answers sent for and not seen yet.
+    owed: u32,
 }
 
-/// How far an answer has come.
+/// An answer on its way in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Answer {
-    /// Sent, and nothing of it seen.
-    Awaited { read: usize },
     /// Its table is arriving.
     Arriving { read: usize },
     /// Its one line came, and its prompt should follow.
@@ -112,7 +117,11 @@ pub(super) struct QuietReads {
     in_game: bool,
     last_player_command: Option<Timestamp>,
     last_sent: Option<Timestamp>,
-    answer: Option<(Answer, Timestamp)>,
+    /// The read just sent, until [`ANSWER_WAIT`] or its answer.
+    waiting_since: Option<Timestamp>,
+    answer: Option<Answer>,
+    /// A pager prompt is the player's to answer.
+    at_pager: bool,
 }
 
 impl QuietReads {
@@ -139,6 +148,7 @@ impl QuietReads {
                     point,
                     due: self.in_game,
                     last_read: None,
+                    owed: 0,
                 }));
             }
             let gear = plugin.points.gear.iter();
@@ -148,6 +158,7 @@ impl QuietReads {
         self.reads = reads;
         self.gear_changes = gear_changes;
         self.answer = None;
+        self.waiting_since = None;
     }
 
     /// The command that reads `reader`'s table, for saying where data came
@@ -164,9 +175,22 @@ impl QuietReads {
         }
     }
 
-    /// The player sent something.
-    pub(super) fn player_acted(&mut self, now: Timestamp) {
+    /// The player sent `typed`. It answers a pager, and if it's a read's own
+    /// command, what comes next is theirs: an answer only waited on is let go.
+    pub(super) fn player_acted(&mut self, typed: &str, now: Timestamp) {
         self.last_player_command = Some(now);
+        self.at_pager = false;
+        if self.waiting_since.is_none()
+            && let Some(read) =
+                (self.reads.iter_mut()).find(|read| read.command.eq_ignore_ascii_case(typed.trim()))
+        {
+            read.owed = 0;
+        }
+    }
+
+    /// Whether the server is waiting at a pager prompt no read will answer.
+    pub(super) fn pager_waiting(&mut self, waiting: bool) {
+        self.at_pager = waiting;
     }
 
     /// The player asked for the character's tables again.
@@ -185,21 +209,21 @@ impl QuietReads {
 
     /// Whether a read is on its way or waiting for its moment.
     pub(super) fn is_busy(&self) -> bool {
-        self.answer.is_some() || self.reads.iter().any(|read| read.due)
+        self.answer.is_some()
+            || self.waiting_since.is_some()
+            || self.reads.iter().any(|read| read.due)
     }
 
     /// Whether the text arriving now is an answer's.
     pub(super) fn is_hiding(&self) -> bool {
-        matches!(
-            self.answer,
-            Some((Answer::Arriving { .. } | Answer::Closing, _))
-        )
+        self.answer.is_some()
     }
 
     /// The command to send now, if any. It counts as sent.
     pub(super) fn next(&mut self, moment: Moment<'_>, now: Timestamp) -> Option<String> {
-        self.give_up_on_answer(now);
-        if self.answer.is_some() || !self.game_can_spare_one(moment, now) {
+        self.stop_waiting_after(now);
+        let busy = self.answer.is_some() || self.waiting_since.is_some();
+        if busy || !self.game_can_spare_one(moment, now) {
             return None;
         }
         let spaced = |last: Option<Timestamp>, by: i64| last.is_none_or(|at| now.0 - at.0 >= by);
@@ -211,15 +235,16 @@ impl QuietReads {
         let read = &mut self.reads[at];
         read.due = false;
         read.last_read = Some(now);
+        read.owed += 1;
         self.last_sent = Some(now);
-        self.answer = Some((Answer::Awaited { read: at }, now));
+        self.waiting_since = Some(now);
         Some(read.command.clone())
     }
 
     /// Reads a line's events, and says whether it stays out of the chat.
     pub(super) fn read_line(&mut self, seen: Seen<'_>, now: Timestamp) -> bool {
-        self.give_up_on_answer(now);
-        let hidden = self.hides(seen, now);
+        self.stop_waiting_after(now);
+        let hidden = self.hides(seen);
         for event in seen.events {
             if event.point == Point::Gear && self.gear_changes.iter().any(|n| *n == *event.name) {
                 self.gear_changed();
@@ -249,19 +274,17 @@ impl QuietReads {
             let position = position.trim().to_lowercase();
             !position.is_empty() && !BUSY_POSITIONS.iter().any(|busy| position.starts_with(busy))
         });
-        self.in_game && idle && at_ease && !moment.typing && !moment.echo_off && !moment.in_fight
+        let free = !moment.typing && !moment.echo_off && !moment.in_fight && !self.at_pager;
+        self.in_game && idle && at_ease && free
     }
 
-    fn give_up_on_answer(&mut self, now: Timestamp) {
-        if self
-            .answer
-            .is_some_and(|(_, since)| now.0 - since.0 >= ANSWER_WAIT)
-        {
-            self.answer = None;
+    fn stop_waiting_after(&mut self, now: Timestamp) {
+        if (self.waiting_since).is_some_and(|since| now.0 - since.0 >= ANSWER_WAIT) {
+            self.waiting_since = None;
         }
     }
 
-    fn hides(&mut self, seen: Seen<'_>, now: Timestamp) -> bool {
+    fn hides(&mut self, seen: Seen<'_>) -> bool {
         let named = |read: usize, part: &str| {
             let reader = &self.reads[read].reader;
             seen.events.iter().any(|event| {
@@ -271,31 +294,35 @@ impl QuietReads {
                     .is_some_and(|(name, ending)| name == reader && ending == part)
             })
         };
-        let Some((answer, _)) = self.answer else {
-            return false;
-        };
-        match answer {
-            Answer::Awaited { read } if named(read, STARTED) => {
-                let done = named(read, ENDED) || named(read, CUT);
-                self.answer = (!done).then_some((Answer::Arriving { read }, now));
-                true
-            }
-            Answer::Awaited { read } if named(read, NO_TABLE) => {
-                self.answer = Some((Answer::Closing, now));
-                true
-            }
-            Answer::Awaited { .. } => seen.blank,
-            Answer::Arriving { read } if named(read, ENDED) || named(read, CUT) => {
+        match self.answer {
+            Some(Answer::Arriving { read }) if named(read, ENDED) || named(read, CUT) => {
                 self.answer = None;
                 !(seen.prompt && seen.glued)
             }
-            Answer::Arriving { .. } => {
-                self.answer = self.answer.map(|(answer, _)| (answer, now));
-                true
-            }
-            Answer::Closing => {
+            Some(Answer::Arriving { .. }) => true,
+            Some(Answer::Closing) => {
                 self.answer = None;
                 seen.blank || (seen.prompt && !seen.glued)
+            }
+            None => {
+                let owed = (0..self.reads.len()).filter(|&read| self.reads[read].owed > 0);
+                let answered = owed
+                    .clone()
+                    .find(|&read| named(read, STARTED) || named(read, NO_TABLE));
+                let Some(read) = answered else {
+                    return seen.blank && self.waiting_since.is_some();
+                };
+                let answer = if !named(read, STARTED) {
+                    Some(Answer::Closing)
+                } else if named(read, ENDED) || named(read, CUT) {
+                    None
+                } else {
+                    Some(Answer::Arriving { read })
+                };
+                self.answer = answer;
+                self.reads[read].owed -= 1;
+                self.waiting_since = None;
+                true
             }
         }
     }
@@ -488,7 +515,7 @@ mod tests {
     #[test]
     fn a_read_waits_until_the_player_has_been_idle() {
         let mut reads = reads();
-        reads.player_acted(Timestamp(10_000));
+        reads.player_acted("look", Timestamp(10_000));
         assert_eq!(reads.next(AT_EASE, Timestamp(14_999)), None);
         assert!(reads.next(AT_EASE, Timestamp(15_000)).is_some());
     }
@@ -589,12 +616,57 @@ mod tests {
     }
 
     #[test]
-    fn a_table_that_stalls_stops_hiding_what_follows() {
+    fn a_table_that_stalls_stays_hidden_until_it_ends() {
         let mut reads = reads();
         reads.next(AT_EASE, Timestamp(0));
         reads.read_line(line(&[event("stats.start")]), Timestamp(1_000));
-        assert!(reads.read_line(line(&[]), Timestamp(6_000)));
-        assert!(!reads.read_line(line(&[]), Timestamp(12_000)));
+        assert!(reads.read_line(line(&[]), Timestamp(60_000)));
+        assert!(reads.read_line(prompt(&[event("stats.end")]), Timestamp(60_000)));
+        assert!(!reads.read_line(line(&[]), Timestamp(60_000)));
+    }
+
+    #[test]
+    fn an_answer_past_the_wait_frees_the_queue_and_stays_hidden() {
+        let mut reads = reads();
+        assert_eq!(reads.next(AT_EASE, Timestamp(0)).unwrap(), "stats");
+        let later = Timestamp(30_000);
+        assert_eq!(reads.next(AT_EASE, later).unwrap(), "spells", "not held up");
+        assert!(
+            reads.read_line(line(&[event("stats.start")]), later),
+            "late"
+        );
+        assert!(reads.read_line(prompt(&[event("stats.end")]), later));
+        assert!(reads.read_line(line(&[event("spells.start")]), later));
+        assert!(reads.read_line(prompt(&[event("spells.end")]), later));
+        assert!(
+            !reads.read_line(line(&[event("stats.start")]), later),
+            "theirs"
+        );
+    }
+
+    #[test]
+    fn a_lost_answer_cant_swallow_a_table_the_player_asks_for() {
+        let mut reads = reads();
+        reads.reads.iter_mut().for_each(|read| read.due = false);
+        reads.reads[0].due = true;
+        reads.next(AT_EASE, Timestamp(0));
+        reads.player_acted("STATS ", Timestamp(1_000));
+        assert_eq!(reads.reads[0].owed, 1, "ours is first in line, still");
+        let later = Timestamp(30_000);
+        reads.read_line(line(&[]), later);
+        reads.player_acted("look", later);
+        assert_eq!(reads.reads[0].owed, 1);
+        reads.player_acted("stats", later);
+        assert!(!reads.read_line(line(&[event("stats.start")]), later));
+    }
+
+    #[test]
+    fn a_pager_the_player_is_reading_holds_the_reads() {
+        let mut reads = reads();
+        reads.pager_waiting(true);
+        assert_eq!(reads.next(AT_EASE, Timestamp(0)), None);
+        reads.player_acted("c", Timestamp(0));
+        assert_eq!(reads.next(AT_EASE, Timestamp(5_000)).unwrap(), "stats");
     }
 
     #[test]
