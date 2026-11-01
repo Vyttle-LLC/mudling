@@ -815,6 +815,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn picking_by_keyboard_in_review_leaves_focus_off_a_join_that_is_not_there(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = duplicated_view(cx);
+        let first = view.read_with(cx, |view, _| view.model.first_room());
+        view.update(cx, |view, cx| view.go_to(first, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| view.pick_selected(window, cx));
+        click_on("Review duplicates", cx);
+        view.update(cx, |view, cx| view.go_to(first + 1, cx));
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, cx| view.pick_selected(window, cx));
+        cx.run_until_parked();
+
+        view.update_in(cx, |view, window, _| {
+            assert!(view.model.reviewing());
+            assert_eq!(view.model.picks().len(), 1, "nothing was picked");
+            assert!(!view.join_button.is_focused(window));
+            assert!(
+                view.review_first.is_focused(window),
+                "focus stayed in Review"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn a_refused_join_leaves_the_keyboard_on_a_control_that_is_there(cx: &mut TestAppContext) {
         let (view, cx) = duplicated_view(cx);
         pick_two_by_keyboard(&view, cx);

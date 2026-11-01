@@ -29,11 +29,15 @@ pub fn bind_keys(cx: &mut App) {
 
 impl MapView {
     /// Picks the room shown, as the keyboard's way to Shift-click. With a
-    /// second room picked, focus goes to Join.
+    /// second room picked, focus goes to Join. Review has no map to pick
+    /// from and no Join to go to, so it does nothing there.
     pub fn pick_selected(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         let Some(room) = self.model.selection().map(|selection| selection.room) else {
             return;
         };
+        if self.model.reviewing() {
+            return;
+        }
         self.model.pick(room);
         if self.model.picked_pair().is_some() {
             window.focus(&self.join_button, cx);
