@@ -114,7 +114,7 @@ impl Points {
         rules
     }
 
-    pub(super) fn readers(&self) -> Vec<(Point, &TableReader)> {
+    pub(crate) fn readers(&self) -> Vec<(Point, &TableReader)> {
         let character = self.character.iter().flat_map(|point| &point.readers);
         let gear = self
             .gear

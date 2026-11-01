@@ -84,7 +84,7 @@ impl Verbs {
 
     /// `target` comes from the server, so it can't be trusted to be one word
     /// of one command: anything past a line or chain break is dropped.
-    fn command(&self, verb: &str, target: &str) -> String {
+    pub fn command(&self, verb: &str, target: &str) -> String {
         let word = self.0.get(verb).map_or(verb, String::as_str);
         let target = target
             .split(['\n', '\r', CHAIN_SEPARATOR])

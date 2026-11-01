@@ -1,8 +1,10 @@
 # The commands that re-read the character in the background, the table
 # that answers each, and the messages about skills. With no `end`, the next
-# prompt ends a table. The client sends them when the character enters the
-# game, after a level-up (practice, slist), when affects may have changed
-# (aff), and after a gear change (equipment); slist only changes with level.
+# prompt ends a table. The client sends each when the character enters the
+# game, and when a rule named `<reader>.stale` matches: after a level-up
+# (score, practice, slist), when affects may have changed (aff), and when a
+# skill improves (practice). A gear change asks for `equipment`, the Gear
+# point's table.
 
 [[command]]
 command = "score"
@@ -76,7 +78,8 @@ name = "character.skill_practiced"
 pattern = '''You practice (?<skill>.+?) with .+?\. Your current skill level is now (?<learned>\d+)\.'''
 hook = "on_practiced"
 
-# Improving through use, in ROM's wording; the new percent isn't given.
+# Improving through use, in ROM's wording; the new percent isn't given, so
+# it asks for `practice` again.
 [[skill_improved]]
-name = "character.skill_improved"
+name = "practice.stale"
 pattern = '''You have become better at|You learn from your mistakes'''

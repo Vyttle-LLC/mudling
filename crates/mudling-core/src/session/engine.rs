@@ -7,6 +7,8 @@ use super::inventory::{self, Inventory};
 use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
+use super::quiet::{Moment, QuietReads, Seen};
+use super::sheet::Sheet;
 use super::values::{self, HubView};
 use super::{MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
@@ -32,9 +34,10 @@ use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
 use crate::store::{
-    CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState,
-    MapRestore, MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub,
-    TargetState, TerminalChange, TerminalState, Versioned, VitalsState,
+    CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
+    CuesState, GearState, MapRestore, MapState, Memo, MobsState, RoomState, RulesState,
+    SettingsState, SheetState, StoreHub, TargetState, TerminalChange, TerminalState, Versioned,
+    VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
@@ -73,6 +76,7 @@ struct Link {
     inventory: Inventory,
     inventory_asked: bool,
     game: GameFeed,
+    quiet: QuietReads,
     latency: Latency,
     login: Option<Login>,
     variety: CommandVariety,
@@ -138,7 +142,10 @@ pub struct Engine {
     map: LiveMap,
     walk: WalkSyntax,
     link: Option<Link>,
-    character_id: String,
+    /// The sheet of the character [`Engine::playing`] names.
+    sheet: Sheet,
+    /// The command field holds text the player hasn't sent.
+    typing_text: bool,
     settings: SettingsState,
     rules: RulesState,
     /// The triggers in the matcher: those on, for this character.
@@ -206,10 +213,6 @@ impl Engine {
                 .notices
                 .push(format!("couldn't read the command history: {error}")),
         }
-        let character_id = config.credentials.as_ref().map_or_else(
-            || UNNAMED_CHARACTER.to_owned(),
-            |credentials| credentials.name.to_lowercase(),
-        );
         let mut batch = Batch::new();
         batch.upsert(Server {
             id: config.host.clone(),
@@ -220,9 +223,9 @@ impl Engine {
             updated: now,
         });
         batch.upsert(Character {
-            id: character_id.clone(),
+            id: UNNAMED_CHARACTER.to_owned(),
             server_id: config.host.clone(),
-            name: character_id.clone(),
+            name: UNNAMED_CHARACTER.to_owned(),
             updated: now,
         });
         // Playing on a server the player removed puts it back on their list.
@@ -242,7 +245,8 @@ impl Engine {
             plugins,
             walk,
             link: None,
-            character_id,
+            sheet: Sheet::default(),
+            typing_text: false,
             settings,
             rules: RulesState::default(),
             running_triggers: Vec::new(),
@@ -302,6 +306,8 @@ impl Engine {
         for plugin in &self.config.approved {
             hooks.set_approved(plugin, true);
         }
+        let mut quiet = QuietReads::default();
+        quiet.declare(&self.plugins);
         self.link = Some(Link {
             parser: telnet::Parser::new(),
             pipeline: LinePipeline::new(self.encoding()),
@@ -309,6 +315,7 @@ impl Engine {
             inventory: Inventory::default(),
             inventory_asked: false,
             game: GameFeed::default(),
+            quiet,
             latency: Latency::default(),
             login: self.new_login(),
             variety: CommandVariety::default(),
@@ -325,9 +332,10 @@ impl Engine {
         self.publish_settings();
         // Each connection starts unnamed. Until the game says who plays, it's
         // who's logging in, if anyone is.
-        self.playing = (self.config.credentials.as_ref())
+        let logging_in = (self.config.credentials.as_ref())
             .map(|credentials| credentials.name.to_lowercase())
             .unwrap_or_default();
+        self.character_named(logging_in, Timestamp::now());
         if let Some(credentials) = self
             .config
             .credentials
@@ -387,9 +395,8 @@ impl Engine {
     /// What the player typed. With echo off it's a password: it goes to the
     /// server as typed, and nowhere else.
     pub fn send(&mut self, typed: &str, now: Timestamp) {
-        if self.link.is_none() {
-            return;
-        }
+        let Some(link) = &mut self.link else { return };
+        link.quiet.player_acted(now);
         if self.settings.echo_off {
             write_line(typed, self.encoding(), &mut self.output);
             return;
@@ -407,7 +414,8 @@ impl Engine {
     /// A command the player pressed. With echo off it would go as a password,
     /// so it does nothing. It isn't typing: history doesn't keep it.
     pub fn press(&mut self, command: &str, now: Timestamp) {
-        if self.link.is_some() && !self.settings.echo_off {
+        if let Some(link) = self.link.as_mut().filter(|_| !self.settings.echo_off) {
+            link.quiet.player_acted(now);
             self.show_pending();
             self.show(Line::command(command));
             self.issue_expanded(command, now);
@@ -474,10 +482,41 @@ impl Engine {
         }
     }
 
+    /// The player has text in the command field, or no longer has.
+    pub fn set_typing(&mut self, typing: bool) {
+        self.typing_text = typing;
+    }
+
+    /// Reads the character's tables again as soon as the game can spare it.
+    pub fn refresh_character(&mut self) {
+        if let Some(link) = &mut self.link {
+            link.quiet.refresh();
+        }
+    }
+
+    /// Time passed: sends the next quiet read, if it's due and the game can
+    /// spare it. Nothing else sends one, so a replay never does. A quiet read
+    /// is no command of the player's, so it skips what theirs go through:
+    /// the chat, the map's reckoning, the latency clock and history.
+    pub fn tick(&mut self, now: Timestamp) {
+        let encoding = self.encoding();
+        let Some(link) = &mut self.link else { return };
+        let moment = Moment {
+            typing: self.typing_text,
+            echo_off: self.settings.echo_off,
+            in_fight: link.game.in_fight(),
+            position: link.game.position(),
+        };
+        if let Some(command) = link.quiet.next(moment, now) {
+            write_line(&command, encoding, &mut self.output);
+        }
+    }
+
     /// Publishes what changed since the last settle: the stores, and the
     /// rows for the database. A move's map work finishes here.
     pub fn settle(&mut self, now: Timestamp) {
         self.take_hook_outputs(now);
+        self.publish_sheet();
         let mut notices = Vec::new();
         if let Some(link) = &mut self.link {
             for (plugin, turned_off) in link.hooks.turn_off_overrunning(&mut self.plugins) {
@@ -523,6 +562,16 @@ impl Engine {
         self.submit(batch);
         self.autosave_map(now);
         self.tell_of_landed_versions();
+    }
+
+    fn publish_sheet(&mut self) {
+        let quiet = self.link.as_ref().map(|link| &link.quiet);
+        self.sheet
+            .set_reading(quiet.is_some_and(QuietReads::is_busy));
+        let change = (self.sheet).take_change(|reader| quiet?.command_of(reader));
+        if let Some(sheet) = change {
+            self.hub.write::<SheetState>(sheet);
+        }
     }
 
     fn autosave_map(&mut self, now: Timestamp) {
@@ -743,6 +792,15 @@ impl Engine {
                 self.read_lines(now);
                 if let Some(line) = line {
                     self.plugins.end_tables_at_signal(&line, &mut self.events);
+                    if let Some(link) = &mut self.link {
+                        let ended = Seen {
+                            events: &self.events,
+                            prompt: true,
+                            glued: false,
+                            blank: false,
+                        };
+                        link.quiet.read_line(ended, now);
+                    }
                     self.route_events(now);
                 }
             }
@@ -771,7 +829,8 @@ impl Engine {
 
     /// Reads each finished line once: defaults, plugins, login, the map, the
     /// plugins' events, then the terminal. A prompt it opens with ends the
-    /// open tables, and the plugins read what's glued after it.
+    /// open tables, and the plugins read what's glued after it. A quiet
+    /// read's answer stops at the plugins: no trigger, map or chat sees it.
     fn read_lines(&mut self, now: Timestamp) {
         let encoding = self.encoding();
         let mut lines = std::mem::take(&mut self.lines);
@@ -792,11 +851,22 @@ impl Engine {
             let coloring = self
                 .plugins
                 .read_line_from(&line, output_at, &mut self.events);
-            let response = self.trigger_response();
+            let seen = Seen {
+                events: &self.events,
+                prompt: prompt.is_some(),
+                glued: output_at > 0,
+                blank: text.trim().is_empty(),
+            };
+            let quiet = link.quiet.read_line(seen, now);
+            let response = if quiet {
+                TriggerResponse::default()
+            } else {
+                self.trigger_response()
+            };
             let Some(link) = &mut self.link else { return };
             answer_login(&mut link.login, text, encoding, &mut self.output);
             let body = &text[prompt.unwrap_or(0)..];
-            if prompt.is_none() || !body.is_empty() {
+            if !quiet && (prompt.is_none() || !body.is_empty()) {
                 self.map.line(body, now);
             }
             self.route_events(now);
@@ -815,7 +885,7 @@ impl Engine {
             // isn't shown again, hidden or not.
             let already_shown = std::mem::take(&mut link.pending_shown);
             self.sounds.extend(response.sounds);
-            if response.hides {
+            if quiet || response.hides {
                 continue;
             }
             let prompt_len = prompt.filter(|_| hud_repeats_it).unwrap_or(0);
@@ -889,6 +959,8 @@ impl Engine {
         let action = link.defaults.read_pending(&pending, kind);
         match action {
             PendingAction::Wait => {}
+            // A key sent now would land in the password box.
+            PendingAction::Send(_) if self.settings.echo_off => {}
             PendingAction::Send(key) => {
                 write_line(&key, encoding, &mut self.output);
                 self.plugins.pager_answered();
@@ -907,10 +979,19 @@ impl Engine {
             self.hub.write::<CharactersState>(CharactersState(entries));
         }
         let heard = link.game.read(package, json);
+        // The first room means the character is in the game. Asking for the
+        // modules again has a server send their values, which it may not
+        // have done when the character came in.
+        let entered_game = !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info");
+        if entered_game {
+            link.inventory_asked = true;
+            link.quiet.entered_game();
+            gmcp::encode(inventory::ASK, "", &mut self.output);
+            self.ask_for_modules();
+        }
         self.contents_changed |= heard.contents;
         if let Some(HookValue::Text(name)) = heard.character.get(CHARACTER_NAME) {
-            self.playing = name.to_lowercase();
-            self.character_renamed = true;
+            self.character_named(name.to_lowercase(), now);
         }
         if !heard.character.is_empty() {
             let lasting = heard
@@ -918,27 +999,13 @@ impl Engine {
                 .iter()
                 .filter(|(key, _)| *key != CHARACTER_POSITION);
             for (key, value) in lasting {
-                self.batch.upsert(persist::CharacterStat {
-                    character_id: self.character_id.clone(),
-                    key: key.clone(),
-                    value: values::to_row(value),
-                    updated: now,
-                });
+                self.keep_character_value(key, value, now);
             }
             self.hub
                 .write::<CharactersState>(CharactersState(heard.character));
         }
         if let Some(target) = heard.target {
             self.hub.write::<TargetState>(target);
-        }
-        // The first room means the character is in the game. Asking for the
-        // modules again has a server send their values, which it may not
-        // have done when the character came in.
-        let entered_game = !link.inventory_asked && package.eq_ignore_ascii_case("Room.Info");
-        if entered_game {
-            link.inventory_asked = true;
-            gmcp::encode(inventory::ASK, "", &mut self.output);
-            self.ask_for_modules();
         }
         let Some(link) = &self.link else { return };
         let learned = link.defaults.hud.has_learned();
@@ -1053,6 +1120,7 @@ impl Engine {
         let Some(link) = &mut self.link else { return };
         link.pipeline.set_encoding(encoding);
         link.login = login;
+        link.quiet.declare(&self.plugins);
         self.subscribe_gmcp();
         self.run_aliases();
         self.rules.separator = self.plugins.settings().separator.clone();
@@ -1217,12 +1285,12 @@ impl Engine {
         }
     }
 
-    /// Loads the map, the mobs and the plugin stores from the database,
-    /// under the rules of the plugins on now.
+    /// Loads the map, the mobs and the gear stores from the database, under
+    /// the rules of the plugins on now. A character's rows wait for the
+    /// connection to name them: see [`Engine::character_named`].
     fn load_saved(&mut self) -> Result<(), SessionError> {
         let reader = self.database.reader()?;
         let (rows, marks, meta) = (reader.map()?, reader.mob_marks()?, reader.meta()?);
-        let stats = reader.characters()?.stats;
         let rules = Box::new(PluginRules::of(&self.plugins));
         self.map = LiveMap::load(rules, &rows, &marks, &meta);
 
@@ -1239,19 +1307,6 @@ impl Engine {
             mobs.marks.extend(names.map(|name| (mark, name.clone())));
         }
         self.hub.write::<MobsState>(mobs);
-        let character = CharactersState(
-            stats
-                .iter()
-                .filter(|stat| stat.character_id == self.character_id)
-                .filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?)))
-                .collect(),
-        );
-        let had_affects = !character.affects().is_empty();
-        self.hub.write::<CharactersState>(character);
-        if had_affects {
-            self.hub
-                .write::<CharactersState>(CharactersState::no_affects());
-        }
         let gear = meta
             .iter()
             .filter_map(|entry| {
@@ -1329,7 +1384,7 @@ impl Engine {
     /// what follows it joins it for the plugins, the map and the learner.
     fn show_pending(&mut self) {
         let Some(link) = &mut self.link else { return };
-        let Some(pending) = link.pipeline.pending() else {
+        let Some(pending) = link.pipeline.pending().filter(|_| !link.quiet.is_hiding()) else {
             return;
         };
         if pending.plain[link.pending_shown..].trim().is_empty() {
@@ -1364,12 +1419,11 @@ impl Engine {
         if key == CHARACTER_NAME
             && let HookValue::Text(name) = &value
         {
-            self.playing = name.to_lowercase();
-            self.character_renamed = true;
+            self.character_named(name.to_lowercase(), now);
         }
-        let row = values::to_row(&value);
-        let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
+            let row = values::to_row(&value);
+            let change = BTreeMap::from([(key.clone(), value)]);
             self.hub.write::<GearState>(GearState(change));
             self.batch.upsert(persist::Meta {
                 key: format!("{}{key}", values::GEAR_META_PREFIX),
@@ -1377,14 +1431,76 @@ impl Engine {
                 updated: now,
             });
         } else {
+            self.keep_character_value(&key, &value, now);
+            let change = BTreeMap::from([(key, value)]);
             self.hub.write::<CharactersState>(CharactersState(change));
+        }
+    }
+
+    /// Saves a value about the character: in its typed table if it has one,
+    /// or as a stat. Until the connection names them, it's nobody's.
+    fn keep_character_value(&mut self, key: &str, value: &HookValue, now: Timestamp) {
+        let split = key.split_once('.').unwrap_or((key, ""));
+        let character = match self.playing.as_str() {
+            "" => UNNAMED_CHARACTER,
+            playing => playing,
+        };
+        let typed =
+            !self.playing.is_empty() && (self.sheet).keep(split, value, now, &mut self.batch);
+        if !typed {
             self.batch.upsert(persist::CharacterStat {
-                character_id: self.character_id.clone(),
-                key,
-                value: row,
+                character_id: character.to_owned(),
+                key: key.to_owned(),
+                value: values::to_row(value),
                 updated: now,
             });
         }
+    }
+
+    /// This connection said who plays. Their saved rows take over the sheet,
+    /// and nothing of whoever played before stays on it. Reads the disk,
+    /// once a character.
+    fn character_named(&mut self, id: String, now: Timestamp) {
+        self.character_renamed |= self.playing != id;
+        self.playing = id;
+        if self.sheet.character() == self.playing {
+            return;
+        }
+        if self.playing.is_empty() {
+            self.sheet = Sheet::default();
+            self.publish_sheet();
+            return;
+        }
+        let saved = (self.database.reader())
+            .and_then(|reader| reader.characters())
+            .unwrap_or_else(|error| {
+                self.settings
+                    .notices
+                    .push(format!("couldn't load the character: {error}"));
+                persist::CharacterRows::default()
+            });
+        self.batch.upsert(Character {
+            id: self.playing.clone(),
+            server_id: self.config.host.clone(),
+            name: self.playing.clone(),
+            updated: now,
+        });
+        self.sheet = Sheet::of(&self.playing, &saved);
+        // What hooks read back, and the HUD's level: whoever played before
+        // has theirs replaced, or blanked.
+        let mut values: BTreeMap<String, HookValue> =
+            BTreeMap::from([(CHARACTER_LEVEL.to_owned(), HookValue::Text(String::new()))]);
+        let mine = saved
+            .stats
+            .iter()
+            .filter(|stat| stat.character_id == self.playing);
+        values.extend(
+            mine.filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?))),
+        );
+        self.hub.write::<CharactersState>(CharactersState(values));
+        self.hub
+            .write::<CharactersState>(CharactersState::no_affects());
+        self.publish_sheet();
     }
 
     /// Who is playing, by id: what a rule for one character names. Empty

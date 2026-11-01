@@ -10,7 +10,7 @@
 //! The chat text is made up for this file: it comes from no real session.
 
 use crate::assets::{Assets, load_fonts};
-use crate::dock::{DockState, Side};
+use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::sample_map;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
@@ -519,6 +519,18 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    for (name, tab) in [("character", Slot::Character), ("skills", Slot::Skills)] {
+        for (mode, appearance) in [("dark", Dark), ("light", Light)] {
+            render(
+                &format!("{name}-tab-{mode}"),
+                appearance,
+                WIDE,
+                move |shell, _, cx| {
+                    crate::measure::open_sheet_tab(shell, tab, cx);
+                },
+            );
+        }
+    }
     render("find-panel-dark", Dark, WIDE, |shell, window, cx| {
         open_find_panel(shell, None, window, cx);
     });

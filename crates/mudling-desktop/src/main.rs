@@ -6,7 +6,8 @@
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
-//!                            [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]]
+//!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
+//!                            [--skills-open] [--sample-map <rooms>]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -24,7 +25,8 @@
 //! report (see `measure`); `--settings-open` measures it with the settings
 //! sheet open, `--hud` with the HUD in that place, `--find-open` with the find
 //! bar open and results showing, `--find-panel` with the Find panel showing and
-//! being typed in, `--notes-open` with a note being typed in the Notes tab, and
+//! being typed in, `--notes-open` with a note being typed in the Notes tab,
+//! `--character-open` and `--skills-open` with that tab showing a sample, and
 //! `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
@@ -42,6 +44,7 @@ macro_rules! secondary {
 }
 
 mod assets;
+mod character_panel;
 mod chat;
 mod dock;
 mod dpad;
@@ -62,6 +65,7 @@ mod room_panel;
 mod session_bar;
 mod settings;
 mod shell;
+mod skills_panel;
 mod sound;
 mod status;
 mod stream;
@@ -70,6 +74,7 @@ mod title_bar;
 #[cfg(all(test, target_os = "macos"))]
 mod window_images;
 
+use dock::Slot;
 use futures::channel::mpsc;
 use futures::future::{self, Either};
 use gpui::{
@@ -97,7 +102,8 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
-                     [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]] [--ax-check]";
+                     [--find-open] [--find-panel] [--notes-open] [--character-open] [--skills-open] \
+                     [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -120,6 +126,7 @@ struct Options {
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
+    sheet_tab: Option<Slot>,
     sample_map: Option<i64>,
     ax_check: bool,
 }
@@ -305,6 +312,7 @@ fn main() -> ExitCode {
                         find_open: options.find_open,
                         find_panel: options.find_panel,
                         notes_open: options.notes_open,
+                        sheet_tab: options.sheet_tab,
                     },
                     cx,
                 );
@@ -467,6 +475,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         find_open: false,
         find_panel: false,
         notes_open: false,
+        sheet_tab: None,
         sample_map: None,
         ax_check: false,
     };
@@ -509,6 +518,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--find-open" => options.find_open = true,
             "--find-panel" => options.find_panel = true,
             "--notes-open" => options.notes_open = true,
+            "--character-open" => options.sheet_tab = Some(Slot::Character),
+            "--skills-open" => options.sheet_tab = Some(Slot::Skills),
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

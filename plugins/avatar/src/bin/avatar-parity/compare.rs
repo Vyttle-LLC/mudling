@@ -218,13 +218,10 @@ fn compare_flat(
 }
 
 fn compare_people(prototype: &World, mudling: &World, out: &mut Differences) {
-    let names: BTreeSet<&String> = prototype
-        .characters
-        .keys()
-        .chain(mudling.characters.keys())
-        .collect();
+    // A second character logging in on one connection has a record of their
+    // own here, and none in the prototype: docs/parity.md says who.
     let empty = BTreeMap::new();
-    for name in names {
+    for name in prototype.characters.keys() {
         compare_flat(
             name,
             prototype.characters.get(name).unwrap_or(&empty),

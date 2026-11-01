@@ -8,8 +8,8 @@ use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
     CharactersState, CuesState, Diff, GearState, MapState, MobsState, RoomState, RulesState,
-    SettingsState, Store, StoreHub, StoreKind, TargetState, TerminalChange, TerminalState,
-    Versioned, VitalsState,
+    SettingsState, SheetState, Store, StoreHub, StoreKind, TargetState, TerminalChange,
+    TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -26,6 +26,7 @@ pub enum StoreKind {
     Map,
     Mobs,
     Characters,
+    Sheet,
     Target,
     Gear,
     Settings,
@@ -108,6 +109,7 @@ impl Session {
             map,
             mobs,
             characters,
+            sheet,
             target,
             gear,
             settings,
@@ -121,6 +123,7 @@ impl Session {
             map.map(MapState::diff),
             mobs.map(MobsState::diff),
             characters.map(CharactersState::diff),
+            sheet.map(SheetState::diff),
             target.map(TargetState::diff),
             gear.map(GearState::diff),
             settings.map(SettingsState::diff),
@@ -166,6 +169,10 @@ macro_rules! with_store {
             }
             StoreKind::Characters => {
                 type $S = CharactersState;
+                $body
+            }
+            StoreKind::Sheet => {
+                type $S = SheetState;
                 $body
             }
             StoreKind::Target => {
@@ -309,6 +316,16 @@ impl FieldStore for MobsState {
             .iter()
             .map(|(mark, name)| (name.clone(), mark.name().to_owned()))
             .collect()
+    }
+}
+
+impl FieldStore for SheetState {
+    fn fields(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("character".to_owned(), self.character.clone()),
+            ("skills".to_owned(), self.skills.len().to_string()),
+            ("reading".to_owned(), self.reading.to_string()),
+        ])
     }
 }
 

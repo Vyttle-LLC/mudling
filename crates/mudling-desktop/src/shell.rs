@@ -10,6 +10,7 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 use crate::assets::UI_FONT;
+use crate::character_panel::{CharacterPanel, RefreshCharacter};
 use crate::chat::{self, Chat, CloseFind, column_width};
 use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
@@ -26,6 +27,7 @@ use crate::notes::{Host, NoteEdit, Notes, NotesEvent, NotesPanel, RoomCard};
 use crate::room_panel::{MarkMob, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
+use crate::skills_panel::{self, SkillsPanel};
 use crate::sound::Speaker;
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
@@ -49,7 +51,7 @@ use mudling_core::plugin::PluginId;
 use mudling_core::session::{MapEdit, RuleEdit, Session};
 use mudling_core::store::{
     CharactersState, ConnectionStatus, CuesState, MapState, MobsState, RoomState, RulesState,
-    SettingsState, StoreHub, TargetState, Versioned, VitalsState,
+    SettingsState, SheetState, StoreHub, TargetState, Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use std::collections::VecDeque;
@@ -99,6 +101,9 @@ pub fn bind_keys(cx: &mut App) {
         // Outranks the field's own Tab for being bound after it.
         KeyBinding::new("tab", FocusNext, Some(&find_panel::field_context())),
         KeyBinding::new("escape", FocusCommandBar, Some(find_panel::CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(skills_panel::CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(&skills_panel::field_context())),
+        KeyBinding::new("escape", FocusCommandBar, Some(skills_panel::CONTEXT)),
     ]);
     crate::notes::bind_keys(cx);
 }
@@ -162,6 +167,7 @@ struct Copies {
     settings: Versioned<SettingsState>,
     vitals: Versioned<VitalsState>,
     characters: Versioned<CharactersState>,
+    sheet: Versioned<SheetState>,
     target: Versioned<TargetState>,
     room: Versioned<RoomState>,
     mobs: Versioned<MobsState>,
@@ -178,6 +184,7 @@ impl Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             vitals: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             characters: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            sheet: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             target: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
@@ -240,6 +247,12 @@ pub struct Shell {
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
     room_panel: Entity<RoomPanel>,
+    character_panel: Entity<CharacterPanel>,
+    skills_panel: Entity<SkillsPanel>,
+    /// What the session last heard about the command field.
+    told_of_typing: bool,
+    /// A sample fills the Character and Skills tabs, not the stores.
+    sheet_held: bool,
     /// The map in the left panel, and the small one in the Room panel.
     map: Entity<MapView>,
     map_inset: Entity<MapView>,
@@ -261,7 +274,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 15],
+    _subscriptions: [Subscription; 17],
     _woken: Task<()>,
 }
 
@@ -283,7 +296,10 @@ impl Shell {
         let typing = cx.subscribe_in(&input, window, |shell, _, event, window, cx| {
             shell.on_typing(event, window, cx);
         });
-        let edited = cx.observe(&input, |shell, _, cx| shell.show_alias_preview(cx));
+        let edited = cx.observe(&input, |shell, _, cx| {
+            shell.show_alias_preview(cx);
+            shell.tell_of_typing(cx);
+        });
         let hotbar = cx.new(Hotbar::new);
         let chips = cx.subscribe_in(&hotbar, window, |shell, _, event, window, cx| {
             shell.on_hotbar(event, window, cx);
@@ -291,6 +307,15 @@ impl Shell {
         let verbs = game.as_ref().map(|game| game.verbs.clone());
         let room_panel = cx.new(|cx| RoomPanel::new(verbs.unwrap_or_default(), cx));
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
+            shell.on_panel_command(sent, window, cx);
+        });
+        let character_panel = cx.new(CharacterPanel::new);
+        let refreshed = cx.subscribe_in(&character_panel, window, Self::on_refresh);
+        let skills_panel = cx.new(|cx| {
+            let verbs = game.as_ref().map(|game| game.verbs.clone());
+            SkillsPanel::new(verbs.unwrap_or_default(), cx)
+        });
+        let practiced = cx.subscribe_in(&skills_panel, window, |shell, _, sent, window, cx| {
             shell.on_panel_command(sent, window, cx);
         });
         let find_stores = stores.map(FindStores::subscribed).unwrap_or_default();
@@ -426,6 +451,10 @@ impl Shell {
             left_dock,
             right_dock,
             room_panel,
+            character_panel,
+            skills_panel,
+            told_of_typing: false,
+            sheet_held: false,
             map,
             map_inset,
             find_panel,
@@ -445,6 +474,8 @@ impl Shell {
                 edited,
                 chips,
                 verb_sent,
+                refreshed,
+                practiced,
                 focus_lost,
                 appearance,
                 quitting,
@@ -462,7 +493,10 @@ impl Shell {
         shell.show_status(cx);
         shell.show_room(cx);
         shell.show_rules(cx);
+        shell.show_sheet(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
+        shell.mount(Slot::Character, shell.character_panel.clone(), cx);
+        shell.mount(Slot::Skills, shell.skills_panel.clone(), cx);
         shell.mount(Slot::Find, shell.find_panel.clone(), cx);
         shell.mount(Slot::Notes, shell.notes_panel.clone(), cx);
         shell.mount_maps(cx);
@@ -683,10 +717,14 @@ impl Shell {
         self.chat = cx.new(|_| Chat::new(terminal));
         self.room_panel
             .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
+        self.skills_panel
+            .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
         self.settings
             .update(cx, |sheet, cx| sheet.show_plugins(game.plugins.clone(), cx));
         self.show_room(cx);
         self.show_rules(cx);
+        self.show_sheet(cx);
+        self.told_of_typing = false;
         game.session.connect();
         self.game = Some(game);
         self.input.update(cx, |input, cx| {
@@ -908,6 +946,8 @@ impl Shell {
                 .update(cx, |hotbar, cx| hotbar.set_locked(masked, cx));
             self.find_panel
                 .update(cx, |panel, cx| panel.set_locked(masked, cx));
+            self.skills_panel
+                .update(cx, |panel, cx| panel.set_locked(masked, cx));
         }
         if let Some(rules) = &batch.rules {
             self.copies.rules.apply_diff(rules);
@@ -919,6 +959,9 @@ impl Shell {
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
         }
+        if let Some(sheet) = &batch.sheet {
+            self.copies.sheet.apply_diff(sheet);
+        }
         if let Some(target) = &batch.target {
             self.copies.target.apply_diff(target);
         }
@@ -928,6 +971,13 @@ impl Shell {
             || batch.target.is_some()
         {
             self.show_status(cx);
+        }
+        if batch.vitals.is_some()
+            || batch.settings.is_some()
+            || batch.characters.is_some()
+            || batch.sheet.is_some()
+        {
+            self.show_sheet(cx);
         }
         if let Some(room) = &batch.room {
             self.copies.room.apply_diff(room);
@@ -1035,6 +1085,63 @@ impl Shell {
         }
     }
 
+    /// Tells the session whether the command field holds text, when that
+    /// changes: quiet reads wait while it does.
+    fn tell_of_typing(&mut self, cx: &mut Context<Shell>) {
+        let typing = !self.input.read(cx).content().is_empty();
+        if self.told_of_typing != typing {
+            self.told_of_typing = typing;
+            if let Some(game) = &self.game {
+                game.session.set_typing(typing);
+            }
+        }
+    }
+
+    fn on_refresh(
+        &mut self,
+        _: &Entity<CharacterPanel>,
+        refresh: &RefreshCharacter,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        if let Some(game) = &self.game {
+            game.session.refresh_character();
+        }
+        if !refresh.by_keyboard {
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
+    }
+
+    fn show_sheet(&self, cx: &mut Context<Shell>) {
+        if self.sheet_held {
+            return;
+        }
+        let copies = &self.copies;
+        self.show_sheet_of(
+            copies.sheet.value(),
+            copies.characters.value(),
+            copies.vitals.value(),
+            copies.settings.value(),
+            cx,
+        );
+    }
+
+    /// Fills the Character and Skills tabs.
+    pub fn show_sheet_of(
+        &self,
+        sheet: &SheetState,
+        characters: &CharactersState,
+        vitals: &VitalsState,
+        settings: &SettingsState,
+        cx: &mut Context<Shell>,
+    ) {
+        self.character_panel.update(cx, |panel, cx| {
+            panel.show(sheet, characters, vitals, settings, cx);
+        });
+        self.skills_panel
+            .update(cx, |panel, cx| panel.show(sheet, cx));
+    }
+
     fn show_room(&mut self, cx: &mut Context<Shell>) {
         let (room, mobs) = (self.copies.room.value(), self.copies.mobs.value());
         self.room_panel.update(cx, |panel, cx| {
@@ -1102,6 +1209,13 @@ impl Shell {
     fn forget_the_session(&mut self, cx: &mut Context<Shell>) {
         self.map_history = Self::new_history(None, &SettingsState::default(), cx);
         self.use_maps_of(None, cx);
+        self.show_sheet_of(
+            &SheetState::default(),
+            &CharactersState::default(),
+            &VitalsState::default(),
+            &SettingsState::default(),
+            cx,
+        );
         self.show_problems(&SettingsState::default(), cx);
         self.settings.update(cx, |sheet, cx| {
             sheet.show_plugins(Vec::new(), cx);
@@ -1376,6 +1490,12 @@ impl Shell {
 
     pub fn hud(&self) -> Entity<Hud> {
         self.hud.clone()
+    }
+
+    /// Leaves the Character and Skills tabs to [`Shell::show_sheet_of`] from
+    /// now on.
+    pub fn hold_sheet(&mut self) {
+        self.sheet_held = true;
     }
 
     /// Leaves the HUD to [`Shell::show_sample_hud`] from now on.
@@ -2759,6 +2879,27 @@ pub mod tests {
             })
         })
         .expect("the plugin loads")
+    }
+
+    #[gpui::test]
+    fn the_session_hears_when_the_command_field_fills_and_empties(cx: &mut TestAppContext) {
+        let (_waker, woken) = unbounded();
+        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(None, woken, window, cx));
+        cx.run_until_parked();
+        shell.update_in(cx, |shell, window, cx| {
+            shell.input.update(cx, |input, cx| {
+                input.show("lo".to_owned(), 2, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(shell.told_of_typing));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.input.update(cx, |input, cx| {
+                input.show(String::new(), 0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| assert!(!shell.told_of_typing));
     }
 
     #[gpui::test]

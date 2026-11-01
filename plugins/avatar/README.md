@@ -44,6 +44,15 @@ or `count` key. The client answers the pager with `c` while a table is open.
 A table that ends with its pager unanswered, or with the connection, is cut
 short and sends nothing; a last page with no rows was still answered.
 
+## Quiet reads
+
+The core sends `character.toml`'s `[[command]]`s in the background and keeps
+their answers out of the chat. `crates/mudling-core/src/session/quiet.rs` has
+the rules. Two names matter to it, and neither needs anything but a rule's
+name: a rule named `<reader>.stale` asks for that reader's command again, and
+one named `<reader>.none` is a one-line answer that isn't a table. A rule of
+the Gear point's `wear` and `remove` lists asks for the Gear point's command.
+
 ## Events
 
 Each match is a `PluginEvent` named below, its named captures as data. Hooks
@@ -66,11 +75,12 @@ The rest are single lines:
 
 | Point | Event | Captures | Line |
 | --- | --- | --- | --- |
-| Text | `character.affects.none` † | | `You are not under the affects of any spells` |
-| Text | `character.affects_changed` | | `You feel …`, `… wears off` |
+| Text | `affects.none` † | | `You are not under the affects of any spells`: `aff`'s answer when nothing's on |
+| Text | `affects.stale` | | `You feel …`, `… wears off` |
+| Text | `score.stale`, `practice.stale`, `slist.stale` | | `You raise a level!! …` |
 | Text | `map.area` | `low`, `high`, `name` | `{10  15} Dev     Sarphyre's Court` |
 | Character | `character.skill_practiced` † | `skill`, `learned` | `You practice dodge with Ulric. Your current skill level is now 45.` |
-| Character | `character.skill_improved` | | `You have become better at …` (ROM wording) |
+| Character | `practice.stale` | | `You have become better at …` (ROM wording) |
 | Gear | `gear.wore` † | `item`; `on`, `part` for wear | `You wear …`, `You hold …`, `You light … and hold it.`, `You wield …` |
 | Gear | `gear.removed` † | `item` | `You stop using a round shield.` |
 | Gear | `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
@@ -92,6 +102,9 @@ Hooks write booleans, numbers and strings as `StoreWrite`s. A table's
 writes arrive together, its `read` or `count` key last: a store applies the
 batch when that key arrives. An item's *plain name* is its name without
 tags such as `(Glowing)`, spaces collapsed, in lowercase.
+
+The core keeps `skills` and `affects` per character in its typed tables, and
+the rest as the character's stats (`crates/mudling-core/src/session/sheet.rs`).
 
 **`character`**, from `score`:
 

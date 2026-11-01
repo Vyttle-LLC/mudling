@@ -15,6 +15,7 @@ use crate::map::{
     Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
 };
 use crate::net::DisconnectReason;
+use crate::persist::Timestamp;
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
 use crate::scrollback::Scrollback;
@@ -310,6 +311,62 @@ impl CharactersState {
     }
 }
 
+/// One skill or spell on the sheet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkillRow {
+    pub name: String,
+    /// The level the character can learn it at.
+    pub level: Option<i64>,
+    /// How well it's learned, 0–100.
+    pub learned: Option<i64>,
+    /// Above 0 it's a spell.
+    pub mana: Option<i64>,
+}
+
+impl SkillRow {
+    pub fn named(name: &str) -> SkillRow {
+        SkillRow {
+            name: name.to_owned(),
+            ..SkillRow::default()
+        }
+    }
+}
+
+/// A skill that just got better.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Improved {
+    pub skill: String,
+    pub learned: i64,
+    pub at: Timestamp,
+}
+
+/// What this connection's character looks like: their saved rows, then what
+/// the game says as it plays. Empty until the connection names them, and
+/// never another character's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SheetState {
+    /// By id; empty until this connection names them.
+    pub character: String,
+    /// By the key after `character.`: `str`, `str_perm`, `gold`.
+    pub stats: BTreeMap<String, Value>,
+    /// By name.
+    pub skills: Vec<SkillRow>,
+    /// Sessions left to spend.
+    pub practices: Option<i64>,
+    /// As last read and saved. On a connection, [`CharactersState::affects`]
+    /// is the live list.
+    pub affects: Vec<Affect>,
+    /// The commands behind the stats and affects.
+    pub sources: Vec<String>,
+    /// When a table last updated the stats or affects.
+    pub character_read: Option<Timestamp>,
+    /// When a table last updated the skills.
+    pub skills_read: Option<Timestamp>,
+    pub improved: Option<Improved>,
+    /// A quiet read is on its way or waiting for its moment.
+    pub reading: bool,
+}
+
 /// The player's room, as the map last placed them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoomState {
@@ -506,7 +563,14 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, TargetState, SettingsState, RulesState);
+whole_value_stores!(
+    RoomState,
+    MobsState,
+    TargetState,
+    SettingsState,
+    RulesState,
+    SheetState,
+);
 
 #[cfg(test)]
 mod tests {

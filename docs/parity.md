@@ -55,7 +55,7 @@ empty. All 95 are used.
 | | Rooms | Links | Maze squares | Characters |
 | --- | --- | --- | --- | --- |
 | Prototype's code | 1,637 | 3,194 | 8 | 4 |
-| MUDling | 1,637 | 3,194 | 8 | 4 |
+| MUDling | 1,637 | 3,194 | 8 | 5 |
 | Saved world | 1,459 | 3,022 | 2 | 4 |
 
 The final maps match in every field the checker compares (exits, links,
@@ -65,9 +65,20 @@ identify reading MUDling keeps is one the prototype has, though it keeps only
 the latest for an item's words, below.
 
 Everything is read from the final database and the final baseline, nothing
-from partway through. Characters' `score`, skills, affects and worn items are
-the plugin's own stores, as their stats rows. The typed `skills`, `affects`
-and `worn` tables have no rows yet: filling them is Phase 5's.
+from partway through. Characters' `score` facts are stats rows, and skills and
+affects come from the typed `skills` and `affects` tables, per character.
+Worn items are still the plugin's own store, as stats rows.
+
+The fifth character is Eiri, who logs in once, after Benjamina on the same
+connection in `session-20261026-230829`. A character's records follow what
+the connection says, so Eiri has their own. The prototype has no such record,
+so Eiri isn't compared.
+
+A replay sends no quiet reads, as it has no game to answer them: only
+`Engine::tick` sends one, and the checker doesn't call it. So quiet reads don't
+change any reading here, and the 126 `character.skill` and 47 score differences
+stay. All of those are rows MUDling has and the prototype doesn't, and no
+change on MUDling's side would close them but losing the rows.
 
 Room ids don't match, and aren't compared: the prototype spends two on Lost in
 the Dark Woods before it works out that's a maze, where the plugin declares
@@ -100,6 +111,8 @@ Not compared, on purpose:
 | `updated` and sighting times | The replay's clock isn't the session's. |
 | The map's next id and island count | Bookkeeping; ids aren't compared, and positions show any effect of islands. |
 | Skills' `practice.sessions`, `practice.read`, `slist.read` and `score.read` | The plugin's own counts, with no prototype field. |
+| Stats `ac`, `alignment`, `damroll` and `hitroll` | MUDling keeps them from Char.Status for the Character panel. The prototype shows them live and keeps no record of them. |
+| A character only MUDling has | See Eiri, above. |
 
 The differences these replaced were fixed, not excused:
 
