@@ -11,6 +11,8 @@ pub type RoomId = i64;
 pub mod feature {
     /// An aggressive mob has been seen here.
     pub const AGGRESSIVE_MOB: &str = "aggressive-mob";
+    /// A fountain lies here.
+    pub const FOUNTAIN: &str = "fountain";
     /// Important gear is here.
     pub const GEAR: &str = "gear";
 }
@@ -77,6 +79,17 @@ impl MapRoom {
             features: BTreeSet::new(),
             sightings: BTreeMap::new(),
         }
+    }
+
+    /// Whether the two differ only in what's been noted about the room, so
+    /// neither its area nor its place in the map's shape changed.
+    pub(super) fn same_shape(&self, other: &MapRoom) -> bool {
+        self.zone == other.zone
+            && self.indoor == other.indoor
+            && self.position == other.position
+            && self.building == other.building
+            && self.links == other.links
+            && self.doorways == other.doorways
     }
 
     /// Doors in four or more directions: each a way into a story of its own.

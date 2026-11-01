@@ -19,6 +19,7 @@
 //! window and quits, and `--shot-fit <path.png>` frames the whole map first.
 
 use super::{MapLayout, MapView, Selection, Walk};
+use crate::assets;
 use crate::measure;
 use crate::theme::Theme;
 use gpui::{
@@ -325,7 +326,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
-/// Runs the harness; the rest of `main` is the chat.
+/// Runs the harness, in the background like `main`'s checks; the rest of
+/// `main` is the chat.
 pub fn run(args: &[String]) -> ExitCode {
     let options = match parse_options(args) {
         Ok(options) => options,
@@ -344,7 +346,13 @@ pub fn run(args: &[String]) -> ExitCode {
         let built_ms = started.elapsed().as_secs_f64() * 1e3;
         measure::mark(&format!("info synthetic_map_ms={built_ms:.1}"));
     }
-    gpui_platform::application().run(move |cx: &mut App| {
+    // Like a check, the harness never comes forward: the player may be
+    // working. See `main`.
+    let application = gpui_platform::application().with_assets(assets::Assets);
+    #[cfg(target_os = "macos")]
+    let application = application.with_windowing(gpui::WindowingRequest::Headless);
+    application.run(move |cx: &mut App| {
+        assets::load_fonts(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
         let bounds = Bounds::centered(None, WINDOW, cx);
         let window_options = WindowOptions {
@@ -353,6 +361,9 @@ pub fn run(args: &[String]) -> ExitCode {
                 ..TitlebarOptions::default()
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            focus: false,
+            // macOS shows it only once `macos::show_unseen` has hidden it.
+            show: !cfg!(target_os = "macos"),
             // A measured run draws every frame even if another app has focus.
             inactive_frame_interval: if options.measured_run {
                 None
@@ -378,7 +389,9 @@ pub fn run(args: &[String]) -> ExitCode {
                 return;
             }
         };
-        cx.activate(true);
+        #[cfg(target_os = "macos")]
+        crate::macos::show_unseen(cx);
+        measure::fail_if_frames_stop(window.into(), cx);
         let Ok(map) = window.update(cx, |harness, _, _| harness.map.clone()) else {
             return;
         };

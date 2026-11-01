@@ -1,7 +1,8 @@
 //! Runs the Avatar plugin the way the client will, through the public
 //! plugin API only: server text through the line pipeline, each line
 //! through the plugin host, and each event naming a hook through the Luau
-//! hooks. The fixture tests and the log replay share it.
+//! hooks. The fixture tests and the log replay share it. [`bundled`] is the
+//! plugin itself, for an app to ship.
 
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
@@ -9,6 +10,7 @@ use mudling_core::plugin::luau::{
 };
 use mudling_core::plugin::{PendingKind, Plugin, PluginEvent, PluginHost};
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,12 +23,37 @@ pub fn load() -> Plugin {
     Plugin::load(plugin_dir()).unwrap_or_else(|error| panic!("{error}"))
 }
 
+/// The plugin compiled in, from the same files as its folder.
+pub fn bundled() -> Plugin {
+    Plugin::from_files(|file| {
+        let text = match file {
+            "plugin.toml" => include_str!("../plugin.toml"),
+            "text.toml" => include_str!("../text.toml"),
+            "commands.toml" => include_str!("../commands.toml"),
+            "connection.toml" => include_str!("../connection.toml"),
+            "character.toml" => include_str!("../character.toml"),
+            "gear.toml" => include_str!("../gear.toml"),
+            "map.toml" => include_str!("../map.toml"),
+            "mobs.toml" => include_str!("../mobs.toml"),
+            "hud.toml" => include_str!("../hud.toml"),
+            "readers.luau" => include_str!("../readers.luau"),
+            "character.luau" => include_str!("../character.luau"),
+            "gear.luau" => include_str!("../gear.luau"),
+            _ => return Err(io::ErrorKind::NotFound.into()),
+        };
+        Ok(text.to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
 /// One connection's text through the plugin.
 pub struct Session {
     pipeline: LinePipeline,
     host: PluginHost,
     hooks: HookRunner,
-    /// Pager prompts seen, each one the client would answer.
+    /// Answers the pager while a table is open, as the client does.
+    answers_pager: bool,
+    /// Pager prompts seen.
     pub pager_prompts: usize,
 }
 
@@ -47,7 +74,16 @@ impl Session {
             pipeline: LinePipeline::default(),
             host,
             hooks,
+            answers_pager: true,
             pager_prompts: 0,
+        }
+    }
+
+    /// A session that leaves every pager prompt unanswered.
+    fn not_answering_the_pager() -> Session {
+        Session {
+            answers_pager: false,
+            ..Session::new()
         }
     }
 
@@ -67,6 +103,9 @@ impl Session {
             Some(PendingKind::Prompt) => lines.extend(self.pipeline.prompt_end()),
             Some(PendingKind::Pager { .. }) => {
                 self.pager_prompts += 1;
+                if self.answers_pager {
+                    self.host.pager_answered();
+                }
                 self.pipeline.push(b"\n", &mut lines);
             }
             None => self.pipeline.push(b"\n", &mut lines),
@@ -99,7 +138,15 @@ pub struct Transcript {
 impl Transcript {
     /// Reads `text`, one server line per line, through a new session.
     pub fn of(text: &str) -> Transcript {
-        let mut session = Session::new();
+        Transcript::read(text, Session::new())
+    }
+
+    /// Reads `text` with no one answering the pager.
+    pub fn unanswered(text: &str) -> Transcript {
+        Transcript::read(text, Session::not_answering_the_pager())
+    }
+
+    fn read(text: &str, mut session: Session) -> Transcript {
         let mut transcript = Transcript::default();
         for line in text.lines() {
             session.read_line(line, &mut |event, outputs| {
@@ -127,11 +174,16 @@ impl Transcript {
             .collect()
     }
 
-    /// Every output that isn't a store write, such as a failed hook.
+    /// Every output the plugin shouldn't produce, such as a failed hook.
     pub fn problems(&self) -> Vec<&HookOutput> {
         self.outputs
             .iter()
-            .filter(|output| !matches!(output, HookOutput::StoreWrite(_)))
+            .filter(|output| {
+                !matches!(
+                    output,
+                    HookOutput::StoreWrite(_) | HookOutput::RefreshInventory
+                )
+            })
             .collect()
     }
 

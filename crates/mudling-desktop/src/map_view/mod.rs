@@ -14,7 +14,7 @@ mod model;
 mod paint;
 mod sheet;
 
-use crate::chat::MONO_FONT;
+use crate::assets::HEADING_FONT;
 use crate::theme::{MapColors, Theme};
 use gpui::{
     Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -277,8 +277,8 @@ impl MapView {
                     .min_w_0()
                     .child(
                         div()
-                            .font_family(MONO_FONT)
-                            .font_weight(FontWeight::BOLD)
+                            .font_family(HEADING_FONT)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_size(px(22.))
                             .text_color(colors.heading)
                             .child(title),

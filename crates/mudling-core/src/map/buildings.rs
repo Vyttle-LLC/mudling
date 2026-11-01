@@ -105,6 +105,69 @@ impl Layout {
         }
     }
 
+    /// Puts every building back on its area's grid, at its first door, and
+    /// redraws the areas, lifting out again only what can't be drawn
+    /// otherwise, with mazes as one square and stories as wings. Run on
+    /// load: what's learned since a building was lifted can undo the reason.
+    pub(super) fn rebuild_buildings(&mut self) {
+        let buildings: BTreeSet<RoomId> = self.buildings().collect();
+        for building in buildings {
+            let members: BTreeSet<RoomId> =
+                self.building_members(building).iter().copied().collect();
+            let shift = self.door_shift(&members).unwrap_or_default();
+            for id in members {
+                self.update(id, |room| {
+                    room.building = None;
+                    room.position = room.position + shift;
+                });
+            }
+        }
+        let ids: Vec<RoomId> = {
+            let ids: BTreeSet<RoomId> = self.rooms().map(|room| room.id).collect();
+            ids.into_iter().collect()
+        };
+        for id in &ids {
+            if self.contains(*id) {
+                self.collapse_maze(*id);
+            }
+        }
+        self.assign_wings();
+        let mut straightened = HashSet::new();
+        let mut may_be_misdrawn = self.rooms_leading_to_misdrawing();
+        for id in ids {
+            if straightened.contains(&id) || !may_be_misdrawn.contains(&id) {
+                continue;
+            }
+            if let Some(area) = self.misdrawn_area(id) {
+                let moved = self.straighten(&area);
+                self.note_moved_rooms(&moved, &mut may_be_misdrawn);
+                straightened.extend(self.flat_area_around(id));
+            }
+        }
+    }
+
+    /// How far to move a building's rooms to put the room inside its first
+    /// door one square from the outdoor room it opens from.
+    fn door_shift(&self, members: &BTreeSet<RoomId>) -> Option<GridPoint> {
+        for inside in members.iter().filter_map(|id| self.room(*id)) {
+            for direction in Direction::FLAT {
+                let Some(outside) = inside
+                    .links
+                    .get_copied(direction)
+                    .and_then(|to| self.room(to))
+                else {
+                    continue;
+                };
+                if outside.building.is_none() && outside.zone == inside.zone {
+                    return Some(
+                        outside.position + direction.opposite().offset() - inside.position,
+                    );
+                }
+            }
+        }
+        None
+    }
+
     /// Whether indoor rooms are a way into another area: a room with a door
     /// from this area's outdoors that also leads straight on elsewhere.
     pub(super) fn is_area_entrance(&self, members: &BTreeSet<RoomId>) -> bool {

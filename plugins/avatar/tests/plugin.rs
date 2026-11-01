@@ -3,7 +3,6 @@
 
 use mudling_core::line::LinePipeline;
 use mudling_core::plugin::luau::{HookLimits, HookOutput, LuauHooks, StateView, Value};
-use mudling_core::plugin::points::TableReader;
 use mudling_core::plugin::{Layer, PluginHost, ServerInfo};
 use mudling_plugin_avatar::load;
 use std::collections::HashMap;
@@ -28,6 +27,7 @@ fn loads_with_every_pattern_compiled_and_every_hook_defined() {
     }));
     // A host compiles every pattern together; a session loads every hook.
     PluginHost::new([plugin]).unwrap_or_else(|error| panic!("{error}"));
+    PluginHost::new([mudling_plugin_avatar::bundled()]).unwrap_or_else(|error| panic!("{error}"));
     mudling_plugin_avatar::Session::new();
 }
 
@@ -54,7 +54,7 @@ fn the_clients_hook_worker_loads_the_hooks_and_runs_them() {
     }
     hooks.wait_until_idle();
     let count = received.try_iter().find_map(|output| match output {
-        HookOutput::StoreWrite(write) if write.store == "equipment" && write.key == "count" => {
+        HookOutput::StoreWrite(write) if write.store == "worn" && write.key == "count" => {
             Some(write.value)
         }
         _ => None,
@@ -63,37 +63,10 @@ fn the_clients_hook_worker_loads_the_hooks_and_runs_them() {
 }
 
 #[test]
-fn each_background_reader_is_the_text_patterns_of_its_name() {
+fn every_background_command_has_a_table_the_prompt_ends() {
     let plugin = load();
-    let text = plugin.points.text.as_ref().unwrap();
     let character = plugin.points.character.as_ref().unwrap();
-    let pattern = |name: &str| {
-        let rule = text.patterns.iter().find(|rule| rule.name.as_str() == name);
-        rule.unwrap_or_else(|| panic!("text.toml has no `{name}`"))
-            .clone()
-    };
-    for TableReader {
-        name,
-        start,
-        row,
-        end,
-        hook,
-    } in &character.readers
-    {
-        let events = if name == "equipment" {
-            "gear.equipment".to_owned()
-        } else {
-            format!("character.{name}")
-        };
-        let (start_rule, row_rule) = (
-            pattern(&format!("{events}.start")),
-            pattern(&format!("{events}.row")),
-        );
-        assert_eq!(start.as_str(), start_rule.pattern.as_str(), "{name}: start");
-        assert_eq!(row.as_str(), row_rule.pattern.as_str(), "{name}: row");
-        assert_eq!(hook.as_ref(), start_rule.hook.as_ref(), "{name}: hook");
-        assert!(end.is_none(), "{name}: the prompt ends it");
-    }
+    assert!(character.readers.iter().all(|reader| reader.end.is_none()));
     let commands: Vec<(&str, &str)> = character
         .commands
         .iter()

@@ -17,7 +17,7 @@
 //! pending partial line, often a prompt; see [`LinePipeline::pending`]. It
 //! can't grow past [`MAX_LINE_BYTES`].
 
-use crate::ansi::{AnsiParser, Span};
+use crate::ansi::{AnsiParser, Span, Style};
 use std::sync::Arc;
 
 /// The most server bytes one line may hold. A server that sends more
@@ -53,7 +53,8 @@ impl Encoding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineEnd {
     Newline,
-    /// GA or EOR from the server, or a reader that recognized a prompt.
+    /// GA or EOR from the server, the connection going quiet, or a reader
+    /// that recognized a prompt.
     PromptEnd,
     /// The line reached [`MAX_LINE_BYTES`]; its text continues on the next,
     /// including an escape sequence the cut fell inside.
@@ -69,8 +70,10 @@ pub enum LineKind {
     Command,
 }
 
-/// A link or action over a byte range of a line's plain text. Nothing
-/// produces these yet; MXP and plugins will.
+/// A link or action over a byte range of a line's plain text. Plugins' link
+/// rules find them on request, through
+/// [`crate::plugin::PluginHost::links`]; nothing sets them on a line yet,
+/// which MXP will.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     pub start: u32,
@@ -94,6 +97,8 @@ struct LineData {
     links: Box<[Link]>,
     end: LineEnd,
     kind: LineKind,
+    /// Bytes of the plain text a prompt the HUD repeats takes up at its start.
+    prompt_len: u32,
 }
 
 impl Line {
@@ -108,10 +113,29 @@ impl Line {
         Line::build(self.raw(), self.plain(), styled, self.end(), self.kind())
     }
 
+    /// This line drawn in `style` from byte `at` of its plain text on, over
+    /// the styles it had there, for a trigger's highlight.
+    pub fn highlighted(&self, at: usize, style: Style) -> Self {
+        let offset = at as u32;
+        let before = self.styled().iter().filter(|span| span.start < offset);
+        let mut styled: Vec<Span> = before
+            .map(|span| Span {
+                end: span.end.min(offset),
+                ..*span
+            })
+            .collect();
+        styled.push(Span {
+            start: offset,
+            end: self.plain().len() as u32,
+            style,
+        });
+        Line::build(self.raw(), self.plain(), &styled, self.end(), self.kind())
+    }
+
     /// This line from byte `at` of its plain text on, for showing what
     /// follows a prompt. Escape codes aren't kept: the raw text is the plain
     /// text that's left.
-    pub fn from_plain_offset(&self, at: usize) -> Self {
+    pub fn after(&self, at: usize) -> Self {
         let offset = at as u32;
         let styled: Vec<Span> = self
             .styled()
@@ -125,6 +149,51 @@ impl Line {
             .collect();
         let plain = &self.plain()[at..];
         Line::build(plain, plain, &styled, self.end(), self.kind())
+    }
+
+    /// This line with its first `len` bytes of plain text marked as a prompt
+    /// the HUD repeats, which a shell may hide.
+    pub fn with_prompt(&self, len: usize) -> Self {
+        let mut line = Line::build(
+            self.raw(),
+            self.plain(),
+            self.styled(),
+            self.end(),
+            self.kind(),
+        );
+        Arc::get_mut(&mut line.0)
+            .expect("nothing else holds a line just built")
+            .prompt_len = len as u32;
+        line
+    }
+
+    /// How many bytes of [`Line::plain`] a prompt the HUD repeats takes up.
+    pub fn prompt_len(&self) -> usize {
+        self.0.prompt_len as usize
+    }
+
+    /// Whether this line is a prompt the HUD repeats and nothing else: only
+    /// whitespace may follow it, as a server often pads one.
+    pub fn is_only_prompt(&self) -> bool {
+        self.prompt_len() > 0 && self.plain()[self.prompt_len()..].trim().is_empty()
+    }
+
+    /// The text that shows, without a copy: from past a prompt the HUD repeats,
+    /// unless `prompts_shown`.
+    pub fn shown_text(&self, prompts_shown: bool) -> &str {
+        match prompts_shown {
+            true => self.plain(),
+            false => &self.plain()[self.prompt_len()..],
+        }
+    }
+
+    /// What's left with the prompt hidden, if anything.
+    pub fn without_prompt(&self) -> Option<Line> {
+        match self.prompt_len() {
+            0 => Some(self.clone()),
+            _ if self.is_only_prompt() => None,
+            at => Some(self.after(at)),
+        }
     }
 
     fn build(raw: &str, plain: &str, styled: &[Span], end: LineEnd, kind: LineKind) -> Self {
@@ -144,6 +213,7 @@ impl Line {
             links: Box::default(),
             end,
             kind,
+            prompt_len: 0,
         }))
     }
 
@@ -187,6 +257,22 @@ pub struct Pending<'a> {
     /// line keeps its number while it grows, so a reader can tell half a
     /// prompt split by the network from a new one.
     pub number: u64,
+}
+
+impl Pending<'_> {
+    /// The text so far from byte `at` of its plain text on, for showing
+    /// before the line ends. Only a display's line: the pipeline still
+    /// finishes the whole line for its readers.
+    pub fn shown_from(&self, at: usize) -> Line {
+        let whole = Line::build(
+            self.raw,
+            self.plain,
+            self.styled,
+            LineEnd::Cut,
+            LineKind::Server,
+        );
+        whole.after(at)
+    }
 }
 
 /// Turns one connection's server text into lines. Feed it the bytes of each
@@ -240,9 +326,16 @@ impl LinePipeline {
         self.append(rest, lines);
     }
 
+    /// Reads `text` as a whole line, for text something else already split.
+    pub fn push_line(&mut self, text: &[u8], lines: &mut Vec<Line>) {
+        self.push(text, lines);
+        self.push(b"\n", lines);
+    }
+
     /// The server marked a prompt (GA or EOR): the pending text is a whole
-    /// line. A reader that recognizes the pending text as a prompt (servers
-    /// that send no GA) calls this too. Returns `None` if nothing is pending.
+    /// line. The connection going quiet ends it the same way, as does a
+    /// reader that recognizes the pending text as a prompt (servers that send
+    /// no GA). Returns `None` if nothing is pending.
     pub fn prompt_end(&mut self) -> Option<Line> {
         if self.raw.is_empty() && self.utf8_tail.is_empty() {
             return None;
@@ -391,6 +484,25 @@ mod tests {
 
     fn plain_lines(chunks: &[&[u8]]) -> (Vec<String>, Option<String>) {
         run(&mut LinePipeline::default(), chunks)
+    }
+
+    #[test]
+    fn a_prompt_and_only_whitespace_is_only_a_prompt() {
+        let (lines, _) = plain_lines(&[b"<19hp> \n<19hp>   \n<19hp> You rest.\n"]);
+        assert_eq!(lines.len(), 3);
+        let mut finished = Vec::new();
+        LinePipeline::default().push(b"<19hp> \n<19hp>   \n<19hp> You rest.\n", &mut finished);
+        let marked: Vec<Line> = finished.iter().map(|line| line.with_prompt(6)).collect();
+        assert!(marked[0].is_only_prompt());
+        assert!(marked[1].is_only_prompt());
+        assert!(!marked[2].is_only_prompt());
+        assert_eq!(marked[1].without_prompt(), None);
+        assert_eq!(
+            marked[2]
+                .without_prompt()
+                .map(|line| line.plain().to_owned()),
+            Some(" You rest.".to_owned())
+        );
     }
 
     #[test]
@@ -612,9 +724,9 @@ mod tests {
     }
 
     #[test]
-    fn a_line_from_a_plain_offset_keeps_only_what_follows() {
+    fn a_line_after_an_offset_keeps_only_what_follows() {
         let (lines, _) = lines_and_pending(&[b"<1hp> \x1b[31mred\x1b[0m rest\n"]);
-        let rest = lines[0].from_plain_offset("<1hp> ".len());
+        let rest = lines[0].after("<1hp> ".len());
         assert_eq!((rest.raw(), rest.plain()), ("red rest", "red rest"));
         assert_eq!((rest.styled()[0].start, rest.styled()[0].end), (0, 3));
     }

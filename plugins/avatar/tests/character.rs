@@ -30,9 +30,88 @@ fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn the_login_greeting_names_the_character() {
+    for line in [
+        "Welcome back to the AVATAR System, Hero Bren.",
+        "Welcome back to the AVATAR System, Lady Bren.",
+        "Welcome back to the AVATAR System Bren, hope you get beyond level 10.",
+    ] {
+        let character = read(line).store("character");
+        assert_eq!(get(&character, "name"), &text("Bren"), "{line}");
+    }
+    let said = "A guard says 'Welcome back to the AVATAR System, Bren.'";
+    assert!(read(said).store("character").is_empty(), "only the login's");
+}
+
+#[test]
+fn a_heros_score_has_an_unknown_title_and_a_level_of_its_own() {
+    let score = read(
+        "(805h-272m-314v-1462)(-/-)You are Fen the unknown\n\
+         Level 51(14) Kzinti Monk    Exp/TNL:      96970/1462  .\n\
+         You are 17 years old (129 real life hours) .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "title"), &text("the unknown"));
+    assert_eq!(get(&score, "level"), &number(51.0));
+    assert_eq!(get(&score, "race"), &text("Kzinti"));
+    assert_eq!(get(&score, "age"), &number(17.0));
+
+    let capital = read(
+        "You are Fen The Lost\n\
+         Level 51(15) Gnome Cleric    Exp/TNL:      96970/1046  .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&capital, "title"), &text("The Lost"));
+}
+
+#[test]
+fn a_prompt_can_show_hit_points_below_zero() {
+    let score = read(
+        "$*(-10h-133m-104v-402)(-/-)You are Fen the Violent Fist\n\
+         Level 10 Harpy Monk    Exp/TNL:      14748/402  .\n\
+         $*(-10h-133m-104v-402)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "level"), &number(10.0));
+}
+
+#[test]
+fn a_race_can_be_two_words() {
+    let score = read(
+        "You are Fen the Sharp Initiate\n\
+         Level 4 Lesser Imp Monk    Exp/TNL:      400/1000  .\n\
+         (805h-272m-314v-1462)(-/-)",
+    )
+    .store("character");
+    assert_eq!(get(&score, "race"), &text("Lesser Imp"));
+    assert_eq!(get(&score, "class"), &text("Monk"));
+}
+
+#[test]
+fn a_custom_prompt_can_leave_a_space_before_the_next_line() {
+    let score = read(
+        "<44/50hp><117/117m><122/122mv>\n \
+         You are Fen the Violent Missionary\n\
+         Level 4 Harpy Monk    Exp/TNL:      400/1000  .\n\
+         <44/50hp><117/117m><122/122mv>",
+    )
+    .store("character");
+    assert_eq!(get(&score, "title"), &text("the Violent Missionary"));
+}
+
+#[test]
+fn room_text_is_no_score() {
+    let transcript = read("You are in the donation room for players level 1 through 10.");
+    assert!(transcript.store("character").is_empty());
+}
+
+#[test]
 fn score_fills_the_character() {
     let score = read(include_str!("fixtures/score.txt")).store("character");
     let expected = [
+        ("name", text("Tamsin")),
         ("title", text("the Quiet Attendant")),
         ("level", number(12.0)),
         ("race", text("Harpy")),
@@ -108,17 +187,29 @@ fn practice_reads_on_past_the_pager() {
 }
 
 #[test]
-fn practice_left_at_its_pager_is_not_sent() {
-    let transcript = read(include_str!("fixtures/practice-cut.txt"));
-    let skills = transcript.store("skills");
+fn practice_left_at_its_pager_is_cut_and_not_sent() {
+    let fixture = include_str!("fixtures/practice-cut.txt");
+    let cut = Transcript::unanswered(fixture);
+    assert!(cut.problems().is_empty(), "{:?}", cut.problems());
+    assert_eq!(cut.events("practice.cut", &[]).len(), 1);
+    assert_eq!(cut.events("practice.end", &[]).len(), 0);
+    let skills = cut.store("skills");
     assert!(
         skills.is_empty(),
         "a table cut short sends nothing: {skills:?}"
     );
     assert_eq!(
-        transcript.events("gear.equipment.start", &[]).len(),
+        cut.events("equipment.start", &[]).len(),
         1,
         "the next table still starts"
+    );
+
+    // The same lines with the pager answered: its last page held no rows.
+    let complete = read(fixture);
+    assert_eq!(complete.events("practice.end", &[]).len(), 1);
+    assert_eq!(
+        get(&complete.store("skills"), "practice.read"),
+        &number(4.0)
     );
 }
 
@@ -143,7 +234,7 @@ fn the_next_table_ends_one_whose_prompt_is_unknown() {
         "You are using:\n<worn on head>      a Tiamat mask\nhp:46 >\n\
          You have 1 practice sessions left.\ndodge               95   4   -    0\nhp:46 >",
     );
-    assert_eq!(get(&transcript.store("equipment"), "count"), &number(1.0));
+    assert_eq!(get(&transcript.store("worn"), "count"), &number(1.0));
     assert!(
         transcript.store("skills").is_empty(),
         "the last waits for a prompt or the next table"
@@ -186,6 +277,33 @@ fn slist_cuts_fixed_columns_and_reads_wrapped_rows() {
         "room text isn't a skill: {skills:?}"
     );
     assert_eq!(get(&skills, "slist.read"), &number(17.0));
+}
+
+#[test]
+fn a_line_that_is_no_row_ends_the_wrapped_rows() {
+    let skills = read(
+        "Spells and skills learnable by your class at the lower levels.\n \
+         50: mongoose technique            gurney\nYou are hungry.\n    \
+         {ALIGNED}\n(1h-1m-1v-1)(-/-)"
+            .replace("{ALIGNED}", &format!("{:>19}{:>18}", "Ancient", "Ruin"))
+            .as_str(),
+    )
+    .store("skills");
+    assert!(!skills.contains_key("Ancient.level"), "{skills:?}");
+    assert_eq!(get(&skills, "slist.read"), &number(2.0));
+}
+
+#[test]
+fn a_wrapped_row_reads_on_past_the_pager() {
+    let skills = read(
+        "Spells and skills learnable by your class at the lower levels.\n \
+         50: mongoose technique            gurney\n\
+         [B]ack,[H]elp,[R]efresh, or [C]ontinue:\n            \
+         demonstrate      transmogrify\n(1h-1m-1v-1)(-/-)",
+    )
+    .store("skills");
+    assert_eq!(get(&skills, "transmogrify.level"), &number(50.0));
+    assert_eq!(get(&skills, "slist.read"), &number(4.0));
 }
 
 #[test]

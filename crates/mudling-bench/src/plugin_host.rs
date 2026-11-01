@@ -317,8 +317,7 @@ pub(crate) fn split(source: &[String], count: usize) -> Vec<Line> {
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(count);
     for raw in source.iter().cycle().take(count) {
-        pipeline.push(raw.as_bytes(), &mut lines);
-        pipeline.push(b"\n", &mut lines);
+        pipeline.push_line(raw.as_bytes(), &mut lines);
     }
     lines
 }

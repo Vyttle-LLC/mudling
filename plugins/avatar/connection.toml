@@ -1,0 +1,17 @@
+# Avatar's login, each prompt answered once. Its prompts come unended, so
+# they're matched as pending text.
+
+# "What name shall you be known by, adventurer? "
+[[login]]
+pattern = '''What name shall you be known by'''
+send = "name"
+
+# "Your Password: "
+[[login]]
+pattern = '''(?i)\bpassword:'''
+send = "password"
+
+# "When you have read this, please press <RETURN> to continue ---->"
+[[login]]
+pattern = '''(?i)press <return>'''
+send = "blank"

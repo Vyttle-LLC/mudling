@@ -13,14 +13,22 @@ const KEPT_LINES: usize = 40;
 pub(super) struct RoomText {
     /// Recent lines, trimmed, newest last.
     recent: VecDeque<String>,
+    /// The newest exits line in `recent`, as a plugin's rule reported it.
+    exits: Option<usize>,
 }
 
 impl RoomText {
     pub fn read(&mut self, line: &str) {
         if self.recent.len() == KEPT_LINES {
             self.recent.pop_front();
+            self.exits = self.exits.and_then(|exits| exits.checked_sub(1));
         }
         self.recent.push_back(line.trim().to_owned());
+    }
+
+    /// The line just read lists the room's exits.
+    pub fn exits_read(&mut self) {
+        self.exits = self.recent.len().checked_sub(1);
     }
 
     /// The first description line printed for the room just entered, if
@@ -28,8 +36,12 @@ impl RoomText {
     /// may carry tags after the name ("A cave (Water)") or a prompt before
     /// it.
     pub fn take_description(&mut self, name: &str, rules: &dyn MapRules) -> String {
+        // Lines are kept trimmed, and a Room.Info's name can end in a space.
+        let name = name.trim();
         let recent = std::mem::take(&mut self.recent);
-        let Some(exits) = recent.iter().rposition(|line| rules.exits_line(line)) else {
+        let reported = self.exits.take();
+        let found = || recent.iter().rposition(|line| rules.exits_line(line));
+        let Some(exits) = reported.or_else(found) else {
             return String::new();
         };
         let Some(name_line) = recent.range(..exits).rev().find(|line| !line.is_empty()) else {

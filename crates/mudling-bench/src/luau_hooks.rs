@@ -7,6 +7,7 @@
 //! own cost is amortized over the lines that don't reach it: here a table row
 //! in every [`HOOKED_EVERY`] lines.
 
+use crate::verdict;
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::luau::{
     HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, OVERRUNS_TO_TURN_OFF, StateView, Value,
@@ -136,39 +137,32 @@ pub fn run() -> Report {
 }
 
 pub fn print(report: &Report) {
-    let verdict = if report.within_budget { "ok" } else { "MISSED" };
-    let summary = |s: &Summary| {
-        format!(
-            "p50 {:.2} µs, p99 {:.2} µs, max {:.1} µs",
-            s.p50_us, s.p99_us, s.max_us
-        )
-    };
     println!("luau hooks, {} calls each:", report.calls);
-    println!(
-        "  hand-off on the line thread: {}",
-        summary(&report.hand_off)
-    );
+    println!("  hand-off on the line thread: {}", report.hand_off);
     let overruns = |o: &Overruns| match &o.first {
         None => "no overruns".to_owned(),
         Some(first) => format!("{} overran (first: {first})", o.count),
     };
     println!(
         "  trivial hook on the worker: {}; {}",
-        summary(&report.trivial),
+        report.trivial,
         overruns(&report.trivial_overruns)
     );
     println!(
         "  column-splitting hook on the worker: {}; {}",
-        summary(&report.columns),
+        report.columns,
         overruns(&report.columns_overruns)
     );
     println!(
         "  an endless loop, stopped by the default budget: {}",
-        summary(&report.runaway_stopped)
+        report.runaway_stopped
     );
     println!(
-        "  column hook amortized over 1 line in {}: {:.2} µs p99 per line; budget ≤ {} µs: {verdict}",
-        report.hooked_every, report.columns_amortized_p99_us, report.plugin_budget_us
+        "  column hook amortized over 1 line in {}: {:.2} µs p99 per line; budget ≤ {} µs: {}",
+        report.hooked_every,
+        report.columns_amortized_p99_us,
+        report.plugin_budget_us,
+        verdict(report.within_budget)
     );
 }
 
@@ -302,8 +296,7 @@ fn rows() -> Vec<Line> {
                 )
             })
             .collect();
-        pipeline.push(cells.as_bytes(), &mut lines);
-        pipeline.push(b"\n", &mut lines);
+        pipeline.push_line(cells.as_bytes(), &mut lines);
     }
     lines
 }

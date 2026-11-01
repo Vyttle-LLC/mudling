@@ -22,7 +22,7 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the server stays silent before [`Event::Quiet`]: longer than the
 /// gap between two reads of one burst, short enough that a prompt with no GA
 /// shows at once.
-pub const QUIET_AFTER: Duration = Duration::from_millis(250);
+const QUIET_AFTER: Duration = Duration::from_millis(250);
 
 /// A fresh read buffer's size, allocated when the current one has less than
 /// `MIN_READ` left. It is reclaimed in place once the slices cut from it have
@@ -38,9 +38,9 @@ pub enum Event {
     Connected,
     /// The next bytes the server sent, in any chunking.
     Received(Bytes),
-    /// The server has said nothing for [`QUIET_AFTER`] since its last read.
-    /// Text left unended by now is likely a prompt, on a server that marks
-    /// prompts with neither GA nor GMCP.
+    /// The server has said nothing for a moment since its last read. Text
+    /// left unended by now is likely a prompt, on a server that marks prompts
+    /// with neither GA nor GMCP.
     Quiet,
     /// The connection closed.
     Closed(DisconnectReason),
@@ -250,7 +250,10 @@ mod tests {
         assert_eq!(last, Some(Event::Closed(DisconnectReason::ClosedByServer)));
     }
 
-    #[tokio::test(start_paused = true)]
+    /// On the real clock: a paused one jumps to the next timer whenever the
+    /// runtime is idle, which real sockets leave it while the OS catches up,
+    /// so it can reach the connect timeout before the connect is done.
+    #[tokio::test]
     async fn silence_after_a_read_is_reported_once() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -264,7 +267,7 @@ mod tests {
         server.write_all(b"Password: ").await.unwrap();
         assert!(matches!(events.recv().await, Some(Event::Received(_))));
         assert_eq!(events.recv().await, Some(Event::Quiet));
-        let more = tokio::time::timeout(QUIET_AFTER * 10, events.recv()).await;
+        let more = tokio::time::timeout(QUIET_AFTER * 3, events.recv()).await;
         assert!(more.is_err(), "quiet again without a read: {more:?}");
     }
 

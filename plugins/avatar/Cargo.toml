@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 mudling-core.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

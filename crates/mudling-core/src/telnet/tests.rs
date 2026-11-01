@@ -224,7 +224,7 @@ fn gmcp_round_trips_through_the_parser() {
 }
 
 #[test]
-#[ignore = "compares wall-clock times; mudling-bench-telnet measures this"]
+#[ignore = "compares wall-clock times; mudling-bench measures this"]
 fn a_32_kb_gmcp_message_parses_in_linear_time() {
     // 32× the size should take about 32× the time; quadratic collection (the
     // prototype's) would take about 1,000×. Small chunks make the split count

@@ -1,6 +1,8 @@
-//! Command chaining and speedwalk, as the prototype's `CommandChain` and
-//! `Speedwalk` did them, with the game's syntax from the Commands point.
+//! Command chaining, speedwalk and the spelling of repeated moves, as the
+//! prototype's `CommandChain`, `CommandVariety` and `Speedwalk` did them, with
+//! the game's syntax from the Commands point.
 
+use crate::map::Direction;
 use crate::plugin::PluginHost;
 use crate::plugin::points::Speedwalk;
 
@@ -45,42 +47,31 @@ pub fn chain_lines(commands: &[impl AsRef<str>], separator: Option<&str>) -> Vec
     lines
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    North,
-    East,
-    South,
-    West,
-    Up,
-    Down,
+/// Spells a move that repeats the last command the other way: north, n,
+/// north, n. Merc-derived games disconnect a player who sends one command too
+/// many times in a row, and a long walk is exactly that; both spellings are
+/// the same move.
+#[derive(Clone, Debug, Default)]
+pub struct CommandVariety {
+    last: Option<String>,
 }
 
-impl Direction {
-    fn from_letter(letter: char) -> Option<Direction> {
-        Some(match letter.to_ascii_lowercase() {
-            'n' => Direction::North,
-            'e' => Direction::East,
-            's' => Direction::South,
-            'w' => Direction::West,
-            'u' => Direction::Up,
-            'd' => Direction::Down,
-            _ => return None,
-        })
-    }
-
-    pub fn word(self) -> &'static str {
-        match self {
-            Direction::North => "north",
-            Direction::East => "east",
-            Direction::South => "south",
-            Direction::West => "west",
-            Direction::Up => "up",
-            Direction::Down => "down",
-        }
-    }
-
-    fn letter(self) -> &'static str {
-        &self.word()[..1]
+impl CommandVariety {
+    /// How to send `command`, given what went before it.
+    pub fn next(&mut self, command: &str) -> String {
+        let repeats = self
+            .last
+            .as_deref()
+            .is_some_and(|last| last.eq_ignore_ascii_case(command));
+        let sent = match Direction::parse(command).filter(|_| repeats) {
+            Some(direction) if command.eq_ignore_ascii_case(direction.name()) => {
+                direction.name()[..1].to_owned()
+            }
+            Some(direction) => direction.name().to_owned(),
+            None => command.to_owned(),
+        };
+        self.last = Some(sent.clone());
+        sent
     }
 }
 
@@ -124,7 +115,7 @@ impl WalkSyntax {
             self.open_door
                 .as_deref()
                 .unwrap_or(OPEN_DOOR)
-                .replace("{dir}", direction.word())
+                .replace("{dir}", direction.name())
         };
         let mut commands = Vec::new();
         let mut runs: Vec<(u32, Direction)> = Vec::new();
@@ -135,7 +126,7 @@ impl WalkSyntax {
             }
             match &self.speedwalk {
                 None => commands.extend(std::iter::repeat_n(
-                    step.direction.word().to_owned(),
+                    step.direction.name().to_owned(),
                     step.count as usize,
                 )),
                 Some(_) => match runs.last_mut() {
@@ -216,8 +207,8 @@ fn parse_step(text: &str) -> Option<(Step, &str)> {
         Some(rest) => (true, rest),
         None => (false, rest),
     };
-    let letter = rest.chars().next()?;
-    let direction = Direction::from_letter(letter)?;
+    let letter = rest.get(..1)?;
+    let direction = Direction::parse(letter)?;
     let rest = &rest[1..];
     let rest = if door { rest.strip_prefix(']')? } else { rest };
     Some((

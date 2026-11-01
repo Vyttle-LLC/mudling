@@ -52,17 +52,16 @@ impl Reader {
         }
     }
 
-    /// The reader an event opens a read of. "You are not affected by any"
-    /// is a whole read on its own line, so it opens none.
+    /// The reader an event opens a read of.
     fn started_by(event: &str) -> Option<Reader> {
         Some(match event {
-            "character.score.start" => Reader::Score,
-            "character.practice.start" => Reader::Practice,
-            "character.slist.start" => Reader::Slist,
-            "character.affects.start" => Reader::Affects,
-            "gear.equipment.start" => Reader::Equipment,
-            "gear.identify.named" | "gear.identify.object" => Reader::Identify,
-            "gear.examine.item" => Reader::Examine,
+            "score.start" => Reader::Score,
+            "practice.start" => Reader::Practice,
+            "slist.start" => Reader::Slist,
+            "affects.start" => Reader::Affects,
+            "equipment.start" => Reader::Equipment,
+            "identify.start" => Reader::Identify,
+            "examine.start" => Reader::Examine,
             _ => return None,
         })
     }
@@ -74,22 +73,11 @@ impl Reader {
             ("skills", "practice.read") => Reader::Practice,
             ("skills", "slist.read") => Reader::Slist,
             ("affects", "count") => Reader::Affects,
-            ("equipment", "count") => Reader::Equipment,
+            ("worn", "count") => Reader::Equipment,
             ("identify", "read") => Reader::Identify,
             ("gear", key) if key.starts_with("slot.") => Reader::Examine,
             _ => return None,
         })
-    }
-
-    /// A start line that continues the read open rather than starting
-    /// another: practice's sessions line then its header; a shop's name
-    /// line then its object.
-    fn continues(self, event: &str) -> bool {
-        matches!(
-            (self, event),
-            (Reader::Practice, "character.practice.start")
-                | (Reader::Identify, "gear.identify.object")
-        )
     }
 }
 
@@ -99,7 +87,8 @@ struct Open {
     first_line: String,
     /// A row was read: until then, the start may have been another line.
     rows: bool,
-    paged: bool,
+    /// The last thing read was its pager: a row next means it was answered.
+    at_pager: bool,
 }
 
 #[derive(Default)]
@@ -110,11 +99,27 @@ struct Tally {
     quoted: Vec<String>,
     hook_failures: usize,
     pager_prompts: usize,
+    /// Tables that ended at their pager. The replay answers every pager, as
+    /// the client does, so these read as finished; the log has no more of
+    /// them, or they had no more to show.
+    left_at_pager: usize,
 }
 
 impl Tally {
     fn index(reader: Reader) -> usize {
         READERS.iter().position(|known| *known == reader).unwrap()
+    }
+
+    fn note_end(&mut self, open: &Open) {
+        if open.at_pager {
+            self.left_at_pager += 1;
+            if self.quoted.len() < QUOTED {
+                let line: String = open.first_line.chars().take(QUOTE_CHARS).collect();
+                let name = open.reader.name();
+                self.quoted
+                    .push(format!("{name} (left at its pager): {line}"));
+            }
+        }
     }
 
     fn unfinished(&mut self, open: Open, why: &str) {
@@ -152,64 +157,39 @@ impl Replay {
                     if reader != Reader::Examine || was_open {
                         self.tally.completed[Tally::index(reader)] += 1;
                     }
-                    if was_open {
-                        self.open = None;
+                    if was_open && let Some(open) = self.open.take() {
+                        self.tally.note_end(&open);
                     }
                 }
                 HookOutput::HookFailed(_) | HookOutput::PluginDisabled(_) => {
                     self.tally.hook_failures += 1
                 }
-                HookOutput::SendCommand(_) => {}
+                HookOutput::SendCommand(_) | HookOutput::RefreshInventory => {}
             }
         }
         if let Some(reader) = Reader::started_by(name) {
-            let continuing = self
-                .open
-                .as_ref()
-                .is_some_and(|open| open.reader == reader && reader.continues(name));
-            if !continuing {
-                if let Some(open) = self.open.take() {
-                    self.tally
-                        .unfinished(open, &format!("interrupted by {}", reader.name()));
-                }
+            // One more start before any row is the same table.
+            if self.open.is_none() {
                 self.open = Some(Open {
                     reader,
                     first_line: event.line.plain().to_owned(),
                     rows: false,
-                    paged: false,
+                    at_pager: false,
                 });
             }
-        }
-        match name {
-            "pager" => {
-                if let Some(open) = &mut self.open {
-                    open.paged = true;
-                }
+        } else if name.ends_with(".row") {
+            if let Some(open) = &mut self.open {
+                open.rows = true;
+                open.at_pager = false;
             }
-            "blank" => {
-                if let Some(open) = &mut self.open {
-                    open.paged = false;
-                }
+        } else if name.ends_with(".cut") {
+            if let Some(open) = self.open.take() {
+                self.tally.unfinished(open, "cut short");
             }
-            name if Reader::started_by(name).is_none()
-                && (name.ends_with(".row") || name.starts_with("gear.identify.")) =>
-            {
-                if let Some(open) = &mut self.open {
-                    open.rows = true;
-                    open.paged = false;
-                }
-            }
-            _ => {}
-        }
-        if name == "prompt"
+        } else if name.ends_with(".end")
             && let Some(open) = self.open.take()
         {
-            let why = if open.paged {
-                "pager not answered"
-            } else {
-                "not finished by the prompt"
-            };
-            self.tally.unfinished(open, why);
+            self.tally.unfinished(open, "not finished by its end");
         }
     }
 }
@@ -222,7 +202,13 @@ fn replay(log: &str) -> Tally {
     };
     for line in replay::server_lines(log) {
         replay.tally.lines += 1;
+        let pagers = session.pager_prompts;
         session.read_line(line, &mut |event, outputs| replay.observe(event, outputs));
+        if session.pager_prompts > pagers
+            && let Some(open) = &mut replay.open
+        {
+            open.at_pager = true;
+        }
     }
     if let Some(open) = replay.open.take() {
         replay.tally.unfinished(open, "log ended");
@@ -271,6 +257,7 @@ fn main() -> ExitCode {
         total.lines += tally.lines;
         total.hook_failures += tally.hook_failures;
         total.pager_prompts += tally.pager_prompts;
+        total.left_at_pager += tally.left_at_pager;
         for index in 0..READERS.len() {
             total.completed[index] += tally.completed[index];
             total.unfinished[index] += tally.unfinished[index];
@@ -299,6 +286,7 @@ fn main() -> ExitCode {
             unfinished.join(", ")
         }
     );
+    println!("tables left at their pager: {}", total.left_at_pager);
     println!(
         "pager prompts recognized: {}; {} logs in {:.1} s",
         total.pager_prompts,

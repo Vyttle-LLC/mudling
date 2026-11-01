@@ -6,6 +6,8 @@
 
 use crate::persist::MobMark;
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
 
 /// A mark on a mob, as persisted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -32,6 +34,25 @@ impl Mark {
     fn parse(name: &str) -> Option<Mark> {
         Mark::ALL.into_iter().find(|mark| mark.name() == name)
     }
+
+    /// Whether this mark, held under `marked`, covers the mob on a room line.
+    pub fn covers(self, marked: &str, title: &str) -> bool {
+        match self {
+            Mark::Aggressive => has_word(title, marked),
+            Mark::Gear | Mark::Important => self.covers_name(marked, &mob_name(title)),
+        }
+    }
+
+    /// [`Mark::covers`], for a mob already named.
+    fn covers_name(self, marked: &str, name: &str) -> bool {
+        match self {
+            Mark::Aggressive => has_word(name, marked),
+            Mark::Gear => marked == name,
+            // Their line changes with what they're doing, so a mark made on
+            // one reading covers the others.
+            Mark::Important => same_mob(marked, name),
+        }
+    }
 }
 
 /// A mark set or cleared, for persisting and for views.
@@ -43,12 +64,45 @@ pub struct MarkChange {
     pub set: bool,
 }
 
+/// A game's reading of a room title, if it has one for that title.
+type TitleRule = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// Reads a game's room titles as mob names. A title the game's rule doesn't
+/// name, or a game with no rule, goes by [`mob_name`].
+#[derive(Clone, Default)]
+pub struct MobNamer(Option<Arc<TitleRule>>);
+
+impl MobNamer {
+    pub fn new(rule: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> MobNamer {
+        MobNamer(Some(Arc::new(rule)))
+    }
+
+    /// The mob's name, lowercase with its spaces collapsed, as marks hold it.
+    pub fn name(&self, title: &str) -> String {
+        let named = self.0.as_ref().and_then(|rule| rule(title));
+        named.map_or_else(
+            || mob_name(title),
+            |name| {
+                let words = name.to_lowercase();
+                words.split_whitespace().collect::<Vec<_>>().join(" ")
+            },
+        )
+    }
+}
+
+impl fmt::Debug for MobNamer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MobNamer")
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MobMemory {
     aggressive: BTreeSet<String>,
     gear: BTreeSet<String>,
     important: BTreeSet<String>,
     changes: Vec<MarkChange>,
+    namer: MobNamer,
 }
 
 impl MobMemory {
@@ -62,6 +116,15 @@ impl MobMemory {
         memory
     }
 
+    pub(super) fn named_by(self, namer: MobNamer) -> MobMemory {
+        MobMemory { namer, ..self }
+    }
+
+    /// The mob a room title shows, by name.
+    pub fn name(&self, title: &str) -> String {
+        self.namer.name(title)
+    }
+
     /// A mob attacked unprovoked: its kind is aggressive.
     pub fn learn_aggressor(&mut self, name: &str) {
         if let Some(noun) = noun(name) {
@@ -71,14 +134,16 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, is of a kind known to be aggressive.
     pub fn is_aggressive(&self, title: &str) -> bool {
-        words(title).any(|word| self.aggressive.contains(&word))
+        words(title)
+            .filter_map(|word| self.aggressive.get(&word))
+            .any(|marked| Mark::Aggressive.covers(marked, title))
     }
 
     /// The player marking a kind of mob, by one of its room lines, as
     /// aggressive or not (undoing a wrong guess).
     pub fn set_aggressive(&mut self, title: &str, aggressive: bool) {
         if aggressive {
-            if let Some(noun) = noun(&mob_name(title)) {
+            if let Some(noun) = noun_of_title(title) {
                 self.set(Mark::Aggressive, noun, true);
             }
         } else {
@@ -91,26 +156,27 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, was marked for important gear.
     pub fn is_gear(&self, title: &str) -> bool {
-        self.gear.contains(&mob_name(title))
+        let name = self.name(title);
+        let covers = |marked: &String| Mark::Gear.covers_name(marked, &name);
+        self.gear.iter().any(covers)
     }
 
     pub fn set_gear(&mut self, title: &str, gear: bool) {
-        let name = mob_name(title);
+        let name = self.name(title);
         if !name.is_empty() {
             self.set(Mark::Gear, name, gear);
         }
     }
 
     /// Whether a mob, by its room line, was marked as someone who matters.
-    /// Their line changes with what they're doing, so a mark made on one
-    /// reading covers the others.
     pub fn is_important(&self, title: &str) -> bool {
-        let name = mob_name(title);
-        self.important.iter().any(|marked| same_mob(marked, &name))
+        let name = self.name(title);
+        let covers = |marked: &String| Mark::Important.covers_name(marked, &name);
+        self.important.iter().any(covers)
     }
 
     pub fn set_important(&mut self, title: &str, important: bool) {
-        let name = mob_name(title);
+        let name = self.name(title);
         if name.is_empty() {
             return;
         }
@@ -165,6 +231,18 @@ impl MobMemory {
 /// "(Tag) A grey wolf is here, howling." → "a grey wolf": the mob without
 /// its tags or what it's doing, which change from visit to visit.
 pub fn mob_name(title: &str) -> String {
+    let untagged = without_tags(title);
+    let spaced = untagged.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name = [" is ", " are "]
+        .iter()
+        .filter_map(|verb| spaced.find(verb))
+        .min()
+        .map_or(spaced.as_str(), |end| &spaced[..end]);
+    name.trim_matches([' ', '.', '!', ',']).to_owned()
+}
+
+/// A title in lowercase, without its tags.
+fn without_tags(title: &str) -> String {
     let mut untagged = String::with_capacity(title.len());
     let mut depth = 0usize;
     for c in title.chars() {
@@ -175,13 +253,7 @@ pub fn mob_name(title: &str) -> String {
             _ => {}
         }
     }
-    let spaced = untagged.split_whitespace().collect::<Vec<_>>().join(" ");
-    let name = [" is ", " are "]
-        .iter()
-        .filter_map(|verb| spaced.find(verb))
-        .min()
-        .map_or(spaced.as_str(), |end| &spaced[..end]);
-    name.trim_matches([' ', '.', '!', ',']).to_owned()
+    untagged
 }
 
 /// One name is the other, or starts it: a mob's name and its whole line.
@@ -196,8 +268,51 @@ fn noun(name: &str) -> Option<String> {
     words(name).last()
 }
 
+/// The noun of a room title: the last word of its opening noun phrase, which
+/// ends at the first verb, "of", or a comma that closes more than adjectives.
+/// "A myconoid shaman sways here, spores drifting." → "shaman".
+fn noun_of_title(title: &str) -> Option<String> {
+    const ARTICLES: [&str; 4] = ["a", "an", "the", "some"];
+    const PHRASE_ENDS: [&str; 7] = ["is", "are", "of", "here", "who", "that", "with"];
+    // A present-tense verb; plural nouns rarely open a mob's room line.
+    let verb = |word: &str| word.len() > 3 && word.ends_with('s') && !word.ends_with("ss");
+
+    let untagged = without_tags(title);
+    let mut phrase: Vec<&str> = Vec::new();
+    for clause in untagged.split(',') {
+        let mut ended = false;
+        for word in clause
+            .split(|c: char| !c.is_alphabetic() && c != '\'')
+            .filter(|word| !word.is_empty())
+        {
+            if PHRASE_ENDS.contains(&word) || (!phrase.is_empty() && verb(word)) {
+                ended = true;
+                break;
+            }
+            phrase.push(word);
+        }
+        // "An old, wrinkled nanny": a comma after only an adjective doesn't
+        // end the phrase.
+        let content = phrase.iter().filter(|word| !ARTICLES.contains(word));
+        if ended || content.count() > 1 {
+            break;
+        }
+    }
+    let noun = phrase.iter().rev().find(|word| !ARTICLES.contains(word))?;
+    Some((*noun).to_owned())
+}
+
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphabetic())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
+}
+
+/// Whether `lowercase`, a whole word, is in `text`, in any case.
+fn has_word(text: &str, lowercase: &str) -> bool {
+    text.split(|c: char| !c.is_alphabetic()).any(|word| {
+        word.chars()
+            .flat_map(char::to_lowercase)
+            .eq(lowercase.chars())
+    })
 }

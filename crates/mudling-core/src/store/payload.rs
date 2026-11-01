@@ -6,15 +6,19 @@
 //! terminal and the map.
 
 use super::StoreState;
+use crate::defaults::aliases::AliasRule;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
+use crate::defaults::triggers::TriggerRule;
 use crate::line::Line;
 use crate::map::{Derived, MapChange, MapRoom, Mark, MarkChange, RoomId, WalkStep, Whereabouts};
 use crate::net::DisconnectReason;
-use crate::plugin::luau::Value;
+use crate::plugin::PluginCost;
+use crate::plugin::luau::{PluginDisabled, Value};
 use crate::scrollback::Scrollback;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How many lines the terminal store holds (PRD §6: 100,000 lines).
 pub const TERMINAL_CAPACITY: usize = 100_000;
@@ -183,10 +187,98 @@ named_value_stores! {
     /// The HUD's values, from GMCP.
     VitalsState(Vital => i64),
     /// What plugins read about the character: skills, affects, score. Each
-    /// key is `<plugin store>.<key>`.
+    /// key is `<plugin store>.<key>`. The core adds what GMCP says under
+    /// [`CHARACTER_NAME`], [`CHARACTER_LEVEL`], [`CHARACTER_POSITION`] and
+    /// [`CHARACTER_AFFECTS`].
     CharactersState(String => Value),
     /// What plugins read about gear, keyed like [`CharactersState`].
     GearState(String => Value),
+}
+
+/// The character's name, in [`CharactersState`].
+pub const CHARACTER_NAME: &str = "character.name";
+/// The character's level, as a number.
+pub const CHARACTER_LEVEL: &str = "character.level";
+/// What the character is doing as the game words it; empty off the game.
+pub const CHARACTER_POSITION: &str = "character.position";
+
+/// What a plugin's HUD point says is affecting the character: under this key,
+/// `.count`, then `.<n>.name` and `.<n>.detail` for n from 1. Rows past the
+/// count are left from a longer list.
+pub const CHARACTER_AFFECTS: &str = "character.affects";
+/// Where a plugin's hooks keep the affects they read from the game's text, in
+/// the same rows: its store of that name.
+const READ_AFFECTS: &str = "affects";
+
+/// Something affecting the character, as the game words it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Affect {
+    pub name: String,
+    /// How long it lasts; empty if the game doesn't say.
+    pub detail: String,
+}
+
+impl CharactersState {
+    /// The change that makes `affects` the list.
+    pub fn listing(affects: &[Affect]) -> CharactersState {
+        let mut values = BTreeMap::from([(
+            format!("{CHARACTER_AFFECTS}.count"),
+            Value::Number(affects.len() as f64),
+        )]);
+        for (index, affect) in affects.iter().enumerate() {
+            let row = format!("{CHARACTER_AFFECTS}.{}", index + 1);
+            values.insert(format!("{row}.name"), Value::Text(affect.name.clone()));
+            values.insert(format!("{row}.detail"), Value::Text(affect.detail.clone()));
+        }
+        CharactersState(values)
+    }
+
+    /// The change that empties both lists. A saved list stays on the disk, but
+    /// it says nothing of a character in a game played since.
+    pub fn no_affects() -> CharactersState {
+        CharactersState(BTreeMap::from(
+            [CHARACTER_AFFECTS, READ_AFFECTS]
+                .map(|list| (format!("{list}.count"), Value::Number(0.))),
+        ))
+    }
+
+    /// What's on the character: what was last read from the game's text, with
+    /// what GMCP lists. Each comes once, with GMCP's detail if it gives one.
+    pub fn affects(&self) -> Vec<Affect> {
+        let mut affects: Vec<Affect> = Vec::new();
+        for affect in [READ_AFFECTS, CHARACTER_AFFECTS]
+            .map(|list| self.listed(list))
+            .concat()
+        {
+            let same = |known: &&mut Affect| known.name.eq_ignore_ascii_case(&affect.name);
+            match affects.iter_mut().find(same) {
+                Some(known) if !affect.detail.is_empty() => known.detail = affect.detail,
+                Some(_) => {}
+                None => affects.push(affect),
+            }
+        }
+        affects
+    }
+
+    fn listed(&self, list: &str) -> Vec<Affect> {
+        let text = |key: String| match self.0.get(&key) {
+            Some(Value::Text(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let count = match self.0.get(&format!("{list}.count")) {
+            Some(Value::Number(count)) => *count as usize,
+            _ => 0,
+        };
+        (1..=count)
+            .filter_map(|row| {
+                let row = format!("{list}.{row}");
+                Some(Affect {
+                    name: text(format!("{row}.name"))?,
+                    detail: text(format!("{row}.detail")).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
 }
 
 /// The player's room, as the map last placed them.
@@ -194,6 +286,46 @@ named_value_stores! {
 pub struct RoomState {
     pub room: Option<Arc<MapRoom>>,
     pub whereabouts: Whereabouts,
+    pub contents: RoomContents,
+}
+
+/// Who and what the server says is in the player's room now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoomContents {
+    pub occupants: Vec<Occupant>,
+    pub items: Vec<Item>,
+}
+
+/// Someone in the room. `name` is the line the game shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Occupant {
+    pub name: String,
+    /// One word the game knows them by, made only of letters, so it's safe
+    /// to put in a command. `None` when their line gives no word to guess:
+    /// they're still here, with nothing to aim a command at.
+    pub target: Option<String>,
+}
+
+/// Something on the ground, `count` of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Item {
+    pub name: String,
+    /// As [`Occupant::target`].
+    pub target: String,
+    pub count: u32,
+}
+
+/// Who the character is fighting; `None` out of a fight.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetState(pub Option<Target>);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Target {
+    pub name: String,
+    pub level: Option<i64>,
+    pub health: Option<i64>,
+    /// What `health` is out of, when the game says.
+    pub max_health: Option<i64>,
 }
 
 /// The mobs the map remembers: kinds that attack, and mobs the player marked.
@@ -229,9 +361,13 @@ pub enum ConnectionStatus {
 }
 
 /// What a shell shows about the session around the game.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsState {
     pub connection: ConnectionStatus,
+    /// How long the game takes to answer: the median of the last few
+    /// commands. It stands while nothing is sent; `None` until the first
+    /// answer and off a connection.
+    pub latency: Option<Duration>,
     /// The host of this connection, or the last one.
     pub server: Option<String>,
     /// The game plugin detection suggests for this server, and what named
@@ -239,9 +375,54 @@ pub struct SettingsState {
     pub suggestion: Option<Suggestion>,
     /// The server turned echo off: what's typed now is a password.
     pub echo_off: bool,
-    /// Things gone wrong that the player should see, newest last: a plugin
-    /// turned off, a failed write.
+    /// Things gone wrong that the player should see, newest last: a failed
+    /// hook, a failed write. A plugin turned off is in `turned_off` instead.
     pub notices: Vec<String>,
+    /// Each plugin's sampled cost per line, in the order added. Refreshed
+    /// every few seconds while connected.
+    pub plugin_costs: Vec<PluginCost>,
+    /// The plugins the core turned off, and why, until
+    /// [`crate::session::Session::turn_plugin_on`] brings one back.
+    pub turned_off: Vec<PluginDisabled>,
+}
+
+/// What the player set up for this session: what Settings edits, and the
+/// hotbar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RulesState {
+    /// The host this session plays on.
+    pub server: String,
+    /// The character this session plays, by id.
+    pub character: String,
+    /// What the game chains commands with, if it does.
+    pub separator: Option<String>,
+    pub triggers: Vec<TriggerRule>,
+    pub aliases: Vec<AliasRule>,
+    /// The hotbar's commands, in order.
+    pub hotbar: Vec<String>,
+}
+
+/// Sounds the triggers asked for: a shell plays each change, once.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CuesState {
+    pub sounds: Vec<String>,
+}
+
+impl StoreState for CuesState {
+    type Change = Vec<String>;
+
+    fn apply(&mut self, change: &Vec<String>) -> bool {
+        self.sounds.clone_from(change);
+        !change.is_empty()
+    }
+
+    fn coalesce(earlier: &mut Vec<String>, later: Vec<String>) {
+        for sound in later {
+            if !earlier.contains(&sound) {
+                earlier.push(sound);
+            }
+        }
+    }
 }
 
 /// Declares stores whose change is the whole new state, so a write that
@@ -266,7 +447,7 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, SettingsState);
+whole_value_stores!(RoomState, MobsState, TargetState, SettingsState, RulesState);
 
 #[cfg(test)]
 mod tests {
