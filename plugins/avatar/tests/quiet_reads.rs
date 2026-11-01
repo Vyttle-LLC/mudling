@@ -8,7 +8,8 @@ use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{CharacterRows, Database, SERVERS_FOLDER, Timestamp};
 use mudling_core::session::{Engine, RuleEdit, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, CuesState, SettingsState, SheetState, StoreHub, TerminalState, Versioned,
+    CharactersState, CuesState, ItemsState, SettingsState, SheetState, StoreHub, TerminalState,
+    Versioned,
 };
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
@@ -394,6 +395,34 @@ fn every_line_of_the_games_own_tables_is_a_row_and_a_tell_inside_one_shows() {
         .hub
         .read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
     assert_eq!(notices, [""; 0], "no row ran a hook out of its budget");
+}
+
+#[test]
+fn a_quiet_equipment_read_fills_the_worn_list_and_a_tell_inside_it_shows() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    let shown = game.chat().len();
+    game.read_up_to("equipment");
+    game.say(
+        "You are using:\n<worn on finger>    a pink ice ring\n\
+        Bren tells you 'hi'\n<worn on head>      a red hat",
+    );
+    let started = Instant::now();
+    let worn = loop {
+        let now = game.at();
+        game.engine.settle(now);
+        let worn = game
+            .hub
+            .read(|items: &Versioned<ItemsState>| items.value().worn.clone());
+        if worn.len() == 2 {
+            break worn;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(worn[0].item, "a pink ice ring");
+    assert_eq!(worn[1].item, "a red hat");
+    assert_eq!(game.chat()[shown..], ["Bren tells you 'hi'"]);
 }
 
 #[test]
