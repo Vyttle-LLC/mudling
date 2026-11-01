@@ -44,6 +44,11 @@ pub struct LiveMap {
     committed_whereabouts: Whereabouts,
     id_prefix_saved: bool,
     revision: u64,
+    /// Bumps when a commit changes a room's area or the map's shape: all
+    /// that [`Derived`] reads.
+    shape: u64,
+    /// The shape `derived` was computed from.
+    derived_shape: u64,
     derived: Option<Derived>,
     area_names: HashMap<String, AreaName>,
     /// How many times derived data was computed, for tests.
@@ -83,10 +88,11 @@ pub struct Commit {
     pub batch: Batch,
 }
 
-/// What views draw that's computed from the rooms, worked out once per
-/// revision.
+/// What views draw that's computed from the rooms, worked out again only
+/// when an area or the map's shape changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Derived {
+    /// The map's revision when it was computed.
     pub revision: u64,
     /// Every area, by zone.
     pub areas: Vec<Area>,
@@ -174,6 +180,8 @@ impl LiveMap {
             committed_whereabouts: Whereabouts::default(),
             id_prefix_saved: false,
             revision: 0,
+            shape: 0,
+            derived_shape: 0,
             derived: None,
             area_names: HashMap::new(),
             #[cfg(test)]
@@ -195,20 +203,13 @@ impl LiveMap {
         if is("Room.WrongDir") {
             self.tracker.move_failed(now);
         } else if is("Room.Players") || is("Room.AddPlayer") {
-            self.mobs_here(&info::mob_titles(json), now);
+            self.note_sightings(&info::mob_titles(json), now);
         } else if is("Char.Status") {
             self.status(json);
         } else if is("Char.Items.List") || is("Char.Items.Add") {
             self.items_here(json);
         }
         None
-    }
-
-    fn mobs_here(&mut self, titles: &[String], now: Timestamp) {
-        self.note_sightings(titles, now);
-        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
-            self.note_feature(feature::AGGRESSIVE_MOB);
-        }
     }
 
     /// A door changed in place, which brings no Room.Info.
@@ -336,6 +337,9 @@ impl LiveMap {
                 room.sightings.insert(title.clone(), now);
             }
         });
+        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
+            self.note_feature(feature::AGGRESSIVE_MOB);
+        }
     }
 
     /// Something worth remembering about the player's room.
@@ -487,15 +491,13 @@ impl LiveMap {
         route(&self.tracker.layout, self.tracker.layout.current?, goal)
     }
 
-    /// Areas and buildings, computed from the rooms once per revision.
+    /// Areas and buildings, computed from the rooms once per shape: a move
+    /// or a sighting computes nothing.
     pub fn derived(&mut self) -> &Derived {
-        let stale = self
-            .derived
-            .as_ref()
-            .is_none_or(|derived| derived.revision != self.revision);
-        if stale {
+        if self.derived.is_none() || self.derived_shape != self.shape {
             let derived = self.derive();
             self.derived = Some(derived);
+            self.derived_shape = self.shape;
         }
         self.derived.as_ref().expect("just derived")
     }
@@ -542,8 +544,8 @@ impl LiveMap {
     // MARK: Writing it out
 
     /// What changed since the last commit, as a change for views and the
-    /// rows for the writer; `None` when nothing did. Cheap: it looks only at
-    /// the rooms marked changed.
+    /// rows for the writer; `None` when nothing did. It looks only at the
+    /// rooms marked changed, so its cost follows them, not the map's size.
     pub fn commit(&mut self, now: Timestamp) -> Option<Commit> {
         let whereabouts = self.whereabouts();
         let unsure = whereabouts.unsure;
@@ -567,6 +569,13 @@ impl LiveMap {
             };
             if same {
                 continue;
+            }
+            let same_shape = match (old, new) {
+                (Some(old), Some(new)) => old.same_shape(new),
+                _ => false,
+            };
+            if !same_shape {
+                self.shape += 1;
             }
             write_room(
                 &mut batch,

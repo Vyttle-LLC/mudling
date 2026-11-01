@@ -1,4 +1,5 @@
 use super::*;
+use crate::defaults::hotbar::HOTBAR_META;
 use crate::map::ISLANDS;
 use crate::persist::*;
 use crate::repo::Error;
@@ -69,6 +70,11 @@ fn every_record() -> Batch {
     batch.upsert(Meta {
         key: ISLANDS.to_owned(),
         value: "3".to_owned(),
+        updated: T1,
+    });
+    batch.upsert(Meta {
+        key: HOTBAR_META.to_owned(),
+        value: r#"["look","kill rat"]"#.to_owned(),
         updated: T1,
     });
     batch.upsert(Meta {

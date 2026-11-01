@@ -7,6 +7,11 @@ Avatar is in this folder; the core holds none of its wording.
 It's also the first worked example for plugin authors (the cookbook,
 VYT-235): each file says what it reads, and each regex has a comment.
 
+The desktop app ships it compiled in (`bundled()` in `src/lib.rs`, which names
+every file here, so a new file goes there too). It stays off until the player
+turns it on from the suggestion. A folder with its id in `<data>/plugins/`
+replaces it.
+
 ## Files
 
 | File | What it declares |
@@ -22,6 +27,7 @@ VYT-235): each file says what it reads, and each regex has a comment.
 | `gear.toml` | The 15 slots in the game's order, the gear tables, and the wear, remove and put messages. |
 | `map.toml` | Rooms known by description, the zone's format, the exits line, failed moves, darkness, flees and the maze. |
 | `mobs.toml` | Aggression, and a mob's name from its room title. |
+| `hud.toml` | Where the game lists affects. |
 
 ## How a table is read
 
@@ -91,6 +97,7 @@ tags such as `(Glowing)`, spaces collapsed, in lowercase.
 
 | Key | Value |
 | --- | --- |
+| `name` | `Tamsin`; also from the login's "Welcome back" line |
 | `title` | `the Quiet Attendant` |
 | `level`, `age` | numbers |
 | `race`, `class` | `Harpy`, `Monk` |
@@ -156,6 +163,10 @@ order:
   out the copy isn't written yet. Avatar sends no `Char.Items` when gear goes
   on or comes off, so the wear and remove hooks call
   `mud.refresh_inventory()`.
+- **Locked doors**: `Room.Info` gives an exit as open or closed, never locked,
+  so the Room panel can't offer `doors.unlock`. The only sign is a line after
+  an `open`, such as "The door to the east is locked." Reading that needs a
+  map signal API v1 doesn't have; a text rule can come in API v2.
 
 ## Tests
 

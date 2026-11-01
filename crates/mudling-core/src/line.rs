@@ -17,7 +17,7 @@
 //! pending partial line, often a prompt; see [`LinePipeline::pending`]. It
 //! can't grow past [`MAX_LINE_BYTES`].
 
-use crate::ansi::{AnsiParser, Span};
+use crate::ansi::{AnsiParser, Span, Style};
 use std::sync::Arc;
 
 /// The most server bytes one line may hold. A server that sends more
@@ -97,6 +97,8 @@ struct LineData {
     links: Box<[Link]>,
     end: LineEnd,
     kind: LineKind,
+    /// Bytes of the plain text a prompt the HUD repeats takes up at its start.
+    prompt_len: u32,
 }
 
 impl Line {
@@ -109,6 +111,25 @@ impl Line {
     /// line the server sent without any.
     pub fn colored(&self, styled: &[Span]) -> Self {
         Line::build(self.raw(), self.plain(), styled, self.end(), self.kind())
+    }
+
+    /// This line drawn in `style` from byte `at` of its plain text on, over
+    /// the styles it had there, for a trigger's highlight.
+    pub fn highlighted(&self, at: usize, style: Style) -> Self {
+        let offset = at as u32;
+        let before = self.styled().iter().filter(|span| span.start < offset);
+        let mut styled: Vec<Span> = before
+            .map(|span| Span {
+                end: span.end.min(offset),
+                ..*span
+            })
+            .collect();
+        styled.push(Span {
+            start: offset,
+            end: self.plain().len() as u32,
+            style,
+        });
+        Line::build(self.raw(), self.plain(), &styled, self.end(), self.kind())
     }
 
     /// This line from byte `at` of its plain text on, for showing what
@@ -130,6 +151,51 @@ impl Line {
         Line::build(plain, plain, &styled, self.end(), self.kind())
     }
 
+    /// This line with its first `len` bytes of plain text marked as a prompt
+    /// the HUD repeats, which a shell may hide.
+    pub fn with_prompt(&self, len: usize) -> Self {
+        let mut line = Line::build(
+            self.raw(),
+            self.plain(),
+            self.styled(),
+            self.end(),
+            self.kind(),
+        );
+        Arc::get_mut(&mut line.0)
+            .expect("nothing else holds a line just built")
+            .prompt_len = len as u32;
+        line
+    }
+
+    /// How many bytes of [`Line::plain`] a prompt the HUD repeats takes up.
+    pub fn prompt_len(&self) -> usize {
+        self.0.prompt_len as usize
+    }
+
+    /// Whether this line is a prompt the HUD repeats and nothing else: only
+    /// whitespace may follow it, as a server often pads one.
+    pub fn is_only_prompt(&self) -> bool {
+        self.prompt_len() > 0 && self.plain()[self.prompt_len()..].trim().is_empty()
+    }
+
+    /// The text that shows, without a copy: from past a prompt the HUD repeats,
+    /// unless `prompts_shown`.
+    pub fn shown_text(&self, prompts_shown: bool) -> &str {
+        match prompts_shown {
+            true => self.plain(),
+            false => &self.plain()[self.prompt_len()..],
+        }
+    }
+
+    /// What's left with the prompt hidden, if anything.
+    pub fn without_prompt(&self) -> Option<Line> {
+        match self.prompt_len() {
+            0 => Some(self.clone()),
+            _ if self.is_only_prompt() => None,
+            at => Some(self.after(at)),
+        }
+    }
+
     fn build(raw: &str, plain: &str, styled: &[Span], end: LineEnd, kind: LineKind) -> Self {
         let (text, plain_start) = if raw == plain {
             (Box::from(raw), 0)
@@ -147,6 +213,7 @@ impl Line {
             links: Box::default(),
             end,
             kind,
+            prompt_len: 0,
         }))
     }
 
@@ -417,6 +484,25 @@ mod tests {
 
     fn plain_lines(chunks: &[&[u8]]) -> (Vec<String>, Option<String>) {
         run(&mut LinePipeline::default(), chunks)
+    }
+
+    #[test]
+    fn a_prompt_and_only_whitespace_is_only_a_prompt() {
+        let (lines, _) = plain_lines(&[b"<19hp> \n<19hp>   \n<19hp> You rest.\n"]);
+        assert_eq!(lines.len(), 3);
+        let mut finished = Vec::new();
+        LinePipeline::default().push(b"<19hp> \n<19hp>   \n<19hp> You rest.\n", &mut finished);
+        let marked: Vec<Line> = finished.iter().map(|line| line.with_prompt(6)).collect();
+        assert!(marked[0].is_only_prompt());
+        assert!(marked[1].is_only_prompt());
+        assert!(!marked[2].is_only_prompt());
+        assert_eq!(marked[1].without_prompt(), None);
+        assert_eq!(
+            marked[2]
+                .without_prompt()
+                .map(|line| line.plain().to_owned()),
+            Some(" You rest.".to_owned())
+        );
     }
 
     #[test]

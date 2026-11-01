@@ -1,5 +1,6 @@
 //! An engine with no game, or a made-up one, fed as a socket would.
 
+use mudling_core::Line;
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::Plugin;
 use mudling_core::session::{Credentials, Engine, SessionConfig, Typing};
@@ -70,7 +71,19 @@ impl Driven {
         text.lines().map(str::to_owned).collect()
     }
 
+    /// What a chat hiding the prompts the HUD repeats shows.
     pub fn terminal(&self) -> Vec<String> {
+        self.hub.read(|terminal: &Versioned<TerminalState>| {
+            let lines = terminal.value().lines().iter();
+            lines
+                .filter_map(Line::without_prompt)
+                .map(|line| line.plain().to_owned())
+                .collect()
+        })
+    }
+
+    /// What a chat showing the prompts the HUD repeats shows.
+    pub fn terminal_with_prompts(&self) -> Vec<String> {
         self.hub.read(|terminal: &Versioned<TerminalState>| {
             let lines = terminal.value().lines().iter();
             lines.map(|line| line.plain().to_owned()).collect()

@@ -45,27 +45,21 @@ jobs:
         if: runner.os == 'macOS'
         run: ./target/release/mudling-desktop --synthetic --ax-check
       # The committed synthetic fixture: session logs hold other players' chat
-      # and are never committed. Misses any PRD §6 budget a headless run can
-      # measure and it fails; the frame and map pan budgets need a window. Noise
-      # only adds time, so a miss must repeat in a second whole run: a build
-      # that can meet a budget does so in one run, and one that can't, in none.
-      #
-      # GitHub's macOS and Windows runners read slower than the machines §6
-      # was set on: up to 3.2× the budget on one more plugin, 1.8× on a move and
-      # 1.4× on a whole line, where Ubuntu and a real Mac pass at 1×. They hold
-      # the budgets ×4; Ubuntu holds them as §6 states them. Memory and the
-      # regression job's 10% are never scaled.
-      - name: Replay benchmark (gates the §6 budgets)
-        shell: bash
-        env:
-          BUDGET_SCALE: ${{ matrix.os == 'ubuntu-latest' && '1' || '4' }}
-        run: |
-          cargo run --release -p mudling-bench -- --check --budget-scale "$BUDGET_SCALE" --json bench-report.json ||
-            cargo run --release -p mudling-bench -- --check --budget-scale "$BUDGET_SCALE" --json bench-report.json
+      # and are never committed. This records the numbers and gates none of
+      # them. GitHub's shared runners read up to 4× over PRD §6's budgets and
+      # vary 2× from one run to the next, so a budget means nothing here. The
+      # budgets are held locally: `mudling-bench --check` on a quiet machine,
+      # before each phase's pull request. What CI gates is the comparison with
+      # the base branch, below, which runs both builds in turns on one machine.
+      # This step fails only if the benchmark itself can't run.
+      - name: Replay benchmark (records the numbers)
+        run: cargo run --release -p mudling-bench -- --json bench-report.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: bench-report-${{ matrix.os }}
           path: bench-report.json
+          if-no-files-found: ignore
 
   # Fails a pull request that loses more than 10% against its base. Both builds
   # run in this job, on this machine, in turns: see the bench's compare.rs.

@@ -7,6 +7,7 @@
 use super::Error;
 use super::names::Names;
 use super::write::is_json;
+use crate::defaults::hotbar::HOTBAR_META;
 use crate::map::ISLANDS;
 use crate::persist::*;
 use serde::de::DeserializeOwned;
@@ -63,7 +64,7 @@ pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 /// The only [`Meta`] keys that sync besides the notepad, which has a file of
 /// its own. The rest stay on the device, such as the room this device last
 /// stood in.
-const SYNCED_META: [&str; 1] = [ISLANDS];
+const SYNCED_META: [&str; 2] = [ISLANDS, HOTBAR_META];
 
 /// How long a delete is remembered. A device offline for longer brings back
 /// what was deleted in the meantime: the cost of not keeping them forever.

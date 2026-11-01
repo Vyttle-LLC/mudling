@@ -3,9 +3,10 @@
 use super::{RepoSettings, Sessions, kill, summary, vault};
 use crate::git::{self, GitError, Limit, Oid};
 use crate::merge::{self, Retired, Store};
+use crate::persist::SERVERS_FOLDER;
 use crate::persist::{self, Database, Writer};
 use crate::repo::{self, AppSettings};
-use crate::session::{HeldSession, SERVERS_FOLDER, SessionLink};
+use crate::session::{HeldSession, SessionLink};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;

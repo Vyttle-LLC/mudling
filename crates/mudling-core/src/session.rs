@@ -26,20 +26,25 @@
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 
 mod engine;
+mod game;
 mod inventory;
+mod latency;
 mod login;
 mod map_rules;
 mod values;
 
 pub use engine::Engine;
-pub(crate) use engine::SERVERS_FOLDER;
 pub use login::Credentials;
 
 use crate::completion::{Completer, Completion, History, KnownWords};
+use crate::defaults::aliases::{AliasRule, AliasSet};
+use crate::defaults::triggers::TriggerRule;
+use crate::line::{Line, Link};
 use crate::merge::RoomMoves;
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Timestamp};
 use crate::plugin::luau::HookLimits;
+use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
 use crate::store::{ConnectionStatus, SettingsState, StoreHub};
 use crate::sync::Syncer;
@@ -110,6 +115,8 @@ pub enum SessionError {
     Plugin(PluginError),
     /// The command history couldn't be saved.
     History(io::Error),
+    /// The core thread's async runtime couldn't start.
+    Runtime(io::Error),
     /// The core thread panicked.
     Stopped,
 }
@@ -122,6 +129,7 @@ impl fmt::Display for SessionError {
             SessionError::History(error) => {
                 write!(f, "couldn't save the command history: {error}")
             }
+            SessionError::Runtime(error) => write!(f, "couldn't start the session: {error}"),
             SessionError::Stopped => f.write_str("the session stopped unexpectedly"),
         }
     }
@@ -141,28 +149,46 @@ impl From<PluginError> for SessionError {
     }
 }
 
-impl From<io::Error> for SessionError {
-    fn from(error: io::Error) -> SessionError {
-        SessionError::History(error)
-    }
-}
-
-/// What the command box reads: memory only, under a lock held just long
-/// enough for one key press or one room's words.
+/// What a shell reads on its own thread: memory only, under a lock held just
+/// long enough for one key press, one line's links or one room's words.
 #[derive(Debug, Default)]
 pub struct Typing {
     history: History,
     known: KnownWords,
     completer: Completer,
+    link_rules: Vec<LinkRule>,
+    aliases: AliasSet,
+}
+
+impl Typing {
+    /// What `typed` would send, for the alias preview, if it holds an alias.
+    pub fn alias_preview(&self, typed: &str) -> Option<String> {
+        self.aliases.preview(typed)
+    }
+}
+
+/// A change the player made to what they set up. A rule with no id is new.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuleEdit {
+    SaveTrigger(TriggerRule),
+    RemoveTrigger(String),
+    SaveAlias(AliasRule),
+    RemoveAlias(String),
+    /// The hotbar's whole new list.
+    SetHotbar(Vec<String>),
 }
 
 enum Input {
     Connect,
     Send(String),
+    SendAction(String),
+    Press(String),
+    Edit(RuleEdit),
     Cancel,
     Replay(Vec<Bytes>),
     HoldWrites(SyncSender<()>),
     ReleaseWrites(RoomMoves),
+    TurnPluginOn(PluginId),
     Quit,
 }
 
@@ -286,6 +312,28 @@ impl Session {
         self.queue(Input::Send(typed.into()));
     }
 
+    /// Sends a command from a button, not the command box: see
+    /// [`Engine::send_action`].
+    pub fn send_action(&self, command: impl Into<String>) {
+        self.queue(Input::SendAction(command.into()));
+    }
+
+    /// Runs a command the player pressed, as on the hotbar. While the server
+    /// asks for a password it does nothing: it would go as the password.
+    pub fn press(&self, command: impl Into<String>) {
+        self.queue(Input::Press(command.into()));
+    }
+
+    /// Saves a change the player made; the rules store shows it.
+    pub fn edit(&self, edit: RuleEdit) {
+        self.queue(Input::Edit(edit));
+    }
+
+    /// See [`Typing::alias_preview`].
+    pub fn alias_preview(&self, typed: &str) -> Option<String> {
+        self.typing().alias_preview(typed)
+    }
+
     /// Closes the connection, or gives up on one still opening.
     pub fn cancel(&self) {
         self.queue(Input::Cancel);
@@ -295,6 +343,23 @@ impl Session {
     /// each chunk as a read from the socket. What it would send goes nowhere.
     pub fn replay(&self, chunks: Vec<Bytes>) {
         self.queue(Input::Replay(chunks));
+    }
+
+    /// Turns a plugin back on after the core turned it off;
+    /// `SettingsState::turned_off` lists those. It runs again from the next
+    /// line, on a clean count of overruns.
+    pub fn turn_plugin_on(&self, plugin: PluginId) {
+        self.queue(Input::TurnPluginOn(plugin));
+    }
+
+    /// The links the enabled plugins find in `line`, for a shell to offer.
+    /// Ask for lines shown, not lines read.
+    pub fn links(&self, line: &Line) -> Vec<Link> {
+        let mut links = Vec::new();
+        for rule in &self.typing().link_rules {
+            rule.find(line.plain(), &mut links);
+        }
+        links
     }
 
     /// Up arrow in the command box: see [`History::older`].
@@ -313,6 +378,12 @@ impl Session {
         typing
             .completer
             .complete(line, cursor, &typing.history, &typing.known)
+    }
+
+    /// Whether the core thread ended: the database wouldn't open, or it
+    /// panicked. Nothing more happens here; only a new session can connect.
+    pub fn has_stopped(&self) -> bool {
+        self.core.is_finished()
     }
 
     /// Closes the connection and flushes every writer. Returns at once;
@@ -338,12 +409,19 @@ fn run_core(
     typing: Arc<Mutex<Typing>>,
     inputs: UnboundedReceiver<Input>,
 ) -> Result<(), SessionError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
     let host = config.host.clone();
-    let result = match Engine::open(config, Arc::clone(&hub), typing) {
-        Ok(engine) => runtime.block_on(run(engine, inputs)),
+    let started = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(SessionError::Runtime)
+        .and_then(|runtime| Ok((runtime, Engine::open(config, Arc::clone(&hub), typing)?)));
+    match started {
+        Ok((runtime, engine)) => {
+            let result = runtime.block_on(run(engine, inputs));
+            // A hostname lookup still running mustn't hold the session open.
+            runtime.shutdown_background();
+            result
+        }
         Err(error) => {
             hub.write::<SettingsState>(SettingsState {
                 server: Some(host),
@@ -352,10 +430,7 @@ fn run_core(
             });
             Err(error)
         }
-    };
-    // A hostname lookup still running mustn't hold the session open.
-    runtime.shutdown_background();
-    result
+    }
 }
 
 /// An open socket, with what it reports.
@@ -398,6 +473,11 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Connect) => {}
                 Some(Input::Send(typed)) => engine.send(&typed, Timestamp::now()),
+                Some(Input::SendAction(command)) => {
+                    engine.send_action(&command, Timestamp::now());
+                }
+                Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
+                Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();
@@ -407,6 +487,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::Replay(_)) => {}
                 Some(Input::HoldWrites(done)) => engine.hold_writes(done),
                 Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
+                Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {
@@ -493,8 +574,8 @@ fn replay(engine: &mut Engine, chunks: Vec<Bytes>) {
 mod tests {
     use super::*;
     use crate::map::Whereabouts;
+    use crate::persist::SERVERS_FOLDER;
     use crate::persist::{Batch, Database, Key, Room};
-    use crate::session::engine::SERVERS_FOLDER;
     use crate::store::{MapState, Versioned};
     use std::sync::mpsc::sync_channel;
     use std::time::Instant;

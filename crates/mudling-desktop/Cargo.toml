@@ -13,20 +13,33 @@ path = "src/main.rs"
 
 [dependencies]
 mudling-core.workspace = true
+aho-corasick = "1.1"
+mudling-plugin-avatar = { path = "../../plugins/avatar" }
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
+futures = "0.3"
 memory-stats = "1"
+rodio = { version = "0.23", default-features = false, features = ["playback", "wav"] }
 unicode-segmentation = "1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSView", "NSWindow"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.10", features = ["font-kit"] }
 
 [lints]
 workspace = true

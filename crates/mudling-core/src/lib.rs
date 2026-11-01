@@ -24,3 +24,12 @@ pub mod vault;
 pub use ansi::{AnsiParser, Color, Span, Style};
 pub use line::{Line, LineKind, LinePipeline};
 pub use scrollback::Scrollback;
+
+use std::path::PathBuf;
+
+/// The OS data folder MUDling keeps its files in, or `None` when the OS names
+/// no home folder.
+pub fn data_folder() -> Option<PathBuf> {
+    directories::ProjectDirs::from("com", "Vyttle", "MUDling")
+        .map(|dirs| dirs.data_dir().to_owned())
+}

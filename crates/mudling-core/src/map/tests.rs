@@ -1450,7 +1450,7 @@ fn the_revision_bumps_only_on_a_real_change() {
 }
 
 #[test]
-fn derived_data_is_computed_once_per_revision() {
+fn derived_data_is_computed_once_per_shape() {
     let mut walk = Walk::new(text_map());
     let zone = "1-5 | The Fields";
     walk.arrive_in("A meadow", zone, &["e"], "");
@@ -1466,16 +1466,36 @@ fn derived_data_is_computed_once_per_revision() {
     assert_eq!(walk.map.derived().revision, derived.revision);
     assert_eq!(walk.map.derivations, 1, "asked twice, computed once");
 
-    // A move is a new revision: the next ask computes again, once.
-    walk.go("w", "A meadow", &["e"]);
+    // A move along known links and a sighting leave the shape alone.
+    let now = walk.now();
+    walk.map.sent("w", now);
+    walk.arrive_in("A meadow", zone, &["e"], "");
+    let now = walk.now();
+    walk.map
+        .note_sightings(&["A wolf is here.".to_owned()], now);
     walk.map.commit(walk.now());
     walk.map.derived();
+    assert_eq!(walk.map.derivations, 1);
+
+    // A new room changes it: the next ask computes again, once.
+    let now = walk.now();
+    walk.map.sent("n", now);
+    walk.arrive_in("A pond", zone, &["s"], "");
+    walk.map.commit(walk.now());
+    assert_eq!(walk.map.derived().areas[0].rooms, 3);
     walk.map.derived();
     assert_eq!(walk.map.derivations, 2);
-    // Nothing changed, no new revision: nothing to compute.
-    assert!(walk.map.commit(walk.now()).is_none());
-    walk.map.derived();
-    assert_eq!(walk.map.derivations, 2);
+}
+
+#[test]
+fn every_mark_reads_a_room_line_by_one_rule() {
+    let title = "(Tag) A grey wolf is here, howling.";
+    assert!(Mark::Aggressive.covers("wolf", title));
+    assert!(!Mark::Aggressive.covers("wol", title));
+    assert!(Mark::Gear.covers("a grey wolf", title));
+    assert!(!Mark::Gear.covers("a grey", title));
+    assert!(Mark::Important.covers("a grey", title));
+    assert!(!Mark::Important.covers("a gre", title));
 }
 
 #[test]

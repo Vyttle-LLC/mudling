@@ -29,6 +29,7 @@ character = "character.toml"
 gear = "gear.toml"
 map = "map.toml"
 mobs = "mobs.toml"
+hud = "hud.toml"
 
 [hooks]
 # readers.luau first: the others use the Readers table it defines.

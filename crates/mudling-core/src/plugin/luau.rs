@@ -68,6 +68,7 @@ use cpu_time::ThreadTime;
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -204,6 +205,22 @@ pub struct PluginDisabled {
 pub enum DisabledReason {
     /// Its hooks overran this many times this session.
     Overran(u32),
+}
+
+impl fmt::Display for PluginDisabled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} was turned off: {}", self.plugin, self.reason)
+    }
+}
+
+impl fmt::Display for DisabledReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DisabledReason::Overran(times) => {
+                write!(f, "its hooks ran too long {times} times")
+            }
+        }
+    }
 }
 
 /// Where hook outputs go.
@@ -398,6 +415,15 @@ impl HookRunner {
     pub fn set_approved(&mut self, plugin: &PluginId, approved: bool) {
         if let Some(vm) = self.vm(plugin) {
             vm.approved = approved;
+        }
+    }
+
+    /// Lets a plugin turned off for overrunning run again, with a clean
+    /// count of overruns.
+    pub fn turn_back_on(&mut self, plugin: &PluginId) {
+        if let Some(vm) = self.vm(plugin) {
+            vm.disabled = false;
+            vm.overruns = 0;
         }
     }
 
@@ -803,6 +829,7 @@ pub struct LuauHooks {
 enum Job {
     Event(PluginEvent),
     Approve(PluginId, bool),
+    TurnBackOn(PluginId),
     Idle(SyncSender<()>),
 }
 
@@ -871,6 +898,12 @@ impl LuauHooks {
     /// after it, and never waits.
     pub fn set_approved(&mut self, plugin: &PluginId, approved: bool) {
         self.send(Job::Approve(plugin.clone(), approved));
+    }
+
+    /// See [`HookRunner::turn_back_on`]. Takes effect before any event sent
+    /// after it, and never waits.
+    pub fn turn_back_on(&mut self, plugin: &PluginId) {
+        self.send(Job::TurnBackOn(plugin.clone()));
     }
 
     /// Each plugin's events dropped this session because the queue was full,
@@ -955,6 +988,7 @@ fn work(
                 runner.run(&event, &mut sink);
             }
             Job::Approve(plugin, approved) => runner.set_approved(&plugin, approved),
+            Job::TurnBackOn(plugin) => runner.turn_back_on(&plugin),
             Job::Idle(done) => {
                 let _ = done.send(());
             }

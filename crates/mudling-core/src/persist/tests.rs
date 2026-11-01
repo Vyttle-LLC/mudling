@@ -770,3 +770,112 @@ fn an_empty_map_saves_a_version_with_no_areas() {
     assert_eq!(versions[0].room_count, 0);
     assert!(versions[0].areas.is_empty());
 }
+
+fn save_stat(database: &Database, character_id: &str, key: &str, value: &str) {
+    let mut batch = Batch::new();
+    batch.upsert(Character {
+        id: character_id.to_owned(),
+        server_id: "mud.example.org".to_owned(),
+        name: character_id.to_owned(),
+        updated: T2,
+    });
+    batch.upsert(CharacterStat {
+        character_id: character_id.to_owned(),
+        key: key.to_owned(),
+        value: value.to_owned(),
+        updated: T2,
+    });
+    commit(database, batch);
+}
+
+#[test]
+fn a_saved_server_lists_with_only_what_is_known() {
+    let folder = TempDir::new().unwrap();
+    assert_eq!(saved_servers(folder.path()), SavedServers::default());
+
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    save_server(folder.path(), "another.example.org", 23).unwrap();
+
+    let saved = saved_servers(folder.path());
+    assert_eq!(saved.problems, Vec::<String>::new());
+    let hosts: Vec<_> = saved.servers.iter().map(|s| (&*s.host, s.port)).collect();
+    assert_eq!(
+        hosts,
+        [("another.example.org", 23), ("mud.example.org", 4000)]
+    );
+    assert_eq!(saved.servers[1].last_room, None);
+    assert_eq!(saved.servers[1].characters, []);
+}
+
+#[test]
+fn a_removed_server_leaves_the_list_and_comes_back_with_what_it_had() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let database = Database::open(&folder.path().join(SERVERS_FOLDER), "mud.example.org").unwrap();
+    save_stat(&database, "player", "character.name", "\"Altissima\"");
+    let mut batch = Batch::new();
+    batch.upsert(room(7, "The Donation Room"));
+    commit(&database, batch);
+
+    remove_server(folder.path(), "mud.example.org").unwrap();
+    assert_eq!(saved_servers(folder.path()), SavedServers::default());
+
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let saved = saved_servers(folder.path());
+    assert_eq!(saved.servers[0].characters.len(), 1);
+    assert_eq!(
+        database.reader().unwrap().room_name(7).unwrap().as_deref(),
+        Some("The Donation Room")
+    );
+}
+
+#[test]
+fn a_saved_character_shows_its_level_name_and_last_room() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let database = Database::open(&folder.path().join(SERVERS_FOLDER), "mud.example.org").unwrap();
+    save_stat(&database, "player", "character.level", "2.0");
+    save_stat(&database, "player", "character.name", "\"Altissima\"");
+    let mut batch = Batch::new();
+    batch.upsert(room(7, "The Donation Room"));
+    batch.upsert(Meta {
+        key: "map.current-room".to_owned(),
+        value: "7".to_owned(),
+        updated: T2,
+    });
+    commit(&database, batch);
+
+    let saved = saved_servers(folder.path());
+    let server = &saved.servers[0];
+    assert_eq!(server.last_room.as_deref(), Some("The Donation Room"));
+    assert_eq!(
+        server.characters,
+        [SavedCharacter {
+            name: Some("Altissima".to_owned()),
+            level: Some(2),
+            last_played: T2,
+        }]
+    );
+}
+
+#[test]
+fn an_unreadable_database_leaves_the_others_listed() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let servers = folder.path().join(SERVERS_FOLDER);
+    std::fs::write(servers.join("broken.sqlite"), "not a database").unwrap();
+
+    let saved = saved_servers(folder.path());
+    assert_eq!(saved.servers.len(), 1);
+    assert!(saved.problems[0].starts_with("broken: "), "{saved:?}");
+}
+
+#[test]
+fn turned_on_plugins_are_kept_for_the_server() {
+    let folder = TempDir::new().unwrap();
+    let host = "mud.example.org";
+    assert!(enabled_plugins(folder.path(), host).unwrap().is_empty());
+
+    save_enabled_plugins(folder.path(), host, &["hearth".to_owned()]).unwrap();
+    assert_eq!(enabled_plugins(folder.path(), host).unwrap(), ["hearth"]);
+}

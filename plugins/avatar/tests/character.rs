@@ -30,6 +30,20 @@ fn get<'a>(store: &'a HashMap<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn the_login_greeting_names_the_character() {
+    for line in [
+        "Welcome back to the AVATAR System, Hero Bren.",
+        "Welcome back to the AVATAR System, Lady Bren.",
+        "Welcome back to the AVATAR System Bren, hope you get beyond level 10.",
+    ] {
+        let character = read(line).store("character");
+        assert_eq!(get(&character, "name"), &text("Bren"), "{line}");
+    }
+    let said = "A guard says 'Welcome back to the AVATAR System, Bren.'";
+    assert!(read(said).store("character").is_empty(), "only the login's");
+}
+
+#[test]
 fn a_heros_score_has_an_unknown_title_and_a_level_of_its_own() {
     let score = read(
         "(805h-272m-314v-1462)(-/-)You are Fen the unknown\n\
@@ -97,6 +111,7 @@ fn room_text_is_no_score() {
 fn score_fills_the_character() {
     let score = read(include_str!("fixtures/score.txt")).store("character");
     let expected = [
+        ("name", text("Tamsin")),
         ("title", text("the Quiet Attendant")),
         ("level", number(12.0)),
         ("race", text("Harpy")),

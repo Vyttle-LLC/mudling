@@ -1,0 +1,7 @@
+# Most of what's on a character only shows in `aff`, which `character.luau`
+# reads into the `affects` store. Char.Status lists the rest, such as a race's
+# timed effects and sometimes spells, as a diff with the rest of it:
+# `"affects": { "Spell: bless": "for 6 hours" }`, or null. The HUD shows both,
+# each affect once. The vitals, experience included, are read by their common
+# names.
+affects = "Char.Status.affects"
