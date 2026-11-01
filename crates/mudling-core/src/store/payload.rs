@@ -210,6 +210,10 @@ pub const CHARACTER_AFFECTS: &str = "character.affects";
 /// the same rows: its store of that name.
 const READ_AFFECTS: &str = "affects";
 
+/// What the character carries, from GMCP: under this key, `.count`, then
+/// `.<n>.id` and `.<n>.name` for n from 1. Rows past the count are stale.
+pub const CHARACTER_INVENTORY: &str = "inventory";
+
 /// Something affecting the character, as the game words it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Affect {
@@ -260,24 +264,39 @@ impl CharactersState {
         affects
     }
 
+    /// The names of what the character carries.
+    pub fn carried(&self) -> Vec<String> {
+        self.rows(CHARACTER_INVENTORY)
+            .filter_map(|row| self.text(format!("{row}.name")))
+            .collect()
+    }
+
     fn listed(&self, list: &str) -> Vec<Affect> {
-        let text = |key: String| match self.0.get(&key) {
+        self.rows(list)
+            .filter_map(|row| {
+                Some(Affect {
+                    name: self.text(format!("{row}.name"))?,
+                    detail: self.text(format!("{row}.detail")).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    fn text(&self, key: String) -> Option<String> {
+        match self.0.get(&key) {
             Some(Value::Text(text)) => Some(text.clone()),
             _ => None,
-        };
+        }
+    }
+
+    /// The keys of the rows `list` counts.
+    fn rows(&self, list: &str) -> impl Iterator<Item = String> {
         let count = match self.0.get(&format!("{list}.count")) {
             Some(Value::Number(count)) => *count as usize,
             _ => 0,
         };
-        (1..=count)
-            .filter_map(|row| {
-                let row = format!("{list}.{row}");
-                Some(Affect {
-                    name: text(format!("{row}.name"))?,
-                    detail: text(format!("{row}.detail")).unwrap_or_default(),
-                })
-            })
-            .collect()
+        let list = list.to_owned();
+        (1..=count).map(move |row| format!("{list}.{row}"))
     }
 }
 

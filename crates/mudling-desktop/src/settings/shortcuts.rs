@@ -53,6 +53,11 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
             ),
             row("Go to the hotbar", &["main-4"], &["shell::FocusHotbar"]),
             row(
+                "Go to the Find panel",
+                &["main-5"],
+                &["shell::FocusFindPanel"],
+            ),
+            row(
                 "Search the scrollback",
                 &["main-f"],
                 &["title_bar::FindInScrollback"],

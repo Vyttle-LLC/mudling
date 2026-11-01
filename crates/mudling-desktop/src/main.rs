@@ -6,7 +6,7 @@
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
-//!                            [--find-open] [--sample-map <rooms>]]
+//!                            [--find-open] [--find-panel] [--sample-map <rooms>]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -23,7 +23,8 @@
 //! into ones that wrap. `--measure` records frame times and writes a JSON
 //! report (see `measure`); `--settings-open` measures it with the settings
 //! sheet open, `--hud` with the HUD in that place, `--find-open` with the find
-//! bar open and results showing, and `--sample-map` with a made-up map.
+//! bar open and results showing, `--find-panel` with the Find panel showing and
+//! being typed in, and `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
 //! alone (see `map_view::harness`).
@@ -44,6 +45,7 @@ mod chat;
 mod dock;
 mod dpad;
 mod empty_state;
+mod find_panel;
 mod hotbar;
 mod hud;
 mod input;
@@ -92,7 +94,7 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
-                     [--find-open] [--sample-map <rooms>]] [--ax-check]";
+                     [--find-open] [--find-panel] [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -113,6 +115,7 @@ struct Options {
     settings_open: bool,
     hud: Option<HudRun>,
     find_open: bool,
+    find_panel: bool,
     sample_map: Option<i64>,
     ax_check: bool,
 }
@@ -291,6 +294,7 @@ fn main() -> ExitCode {
                         stream_for: options.stream_for,
                         hud: options.hud,
                         find_open: options.find_open,
+                        find_panel: options.find_panel,
                     },
                     cx,
                 );
@@ -450,6 +454,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         settings_open: false,
         hud: None,
         find_open: false,
+        find_panel: false,
         sample_map: None,
         ax_check: false,
     };
@@ -490,6 +495,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)
             }
             "--find-open" => options.find_open = true,
+            "--find-panel" => options.find_panel = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,
