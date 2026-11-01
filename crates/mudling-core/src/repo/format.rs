@@ -73,7 +73,25 @@ pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 /// retired room finds its way to the kept room, however late it turns up.
 /// [`NOT_SAME`] travels because the player's answer holds for the map, and no
 /// device should ask it again.
-const SYNCED_META: [&str; 4] = [ISLANDS, HOTBAR_META, JOINED, NOT_SAME];
+///
+/// What the Avatar plugin learns about an item travels as its name and its
+/// keyword (`plugin.gear.name.` and `plugin.gear.keyword.`), since a device
+/// that hasn't met the item can use them. Its slots and the plugin's other
+/// words are rows (`item_facts`) or aren't the player's. `plugin.gear.holds.`
+/// and `plugin.gear.verb.` stay: the plugin says them again on every
+/// connection, so a copy from another device is only ever stale. They stay out
+/// by name, so no wider `plugin.gear.` is listed here, and `.keywords.`, which
+/// an older version moved to rows, can't match `.keyword.`.
+const SYNCED_META: [&str; 6] = [
+    ISLANDS,
+    HOTBAR_META,
+    JOINED,
+    NOT_SAME,
+    GEAR_NAME,
+    GEAR_KEYWORD,
+];
+const GEAR_NAME: &str = "plugin.gear.name.";
+const GEAR_KEYWORD: &str = "plugin.gear.keyword.";
 
 fn is_synced_meta(key: &str) -> bool {
     SYNCED_META

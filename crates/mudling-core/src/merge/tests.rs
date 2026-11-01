@@ -4,8 +4,9 @@
 use super::*;
 use crate::map::{LiveMap, MapRules, RoomIdentity, likely_duplicates};
 use crate::persist::{
-    Batch, Exit, GearCopy, Key, Link, MapRows, Meta, NOTEPAD, Room, RoomFeature, RoomNote, Server,
-    Sighting, Timestamp, Tombstone,
+    Affect, Batch, Character, CharacterStat, Exit, GearCopy, GearPiece, GearSet, Identification,
+    ItemFacts, Key, Link, MapRows, Meta, NOTEPAD, Room, RoomFeature, RoomNote, Server, Sighting,
+    Skill, StatMap, Timestamp, Tombstone, Worn,
 };
 use crate::repo::format::{ServerRows, tombstone_cutoff};
 use git2::Repository;
@@ -2656,4 +2657,345 @@ fn a_repo_with_no_remote_has_nothing_unsynced() {
     git.commit_all("a").unwrap();
 
     assert_eq!(unsynced_sessions(&git, REMOTE, BRANCH).unwrap(), 0);
+}
+
+// MARK: Gear and characters
+
+fn character(id: &str) -> Character {
+    Character {
+        id: id.to_owned(),
+        server_id: SERVER.to_owned(),
+        name: id.to_owned(),
+        updated: T1,
+    }
+}
+
+fn gear_set(id: &str, owner: &str, name: &str, updated: Timestamp) -> GearSet {
+    GearSet {
+        id: id.to_owned(),
+        character_id: owner.to_owned(),
+        name: name.to_owned(),
+        container: None,
+        pieces: vec![GearPiece {
+            item: "a straw hat".to_owned(),
+            slot: Some("head".to_owned()),
+            copy_id: None,
+        }],
+        updated,
+    }
+}
+
+fn facts(keywords: Option<&str>, updated: Timestamp) -> ItemFacts {
+    ItemFacts {
+        name: "a straw hat".to_owned(),
+        keywords: keywords.map(str::to_owned),
+        slot: Some("head".to_owned()),
+        measured: None,
+        updated,
+    }
+}
+
+fn meta_row(key: &str, value: &str, updated: Timestamp) -> Meta {
+    Meta {
+        key: key.to_owned(),
+        value: value.to_owned(),
+        updated,
+    }
+}
+
+fn characters_of(device: &Device) -> crate::persist::CharacterRows {
+    device.database.reader().unwrap().characters().unwrap()
+}
+
+fn meta_keys(device: &Device) -> Vec<String> {
+    let meta = device.database.reader().unwrap().meta().unwrap();
+    meta.into_iter().map(|entry| entry.key).collect()
+}
+
+#[test]
+fn a_gear_set_edited_on_two_devices_keeps_the_newest_whole_whoever_merges() {
+    for newer_on_ipad in [true, false] {
+        let world = two_devices();
+        world.mac.apply(|batch| {
+            batch.upsert(character("alda"));
+            batch.upsert(gear_set("s1", "alda", "Hunting", T1));
+        });
+        settle(&world);
+        assert_eq!(characters_of(&world.ipad).gear_sets.len(), 1);
+
+        let (older, newer) = (T2, T3);
+        let mut quick = gear_set("s1", "alda", "The older edit", older);
+        quick.container = Some("a sack".to_owned());
+        let mut last = gear_set("s1", "alda", "The newer edit", newer);
+        last.pieces.push(GearPiece {
+            item: "a copper ring".to_owned(),
+            slot: Some("finger".to_owned()),
+            copy_id: Some("g1".to_owned()),
+        });
+        let (on_mac, on_ipad) = if newer_on_ipad {
+            (quick, last.clone())
+        } else {
+            (last.clone(), quick)
+        };
+        world.mac.apply(|batch| {
+            batch.upsert(on_mac);
+        });
+        world.ipad.apply(|batch| {
+            batch.upsert(on_ipad);
+        });
+
+        // The device with the newer edit pushes first, so the other one is
+        // the one that merges, with its older edit as its own.
+        let (first, second) = if newer_on_ipad {
+            (&world.ipad, &world.mac)
+        } else {
+            (&world.mac, &world.ipad)
+        };
+        first.sync();
+        second.sync();
+        first.sync();
+
+        for device in [&world.mac, &world.ipad] {
+            assert_eq!(characters_of(device).gear_sets, [last.clone()]);
+        }
+    }
+}
+
+#[test]
+fn a_gear_set_removed_on_one_device_does_not_return() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(character("alda"));
+        batch.upsert(gear_set("s1", "alda", "Hunting", T1));
+    });
+    settle(&world);
+    assert_eq!(characters_of(&world.ipad).gear_sets.len(), 1);
+
+    world.mac.apply(|batch| {
+        batch.delete(Key::GearSet("s1".to_owned()));
+    });
+    settle(&world);
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        assert!(characters_of(device).gear_sets.is_empty());
+    }
+}
+
+#[test]
+fn clearing_an_items_words_on_one_device_clears_them_on_the_other() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(facts(Some("straw hat"), T1));
+    });
+    settle(&world);
+    let words = |device: &Device| device.database.reader().unwrap().gear().unwrap().facts;
+    assert_eq!(words(&world.ipad)[0].keywords.as_deref(), Some("straw hat"));
+
+    world.ipad.apply(|batch| {
+        batch.upsert(facts(None, T3));
+    });
+    settle(&world);
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        assert_eq!(words(device), [facts(None, T3)]);
+    }
+}
+
+#[test]
+fn everything_known_about_items_and_characters_reaches_the_other_device() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(character("alda"));
+        batch.upsert(GearCopy {
+            id: "g1".to_owned(),
+            name: "a straw hat".to_owned(),
+            measured: Some(StatMap::from([("dex".to_owned(), 1)])),
+            updated: T2,
+        });
+        batch.upsert(facts(Some("straw hat"), T2));
+        batch.upsert(Identification {
+            id: "i1".to_owned(),
+            item_name: "a straw hat".to_owned(),
+            copy_id: Some("g1".to_owned()),
+            keywords: "straw hat".to_owned(),
+            item_type: "armor".to_owned(),
+            flags: vec!["glowing".to_owned()],
+            level: Some(4),
+            quality: None,
+            base: StatMap::from([("ac".to_owned(), -2)]),
+            added: BTreeMap::new(),
+            details: vec!["Weight: 1".to_owned()],
+            updated: T2,
+        });
+        batch.upsert(Worn {
+            character_id: "alda".to_owned(),
+            position: 0,
+            slot: "head".to_owned(),
+            item: "a straw hat".to_owned(),
+            copy_id: Some("g1".to_owned()),
+            updated: T2,
+        });
+        batch.upsert(CharacterStat {
+            character_id: "alda".to_owned(),
+            key: "level".to_owned(),
+            value: "12".to_owned(),
+            updated: T2,
+        });
+        batch.upsert(Skill {
+            character_id: "alda".to_owned(),
+            name: "swim".to_owned(),
+            level: Some(3),
+            learned: Some(78),
+            cost: None,
+            updated: T2,
+        });
+        batch.upsert(Affect {
+            character_id: "alda".to_owned(),
+            name: "bless".to_owned(),
+            detail: Some("12 hours".to_owned()),
+            updated: T2,
+        });
+        batch.upsert(gear_set("s1", "alda", "Hunting", T2));
+    });
+
+    settle(&world);
+
+    let (mac, ipad) = (&world.mac, &world.ipad);
+    let gear = |device: &Device| device.database.reader().unwrap().gear().unwrap();
+    assert_eq!(gear(ipad), gear(mac));
+    assert_eq!(characters_of(ipad), characters_of(mac));
+    let rows = characters_of(ipad);
+    let gear = gear(ipad);
+    assert_eq!(
+        gear.copies.len() + gear.facts.len() + gear.identifications.len(),
+        3
+    );
+    assert_eq!(rows.stats.len() + rows.skills.len() + rows.affects.len(), 3);
+    assert_eq!(rows.worn.len() + rows.gear_sets.len(), 2);
+}
+
+#[test]
+fn one_characters_rows_never_become_anothers_in_a_merge() {
+    let world = two_devices();
+    let rows_for = |device: &Device, owner: &str, level: &str, at: Timestamp| {
+        device.apply(|batch| {
+            batch.upsert(character(owner));
+            batch.upsert(CharacterStat {
+                character_id: owner.to_owned(),
+                key: "level".to_owned(),
+                value: level.to_owned(),
+                updated: at,
+            });
+            batch.upsert(Worn {
+                character_id: owner.to_owned(),
+                position: 0,
+                slot: "head".to_owned(),
+                item: format!("{owner}'s hat"),
+                copy_id: None,
+                updated: at,
+            });
+            batch.upsert(gear_set(&format!("{owner}-set"), owner, "Hunting", at));
+        });
+    };
+    rows_for(&world.mac, "alda", "12", T2);
+    rows_for(&world.ipad, "bryn", "7", T3);
+
+    settle(&world);
+    settle(&world);
+
+    for device in [&world.mac, &world.ipad] {
+        let rows = characters_of(device);
+        let level = |owner: &str| {
+            let stat = rows.stats.iter().find(|stat| stat.character_id == owner);
+            stat.map(|stat| stat.value.clone())
+        };
+        assert_eq!(level("alda").as_deref(), Some("12"));
+        assert_eq!(
+            level("bryn").as_deref(),
+            Some("7"),
+            "a newer level of another"
+        );
+        for worn in &rows.worn {
+            assert_eq!(worn.item, format!("{}'s hat", worn.character_id));
+        }
+        for set in &rows.gear_sets {
+            assert_eq!(set.id, format!("{}-set", set.character_id));
+        }
+        assert_eq!((rows.worn.len(), rows.gear_sets.len()), (2, 2));
+    }
+}
+
+#[test]
+fn gear_names_and_words_travel_but_what_the_plugin_says_each_time_does_not() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        for (key, value) in [
+            ("plugin.gear.name.straw hat", "\"a Straw Hat\""),
+            ("plugin.gear.keyword.straw hat", "\"hat\""),
+            ("plugin.gear.holds.finger", "2"),
+            ("plugin.gear.verb.wield", "\"wield\""),
+        ] {
+            batch.upsert(meta_row(key, value, T2));
+        }
+    });
+
+    settle(&world);
+
+    let keys = meta_keys(&world.ipad);
+    for travels in [
+        "plugin.gear.name.straw hat",
+        "plugin.gear.keyword.straw hat",
+    ] {
+        assert!(keys.iter().any(|key| key == travels), "{travels} stayed");
+    }
+    for stays in ["plugin.gear.holds.finger", "plugin.gear.verb.wield"] {
+        assert!(!keys.iter().any(|key| key == stays), "{stays} went");
+    }
+}
+
+#[test]
+fn rows_an_older_database_moved_out_of_meta_do_not_come_back_from_another_device() {
+    let world = two_devices();
+    let legacy = [
+        "plugin.gear.slot.a tiamat mask",
+        "plugin.gear.keywords.a tiamat mask",
+        "plugin.identify.mask tiamat.name",
+    ];
+    let later = Timestamp(Timestamp::now().0 + 3_600_000);
+    for device in [&world.mac, &world.ipad] {
+        device.apply(|batch| {
+            for key in legacy {
+                batch.upsert(meta_row(key, "\"old\"", T2));
+            }
+        });
+    }
+    settle(&world);
+    // Only the mac has moved them to rows, as a session does when it loads.
+    world.mac.apply(|batch| {
+        for key in legacy {
+            batch.delete(Key::Meta(key.to_owned()));
+        }
+    });
+    // And the iPad has written them again since, newer than that delete.
+    world.ipad.apply(|batch| {
+        for key in legacy {
+            batch.upsert(meta_row(key, "\"newer\"", later));
+        }
+    });
+
+    settle(&world);
+    settle(&world);
+
+    let old: Vec<String> = meta_keys(&world.mac)
+        .into_iter()
+        .filter(|key| key.starts_with("plugin.gear.slot") || key.starts_with("plugin.identify"))
+        .collect();
+    assert!(old.is_empty(), "{old:?} came back");
+    let tip = world.mac.git.branch_tip(BRANCH).unwrap().unwrap();
+    for bytes in world.mac.git.files_at(tip).unwrap().values() {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains("plugin.identify") && !text.contains("plugin.gear.slot"));
+    }
 }
