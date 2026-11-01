@@ -230,8 +230,7 @@ impl MapView {
             return;
         }
         let point = self.in_view(event.position);
-        if event.modifiers.shift {
-            self.model.pick_at(point, self.view_size());
+        if event.modifiers.shift && self.model.pick_at(point, self.view_size()) {
             cx.notify();
         } else if self.model.click(point, self.view_size()).is_some() {
             if let Some(selection) = self.model.selection().cloned() {
@@ -564,7 +563,7 @@ mod tests {
         Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
         WindowAppearance,
     };
-    use mudling_core::map::{JoinDone, LastJoin, MapChange};
+    use mudling_core::map::{Building, Direction, JoinDone, LastJoin, MapChange, MapDoor};
     use mudling_core::persist::Timestamp;
     use mudling_core::store::Revision;
     use std::cell::RefCell;
@@ -694,6 +693,37 @@ mod tests {
             assert!(!view.model.duplicates().pairs.is_empty());
         });
         assert!(heard.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn shift_clicking_where_no_room_can_be_picked_clicks_as_before(cx: &mut TestAppContext) {
+        let mut street = room(1, 0, 0);
+        street.links.insert(Direction::East, 20);
+        let mut hall = room(20, 7, 7);
+        hall.building = Some(20);
+        let keep = Building {
+            id: 20,
+            doors: vec![MapDoor {
+                outside: 1,
+                direction: Direction::East,
+                inside: 20,
+            }],
+            footprint: None,
+        };
+        let (view, cx) = unscanned_view(store_of(vec![street, hall], vec![keep]), cx);
+        cx.run_until_parked();
+        let (bounds, camera) =
+            view.read_with(cx, |view, _| (view.bounds.get(), view.model.camera()));
+        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let (x, y) = camera.to_view((1., 0.), size);
+
+        cx.simulate_click(bounds.origin + point(px(x), px(y)), Modifiers::shift());
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, _| {
+            assert!(view.model.building_name().is_some(), "the house opened");
+            assert!(view.model.picks().is_empty());
+        });
     }
 
     #[gpui::test]

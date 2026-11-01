@@ -643,9 +643,11 @@ impl MapModel {
     }
 
     /// A Shift-click: picks the selected room as well, if nothing is picked.
-    pub fn pick_at(&mut self, point: (f32, f32), size: (f32, f32)) {
+    /// Returns whether a room was there to pick: if not, the click is an
+    /// ordinary one.
+    pub fn pick_at(&mut self, point: (f32, f32), size: (f32, f32)) -> bool {
         let Some(Hit::Room(room)) = self.sheet.hit(self.camera.to_grid(point, size)) else {
-            return;
+            return false;
         };
         if self.picks.is_empty()
             && let Some(selected) = self.selection.as_ref().map(|selection| selection.room)
@@ -654,6 +656,7 @@ impl MapModel {
             self.pick(selected);
         }
         self.pick(room);
+        true
     }
 
     /// The two rooms to join, once two are picked.
