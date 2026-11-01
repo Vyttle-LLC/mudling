@@ -355,7 +355,12 @@ const KEEP_THE_MAP: &str = "Keep this map";
 const SAMPLE_SIDE: i64 = 6;
 const SAMPLE_REPEAT: i64 = 3;
 const SAMPLE_ROOM: i64 = (1 << 40) + 7;
-const REVIEW_CONTROLS: [&str; 3] = ["Skip this pair", "Not the same", "Join these rooms"];
+const REVIEW_CONTROLS: [&str; 4] = [
+    "Skip this pair",
+    "Not the same",
+    "Join these rooms",
+    "Close Review",
+];
 const PICK_CONTROLS: [&str; 3] = [
     "Join the rooms picked",
     "Clear the rooms picked",
@@ -933,7 +938,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         let tree = window_tree();
         let unnamed = missing(&REVIEW_CONTROLS, &tree);
         checks.push(Check {
-            name: "Review names its three buttons",
+            name: "Review names its buttons, and a way to close it",
             passed: unnamed.is_empty(),
             detail: format!("not found: {unnamed:?}"),
         });

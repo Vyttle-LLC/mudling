@@ -689,16 +689,16 @@ impl Engine {
         let reader = self.database.reader().map_err(say)?;
         let meta = reader.meta().map_err(say)?;
         let version = reader.map_version(version_id).map_err(say)?;
-        let (rows, cancelled) = merge::joins_over_version(version, &meta);
-        let restored = self.map.prepare_restore(&rows);
-        let mut batch = restored.batch(version_id, now);
-        for key in cancelled {
+        let mut batch = LiveMap::restore_batch(version_id, now);
+        for key in merge::joins_cancelled_by(&version, &meta) {
             batch.delete(key);
         }
         self.writer.commit(batch).map_err(say)?;
         let restored_rows = ServerRows::load(&reader).map_err(say)?;
         let rejoin = merge::rejoin_restored(restored_rows, now);
         self.writer.commit(rejoin).map_err(say)?;
+        let restored = self.map.prepare_restore(&reader.map().map_err(say)?);
+        self.writer.commit(restored.place(now)).map_err(say)?;
         let change = self.map.finish_restore(restored);
         self.map_changed = false;
         self.version_saved = now;
@@ -1783,14 +1783,14 @@ impl Engine {
     }
 }
 
-/// An id for a new rule. Rows load in id order and the first rule to match
-/// wins, so ids sort by when they were made; the random end keeps two devices'
-/// apart.
 /// An error as a view shows it.
 fn say(error: impl fmt::Display) -> String {
     error.to_string()
 }
 
+/// An id for a new rule. Rows load in id order and the first rule to match
+/// wins, so ids sort by when they were made; the random end keeps two devices'
+/// apart.
 fn rule_id(made: u32) -> String {
     let random = RandomState::new().build_hasher().finish() as u32;
     format!("{:012x}{made:04x}{random:08x}", Timestamp::now().0)

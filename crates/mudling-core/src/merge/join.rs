@@ -26,8 +26,7 @@ use super::follow_current_room;
 use super::records::merge_server;
 use super::rooms::RoomMoves;
 use crate::map::{
-    JOINED, LiveMap, RoomId, RoomPair, VERSION_JOIN, join_label, joined_key, joins_in, undo_key,
-    undo_value,
+    LiveMap, RoomId, RoomPair, VERSION_JOIN, join_label, joined_key, joins_in, undo_key, undo_value,
 };
 use crate::persist::{Batch, Key, Keyed, MapRows, Meta, Reader, Record, Room, Timestamp};
 use crate::repo::format::ServerRows;
@@ -268,33 +267,14 @@ fn put_back<T>(
     }
 }
 
-/// `version` as a restore should leave it, with the joins in `meta` carried
-/// out: rooms they retired stay retired. Also the records a restore cancels.
-pub(crate) fn joins_over_version(version: MapRows, meta: &[Meta]) -> (MapRows, Vec<Key>) {
+/// The records restoring `version` cancels: joins of a room it holds to a room
+/// it doesn't.
+pub(crate) fn joins_cancelled_by(version: &MapRows, meta: &[Meta]) -> Vec<Key> {
     let held: HashSet<RoomId> = version.rooms.iter().map(|room| room.id).collect();
-    let joins = joins_in(meta);
-    let back = || joins.iter().filter(|(retired, _)| held.contains(*retired));
-    let void: Vec<RoomId> = (back())
-        .filter(|(_, kept)| !held.contains(*kept))
-        .map(|(retired, _)| *retired)
-        .collect();
-    if back().count() == void.len() {
-        return (version, void_keys(&void));
-    }
-    let records = meta.iter().filter(|row| {
-        let void_key = |id: &RoomId| row.key == joined_key(*id);
-        row.key.starts_with(JOINED) && !void.iter().any(void_key)
-    });
-    let view = ServerRows {
-        map: version,
-        meta: records.cloned().collect(),
-        ..ServerRows::default()
-    };
-    (merge_server(view.clone(), view).map, void_keys(&void))
-}
-
-fn void_keys(void: &[RoomId]) -> Vec<Key> {
-    void.iter().map(|id| Key::Meta(joined_key(*id))).collect()
+    (joins_in(meta).into_iter())
+        .filter(|(retired, kept)| held.contains(retired) && !held.contains(kept))
+        .map(|(retired, _)| Key::Meta(joined_key(retired)))
+        .collect()
 }
 
 /// What moves the rooms a restore just brought back onto the rooms that hold

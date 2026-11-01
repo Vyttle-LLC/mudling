@@ -605,7 +605,8 @@ impl Shell {
         notes.update(cx, |notes, cx| notes.use_map(store, cx));
     }
 
-    /// Hands the session a change to the notes, the features or the marks.
+    /// Hands the session a change to the notes, the features or the marks, or
+    /// what the player told the map about duplicates.
     fn save_note(&self, edit: &NoteEdit) {
         let Some(game) = &self.game else { return };
         match edit {

@@ -67,7 +67,7 @@ mod rooms;
 mod secrets;
 
 pub(crate) use files::{servers, three_way};
-pub(crate) use join::{join_rooms, joins_over_version, rejoin_restored, undo_join};
+pub(crate) use join::{join_rooms, joins_cancelled_by, rejoin_restored, undo_join};
 pub use rooms::RoomMoves;
 pub(crate) use rooms::repoint_batch;
 pub use secrets::find_password;

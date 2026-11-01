@@ -2116,9 +2116,7 @@ fn a_restore_from_before_a_join_keeps_the_rooms_joined() {
     let reader = mac.database.reader().unwrap();
     let version = version_labeled(&mac, "Before the join");
     let meta = reader.meta().unwrap();
-    let (rows, cancelled) = joins_over_version(reader.map_version(version).unwrap(), &meta);
-    assert!(cancelled.is_empty());
-    assert!(rows.rooms.iter().all(|room| room.id != retired));
+    assert!(joins_cancelled_by(&reader.map_version(version).unwrap(), &meta).is_empty());
     let now = Timestamp::now();
     mac.apply(|batch| {
         batch.restore_map_version(version, now);
@@ -2151,10 +2149,59 @@ fn a_restore_without_the_kept_room_cancels_the_join() {
         updated: T2,
     }];
 
-    let (rows, cancelled) = joins_over_version(version, &meta);
+    let cancelled = joins_cancelled_by(&version, &meta);
 
-    assert_eq!(rows.rooms.len(), 1, "the room stays a room");
     assert_eq!(cancelled, [Key::Meta(meta[0].key.clone())]);
+}
+
+/// One retired room, with each device holding it joined to a different room.
+/// The newer record stands. What each device moved stays where it moved it,
+/// so the two kept rooms stay two, and nothing the retired room held is lost.
+#[test]
+fn two_devices_joining_one_room_to_different_rooms_converge_and_lose_nothing() {
+    let (_folder, mac, ipad, first, second) = two_squares();
+    let third = (1 << 41) + first;
+    mac.apply(|batch| {
+        batch.upsert(room(third, "Temple Square", T1));
+        batch.upsert(note(third, "Beggars at night", T2));
+        batch.upsert(feature(third, "fountain"));
+        batch.upsert(sighting(third, "a beggar"));
+    });
+    converge(&mac, &ipad);
+
+    join_on(&mac, first, third);
+    // Later, and before this device hears of the first join.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    ipad.apply(|batch| {
+        batch.upsert(feature(third, "shop"));
+    });
+    join_on(&ipad, second, third);
+    converge(&mac, &ipad);
+
+    for device in [&mac, &ipad] {
+        assert_eq!(copies_of(device, "Temple Square"), [first, second]);
+        let held = [first, second];
+        let features = held.map(|room| features_of(device, room)).concat();
+        let sightings = held.map(|room| sightings_of(device, room)).concat();
+        assert!(features.contains(&"fountain".to_owned()), "{features:?}");
+        assert!(features.contains(&"shop".to_owned()), "{features:?}");
+        assert!(sightings.contains(&"a beggar".to_owned()), "{sightings:?}");
+        let notes = held.map(|room| note_of(device, room));
+        assert!(notes.iter().flatten().any(|n| n.contains("Beggars")));
+        let rows = device.database.reader().unwrap().map().unwrap();
+        assert!(rows.links.iter().all(|link| link.to_room != third));
+    }
+    assert_eq!(joins_of(&mac), [format!("map.joined.{third}")]);
+    let standing = mac.database.reader().unwrap().meta().unwrap();
+    let record = standing
+        .iter()
+        .find(|row| row.key.starts_with("map.joined."));
+    assert_eq!(
+        record.unwrap().value,
+        second.to_string(),
+        "the newer stands"
+    );
+    assert_same_maps(&mac, &ipad);
 }
 
 #[test]

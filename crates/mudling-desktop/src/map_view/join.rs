@@ -67,6 +67,7 @@ impl MapView {
 
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.model.open_review();
+        self.review_open = true;
         window.focus(&self.review_first, cx);
         cx.notify();
     }
@@ -75,12 +76,39 @@ impl MapView {
     /// anything to review.
     pub fn close_review(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.model.close_review();
-        if self.model.duplicates().pairs.is_empty() {
+        self.review_open = false;
+        self.focus_what_remains(window, cx);
+        cx.notify();
+    }
+
+    /// Takes focus to a control that's still there.
+    fn focus_what_remains(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
+        if self.model.reviewing() {
+            window.focus(&self.review_first, cx);
+        } else if self.model.duplicates().pairs.is_empty() {
             window.dispatch_action(Box::new(FocusCommandBar), cx);
         } else {
             window.focus(&self.review_button, cx);
         }
-        cx.notify();
+    }
+
+    /// Looks after the keyboard when the session's answer takes a control
+    /// away: a join can end Review, and Undo goes with its note. Focus moves
+    /// only if it was there, so a mouse player's typing stays where it is.
+    pub(super) fn keep_focus(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
+        let joined = matches!(self.model.join_note(), Some(JoinNote::Joined { .. }));
+        if self.review_open && !self.model.reviewing() {
+            self.review_open = false;
+            cx.defer_in(window, move |view, window, cx| {
+                if joined {
+                    window.focus(&view.undo_button, cx);
+                } else {
+                    view.focus_what_remains(window, cx);
+                }
+            });
+        } else if self.undo_button.is_focused(window) && !joined && self.model.joining().is_none() {
+            cx.defer_in(window, Self::focus_what_remains);
+        }
     }
 
     fn skip_pair(&mut self, cx: &mut Context<MapView>) {
@@ -89,30 +117,32 @@ impl MapView {
     }
 
     fn not_the_same(&mut self, pair: RoomPair, window: &mut Window, cx: &mut Context<MapView>) {
+        self.model.clear_join_note();
         self.model.answer_pair(pair, None);
         cx.emit(MapEdit::NotSame {
             first: pair.0,
             second: pair.1,
         });
-        self.after_answer(window, cx);
-    }
-
-    fn join_reviewed(&mut self, pair: RoomPair, window: &mut Window, cx: &mut Context<MapView>) {
-        self.model.answer_pair(pair, Some(pair.1));
-        self.join(pair, cx);
-        self.after_answer(window, cx);
-    }
-
-    fn after_answer(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         if self.model.review_pair().is_none() {
             self.close_review(window, cx);
         }
         cx.notify();
     }
 
-    fn join(&mut self, (first, second): RoomPair, cx: &mut Context<MapView>) {
-        self.model.clear_picks();
-        cx.emit(MapEdit::Join { first, second });
+    /// Asks the session to join `pair`. Its Join goes as the picks clear, so
+    /// the keyboard waits where Undo will come.
+    fn join(&mut self, pair: RoomPair, window: &mut Window, cx: &mut Context<MapView>) {
+        if self.model.joining() == Some(pair) {
+            return;
+        }
+        if self.join_button.is_focused(window) {
+            window.focus(&self.undo_button, cx);
+        }
+        self.model.await_join(pair);
+        cx.emit(MapEdit::Join {
+            first: pair.0,
+            second: pair.1,
+        });
         cx.notify();
     }
 
@@ -206,10 +236,22 @@ impl MapView {
             .gap_3()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(title),
+                    .child(title)
+                    .child(
+                        small_button("map-review-close", "Close Review", theme)
+                            .border_color(gpui::transparent_black())
+                            .text_color(theme.text_muted)
+                            .child("Close")
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.close_review(window, cx);
+                            })),
+                    ),
             )
             .child(div().flex().gap_3().child(first).child(second))
             .child(
@@ -251,10 +293,46 @@ impl MapView {
                             .text_color(theme.accent)
                             .child("Join these rooms")
                             .on_click(cx.listener(move |view, _, window, cx| {
-                                view.join_reviewed(rooms, window, cx);
+                                view.join(rooms, window, cx);
                             })),
                     ),
             )
+            .children(self.review_note(theme, cx))
+    }
+
+    /// How the last join went, in Review, with Undo right there.
+    fn review_note(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<MapView>,
+    ) -> Option<impl IntoElement + use<>> {
+        let note = self.model.join_note()?;
+        let (text, color, undo) = match note {
+            JoinNote::Joined { label, .. } => (label.clone(), theme.text, true),
+            JoinNote::Failed(error) => (failed(error), theme.error, false),
+        };
+        Some(
+            div()
+                .id("map-review-note")
+                .debug_selector(|| "map-review-note".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(text.clone()))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .text_size(px(13.))
+                .text_color(color)
+                .child(div().min_w_0().child(text))
+                .children(undo.then(|| self.undo_control(theme, cx))),
+        )
+    }
+
+    fn undo_control(&self, theme: &Theme, cx: &mut Context<MapView>) -> Stateful<Div> {
+        small_button("map-join-undo", "Undo the join", theme)
+            .track_focus(&self.undo_button)
+            .child("Undo")
+            .on_click(cx.listener(|view, _, _, cx| view.undo(cx)))
     }
 
     /// The pill over the map: what's picked, or how the last join went.
@@ -266,7 +344,7 @@ impl MapView {
         let picks = self.model.picks().len();
         let (text, hint): (String, Option<&str>) = match (picks, self.model.join_note()) {
             (0, Some(JoinNote::Joined { label, .. })) => (label.clone(), None),
-            (0, Some(JoinNote::Failed(error))) => (format!("The map didn't change: {error}"), None),
+            (0, Some(JoinNote::Failed(error))) => (failed(error), None),
             (0, None) => return None,
             (1, _) => ("1 room picked".to_owned(), Some("Pick one more")),
             (count, _) => (format!("{count} rooms picked"), None),
@@ -286,17 +364,15 @@ impl MapView {
                     .border_color(theme.accent)
                     .text_color(theme.accent)
                     .child("Join")
-                    .on_click(cx.listener(move |view, _, _, cx| view.join(pair, cx)))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.join(pair, window, cx);
+                    }))
             });
             Some(clear).into_iter().chain(join).collect::<Vec<_>>()
         } else {
             let joined = matches!(self.model.join_note(), Some(JoinNote::Joined { .. }));
             joined
-                .then(|| {
-                    small_button("map-join-undo", "Undo the join", theme)
-                        .child("Undo")
-                        .on_click(cx.listener(|view, _, _, cx| view.undo(cx)))
-                })
+                .then(|| self.undo_control(theme, cx))
                 .into_iter()
                 .collect()
         };
@@ -314,6 +390,8 @@ impl MapView {
                         .debug_selector(|| "map-pill".to_owned())
                         .role(Role::Status)
                         .aria_label(SharedString::from(spoken))
+                        // As on a room card: typing stays with the bar.
+                        .capture_any_mouse_down(|_, window, _| window.prevent_default())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .flex()
@@ -364,6 +442,11 @@ impl MapView {
             ),
         )
     }
+}
+
+/// A join or undo the session refused, in the player's words.
+fn failed(error: &str) -> String {
+    format!("The map didn't change: {error}")
 }
 
 fn small_button(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {

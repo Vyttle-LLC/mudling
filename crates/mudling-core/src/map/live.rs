@@ -785,12 +785,25 @@ impl LiveMap {
         batch
     }
 
-    /// Works out what restoring a saved version's rows would make of the
-    /// map, changing nothing: the caller commits [`RestoredMap::batch`], and
-    /// only then calls [`LiveMap::finish_restore`].
-    pub fn prepare_restore(&self, version: &MapRows) -> RestoredMap {
+    /// A batch restoring `version_id` as one transaction: a version of the
+    /// map as it is now first, so the restore can be undone, then the
+    /// restore. Pruning comes last: the version restored may be the oldest of
+    /// its kind.
+    pub fn restore_batch(version_id: i64, now: Timestamp) -> Batch {
+        let mut batch = Batch::new();
+        batch.save_map_version(VERSION_SAFETY, BEFORE_RESTORE, now);
+        batch.restore_map_version(version_id, now);
+        batch.prune_map_versions(VERSION_SAFETY, VERSIONS_KEPT);
+        batch
+    }
+
+    /// Works out what the rows a restore left in the database make of the
+    /// map, changing nothing: they're read back, so the two can't differ. The
+    /// caller commits [`RestoredMap::place`], and only then calls
+    /// [`LiveMap::finish_restore`].
+    pub fn prepare_restore(&self, saved: &MapRows) -> RestoredMap {
         let old = &self.tracker.layout;
-        let mut layout = layout_of(version, &*self.rules, id_prefix(old.next_id));
+        let mut layout = layout_of(saved, &*self.rules, id_prefix(old.next_id));
         // A room made after this must not take an id the discarded map used.
         layout.next_id = layout.next_id.max(old.next_id);
         layout.islands = old.islands;
@@ -850,21 +863,15 @@ pub struct RestoredMap {
 }
 
 impl RestoredMap {
-    /// A batch restoring `version_id` as one transaction: a version of the
-    /// map as it is now first, so the restore can be undone, then the
-    /// restore and where it leaves the player. Pruning comes last: the
-    /// version restored may be the oldest of its kind.
-    pub fn batch(&self, version_id: i64, now: Timestamp) -> Batch {
+    /// A batch saving where the restore leaves the player.
+    pub fn place(&self, now: Timestamp) -> Batch {
         let mut batch = Batch::new();
-        batch.save_map_version(VERSION_SAFETY, BEFORE_RESTORE, now);
-        batch.restore_map_version(version_id, now);
         match self.layout.current {
             Some(id) => meta(&mut batch, CURRENT_ROOM, id, now),
             None => {
                 batch.delete(Key::Meta(CURRENT_ROOM.to_owned()));
             }
         }
-        batch.prune_map_versions(VERSION_SAFETY, VERSIONS_KEPT);
         batch
     }
 }

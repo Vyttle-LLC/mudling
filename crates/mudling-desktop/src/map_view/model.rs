@@ -222,6 +222,9 @@ pub struct MapModel {
     picks: Vec<RoomId>,
     /// Which pair Review shows; `None` when it's closed.
     reviewing: Option<usize>,
+    /// The pair sent to the session, until it answers. It stays in Review
+    /// until then: a join can be refused.
+    joining: Option<RoomPair>,
     join_note: Option<JoinNote>,
     /// The last answer taken from the store.
     answered: u64,
@@ -261,8 +264,12 @@ impl MapModel {
             return;
         }
         self.answered = last.attempt;
+        let joining = self.joining.take();
         self.join_note = match last.outcome {
             Ok(JoinDone::Joined { label, created, .. }) => {
+                if let Some(pair) = joining {
+                    self.answer_pair(pair, Some(pair.1));
+                }
                 Some(JoinNote::Joined { label, created })
             }
             Ok(JoinDone::Undone) => None,
@@ -563,6 +570,7 @@ impl MapModel {
 
     /// The pair after this one, or the first again after the last.
     pub fn skip_pair(&mut self) {
+        self.join_note = None;
         let pairs = self.duplicates.pairs.len();
         self.reviewing = self.reviewing.map(|index| (index + 1) % pairs.max(1));
     }
@@ -654,6 +662,17 @@ impl MapModel {
             [first, second] => Some(room_pair(first, second)),
             _ => None,
         }
+    }
+
+    /// The session has been asked to join `pair`.
+    pub fn await_join(&mut self, pair: RoomPair) {
+        self.joining = Some(pair);
+        self.join_note = None;
+        self.picks.clear();
+    }
+
+    pub fn joining(&self) -> Option<RoomPair> {
+        self.joining
     }
 
     pub fn join_note(&self) -> Option<&JoinNote> {
@@ -1177,6 +1196,43 @@ mod tests {
 
         model.apply(&answered(3, Err("no".to_owned())));
         assert_eq!(model.join_note(), Some(&JoinNote::Failed("no".to_owned())));
+    }
+
+    #[test]
+    fn a_pair_goes_only_once_the_session_has_joined_it() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let pair = model.review_pair().expect("there are pairs").pair;
+
+        model.await_join(pair);
+        assert_eq!(model.review_pair().map(|shown| shown.pair), Some(pair));
+
+        model.apply(&answered(
+            1,
+            Ok(JoinDone::Joined {
+                label: "Joined".to_owned(),
+                created: Timestamp(5),
+            }),
+        ));
+        assert_ne!(model.review_pair().map(|shown| shown.pair), Some(pair));
+        assert_eq!(model.joining(), None);
+    }
+
+    #[test]
+    fn a_refused_join_keeps_its_pair_and_says_why() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let pair = model.review_pair().expect("there are pairs").pair;
+
+        model.await_join(pair);
+        model.apply(&answered(1, Err("a sync is landing".to_owned())));
+
+        assert_eq!(model.review_pair().map(|shown| shown.pair), Some(pair));
+        assert_eq!(
+            model.join_note(),
+            Some(&JoinNote::Failed("a sync is landing".to_owned()))
+        );
+        assert_eq!(model.joining(), None);
     }
 
     #[test]

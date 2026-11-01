@@ -7,7 +7,7 @@
 mod git_server;
 
 use super::*;
-use crate::map::{CURRENT_ROOM, JoinDone, LastJoin, VERSION_JOIN};
+use crate::map::{CURRENT_ROOM, JoinDone, LastJoin, MapRoom, VERSION_JOIN};
 use crate::merge::{self, CHECKPOINT};
 use crate::persist::{Batch, Character, Database, Room, RoomNote, Server, Skill, Timestamp};
 use crate::session::{MapEdit, Session, SessionConfig};
@@ -1254,6 +1254,63 @@ fn a_join_through_a_session_syncs_and_its_undo_follows() {
     let notes = map_of(&ipad).notes;
     assert_eq!((notes.len(), notes[0].room_id), (1, retired));
     assert_eq!(map_of(&mac).rooms, map_of(&ipad).rooms);
+}
+
+fn rooms_shown(session: &Session) -> Vec<Arc<MapRoom>> {
+    session
+        .stores()
+        .read(|map: &Versioned<MapState>| map.value().rooms().cloned().collect())
+}
+
+/// The version's copies read differently, and only the retired room changes
+/// with the restore, so its stamp beats the kept room's. What the player sees
+/// must be what a reload finds.
+#[test]
+fn a_restore_across_a_join_shows_what_a_reload_finds() {
+    let (_folder, mac, _ipad, kept, retired) = two_devices_with_duplicates();
+    mac.apply(|batch| {
+        batch.upsert(Room {
+            updated: Timestamp(1),
+            x: 40,
+            ..room(retired, "The old square", "The Meadow")
+        });
+        batch.upsert(crate::persist::Sighting {
+            room_id: retired,
+            mob: "a beggar".to_owned(),
+            updated: Timestamp(1),
+        });
+        batch.save_map_version("manual", "Before the join", Timestamp(1));
+    });
+    let reader = mac.database().reader().unwrap();
+    let version = reader.map_versions().unwrap()[0].id;
+    let session = session_on(&mac);
+    wait_until(|| map_rooms(&session) == 2);
+    session.edit_map(MapEdit::Join {
+        first: kept,
+        second: retired,
+    });
+    assert!(wait_for_answer(&session, 1).outcome.is_ok());
+    wait_until(|| !map_holds(&session, retired));
+
+    assert!(session.map_history().restore(version));
+    wait_until(|| {
+        session
+            .stores()
+            .read(|settings: &Versioned<SettingsState>| settings.value().map_restore.is_some())
+    });
+    let restored = session
+        .stores()
+        .read(|settings: &Versioned<SettingsState>| settings.value().map_restore.clone());
+    assert_eq!(restored.unwrap().outcome, Ok(version));
+    let shown = rooms_shown(&session);
+    session.quit().wait().unwrap();
+
+    let reloaded = session_on(&mac);
+    wait_until(|| map_rooms(&reloaded) > 0);
+    assert_eq!(rooms_shown(&reloaded), shown);
+    assert_eq!(shown.len(), 1, "the rooms stay joined");
+    assert!(shown[0].sightings.contains_key("a beggar"));
+    reloaded.quit().wait().unwrap();
 }
 
 /// The other device was playing on the retired room when the join came in.
