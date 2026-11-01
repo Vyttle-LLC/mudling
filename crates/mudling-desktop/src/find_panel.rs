@@ -207,6 +207,7 @@ impl FindPanel {
         self.stores_version += 1;
         self.cache = Some(FindCache::default());
         self.search = None;
+        self.walk = None;
         self.results = None;
         self.locked = false;
         cx.notify();
@@ -798,6 +799,20 @@ mod tests {
         panel.update(cx, |panel, cx| panel.start_over(long_road(1), cx));
         cx.run_until_parked();
         assert_eq!(names(&panel, cx), ["Road 1"]);
+    }
+
+    #[gpui::test]
+    fn a_walk_still_being_worked_out_is_dropped_with_its_session(cx: &mut TestAppContext) {
+        let (panel, cx, sent) = panel_window(sample_find(), cx);
+        type_in(&panel, "gate", cx);
+        panel.update(cx, |panel, cx| {
+            let row = &panel.results.as_ref().expect("searched").1.rows[0];
+            let gate = goal(row).expect("the gate can be walked to");
+            panel.walk_to(gate, false, cx);
+            panel.start_over(sample_find(), cx);
+        });
+        cx.run_until_parked();
+        assert!(sent.borrow().is_empty());
     }
 
     #[gpui::test]
