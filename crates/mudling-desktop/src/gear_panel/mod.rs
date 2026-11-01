@@ -7,9 +7,10 @@
 //! emits [`SendCommand`] and the shell sends it, refusing it while the server
 //! asks for a password.
 //!
-//! Every row is a tab stop that says all it knows, and More opens the rest in
-//! the row. The items the chat named lately are listed too, so what a tooltip
-//! shows on hover reaches the keyboard and a screen reader.
+//! Each worn or carried row is labelled with all it knows, for a screen
+//! reader; what the keyboard reaches in it is its buttons, and More opens the
+//! rest in the row. The items the chat named lately are listed too, each a tab
+//! stop, so what a tooltip shows on hover reaches the keyboard.
 
 pub mod text;
 
