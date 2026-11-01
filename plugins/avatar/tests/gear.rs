@@ -221,6 +221,12 @@ fn examine_notes_the_slot_an_item_goes_in() {
             ("slot.a pair of steel bracers".to_owned(), text("arms")),
             ("slot.a golden feather".to_owned(), text("held")),
             ("slot.a linen robe".to_owned(), text("about")),
+            (
+                "name.a pair of steel bracers".to_owned(),
+                text("a pair of steel bracers")
+            ),
+            ("name.a golden feather".to_owned(), text("a golden feather")),
+            ("name.a linen robe".to_owned(), text("a linen robe")),
         ])
     );
 }

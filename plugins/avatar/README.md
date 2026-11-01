@@ -139,6 +139,7 @@ order:
 
 | Key | Value |
 | --- | --- |
+| `name.<plain name>` | the item as the game writes it, which a plain name can't say; shown wherever the item is named |
 | `slot.<plain name>` | the slot it goes in: from `equipment`, a wear message or `examine` |
 | `keyword.<plain name>` | the word a command names it by: the noun ending its first phrase, never a possessive while there's another word (the game refuses `remove captain's`) |
 | `keywords.<plain name>` | the game's own keywords for it, from a shop's identify |

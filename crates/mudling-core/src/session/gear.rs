@@ -41,6 +41,7 @@ const COUNT: &str = "count";
 const SLOT_PREFIX: &str = "slot.";
 const KEYWORDS_PREFIX: &str = "keywords.";
 const WORD_PREFIX: &str = "keyword.";
+const NAME_PREFIX: &str = "name.";
 /// Where the database kept what's in typed rows now.
 const OLD_GEAR_META: &str = "plugin.gear.";
 const OLD_IDENTIFY_META: &str = "plugin.identify.";
@@ -276,6 +277,9 @@ impl GearKeeper {
             if let (Some(item), Value::Text(word)) = (key.strip_prefix(WORD_PREFIX), &value) {
                 self.book.note_word(word, item);
             }
+            if let (true, Value::Text(name)) = (key.starts_with(NAME_PREFIX), &value) {
+                self.book.note_name(name);
+            }
             flat.insert(format!("gear.{key}"), value);
         }
         hub.write::<GearState>(GearState(flat));
@@ -372,6 +376,8 @@ impl GearKeeper {
             self.book.learn_keywords(value, item, now, batch)
         } else if let Some(item) = key.strip_prefix(WORD_PREFIX) {
             self.book.note_word(value, item)
+        } else if key.starts_with(NAME_PREFIX) {
+            self.book.note_name(value)
         } else {
             false
         };
@@ -437,11 +443,7 @@ impl GearKeeper {
                 taken.push(at);
                 Some(watch.worn_copies[at].1.clone())
             });
-            let was_saved = |row: &&Worn| !item.is_empty() && row.item == item;
-            let copy = copy.or_else(|| {
-                let saved = self.saved_worn.iter().find(was_saved);
-                saved.and_then(|row| row.copy_id.clone())
-            });
+            let copy = self.take_saved_copy(&item, copy);
             worn.push(WornItem { slot, item, copy });
         }
         for row in self.saved_worn.drain(..) {
@@ -469,6 +471,24 @@ impl GearKeeper {
         }
         self.worn = worn;
         self.changed = true;
+    }
+
+    /// The copy of a row that lists `item`: `seen` going on, or else one a
+    /// saved row kept. Each saved copy goes to one row, so two of a name stay
+    /// two copies.
+    fn take_saved_copy(&mut self, item: &str, seen: Option<String>) -> Option<String> {
+        let mut rows = self.saved_worn.iter_mut();
+        match seen {
+            Some(copy) => {
+                if let Some(same) = rows.find(|row| row.copy_id.as_ref() == Some(&copy)) {
+                    same.copy_id = None;
+                }
+                Some(copy)
+            }
+            None => rows
+                .find(|row| row.item == item && row.copy_id.is_some())
+                .and_then(|row| row.copy_id.take()),
+        }
     }
 
     /// The carried list changed. A copy carried isn't worn: one taken off by

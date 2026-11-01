@@ -510,6 +510,18 @@ impl GearBook {
         true
     }
 
+    /// `name` as the game writes it, which a key in plain case can't say.
+    /// Saved by whoever calls this. Returns whether it was news.
+    pub fn note_name(&mut self, name: &str) -> bool {
+        let shown = shown_name(name);
+        let known = self.items.get(&plain_name(name));
+        if known.is_some_and(|known| known.name == shown) {
+            return false;
+        }
+        self.item_mut(name).name = shown;
+        true
+    }
+
     fn note_copy(&mut self, id: &str, name: &str, now: Timestamp, batch: &mut Batch) {
         let entry = self.item_mut(name);
         if entry.copies.iter().any(|copy| copy.id == id) {

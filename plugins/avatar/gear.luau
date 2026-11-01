@@ -22,6 +22,7 @@ local SLOTS = {
 
 local function note_item(write, item, slot)
     local plain = Readers.plain(item)
+    write("gear", "name." .. plain, item)
     if slot then
         write("gear", "slot." .. plain, slot)
     end
@@ -184,7 +185,9 @@ local function finish_identify(reader)
     local item = reader.item or item_answering(reader.keywords)
     if item then
         write("name", item)
-        Readers.write(reader, "gear", "keywords." .. Readers.plain(item), reader.keywords)
+        local plain = Readers.plain(item)
+        Readers.write(reader, "gear", "name." .. plain, item)
+        Readers.write(reader, "gear", "keywords." .. plain, reader.keywords)
     end
     write("keywords", reader.keywords)
     write("type", reader.type)
@@ -299,6 +302,8 @@ function read_examine(event)
     local slot = slot_meant(event.captures.meant)
     if slot then
         Readers.row(reader)
-        Readers.write(reader, "gear", "slot." .. Readers.plain(reader.item), slot)
+        local plain = Readers.plain(reader.item)
+        Readers.write(reader, "gear", "name." .. plain, reader.item)
+        Readers.write(reader, "gear", "slot." .. plain, slot)
     end
 end

@@ -256,6 +256,69 @@ fn wearing_one_item_measures_it_and_moves_it_to_the_worn_list() {
     assert_eq!(state.carried[0].id, "7");
 }
 
+/// The game's list of two rings of one name, read to its end.
+fn list_two_rings(engine: &mut Engine) {
+    let now = Timestamp(0);
+    let table = b"You are using:\r\n\
+        <worn on finger>    a pink ring\r\n\
+        <worn on finger>    a pink ring\r\n";
+    engine.receive(Bytes::from_static(table), now).unwrap();
+    engine.receive(Bytes::from_static(PROMPT), now).unwrap();
+    engine.quiet(now);
+    engine.close_connection(DisconnectReason::ClosedByServer, now);
+}
+
+#[test]
+fn two_worn_copies_of_a_name_stay_two_across_a_reconnect() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let list = r#"{"location":"inv","items":[
+        {"id":"1","name":"a pink ring"},{"id":"2","name":"a pink ring"}]}"#;
+    engine
+        .receive(gmcp("Char.Items.List", &list.replace('\n', " ")), now)
+        .unwrap();
+    engine.settle(now);
+    let wore = b"You wear a pink ring on your left finger.\r\n\
+        You wear a pink ring on your right finger.\r\n";
+    engine.receive(Bytes::from_static(wore), now).unwrap();
+    settle_until(&mut engine, &hub, |items| items.worn.len() == 2);
+    list_two_rings(&mut engine);
+
+    let copies = |hub: &StoreHub| {
+        let state = items(hub);
+        let copies = state.worn.iter().map(|worn| worn.copy.clone());
+        copies.collect::<Vec<_>>()
+    };
+    let both = [Some("1".to_owned()), Some("2".to_owned())];
+    assert_eq!(copies(&hub), both);
+
+    engine.start_connection().unwrap();
+    list_two_rings(&mut engine);
+    assert_eq!(copies(&hub), both);
+}
+
+#[test]
+fn an_item_keeps_the_games_spelling_live_and_after_a_restart() {
+    let folder = tempfile::tempdir().unwrap();
+    let hat = "an official Cult of Bonk Hat";
+    let name = |hub: &StoreHub| {
+        let state = items(hub);
+        state.book.item(hat).map(|item| item.name.clone())
+    };
+    let (mut engine, hub) = self::engine(folder.path());
+    let now = Timestamp(0);
+    let wore = format!("You wear {hat} on your head.\r\n");
+    engine.receive(Bytes::from(wore), now).unwrap();
+    settle_until(&mut engine, &hub, |items| items.book.item(hat).is_some());
+    assert_eq!(name(&hub).as_deref(), Some(hat));
+    engine.finish().unwrap();
+
+    let (engine, hub) = self::engine(folder.path());
+    engine.finish().unwrap();
+    assert_eq!(name(&hub).as_deref(), Some(hat));
+}
+
 #[test]
 fn the_matcher_learns_a_new_name_and_keeps_itself_for_anything_else() {
     let folder = tempfile::tempdir().unwrap();
