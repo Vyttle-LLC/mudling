@@ -5,12 +5,17 @@
 use crate::room_panel::Verbs;
 use crate::settings::PluginRow;
 use crate::shell::Game;
+use futures::executor::block_on;
+use futures::future::{Either, select};
 use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Plugin, PluginId};
-use mudling_core::session::{Session, SessionConfig};
+use mudling_core::session::{Credentials, Session, SessionConfig};
+use mudling_core::sync::Syncer;
+use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::Arc;
 
 /// Under the data folder, one folder per installed plugin.
@@ -35,7 +40,19 @@ pub struct Launcher {
     plugins: Vec<Plugin>,
     /// Plugins the command line turned on, which may also send commands.
     command_line: Vec<PluginId>,
+    /// Told of every session, if there's sync to tell.
+    sync: Option<Syncer>,
     wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// What the vault says about logging in to a server.
+#[derive(Debug)]
+pub enum Login {
+    /// Log in with these, or connect without if there are none to use.
+    Ready(Option<Credentials>),
+    /// A character's password may be in there, but only the player can open
+    /// it.
+    Locked,
 }
 
 impl Launcher {
@@ -49,12 +66,39 @@ impl Launcher {
             data_folder,
             plugins,
             command_line,
+            sync: None,
             wake: Arc::new(wake),
         }
     }
 
     pub fn logs(&self) -> Logs {
         Logs::in_data_folder(&self.data_folder)
+    }
+
+    /// Hands `sync` to every session opened from now on.
+    pub fn with_sync(self, sync: Option<Syncer>) -> Launcher {
+        Launcher { sync, ..self }
+    }
+
+    /// The saved login for the character last played on `host`. A locked
+    /// vault is tried from this device's cache first; this waits on the
+    /// vault's thread, so call it off the UI thread.
+    pub fn login(&self, vault: &Vault, host: &str) -> Login {
+        match self.last_played(host) {
+            Some(character) => login_as(vault, host, character),
+            None => Login::Ready(None),
+        }
+    }
+
+    fn last_played(&self, host: &str) -> Option<String> {
+        let saved = self.saved();
+        let server = saved.servers.iter().find(|server| server.host == host)?;
+        let newest = server
+            .characters
+            .iter()
+            .filter(|character| character.name.is_some())
+            .max_by_key(|character| character.last_played)?;
+        newest.name.clone()
     }
 
     pub fn saved(&self) -> persist::SavedServers {
@@ -76,7 +120,12 @@ impl Launcher {
     /// Opens a session on `target`, with the plugins saved for it. `turn_on`
     /// is saved among them first: the core reads a session's plugins when it
     /// opens, so the player's click takes effect through a new session.
-    pub fn open(&self, target: &Target, turn_on: Option<&PluginId>) -> Result<Game, String> {
+    pub fn open(
+        &self,
+        target: &Target,
+        turn_on: Option<&PluginId>,
+        credentials: Option<Credentials>,
+    ) -> Result<Game, String> {
         let could_not = |error: persist::Error| format!("couldn't open {target}: {error}");
         let mut saved =
             persist::enabled_plugins(&self.data_folder, &target.host).map_err(could_not)?;
@@ -99,6 +148,8 @@ impl Launcher {
             plugins: self.plugins.clone(),
             enabled: enabled.clone(),
             approved: self.command_line.clone(),
+            credentials,
+            sync: self.sync.clone(),
             ..SessionConfig::new(&self.data_folder, &target.host, target.port)
         };
         let wake = Arc::clone(&self.wake);
@@ -118,6 +169,50 @@ impl Launcher {
     pub fn plugin_name(&self, id: &PluginId) -> Option<&str> {
         let plugin = self.plugins.iter().find(|plugin| plugin.id() == id)?;
         Some(&plugin.manifest.name)
+    }
+}
+
+fn login_as(vault: &Vault, host: &str, character: String) -> Login {
+    if vault.state() != VaultState::Unlocked {
+        match block_on(vault.unlock_from_device()) {
+            Ok(()) => {}
+            Err(VaultError::NotCached) => return Login::Locked,
+            Err(_) => return Login::Ready(None),
+        }
+    }
+    match block_on(saved_password(vault, host, &character)) {
+        Ok(password) => Login::Ready(password.map(|password| Credentials {
+            name: character,
+            password: password.expose().to_owned(),
+        })),
+        Err(VaultError::Locked) => Login::Locked,
+        Err(_) => Login::Ready(None),
+    }
+}
+
+/// The password saved for `character`, however the player capitalized it
+/// there. Gives [`VaultError::Locked`] rather than wait out a vault that locks
+/// mid-call, since a job running here holds up the window.
+async fn saved_password(
+    vault: &Vault,
+    host: &str,
+    character: &str,
+) -> Result<Option<Secret>, VaultError> {
+    let mut state = vault.subscribe();
+    let read = async {
+        let entries = vault.entries().await?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.server == host && entry.character.eq_ignore_ascii_case(character));
+        match entry {
+            Some(entry) => vault.password(entry).await,
+            None => Ok(None),
+        }
+    };
+    let locked = state.wait_for(|state| *state != VaultState::Unlocked);
+    match select(pin!(read), pin!(locked)).await {
+        Either::Left((read, _)) => read,
+        Either::Right(_) => Err(VaultError::Locked),
     }
 }
 
@@ -156,6 +251,7 @@ pub fn installed_plugins(data_folder: &Path) -> Vec<Plugin> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mudling_core::vault::{AutoLock, FILE_NAME, MemoryKeyStore};
     use tempfile::TempDir;
 
     #[test]
@@ -169,17 +265,56 @@ mod tests {
             port: 4000,
         };
 
-        let game = launcher.open(&target, None).unwrap();
+        let game = launcher.open(&target, None, None).unwrap();
         assert!(game.enabled.is_empty(), "detection turns nothing on");
         game.session.quit().wait().unwrap();
 
-        let game = launcher.open(&target, Some(&id)).unwrap();
+        let game = launcher.open(&target, Some(&id), None).unwrap();
         assert_eq!(game.enabled, std::slice::from_ref(&id));
         game.session.quit().wait().unwrap();
 
-        let game = launcher.open(&target, None).unwrap();
+        let game = launcher.open(&target, None, None).unwrap();
         assert_eq!(game.enabled, [id]);
         game.session.quit().wait().unwrap();
+    }
+
+    const HOST: &str = "mud.example.org";
+
+    fn fixture_vault(folder: &Path) -> Vault {
+        let path = folder.join(FILE_NAME);
+        std::fs::write(
+            &path,
+            include_str!("../../mudling-core/src/vault/testdata/format-1.vault"),
+        )
+        .unwrap();
+        Vault::open(path, Arc::new(MemoryKeyStore::default()), AutoLock::NEVER)
+    }
+
+    #[test]
+    fn a_locked_vault_is_left_to_the_player_and_an_open_one_logs_in() {
+        let folder = TempDir::new().unwrap();
+        let vault = fixture_vault(folder.path());
+        let login = login_as(&vault, HOST, "Fikus".to_owned());
+        assert!(matches!(login, Login::Locked), "{login:?}");
+
+        let master = "violet anchor mosaic drifting under quiet lanterns";
+        let _ = block_on(vault.unlock_with_password(master.into())).unwrap();
+        let Login::Ready(Some(credentials)) = login_as(&vault, HOST, "fikus".to_owned()) else {
+            panic!("a saved login, however it's capitalized");
+        };
+        assert_eq!(credentials.password, "swordfish-42");
+
+        let nobody = login_as(&vault, HOST, "Nobody".to_owned());
+        assert!(matches!(nobody, Login::Ready(None)), "{nobody:?}");
+    }
+
+    #[test]
+    fn with_no_vault_a_server_just_connects() {
+        let folder = TempDir::new().unwrap();
+        let path = folder.path().join(FILE_NAME);
+        let vault = Vault::open(path, Arc::new(MemoryKeyStore::default()), AutoLock::NEVER);
+        let login = login_as(&vault, HOST, "Fikus".to_owned());
+        assert!(matches!(login, Login::Ready(None)), "{login:?}");
     }
 
     #[test]

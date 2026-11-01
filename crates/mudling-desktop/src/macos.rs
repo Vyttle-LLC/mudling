@@ -10,6 +10,8 @@
 
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
+use crate::measure;
+use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{App, AsyncApp, Context, Entity, Window, px};
@@ -249,6 +251,22 @@ fn sample_log() -> LogFile {
         live: false,
     }
 }
+/// What a screen reader must find in Data & sync, filled with made-up rows.
+const DATA_CONTROLS: [&str; 3] = ["Sync now", "Hide history", "Stop syncing"];
+/// Text Data & sync shows, read from its nodes' values.
+const DATA_TEXT: [&str; 3] = ["ssh-agent", "Last synced", "Never synced"];
+/// What a screen reader must find in Vault, filled with made-up rows.
+const VAULT_CONTROLS: [&str; 7] = [
+    "Reveal the password for Sample on mud.example",
+    "Change the password for Sample on mud.example",
+    "Add a password",
+    "Lock the vault after",
+    "Lock now",
+    "Change master password",
+    "Enter the old master password",
+];
+/// Typed into a masked field, and must reach no node. Made up for this check.
+const TYPED_SECRET: &str = "ax-check typed secret";
 
 /// The HUD's meters, by name, with a value each must read as.
 const HUD_METERS: [(&str, &str); 4] = [
@@ -656,6 +674,80 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("not found: {missing:?}"),
         });
 
+        let named_in = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
+            let unnamed = |name: &&'static str| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            };
+            names.iter().copied().filter(unnamed).collect()
+        };
+        let opened = in_window(
+            &|shell, window, cx| measure::open_sample_section(shell, Section::Data, window, cx),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &DATA_CONTROLS);
+        checks.push(Check {
+            name: "Data & sync names its controls",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        let unread: Vec<_> = DATA_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "Data & sync's text reaches the tree",
+            passed: unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
+        });
+
+        let opened = in_window(
+            &|shell, window, cx| {
+                measure::open_sample_section(shell, Section::Vault, window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &VAULT_CONTROLS);
+        checks.push(Check {
+            name: "Vault names its controls",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+
+        in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.type_sample_password(TYPED_SECRET, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let masked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.subrole.as_deref() == Some("AXSecureTextField"))
+        });
+        let leaks = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                [&e.title, &e.value]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| text.contains(TYPED_SECRET))
+            })
+        });
+        checks.push(Check {
+            name: "a masked field reaches the tree as a mask and nothing else does",
+            passed: !masked.is_empty() && leaks.is_empty(),
+            detail: format!("{} masked, {} leaks", masked.len(), leaks.len()),
+        });
+
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");
         persist::save_server(sample_data.path(), SAMPLE_SERVER, 4000)
@@ -673,14 +765,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let named_here = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
-            let unnamed = |name: &&'static str| {
-                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
-                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
-            };
-            names.iter().copied().filter(unnamed).collect()
-        };
-        let missing = named_here(&tree, &EMPTY_STATE_CONTROLS);
+        let missing = named_in(&tree, &EMPTY_STATE_CONTROLS);
         checks.push(Check {
             name: "the empty state names its cards and controls",
             passed: reached_empty_state.is_some() && missing.is_empty(),
@@ -722,7 +807,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let missing = named_here(&tree, &ADD_FORM_CONTROLS);
+        let missing = named_in(&tree, &ADD_FORM_CONTROLS);
         checks.push(Check {
             name: "the Add form names its field and buttons",
             passed: missing.is_empty(),

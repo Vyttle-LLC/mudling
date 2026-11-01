@@ -22,6 +22,8 @@ const QUICK_TRIES: usize = 3;
 /// How long a disconnect waits for the session's last rows. Rows later than
 /// this go with the next sync.
 const LAST_ROWS_WAIT: Duration = Duration::from_secs(5);
+/// How libssh2 words an SSH server missing from `known_hosts`.
+const UNKNOWN_HOST: &str = "hostkey";
 
 pub(super) struct Thread {
     config: SyncConfig,
@@ -370,6 +372,10 @@ fn plain_words(failure: &Failure, wait: Option<Duration>, tries: u32, locks: &[P
             format!(
                 "The remote or its sign-in didn't answer in time. Your data is safe here.{retry}"
             )
+        }
+        Failure::Git(GitError::AuthRefused(detail)) if detail.contains(UNKNOWN_HOST) => {
+            "This device doesn't know the remote's server yet. Connect to it once with ssh, then sync again. Sync waits until that's done."
+                .to_owned()
         }
         Failure::Git(GitError::AuthRefused(detail)) => format!(
             "The remote refused this device's sign-in: {detail}. Sync waits until that's fixed."

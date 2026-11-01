@@ -472,7 +472,7 @@ impl SettingsSheet {
         );
     }
 
-    fn fill_field(
+    pub(super) fn fill_field(
         &self,
         pane: &mut Pane,
         field: &Entity<CommandInput>,

@@ -16,12 +16,15 @@ use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
-use crate::launcher::{Launcher, Target};
+use crate::launcher::{Launcher, Login, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 #[cfg(target_os = "macos")]
 use crate::settings::Section;
-use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
+use crate::settings::{
+    LockAfter, PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent, SyncChoices,
+    app_settings, with_app_settings,
+};
 use crate::sound::Speaker;
 use crate::status::{StatusLines, lines_for};
 use crate::theme::{Appearance, Theme};
@@ -39,16 +42,20 @@ use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
 #[cfg(target_os = "macos")]
 use mudling_core::logs::{LogFile, LogSettings};
-use mudling_core::persist::SavedServers;
+use mudling_core::persist::{SavedServers, Timestamp};
 use mudling_core::plugin::PluginId;
+use mudling_core::repo::AppSettings;
 use mudling_core::session::{RuleEdit, Session};
 use mudling_core::store::{
     CharactersState, ConnectionStatus, CuesState, MobsState, RoomState, RulesState, SettingsState,
-    StoreHub, TargetState, Versioned, VitalsState,
+    StoreHub, SyncState, TargetState, Versioned, VitalsState,
 };
+use mudling_core::sync::{RepoSettings, Syncer};
 use mudling_core::telnet::Bytes;
+use mudling_core::vault::{KeyStore, Vault};
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -71,6 +78,9 @@ const SHEET_PRIORITY: usize = 4;
 /// How long ending a session may wait for the disk. A stuck hook or disk can
 /// lose what's unsaved, but can't hold up the window or the quit.
 pub const QUIT_WAIT: Duration = Duration::from_secs(5);
+/// How long leaving may take in all: the session, then sync's last push, which
+/// gives up after about 2 seconds.
+pub const LEAVE_WAIT: Duration = Duration::from_secs(8);
 const STUCK_SESSION: &str = "The last session didn't finish saving in time, so its newest \
                              changes may be lost.";
 
@@ -172,11 +182,34 @@ impl Copies {
     }
 }
 
+/// The window's end of sync, which runs whether or not a game does.
+struct SyncLink {
+    syncer: Syncer,
+    copy: Versioned<SyncState>,
+    choices: SyncChoices,
+    /// The settings in force, which the newest `updated` wins.
+    settings: AppSettings,
+    key_store: Arc<dyn KeyStore>,
+    /// Where the vault in use lives.
+    vault_file: PathBuf,
+    /// Stop syncing was pressed, and sync hasn't let go of the repo yet. It
+    /// can refuse, so the saved choice waits for it.
+    clearing: bool,
+}
+
+/// A server to open once the vault has had its say.
+struct WaitingForVault {
+    target: Target,
+    turn_on: Option<PluginId>,
+}
+
 /// What the player can ask for that takes a job off the UI thread.
 enum Request {
     Open {
         target: Target,
         turn_on: Option<PluginId>,
+        /// Whether to look for a saved login.
+        login: bool,
     },
     ChooseServer,
     Save(Target),
@@ -198,11 +231,16 @@ struct Outcome {
     problem: Option<String>,
     /// A server the player added that couldn't be saved.
     unsaved: Option<Target>,
+    /// A server that can't log in until the player unlocks the vault.
+    locked_out: Option<WaitingForVault>,
 }
 
 pub struct Shell {
     game: Option<Game>,
     launcher: Option<Launcher>,
+    sync: Option<SyncLink>,
+    /// What opens when the vault unlocks, or the player closes the sheet.
+    waiting_for_vault: Option<WaitingForVault>,
     /// The one job running off the UI thread: a session ending, another
     /// opening, a server being saved.
     job: Option<Task<()>>,
@@ -236,7 +274,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 12],
+    _subscriptions: [Subscription; 13],
     _woken: Task<()>,
 }
 
@@ -301,8 +339,28 @@ impl Shell {
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
+                    SheetEvent::SetRepo(folder) => shell.set_repo(folder),
+                    SheetEvent::ClearRepo => shell.clear_repo(cx),
+                    SheetEvent::SyncNow => {
+                        if let Some(link) = &shell.sync {
+                            link.syncer.sync_now();
+                        }
+                    }
+                    SheetEvent::LockAfter(lock_after) => shell.keep_lock_after(*lock_after),
+                    SheetEvent::VaultUnlocked => shell.go_on_after_unlock(window, cx),
                 },
             );
+        let front = cx.observe_window_activation(window, |shell, window, cx| {
+            if window.is_window_active() {
+                if let Some(link) = &shell.sync {
+                    link.syncer.foreground();
+                }
+            } else {
+                shell
+                    .settings
+                    .update(cx, |sheet, cx| sheet.hide_passwords(cx));
+            }
+        });
         let quitting = cx.on_app_quit(|shell, cx| {
             let saved = shell.leave(cx);
             async move {
@@ -363,6 +421,8 @@ impl Shell {
         let mut shell = Shell {
             game,
             launcher: None,
+            sync: None,
+            waiting_for_vault: None,
             job: None,
             waiting: VecDeque::new(),
             trouble: None,
@@ -398,6 +458,7 @@ impl Shell {
                 offers,
                 places,
                 sheet_events,
+                front,
                 card_moves,
             ],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
@@ -430,6 +491,188 @@ impl Shell {
             window,
             cx,
         );
+    }
+
+    /// Follows `syncer`, and opens the vault where it says the vault lives.
+    /// Call it after [`Shell::restore_settings`], which holds what's kept.
+    pub fn use_sync(
+        &mut self,
+        syncer: Syncer,
+        key_store: Arc<dyn KeyStore>,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let saved = self.saved_settings.as_ref();
+        let choices = saved.map(SavedSettings::sync_choices).unwrap_or_default();
+        let settings = app_settings(cx.global::<Theme>().choice, choices.settings_updated);
+        let copy = syncer.stores().subscribe();
+        self.sync = Some(SyncLink {
+            syncer,
+            copy,
+            choices,
+            settings,
+            key_store,
+            vault_file: PathBuf::new(),
+            clearing: false,
+        });
+        self.show_sync(window, cx);
+    }
+
+    /// Acts on what sync published. Its waker counts as a wake like a
+    /// session's, and comes with no game running too.
+    fn apply_sync(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        let Some(link) = &mut self.sync else { return };
+        let batch = link.syncer.stores().drain();
+        let Some(diff) = batch.and_then(|batch| batch.sync) else {
+            return;
+        };
+        link.copy.apply_diff(&diff);
+        self.show_sync(window, cx);
+    }
+
+    fn show_sync(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        let saved_settings = &self.saved_settings;
+        let Some(link) = &mut self.sync else { return };
+        let state = link.copy.value();
+        if link.clearing && state.repo.is_none() {
+            link.clearing = false;
+            link.choices.repo = None;
+            if let Some(saved) = saved_settings {
+                saved.save_sync(&link.choices);
+            }
+        }
+        let moved = !state.vault_file.as_os_str().is_empty() && state.vault_file != link.vault_file;
+        if moved {
+            link.vault_file.clone_from(&state.vault_file);
+            let lock_after = link.choices.lock_after;
+            let vault = Vault::open(
+                state.vault_file.clone(),
+                Arc::clone(&link.key_store),
+                lock_after.auto_lock(),
+            );
+            self.settings.update(cx, |sheet, cx| {
+                sheet.use_vault(vault, lock_after, window, cx);
+            });
+        }
+        let Some(link) = &self.sync else { return };
+        let state = link.copy.value();
+        let repo = link.choices.repo.as_deref();
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_sync(state, repo, cx));
+        let theirs = state.settings.clone();
+        self.adopt_settings(theirs, window, cx);
+        self.show_problems(self.copies.settings.value(), cx);
+    }
+
+    /// Wears settings a merge brought in, if they're newer than what's worn.
+    fn adopt_settings(
+        &mut self,
+        theirs: AppSettings,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(link) = &mut self.sync else { return };
+        if theirs.updated <= link.settings.updated {
+            return;
+        }
+        let choice = with_app_settings(cx.global::<Theme>().choice, &theirs);
+        link.choices.settings_updated = theirs.updated;
+        link.settings = theirs;
+        cx.set_global(Theme::chosen(choice, window.appearance()));
+        window.refresh();
+        if let Some(saved) = &self.saved_settings {
+            saved.save(choice);
+            saved.save_sync(&link.choices);
+        }
+    }
+
+    /// Hands a choice of theme or font to sync, as the newest there is.
+    fn tell_sync_of(&mut self, choice: Appearance) {
+        let Some(link) = &mut self.sync else { return };
+        let updated = Timestamp::now();
+        link.settings = AppSettings {
+            shortcuts: std::mem::take(&mut link.settings.shortcuts),
+            panels: std::mem::take(&mut link.settings.panels),
+            ..app_settings(choice, updated)
+        };
+        link.choices.settings_updated = updated;
+        link.syncer.settings_changed(link.settings.clone());
+        if let Some(saved) = &self.saved_settings {
+            saved.save_sync(&link.choices);
+        }
+    }
+
+    fn set_repo(&mut self, folder: &Path) {
+        let Some(link) = &mut self.sync else { return };
+        link.clearing = false;
+        link.choices.repo = Some(folder.to_owned());
+        link.syncer.set_repo(RepoSettings::new(folder));
+        if let Some(saved) = &self.saved_settings {
+            saved.save_sync(&link.choices);
+        }
+    }
+
+    fn clear_repo(&mut self, cx: &mut Context<Shell>) {
+        let Some(link) = &mut self.sync else { return };
+        link.clearing = true;
+        link.syncer.clear_repo();
+        // A repo that never opened publishes nothing to wait for.
+        if link.copy.value().repo.is_none() {
+            link.clearing = false;
+            link.choices.repo = None;
+            if let Some(saved) = &self.saved_settings {
+                saved.save_sync(&link.choices);
+            }
+            let (state, repo) = (link.copy.value(), None);
+            self.settings
+                .update(cx, |sheet, cx| sheet.show_sync(state, repo, cx));
+        }
+    }
+
+    fn keep_lock_after(&mut self, lock_after: LockAfter) {
+        let Some(link) = &mut self.sync else { return };
+        link.choices.lock_after = lock_after;
+        if let Some(saved) = &self.saved_settings {
+            saved.save_sync(&link.choices);
+        }
+    }
+
+    /// The vault opened, so what waited on it goes ahead and logs in.
+    fn go_on_after_unlock(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        if let Some(WaitingForVault { target, turn_on }) = self.waiting_for_vault.take() {
+            let login = true;
+            self.ask(
+                Request::Open {
+                    target,
+                    turn_on,
+                    login,
+                },
+                window,
+                cx,
+            );
+            self.close_settings(window, cx);
+        }
+    }
+
+    /// The sheet is gone from the screen, so what it held goes too. A server
+    /// still waiting on the vault connects without logging in.
+    fn sheet_closed(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.settings.update(cx, |sheet, cx| {
+            sheet.forget_typed(cx);
+            sheet.stop_waiting_for_unlock(cx);
+        });
+        if let Some(WaitingForVault { target, turn_on }) = self.waiting_for_vault.take() {
+            let login = false;
+            self.ask(
+                Request::Open {
+                    target,
+                    turn_on,
+                    login,
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     /// Runs `job` away from the UI thread, one job at a time.
@@ -476,6 +719,13 @@ impl Shell {
             self.play(game, window, cx);
         }
         self.show_where_things_stand(cx);
+        if let Some(waiting) = outcome.locked_out {
+            self.settings.update(cx, |sheet, cx| {
+                sheet.wait_for_unlock(&waiting.target.host, cx)
+            });
+            self.waiting_for_vault = Some(waiting);
+            self.open_settings(window, cx);
+        }
         // A sheet that's open keeps the keyboard. What it goes back to may be
         // gone by the time it closes, as a removed server's card is.
         if self.settings_open {
@@ -492,9 +742,12 @@ impl Shell {
     }
 
     fn ask_to_open(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Shell>) {
-        let target = target.clone();
-        let turn_on = None;
-        self.ask(Request::Open { target, turn_on }, window, cx);
+        let request = Request::Open {
+            target: target.clone(),
+            turn_on: None,
+            login: true,
+        };
+        self.ask(request, window, cx);
     }
 
     /// Does what the player asked now, or once the running job is done.
@@ -511,7 +764,11 @@ impl Shell {
 
     fn start(&mut self, request: Request, window: &mut Window, cx: &mut Context<Shell>) {
         match request {
-            Request::Open { target, turn_on } => self.open(target, turn_on, window, cx),
+            Request::Open {
+                target,
+                turn_on,
+                login,
+            } => self.open(target, turn_on, login, window, cx),
             Request::ChooseServer => self.choose_server(window, cx),
             Request::Save(target) => self.add_server(target, window, cx),
             Request::Remove(host) => self.remove_server(host, window, cx),
@@ -549,11 +806,14 @@ impl Shell {
     /// Ends the session running, if any, and opens one on `target`. `turn_on`
     /// is a game plugin the player just turned on: a session reads its
     /// plugins when it opens, so this is also how that takes effect. A repeat
-    /// of what's already running, such as a double click, does nothing.
+    /// of what's already running, such as a double click, does nothing. With
+    /// `login`, the vault is asked for the saved login, and a vault only the
+    /// player can open sends them to it, with nothing connected yet.
     fn open(
         &mut self,
         target: Target,
         turn_on: Option<PluginId>,
+        login: bool,
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
@@ -572,10 +832,27 @@ impl Shell {
         let connecting = SessionLabel::new(target.host.clone(), None, "Connecting…");
         self.title_bar
             .update(cx, |bar, cx| bar.show(connecting, cx));
+        let vault = self
+            .settings
+            .read(cx)
+            .vault()
+            .filter(|_| login && !target.host.is_empty());
         self.off_the_ui_thread(
             move |launcher| {
                 let stuck = leaving.and_then(Game::finish);
-                let opened = launcher.open(&target, turn_on.as_ref());
+                let credentials = match vault.map(|vault| launcher.login(&vault, &target.host)) {
+                    Some(Login::Locked) => {
+                        return Outcome {
+                            saved: launcher.saved(),
+                            problem: stuck,
+                            locked_out: Some(WaitingForVault { target, turn_on }),
+                            ..Outcome::default()
+                        };
+                    }
+                    Some(Login::Ready(credentials)) => credentials,
+                    None => None,
+                };
+                let opened = launcher.open(&target, turn_on.as_ref(), credentials);
                 let (game, problem) = match opened {
                     Ok(game) => (Some(game), None),
                     Err(problem) => (None, Some(problem)),
@@ -651,8 +928,7 @@ impl Shell {
         let Some(game) = &self.game else { return };
         if game.session.has_stopped() {
             let target = game.target.clone();
-            let turn_on = None;
-            self.ask(Request::Open { target, turn_on }, window, cx);
+            self.ask_to_open(&target, window, cx);
         } else {
             game.session.connect();
             window.focus(&self.input.focus_handle(cx), cx);
@@ -661,9 +937,12 @@ impl Shell {
 
     fn turn_on(&mut self, plugin: PluginId, window: &mut Window, cx: &mut Context<Shell>) {
         if let Some(game) = &self.game {
-            let target = game.target.clone();
-            let turn_on = Some(plugin);
-            self.ask(Request::Open { target, turn_on }, window, cx);
+            let request = Request::Open {
+                target: game.target.clone(),
+                turn_on: Some(plugin),
+                login: true,
+            };
+            self.ask(request, window, cx);
         }
     }
 
@@ -680,7 +959,11 @@ impl Shell {
     }
 
     /// Takes effect at once, in every view.
-    fn apply_choice(&self, choice: Appearance, window: &mut Window, cx: &mut Context<Shell>) {
+    fn apply_choice(&mut self, choice: Appearance, window: &mut Window, cx: &mut Context<Shell>) {
+        let worn = cx.global::<Theme>().choice;
+        if (worn.theme, worn.font) != (choice.theme, choice.font) {
+            self.tell_sync_of(choice);
+        }
         cx.set_global(Theme::chosen(choice, window.appearance()));
         window.refresh();
         if let Some(saved) = &self.saved_settings {
@@ -703,6 +986,7 @@ impl Shell {
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         self.settings_open = false;
+        self.sheet_closed(window, cx);
         match self.focus_before_settings.take() {
             Some(focused) => window.focus(&focused, cx),
             None => self.focus_command_bar(window, cx),
@@ -731,6 +1015,7 @@ impl Shell {
 
     /// Applies what changed since the last frame.
     fn apply_stores(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.apply_sync(window, cx);
         let stores = self.game.as_ref().map(|game| game.session.stores());
         let Some(batch) = stores.and_then(|stores| stores.drain()) else {
             return;
@@ -944,7 +1229,8 @@ impl Shell {
     fn show_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
         self.settings
             .update(cx, |sheet, cx| sheet.show_session(settings, cx));
-        let problems = settings.notices.len() + settings.turned_off.len();
+        let session_problems = settings.notices.len() + settings.turned_off.len();
+        let problems = session_problems + self.settings.read(cx).sync_problems();
         self.title_bar
             .update(cx, |bar, cx| bar.show_problems(problems, cx));
     }
@@ -1116,7 +1402,6 @@ impl Shell {
         self.title_bar.read(cx).find_open()
     }
 
-    #[cfg(test)]
     pub fn settings_sheet(&self) -> Entity<SettingsSheet> {
         self.settings.clone()
     }
@@ -1179,7 +1464,7 @@ impl Shell {
 
     /// Puts the HUD at `placement`, opened or not, as the sheet would.
     pub fn place_hud(
-        &self,
+        &mut self,
         placement: HudPlacement,
         open: bool,
         window: &mut Window,
@@ -1288,8 +1573,9 @@ impl Shell {
         self.ask(Request::ChooseServer, window, cx);
     }
 
-    /// Ends the session, off this thread. The task finishes once everything
-    /// reached the disk. `None` if the shell already left.
+    /// Ends the session, then sync, off this thread: sync's last push must
+    /// see the session's last rows. The task finishes once everything reached
+    /// the disk. `None` if the shell already left.
     pub fn leave(&mut self, cx: &mut Context<Shell>) -> Option<Task<()>> {
         if std::mem::replace(&mut self.left, true) {
             return None;
@@ -1297,6 +1583,7 @@ impl Shell {
         let job = self.job.take();
         let game = self.game.take();
         let saved_settings = self.saved_settings.take();
+        let syncer = self.sync.as_ref().map(|link| link.syncer.clone());
         Some(cx.background_spawn(async move {
             drop(saved_settings);
             if let Some(job) = job {
@@ -1304,6 +1591,9 @@ impl Shell {
             }
             if let Some(problem) = game.and_then(Game::finish) {
                 eprintln!("{problem}");
+            }
+            if let Some(syncer) = syncer {
+                syncer.quit().wait();
             }
         }))
     }
@@ -1384,7 +1674,9 @@ impl Render for Shell {
                 shell.toggle_dock(Side::Right, cx);
             }))
             .on_action(cx.listener(|shell, _: &FocusCommandBar, window, cx| {
-                shell.settings_open = false;
+                if std::mem::take(&mut shell.settings_open) {
+                    shell.sheet_closed(window, cx);
+                }
                 shell.focus_before_settings = None;
                 shell.focus_command_bar(window, cx);
                 cx.notify();
@@ -1437,6 +1729,7 @@ pub mod tests {
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::room_panel::press_key;
     use crate::settings::Section;
+    use crate::theme::ThemeChoice;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
         Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
@@ -1448,12 +1741,13 @@ pub mod tests {
     use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
     use mudling_core::session::SessionConfig;
     use mudling_core::store::TerminalState;
+    use mudling_core::sync::SyncConfig;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
+    use mudling_core::vault::MemoryKeyStore;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::path::Path;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
 
@@ -3597,6 +3891,196 @@ pub mod tests {
 
         played.cx.simulate_keystrokes("enter");
         assert_eq!(played.heard_command(), "hunter2", "the chip went nowhere");
+    }
+
+    /// A port nothing listens on: the listener goes with this call.
+    fn unused_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// A window on sync with no game.
+    fn synced_window<'a>(
+        cx: &'a mut TestAppContext,
+        folder: &Path,
+        repo: Option<&Path>,
+    ) -> (Entity<Shell>, &'a mut VisualTestContext, Syncer) {
+        cx.update(|cx| {
+            crate::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (_waker, woken) = unbounded();
+        let config = SyncConfig {
+            repo: repo.map(RepoSettings::new),
+            ..SyncConfig::new(folder)
+        };
+        let syncer = Syncer::start(config, || {}).unwrap();
+        let handle = syncer.clone();
+        let (shell, cx) = cx.add_window_view(move |window, cx| {
+            let mut shell = Shell::new(None, woken, window, cx);
+            shell.use_sync(handle, Arc::new(MemoryKeyStore::default()), window, cx);
+            shell
+        });
+        (shell, cx, syncer)
+    }
+
+    /// Applies the stores until `done`: sync answers from a real thread.
+    fn applied_until(
+        shell: &Entity<Shell>,
+        cx: &mut VisualTestContext,
+        what: &str,
+        done: impl Fn(&Shell, &App) -> bool,
+    ) {
+        let began = Instant::now();
+        while began.elapsed() < WAIT {
+            shell.update_in(cx, |shell, window, cx| shell.apply_stores(window, cx));
+            cx.run_until_parked();
+            if shell.read_with(cx, |shell, cx| done(shell, cx)) {
+                return;
+            }
+            sleep(Duration::from_millis(5));
+        }
+        panic!("never saw {what}");
+    }
+
+    #[gpui::test]
+    fn the_vault_opens_where_sync_says_it_lives_with_no_game_running(cx: &mut TestAppContext) {
+        let folder = TempDir::new().unwrap();
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), None);
+        applied_until(&shell, cx, "the vault", |shell, cx| {
+            shell.settings.read(cx).vault().is_some()
+        });
+        let path = shell.read_with(cx, |shell, _| {
+            shell.sync.as_ref().unwrap().vault_file.clone()
+        });
+        assert_eq!(path, folder.path().join(mudling_core::vault::FILE_NAME));
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn setting_a_repo_moves_the_vault_there_and_the_choice_is_kept(cx: &mut TestAppContext) {
+        let (folder, repo) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), None);
+        applied_until(&shell, cx, "the first vault", |shell, cx| {
+            shell.settings.read(cx).vault().is_some()
+        });
+
+        let chosen = repo.path().to_owned();
+        shell.update(cx, |shell, _| shell.set_repo(&chosen));
+        let wanted = repo.path().join(mudling_core::vault::FILE_NAME);
+        applied_until(&shell, cx, "the vault moving", |shell, _| {
+            shell.sync.as_ref().unwrap().vault_file == wanted
+        });
+        let kept = shell.read_with(cx, |shell, _| {
+            shell.sync.as_ref().unwrap().choices.repo.clone()
+        });
+        assert_eq!(kept.as_deref(), Some(repo.path()));
+
+        shell.update(cx, |shell, cx| shell.clear_repo(cx));
+        applied_until(&shell, cx, "sync letting go", |shell, _| {
+            shell.sync.as_ref().unwrap().choices.repo.is_none()
+        });
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn newer_settings_from_another_device_are_worn_and_older_ones_are_not(cx: &mut TestAppContext) {
+        let folder = TempDir::new().unwrap();
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), None);
+        let settings = |theme: &str, updated| AppSettings {
+            theme: theme.to_owned(),
+            updated: Timestamp(updated),
+            ..AppSettings::default()
+        };
+        shell.update_in(cx, |shell, window, cx| {
+            shell.adopt_settings(settings("dark", 20), window, cx);
+        });
+        let worn =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| cx.global::<Theme>().choice.theme);
+        assert_eq!(worn(cx), ThemeChoice::Dark);
+
+        shell.update_in(cx, |shell, window, cx| {
+            shell.adopt_settings(settings("light", 10), window, cx);
+        });
+        assert_eq!(worn(cx), ThemeChoice::Dark);
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn choosing_a_theme_tells_sync_and_moving_the_card_does_not(cx: &mut TestAppContext) {
+        let folder = TempDir::new().unwrap();
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), None);
+        let updated = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, _| shell.sync.as_ref().unwrap().settings.updated)
+        };
+        let choice = cx.update(|_, cx| cx.global::<Theme>().choice);
+        shell.update_in(cx, |shell, window, cx| {
+            let card = Appearance {
+                card: Some((1, 2)),
+                ..choice
+            };
+            shell.apply_choice(card, window, cx);
+        });
+        assert_eq!(updated(&shell, cx), Timestamp::default());
+
+        shell.update_in(cx, |shell, window, cx| {
+            let dark = Appearance {
+                theme: ThemeChoice::Dark,
+                ..choice
+            };
+            shell.apply_choice(dark, window, cx);
+        });
+        assert!(updated(&shell, cx) > Timestamp::default());
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn leaving_quits_sync_last_so_its_last_commit_lands(cx: &mut TestAppContext) {
+        let (folder, repo) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), Some(repo.path()));
+        applied_until(&shell, cx, "the repo opening", |shell, _| {
+            shell.sync.as_ref().unwrap().copy.value().repo.is_some()
+        });
+        let left = shell.update(cx, |shell, cx| shell.leave(cx)).unwrap();
+        left.detach();
+        cx.run_until_parked();
+        syncer.quit().wait();
+        let branch = repo.path().join(".git/refs/heads/main");
+        assert!(branch.exists(), "the last pass committed");
+    }
+
+    #[gpui::test]
+    fn a_vault_only_the_player_can_open_stops_for_them_and_closing_connects(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = window_with_keys(cx);
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let target = Target {
+            host: "127.0.0.1".to_owned(),
+            port: unused_port(),
+        };
+        shell.update_in(cx, |shell, window, cx| {
+            shell.use_launcher(launcher, window, cx);
+            let outcome = Outcome {
+                locked_out: Some(WaitingForVault {
+                    target,
+                    turn_on: None,
+                }),
+                ..Outcome::default()
+            };
+            shell.job_done(outcome, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-sheet").is_some());
+        assert!(shell.read_with(cx, |shell, _| shell.game.is_none()));
+
+        cx.simulate_keystrokes("escape");
+        applied_until(&shell, cx, "the game opening", |shell, _| {
+            shell.game.is_some()
+        });
+        let game = shell.update(cx, |shell, _| shell.game.take()).unwrap();
+        game.session.quit().wait().unwrap();
     }
 
     #[gpui::test]

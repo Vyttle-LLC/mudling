@@ -82,6 +82,77 @@ pub fn prepare() {
     ssh_agent::select();
 }
 
+/// How this device gets into a remote, for a settings screen to say. It names
+/// no URL and no helper's command, since either can hold a token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    /// The repo has no such remote, so commits stay on this device.
+    NoRemote,
+    /// The remote is a folder this device reaches by itself.
+    NotNeeded,
+    SshAgent,
+    /// A gitconfig credential helper, by its plain name if it's a known one.
+    Helper(Option<&'static str>),
+    /// Nothing is set up to sign in with.
+    Nothing,
+}
+
+/// One session in a repo's history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCommit {
+    pub message: String,
+    /// Seconds since the epoch.
+    pub time: i64,
+}
+
+/// How this device signs in to `remote` of the repo at `folder`. Reads only,
+/// so it can run beside the sync thread that owns the [`Repo`].
+pub fn sign_in_for(folder: &Path, remote: &str) -> Result<SignIn> {
+    let repo = Repository::open(folder)?;
+    let Ok(found) = repo.find_remote(remote) else {
+        return Ok(SignIn::NoRemote);
+    };
+    let url = found.url().unwrap_or_default();
+    let is_ssh = url.starts_with("ssh://") || (url.contains('@') && !url.contains("://"));
+    if is_ssh {
+        return Ok(SignIn::SshAgent);
+    }
+    if !url.starts_with("http") {
+        return Ok(SignIn::NotNeeded);
+    }
+    let helpers = credentials::helpers_for(&repo.config()?, url);
+    Ok(helpers.last().map_or(SignIn::Nothing, |helper| {
+        SignIn::Helper(credentials::plain_name(helper))
+    }))
+}
+
+/// The newest session commits on the branch HEAD is on, at most `most`,
+/// leaving out merges and checkpoints. Reads only, like [`sign_in_for`].
+pub fn session_history(folder: &Path, most: usize) -> Result<Vec<SessionCommit>> {
+    let repo = Repository::open(folder)?;
+    // A branch with no commits yet has no head.
+    let Ok(head) = repo.head() else {
+        return Ok(Vec::new());
+    };
+    let mut walk = repo.revwalk()?;
+    walk.push(head.peel_to_commit()?.id())?;
+    let mut sessions = Vec::new();
+    for id in walk {
+        let commit = repo.find_commit(id?)?;
+        let message = commit.summary()?.unwrap_or_default();
+        if commit.parent_count() < 2 && message != merge::CHECKPOINT {
+            sessions.push(SessionCommit {
+                message: message.to_owned(),
+                time: commit.time().seconds(),
+            });
+        }
+        if sessions.len() == most {
+            break;
+        }
+    }
+    Ok(sessions)
+}
+
 /// When to stop waiting for a network step: at a deadline, or as soon as
 /// someone raises the flag.
 #[derive(Clone, Debug)]

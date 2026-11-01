@@ -8,15 +8,17 @@
 //! has no control to land on, like the list of shortcuts.
 
 mod appearance;
+mod data;
 mod logs;
 mod plugins;
 mod saved;
 mod servers;
 mod shortcuts;
 mod triggers;
+mod vault;
 
 pub use plugins::PluginRow;
-pub use saved::SavedSettings;
+pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use servers::SavedServer;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
@@ -34,6 +36,7 @@ use mudling_core::plugin::{PluginCost, PluginId};
 use mudling_core::session::RuleEdit;
 use mudling_core::store::RulesState;
 use mudling_core::store::SettingsState;
+use std::path::PathBuf;
 
 const WIDTH: Pixels = px(1000.);
 const HEIGHT: Pixels = px(716.);
@@ -109,15 +112,6 @@ impl Section {
             Section::Vault => "Vault",
         }
     }
-
-    /// The line for a section whose phase hasn't arrived.
-    fn not_yet(self) -> Option<&'static str> {
-        match self {
-            Section::Data => Some("Sync isn't here yet. Your data stays on this device."),
-            Section::Vault => Some("The password vault isn't here yet."),
-            _ => None,
-        }
-    }
 }
 
 pub enum SheetEvent {
@@ -132,6 +126,13 @@ pub enum SheetEvent {
     TrySound(&'static str),
     /// New log settings are saved, for the session to follow.
     LoggingChanged,
+    /// Sync into this folder from now on.
+    SetRepo(PathBuf),
+    /// The player confirmed going back to keeping everything local.
+    ClearRepo,
+    SyncNow,
+    LockAfter(LockAfter),
+    VaultUnlocked,
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -301,6 +302,8 @@ pub struct SettingsSheet {
     details: Option<String>,
     /// The chat faces this machine has.
     fonts: Vec<&'static str>,
+    data: data::DataPane,
+    vault: vault::VaultPane,
     dialog: FocusHandle,
     tabs: [FocusHandle; Section::ALL.len()],
     close: FocusHandle,
@@ -337,6 +340,8 @@ impl SettingsSheet {
             costs: Vec::new(),
             details: None,
             fonts: vec![CHAT_FONTS[0]],
+            data: data::DataPane::default(),
+            vault: vault::VaultPane::new(window, cx),
             dialog: cx.focus_handle(),
             tabs: std::array::from_fn(|_| cx.focus_handle()),
             close: cx.focus_handle(),
@@ -361,21 +366,39 @@ impl SettingsSheet {
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         self.removing = None;
         self.logs.stop_asking();
-        if self.problems() > 0 {
-            self.select(Section::Plugins, cx);
-        } else if self.section == Section::Logs {
-            self.refresh_logs(cx);
-        }
+        let opening_on = if self.is_waited_on() {
+            Section::Vault
+        } else if self.problems() > 0 {
+            Section::Plugins
+        } else if self.sync_problems() > 0 {
+            Section::Data
+        } else {
+            self.section
+        };
+        self.select(opening_on, cx);
         window.focus(&self.tabs[self.section as usize], cx);
     }
 
     pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
+        if self.section == Section::Vault && section != Section::Vault {
+            self.forget_typed(cx);
+        }
         self.section = section;
+        match section {
+            Section::Data => self.read_sign_in(cx),
+            Section::Vault => self.list_vault(cx),
+            _ => {}
+        }
         self.scroll.set_offset(point(px(0.), px(0.)));
         if section == Section::Logs {
             self.refresh_logs(cx);
         }
         cx.notify();
+    }
+
+    /// What Data & sync adds to the sprocket's count.
+    pub fn sync_problems(&self) -> usize {
+        self.data.problems()
     }
 
     pub fn show_servers(
@@ -482,7 +505,11 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let chosen = section == self.section;
-        let problems = self.problems();
+        let problems = match section {
+            Section::Plugins => self.problems(),
+            Section::Data => self.sync_problems(),
+            _ => 0,
+        };
         control(
             SharedString::from(format!("section-{}", section as usize)),
             section.title(),
@@ -491,7 +518,7 @@ impl SettingsSheet {
         )
         .role(Role::Tab)
         .aria_selected(chosen)
-        .when(section == Section::Plugins && problems > 0, |tab| {
+        .when(problems > 0, |tab| {
             tab.aria_description(problems_text(problems))
         })
         .w_full()
@@ -504,9 +531,7 @@ impl SettingsSheet {
         .text_color(theme.text)
         .on_click(cx.listener(move |sheet, _, _, cx| sheet.select(section, cx)))
         .child(section.title())
-        .when(section == Section::Plugins && problems > 0, |tab| {
-            tab.child(count_badge(problems, theme))
-        })
+        .when(problems > 0, |tab| tab.child(count_badge(problems, theme)))
     }
 
     fn render_nav(
@@ -589,7 +614,8 @@ impl SettingsSheet {
             Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
             Section::Shortcuts => shortcuts::fill(&mut pane, theme),
             Section::Logs => self.fill_logs(&mut pane, theme, cx),
-            section => pane.row(muted_line(section.not_yet().unwrap_or_default(), theme)),
+            Section::Data => self.fill_data(&mut pane, theme, cx),
+            Section::Vault => self.fill_vault(&mut pane, theme, cx),
         }
         if let Some(wanted) = self.reveal.take()
             && let Some(at) = pane.stops.in_use().iter().position(|stop| *stop == wanted)
@@ -1265,6 +1291,39 @@ mod tests {
             shell.settings_sheet().read(cx).details.clone()
         });
         assert_eq!(open, Some(disabled.to_string()));
+    }
+
+    #[gpui::test]
+    fn keep_syncing_leaves_the_sheet_the_keyboard(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        section(Section::Data, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| sheet.show_sample_data(cx));
+        cx.run_until_parked();
+        click("stop-sync", cx);
+        click("keep-sync", cx);
+        assert!(cx.debug_bounds("keep-sync").is_none());
+        let on_tab =
+            cx.update(|window, cx| sheet.read(cx).tabs[Section::Data as usize].is_focused(window));
+        assert!(on_tab, "focus stays in the sheet");
+    }
+
+    #[gpui::test]
+    fn a_server_waiting_on_the_vault_opens_the_vault_over_any_problems(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let settings = SettingsState {
+            notices: vec!["A notice".to_owned()],
+            ..SettingsState::default()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_problems(&settings, cx));
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| sheet.wait_for_unlock("mud.example", cx));
+        open(&shell, cx);
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.section),
+            Section::Vault
+        );
     }
 
     #[gpui::test]
