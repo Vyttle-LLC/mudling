@@ -6,7 +6,7 @@
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
-//!                            [--find-open] [--find-panel] [--sample-map <rooms>]]
+//!                            [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -24,7 +24,8 @@
 //! report (see `measure`); `--settings-open` measures it with the settings
 //! sheet open, `--hud` with the HUD in that place, `--find-open` with the find
 //! bar open and results showing, `--find-panel` with the Find panel showing and
-//! being typed in, and `--sample-map` with a made-up map.
+//! being typed in, `--notes-open` with a note being typed in the Notes tab, and
+//! `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
 //! alone (see `map_view::harness`).
@@ -56,6 +57,7 @@ mod map_history;
 mod map_view;
 mod measure;
 mod motion;
+mod notes;
 mod room_panel;
 mod session_bar;
 mod settings;
@@ -95,7 +97,7 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
-                     [--find-open] [--find-panel] [--sample-map <rooms>]] [--ax-check]";
+                     [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -117,6 +119,7 @@ struct Options {
     hud: Option<HudRun>,
     find_open: bool,
     find_panel: bool,
+    notes_open: bool,
     sample_map: Option<i64>,
     ax_check: bool,
 }
@@ -285,6 +288,11 @@ fn main() -> ExitCode {
                         .update(cx, |shell, window, cx| hud.put(shell, window, cx))
                         .expect("the measured window is open");
                 }
+                if options.notes_open {
+                    window
+                        .update(cx, measure::open_notes)
+                        .expect("the measured window is open");
+                }
                 measure::drive(
                     window.into(),
                     shell,
@@ -296,6 +304,7 @@ fn main() -> ExitCode {
                         hud: options.hud,
                         find_open: options.find_open,
                         find_panel: options.find_panel,
+                        notes_open: options.notes_open,
                     },
                     cx,
                 );
@@ -457,6 +466,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         hud: None,
         find_open: false,
         find_panel: false,
+        notes_open: false,
         sample_map: None,
         ax_check: false,
     };
@@ -498,6 +508,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             }
             "--find-open" => options.find_open = true,
             "--find-panel" => options.find_panel = true,
+            "--notes-open" => options.notes_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

@@ -11,7 +11,9 @@ use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
 use crate::line::Line;
-use crate::map::{Derived, MapChange, MapRoom, Mark, MarkChange, RoomId, WalkStep, Whereabouts};
+use crate::map::{
+    Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
+};
 use crate::net::DisconnectReason;
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
@@ -351,9 +353,21 @@ pub struct Target {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MobsState {
     pub marks: BTreeSet<(Mark, String)>,
+    /// How this game's room lines name a mob, as the marks hold them.
+    pub namer: MobNamer,
 }
 
 impl MobsState {
+    /// The marks that cover a mob, by its room line.
+    pub fn marks_on(&self, title: &str) -> Vec<Mark> {
+        let covered = |(mark, marked): &&(Mark, String)| mark.covers(marked, title, &self.namer);
+        self.marks
+            .iter()
+            .filter(covered)
+            .map(|(mark, _)| *mark)
+            .collect()
+    }
+
     /// This state with `changes` made.
     pub fn with_changes(&self, changes: &[MarkChange]) -> MobsState {
         let mut marks = self.marks.clone();
@@ -365,7 +379,10 @@ impl MobsState {
                 marks.remove(&mark);
             }
         }
-        MobsState { marks }
+        MobsState {
+            marks,
+            namer: self.namer.clone(),
+        }
     }
 }
 
@@ -432,6 +449,8 @@ pub struct RulesState {
     pub aliases: Vec<AliasRule>,
     /// The hotbar's commands, in order.
     pub hotbar: Vec<String>,
+    /// The server's notepad, in plain text.
+    pub notepad: String,
 }
 
 /// Sounds the triggers asked for: a shell plays each change, once.

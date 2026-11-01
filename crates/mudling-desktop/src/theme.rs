@@ -3,6 +3,7 @@
 //! font. Values come from the MUDling brand guidelines and the design canvas.
 
 use crate::hud::HudPlacement;
+use crate::map_view::Pip;
 use gpui::{BoxShadow, Global, Hsla, Pixels, WindowAppearance, point, px, rgb, rgba};
 use mudling_core::Color;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,19 @@ pub struct MapColors {
     pub selected: Hsla,
     pub heading: Hsla,
     pub muted: Hsla,
+}
+
+impl MapColors {
+    /// What a room's small mark is drawn in.
+    pub fn pip(&self, pip: Pip) -> Hsla {
+        match pip {
+            Pip::Note => self.you,
+            Pip::Gear => self.maze,
+            Pip::Important => self.selected,
+            Pip::Danger => self.aggressive,
+            Pip::Shop | Pip::Trainer | Pip::Fountain => self.building,
+        }
+    }
 }
 
 /// Which appearance the window wears.

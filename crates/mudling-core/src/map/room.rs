@@ -15,6 +15,16 @@ pub mod feature {
     pub const FOUNTAIN: &str = "fountain";
     /// Important gear is here.
     pub const GEAR: &str = "gear";
+    pub const SHOP: &str = "shop";
+    pub const TRAINER: &str = "trainer";
+    pub const DANGER: &str = "danger";
+    /// A mob marked for its gear has been seen here.
+    pub const GEAR_MOB: &str = "gear-mob";
+    /// A mob marked as someone who matters has been seen here.
+    pub const IMPORTANT_MOB: &str = "important-mob";
+
+    /// What a player sets on a room. The rest follow the mob marks.
+    pub const PLAYER_SET: [&str; 6] = [AGGRESSIVE_MOB, FOUNTAIN, SHOP, TRAINER, DANGER, GEAR];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

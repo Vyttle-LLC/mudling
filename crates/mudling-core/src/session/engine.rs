@@ -8,7 +8,7 @@ use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::values::{self, HubView};
-use super::{RuleEdit, SessionConfig, SessionError, Typing};
+use super::{MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
 use crate::completion::{HISTORY_FILE_NAME, HistoryWriter, load_history, words_of};
 use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::commands::{
@@ -22,8 +22,8 @@ use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, VERSION_AUTOSAVE, VERSION_SAFETY};
 use crate::net::DisconnectReason;
 use crate::persist::{
-    self, Batch, Character, Database, Key, REMOVED, SERVERS_FOLDER, Server, Timestamp,
-    UNNAMED_CHARACTER, Writer,
+    self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
+    Timestamp, UNNAMED_CHARACTER, Writer,
 };
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
@@ -412,8 +412,30 @@ impl Engine {
                 self.batch.upsert(hotbar::to_meta(&chips, now));
                 self.rules.hotbar = chips;
             }
+            RuleEdit::SetNotepad(text) => {
+                self.batch.upsert(Meta {
+                    key: NOTEPAD.to_owned(),
+                    value: text.clone(),
+                    updated: now,
+                });
+                self.rules.notepad = text;
+            }
         }
         self.publish_rules();
+    }
+
+    /// Applies a change the player made to the map. The next settle saves it
+    /// and publishes it, as it does a change the game made.
+    pub fn edit_map(&mut self, edit: MapEdit, now: Timestamp) {
+        match edit {
+            MapEdit::Note { room, text } => self.map.set_notes(room, &text),
+            MapEdit::Feature {
+                room,
+                feature,
+                present,
+            } => self.map.set_feature(room, &feature, present),
+            MapEdit::Mark { title, mark, set } => self.map.mark_mob(&title, mark, set, now),
+        }
     }
 
     /// A command a shell's button sent. It's never a password, so with echo
@@ -1025,7 +1047,9 @@ impl Engine {
             .into_iter()
             .map(|row| AliasRule::from_row(row, &host))
             .collect();
-        let hotbar = hotbar::from_meta(&reader.meta()?);
+        let meta = reader.meta()?;
+        let hotbar = hotbar::from_meta(&meta);
+        let notepad = meta.into_iter().find(|meta| meta.key == NOTEPAD);
         let others = persist::other_servers_rows(&self.config.data_folder, &host);
         for (home, row) in others.triggers {
             let rule = TriggerRule::from_row(row, &home);
@@ -1049,6 +1073,7 @@ impl Engine {
             triggers,
             aliases,
             hotbar,
+            notepad: notepad.map_or_else(String::new, |notepad| notepad.value),
         };
         self.run_triggers();
         self.run_aliases();
@@ -1178,7 +1203,10 @@ impl Engine {
         self.add_map_words(&change.rooms);
         self.hub.write::<MapState>(change);
         self.publish_room();
-        let mut mobs = MobsState::default();
+        let mut mobs = MobsState {
+            namer: self.map.mobs().namer().clone(),
+            ..MobsState::default()
+        };
         for mark in Mark::ALL {
             let names = self.map.mobs().marks(mark).iter();
             mobs.marks.extend(names.map(|name| (mark, name.clone())));

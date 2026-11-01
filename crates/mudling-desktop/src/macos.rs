@@ -8,6 +8,7 @@
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
+use crate::dock::{Side, Slot};
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
 use crate::shell::Shell;
@@ -422,6 +423,68 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "the Room panel's buttons carry their names",
             passed: room_buttons.iter().all(|name| named_buttons.contains(name)),
             detail: format!("{named_buttons:?}"),
+        });
+        let toggles = [
+            "Mark (Marked) a grey wolf gear",
+            "Clear aggressive on (Marked) a grey wolf",
+        ];
+        checks.push(Check {
+            name: "the Room panel's mark toggles carry their names",
+            passed: toggles.iter().all(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref()
+                    .is_some_and(|tree| !tree.find(named).is_empty())
+            }),
+            detail: format!("looked for {toggles:?}"),
+        });
+        let window = cx.update(|cx| cx.windows().first().copied());
+        if let Some(window) = window.and_then(|window| window.downcast::<Shell>()) {
+            window
+                .update(cx, crate::measure::open_notes)
+                .expect("the window is open");
+        }
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let named = |role: &str, name: &str| {
+            tree.as_ref().is_some_and(|tree| {
+                !tree
+                    .find(|e| e.is(role, None) && e.title.as_deref() == Some(name))
+                    .is_empty()
+            })
+        };
+        checks.push(Check {
+            name: "the note's editor is a text field named Note",
+            passed: named("AXTextArea", "Note") || named("AXTextField", "Note"),
+            detail: format!(
+                "{:?}",
+                tree.as_ref()
+                    .map(|tree| tree.find(|e| e.title.as_deref() == Some("Note")).len())
+            ),
+        });
+        checks.push(Check {
+            name: "an all-notes row names its room and its walk",
+            passed: named("AXButton", "Go to Square 1, 0")
+                && named("AXButton", "Walk to Square 1, 0"),
+            detail: String::new(),
+        });
+        let tabs = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.title.as_deref() == Some("Notes"))
+        });
+        checks.push(Check {
+            name: "the Notes tab and its panel are named",
+            passed: tabs.len() >= 2,
+            detail: format!("{} element(s)", tabs.len()),
+        });
+        checks.push(Check {
+            name: "the notepad's button says what it edits",
+            passed: named("AXButton", "Edit the notepad"),
+            detail: String::new(),
+        });
+        shell.update(cx, |shell, cx| {
+            shell.notes().update(cx, |notes, cx| notes.finish(cx));
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
         });
         let find_panel = shell.read_with(cx, |shell, _| shell.find_panel());
         let in_shell = |run: &dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>),

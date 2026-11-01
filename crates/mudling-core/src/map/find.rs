@@ -249,7 +249,8 @@ impl FindStores {
     /// and the items it noted. Each sighting's marks are worked out once for
     /// all the rooms with that line.
     fn world(&self) -> Vec<FindEntry> {
-        let marks = &self.mobs.value().marks;
+        let mobs = self.mobs.value();
+        let (marks, namer) = (&mobs.marks, &mobs.namer);
         let mut marks_of: HashMap<&str, Vec<Mark>> = HashMap::new();
         let mut covered = BTreeSet::new();
         let mut entries = Vec::with_capacity(self.map().rooms().len());
@@ -273,7 +274,9 @@ impl FindStores {
             }
             for (title, seen) in &room.sightings {
                 let on_title = marks_of.entry(title).or_insert_with(|| {
-                    let covering = marks.iter().filter(|(mark, name)| mark.covers(name, title));
+                    let covering = marks
+                        .iter()
+                        .filter(|(mark, name)| mark.covers(name, title, namer));
                     covering
                         .map(|held| {
                             covered.insert(held);

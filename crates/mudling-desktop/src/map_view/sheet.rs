@@ -50,6 +50,82 @@ pub enum TileKind {
     },
 }
 
+/// What a room's small marks stand for, in the order they're drawn. The
+/// legend names the ones on the sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pip {
+    Note,
+    Gear,
+    Important,
+    Danger,
+    Shop,
+    Trainer,
+    Fountain,
+}
+
+impl Pip {
+    pub const ALL: [Pip; 7] = [
+        Pip::Note,
+        Pip::Gear,
+        Pip::Important,
+        Pip::Danger,
+        Pip::Shop,
+        Pip::Trainer,
+        Pip::Fountain,
+    ];
+
+    fn on(self, room: &MapRoom) -> bool {
+        let has = |name: &str| room.features.contains(name);
+        match self {
+            Pip::Note => !room.notes.is_empty(),
+            Pip::Gear => has(feature::GEAR) || has(feature::GEAR_MOB),
+            Pip::Important => has(feature::IMPORTANT_MOB),
+            Pip::Danger => has(feature::DANGER),
+            Pip::Shop => has(feature::SHOP),
+            Pip::Trainer => has(feature::TRAINER),
+            Pip::Fountain => has(feature::FOUNTAIN),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Pip::Note => "Note",
+            Pip::Gear => "Gear",
+            Pip::Important => "Important",
+            Pip::Danger => "Danger",
+            Pip::Shop => "Shop",
+            Pip::Trainer => "Trainer",
+            Pip::Fountain => "Fountain",
+        }
+    }
+}
+
+/// A set of [`Pip`]s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pips(u8);
+
+impl Pips {
+    fn of(room: &MapRoom) -> Pips {
+        let mut pips = Pips::default();
+        for pip in Pip::ALL.into_iter().filter(|pip| pip.on(room)) {
+            pips.0 |= 1 << pip as u8;
+        }
+        pips
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn contains(self, pip: Pip) -> bool {
+        self.0 & (1 << pip as u8) != 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Pip> {
+        Pip::ALL.into_iter().filter(move |pip| self.contains(*pip))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub room: RoomId,
@@ -57,6 +133,7 @@ pub struct Tile {
     pub y: i32,
     pub kind: TileKind,
     pub aggressive: bool,
+    pub pips: Pips,
     /// Links to the floors above and below.
     pub up: bool,
     pub down: bool,
@@ -109,6 +186,8 @@ pub struct Sheet {
     floors: Vec<i64>,
     has_houses: bool,
     has_mazes: bool,
+    /// Every pip on a tile here.
+    pips: Pips,
 }
 
 impl Sheet {
@@ -149,6 +228,7 @@ impl Sheet {
             .max()
             .unwrap_or(0);
         sheet.has_mazes = sheet.tiles.iter().any(|tile| tile.kind == TileKind::Maze);
+        sheet.pips = Pips(sheet.tiles.iter().fold(0, |all, tile| all | tile.pips.0));
         sheet
     }
 
@@ -221,6 +301,7 @@ impl Sheet {
                         building: building.id,
                     },
                     aggressive: false,
+                    pips: Pips::default(),
                     up: false,
                     down: false,
                     leaves: DirSet::default(),
@@ -240,6 +321,10 @@ impl Sheet {
 
     pub fn has_mazes(&self) -> bool {
         self.has_mazes
+    }
+
+    pub fn pips(&self) -> Pips {
+        self.pips
     }
 
     pub fn room_count(&self) -> usize {
@@ -334,6 +419,7 @@ fn tile(map: &MapState, room: &MapRoom, square: (i32, i32), place: &Place) -> Ti
         y: square.1,
         kind,
         aggressive: room.features.contains(feature::AGGRESSIVE_MOB),
+        pips: Pips::of(room),
         up: room.links.contains(Direction::Up),
         down: room.links.contains(Direction::Down),
         leaves,
