@@ -18,7 +18,7 @@
 
 use crate::plugin_host::{Counter, split};
 use crate::session::{self, Bench, LINE_BUDGET_US, MIN_LINES, MOVE_BUDGET_US};
-use crate::{BudgetScale, FRAME, HEAP_BYTES, heap_mb, millis, verdict};
+use crate::{FRAME, HEAP_BYTES, heap_mb, millis, verdict};
 use mudling_core::defaults;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::Timestamp;
@@ -80,7 +80,6 @@ pub fn run(
     logs: &[Vec<Event>],
     plugins: &[Plugin],
     pace: Option<u32>,
-    scale: BudgetScale,
 ) -> Result<Report, String> {
     let events: Vec<&Event> = match pace {
         Some(_) => logs.iter().flatten().collect(),
@@ -97,14 +96,12 @@ pub fn run(
 
     let by_event = summaries(samples.by_event);
     let lines = by_event.get(LINE).map_or(0, |line| line.samples);
-    let line_budget_us = scale.time_us(LINE_BUDGET_US);
-    let move_budget_us = scale.time_us(MOVE_BUDGET_US);
     let within_budget = by_event
         .get(LINE)
-        .is_none_or(|line| line.p99_us <= line_budget_us)
+        .is_none_or(|line| line.p99_us <= LINE_BUDGET_US)
         && by_event
             .get(MOVE)
-            .is_none_or(|moves| moves.p99_us <= move_budget_us);
+            .is_none_or(|moves| moves.p99_us <= MOVE_BUDGET_US);
     Ok(Report {
         source: source.to_owned(),
         lines,
@@ -115,8 +112,8 @@ pub fn run(
         writer_catch_up_ms: millis(writer_catch_up),
         heap_mb: heap_mb(heap),
         threaded: through_the_session(&reads, plugins, lines),
-        line_budget_us,
-        move_budget_us,
+        line_budget_us: LINE_BUDGET_US,
+        move_budget_us: MOVE_BUDGET_US,
         within_budget,
     })
 }

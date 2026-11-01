@@ -9,7 +9,7 @@
 //!   once per write: with no writes coalesced, each burst would wake it for
 //!   every line.
 
-use crate::{BudgetScale, verdict};
+use crate::verdict;
 use mudling_core::defaults::hud::Vital;
 use mudling_core::map::{LiveMap, MapRoom, PlainRules};
 use mudling_core::persist::Timestamp;
@@ -43,20 +43,17 @@ pub struct Report {
     pub burst_batches: usize,
     pub burst_wakes: usize,
     pub burst_frame: Summary,
-    frame_budget_us: f64,
     pub within_budget: bool,
 }
 
-pub fn run(scale: BudgetScale) -> Report {
+pub fn run() -> Report {
     let frame_apply = measure_frame_apply();
     let burst = measure_burst();
-    let frame_budget_us = scale.time_us(FRAME_BUDGET_US);
     Report {
-        within_budget: frame_apply.p99_us <= frame_budget_us
-            && burst.frame.p99_us <= frame_budget_us
+        within_budget: frame_apply.p99_us <= FRAME_BUDGET_US
+            && burst.frame.p99_us <= FRAME_BUDGET_US
             && burst.batches < burst.line_writes
             && burst.wakes <= burst.batches,
-        frame_budget_us,
         frame_apply,
         burst_line_writes: burst.line_writes,
         burst_frames: burst.frames,
@@ -80,7 +77,7 @@ pub fn print(report: &Report) {
         report.burst_frames,
         report.burst_wakes,
         report.burst_frame,
-        report.frame_budget_us / 1e3,
+        FRAME_BUDGET_US / 1e3,
         verdict(report.within_budget)
     );
 }

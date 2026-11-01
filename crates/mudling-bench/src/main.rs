@@ -2,18 +2,17 @@
 //! against the PRD §6 budgets, headless and repeatably.
 //!
 //! ```text
-//! mudling-bench [--check] [--budget-scale <n>] [--json <report.json>]
-//!     [--pace <lines/s>] [--plugin <dir>…] [--world <prototype world file>]
-//!     [<session.log>…]
+//! mudling-bench [--check] [--json <report.json>] [--pace <lines/s>]
+//!     [--plugin <dir>…] [--world <prototype world file>] [<session.log>…]
 //! mudling-bench compare <base-binary> [--json <report.json>]
 //! ```
 //!
 //! With logs, it replays them; without, the committed synthetic fixture.
 //! Logs hold other players' chat: they're read at runtime and never committed.
-//! `--check` exits non-zero when a budget is missed. `--budget-scale` multiplies
-//! every time budget, for runners that read slower than the machines §6 was
-//! set on: memory stays as it is, and so does `compare`'s 10%. `compare` is in
-//! [`compare`].
+//! `--check` exits non-zero when a budget is missed. It is run locally, on a
+//! quiet machine, before each phase's pull request: CI records the report and
+//! gates only on `compare`, since shared runners read up to 4× over the
+//! budgets and vary 2× from run to run. `compare` is in [`compare`].
 //!
 //! Over the log's text it fills a 100,000-line scrollback, times 100,000 more
 //! appends (each one parses a raw line and evicts the oldest), and finds over
@@ -65,8 +64,8 @@ const FIND_NEEDLES: [&str; 4] = ["you", "north", "the guard", "xyzzy-absent"];
 const FIND_ROUNDS: usize = 25;
 /// What a Find panel shows first.
 const FIND_PAGE: usize = 500;
-const USAGE: &str = "usage: mudling-bench [--check] [--budget-scale <n>] [--json <report.json>] \
-                     [--pace <lines/s>] [--plugin <dir>…] [--world <file>] [<session.log>…]\n\
+const USAGE: &str = "usage: mudling-bench [--check] [--json <report.json>] [--pace <lines/s>] \
+                     [--plugin <dir>…] [--world <file>] [<session.log>…]\n\
                      \x20      mudling-bench compare <base-binary> [--json <report.json>]";
 
 /// Counts live heap bytes, so the report can say what 100,000 lines cost.
@@ -98,30 +97,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-/// What `--budget-scale` multiplies every time budget by. PRD §6's numbers
-/// stay the constants: a scale of 1 gates exactly as they read.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct BudgetScale(f64);
-
-impl BudgetScale {
-    const EXACT: Self = Self(1.0);
-
-    fn parse(text: &str) -> Result<Self, String> {
-        match text.parse::<f64>() {
-            Ok(scale) if scale.is_finite() && scale > 0.0 => Ok(Self(scale)),
-            _ => Err(format!("bad budget scale {text}")),
-        }
-    }
-
-    /// A time budget as this run holds it to.
-    fn time_us(self, budget_us: f64) -> f64 {
-        budget_us * self.0
-    }
-}
-
 struct Options {
     check: bool,
-    budget_scale: BudgetScale,
     json: Option<String>,
     pace: Option<u32>,
     logs: Vec<String>,
@@ -138,7 +115,6 @@ struct Report {
     find: Summary,
     find_first_page: Summary,
     find_matches: Vec<(String, usize)>,
-    budget_scale: f64,
     append_budget_us: f64,
     find_budget_us: f64,
     append_within_budget: bool,
@@ -203,7 +179,6 @@ fn main() -> ExitCode {
 fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         check: false,
-        budget_scale: BudgetScale::EXACT,
         json: None,
         pace: None,
         logs: Vec::new(),
@@ -213,10 +188,6 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--check" => options.check = true,
-            "--budget-scale" => {
-                options.budget_scale =
-                    BudgetScale::parse(&args.next().ok_or("--budget-scale needs a number")?)?;
-            }
             "--json" => options.json = Some(args.next().ok_or("--json needs a path")?),
             "--pace" => {
                 let pace = args.next().ok_or("--pace needs lines per second")?;
@@ -266,24 +237,23 @@ fn run(options: &Options) -> Result<bool, String> {
     let logs: Vec<Vec<Event>> = texts.iter().map(|text| replay::events(text)).collect();
     let plugins = session_plugins(&options.plugins)?;
 
-    let scale = options.budget_scale;
-    let line_pipeline = line_pipeline::run(&lines, scale);
-    let plugin_host = plugin_host::run(&lines, scale);
-    let defaults = defaults::run(&source, &logs, scale);
-    let luau_hooks = luau_hooks::run(scale);
+    let line_pipeline = line_pipeline::run(&lines);
+    let plugin_host = plugin_host::run(&lines);
+    let defaults = defaults::run(&source, &logs);
+    let luau_hooks = luau_hooks::run();
     let mut game_plugins = Vec::new();
     for dir in &options.plugins {
         game_plugins.push(
-            game_plugin::run(Path::new(dir), &lines, scale)
+            game_plugin::run(Path::new(dir), &lines)
                 .map_err(|error| format!("couldn't time the plugin in {dir}: {error}"))?,
         );
     }
-    let stores = stores::run(scale);
-    let session = session::run(&lines, &plugins, scale);
-    let replay = log_replay::run(&source, &logs, &plugins, options.pace, scale)?;
-    let telnet = telnet::run(scale);
-    let completion = completion::run(scale);
-    let persist = persist::run(scale);
+    let stores = stores::run();
+    let session = session::run(&lines, &plugins);
+    let replay = log_replay::run(&source, &logs, &plugins, options.pace)?;
+    let telnet = telnet::run();
+    let completion = completion::run();
+    let persist = persist::run();
     let map = map::run(&logs, options.world.as_deref().map(Path::new))?;
     let measured = Measured {
         line_pipeline,
@@ -299,7 +269,7 @@ fn run(options: &Options) -> Result<bool, String> {
         persist,
         map,
     };
-    let report = measure_scrollback(source, ReplayFeed::new(lines), measured, scale);
+    let report = measure_scrollback(source, ReplayFeed::new(lines), measured);
 
     print_scrollback(&report);
     line_pipeline::print(&report.line_pipeline);
@@ -389,12 +359,7 @@ struct Measured {
     map: map::Report,
 }
 
-fn measure_scrollback(
-    source: String,
-    mut feed: ReplayFeed,
-    measured: Measured,
-    scale: BudgetScale,
-) -> Report {
+fn measure_scrollback(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
     let Measured {
         line_pipeline,
         plugin_host,
@@ -449,8 +414,6 @@ fn measure_scrollback(
     let append = Summary::of(&appends).expect("appends were timed");
     let find = Summary::of(&finds).expect("finds were timed");
     let find_first_page = Summary::of(&first_pages).expect("finds were timed");
-    let append_budget_us = scale.time_us(APPEND_BUDGET_US);
-    let find_budget_us = scale.time_us(FIND_BUDGET_US);
     Report {
         source,
         source_lines: feed.source_len(),
@@ -459,15 +422,14 @@ fn measure_scrollback(
             fill_ms: millis(fill),
             heap_mb: heap_mb(scrollback_heap),
         },
-        append_within_budget: append.p99_us <= append_budget_us,
-        find_within_budget: find.p99_us <= find_budget_us,
+        append_within_budget: append.p99_us <= APPEND_BUDGET_US,
+        find_within_budget: find.p99_us <= FIND_BUDGET_US,
         append,
         find,
         find_first_page,
         find_matches,
-        budget_scale: scale.0,
-        append_budget_us,
-        find_budget_us,
+        append_budget_us: APPEND_BUDGET_US,
+        find_budget_us: FIND_BUDGET_US,
         line_pipeline,
         plugin_host,
         defaults,
@@ -494,10 +456,6 @@ fn print_scrollback(report: &Report) {
         scrollback.fill_ms, scrollback.heap_mb
     );
     println!(
-        "budget scale: ×{} on every time budget below (memory is not scaled)",
-        report.budget_scale
-    );
-    println!(
         "append (parse + push + evict): {}; budget p99 ≤ {} µs: {}",
         report.append,
         report.append_budget_us,
@@ -517,40 +475,4 @@ fn print_scrollback(report: &Report) {
         report.find_first_page.p50_us / 1e3,
         report.find_first_page.p99_us / 1e3
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PLUGIN_BUDGET_US: f64 = 5.0;
-    const FOUR: BudgetScale = BudgetScale(4.0);
-
-    #[test]
-    fn a_miss_at_exact_budgets_passes_at_four_times() {
-        let p99_us = 12.0;
-        assert!(p99_us > BudgetScale::EXACT.time_us(PLUGIN_BUDGET_US));
-        assert!(p99_us <= FOUR.time_us(PLUGIN_BUDGET_US));
-    }
-
-    #[test]
-    fn a_miss_at_four_times_still_fails() {
-        assert!(25.0 > FOUR.time_us(PLUGIN_BUDGET_US));
-    }
-
-    #[test]
-    fn the_scale_is_a_positive_number() {
-        assert_eq!(BudgetScale::parse("4"), Ok(FOUR));
-        for bad in ["0", "-1", "inf", "NaN", "four", ""] {
-            assert!(BudgetScale::parse(bad).is_err(), "{bad:?} parsed");
-        }
-    }
-
-    #[test]
-    fn budgets_are_exact_unless_scaled() {
-        let options = parse_options(["--check".to_owned()].into_iter()).unwrap();
-        assert_eq!(options.budget_scale, BudgetScale::EXACT);
-        let options = parse_options(["--budget-scale", "4"].map(str::to_owned).into_iter());
-        assert_eq!(options.unwrap().budget_scale, FOUR);
-    }
 }
