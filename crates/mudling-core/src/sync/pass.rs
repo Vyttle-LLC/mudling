@@ -98,9 +98,47 @@ pub(super) struct Repository {
     vault_taken: Option<Vec<u8>>,
 }
 
+/// Whether a repo in `repo` would hold the data folder: it's the same folder,
+/// or one above it. A repo there commits the databases and logs, and takes the
+/// vault in from where it already is. Paths are compared as the disk has them,
+/// through links, and for a folder not made yet by what exists of it.
+pub fn repo_holds_data_folder(repo: &Path, data_folder: &Path) -> bool {
+    resolved(data_folder).starts_with(resolved(repo))
+}
+
+fn resolved(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut here = path;
+    loop {
+        if let Ok(found) = here.canonicalize() {
+            return missing
+                .iter()
+                .rev()
+                .fold(found, |full, part| full.join(part));
+        }
+        match (here.file_name(), here.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name);
+                here = parent;
+            }
+            _ => return path.to_owned(),
+        }
+    }
+}
+
+fn refuse_data_folder(repo: &Path, data_folder: &Path) -> Result<(), GitError> {
+    if repo_holds_data_folder(repo, data_folder) {
+        Err(GitError::HoldsTheDataFolder)
+    } else {
+        Ok(())
+    }
+}
+
 impl Repository {
-    /// Opens the repo for good, clearing what a killed MUDling left.
+    /// Opens the repo for good, clearing what a killed MUDling left. A folder
+    /// that holds the data folder is refused before anything is made in it.
     pub(super) fn open(settings: RepoSettings, data_folder: &Path) -> Result<Repository, GitError> {
+        refuse_data_folder(&settings.folder, data_folder)?;
         Ok(Repository {
             git: git::Repo::open_or_init(&settings.folder)?,
             files: repo::Repo::new(&settings.folder),
@@ -136,6 +174,9 @@ impl Repository {
         session_began: Option<Instant>,
         limit: &Limit,
     ) -> Result<Done, Failure> {
+        // Before anything touches the vault or a database: a repo chosen
+        // before this check, or a folder moved since, can still hold the data.
+        refuse_data_folder(&self.settings.folder, &self.data_folder)?;
         let mut stores = self.open_stores()?;
         let branch = self.git.current_branch()?;
 

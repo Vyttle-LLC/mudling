@@ -11,8 +11,9 @@
 //!
 //! Each connection is one log, in `logs/debug` or `logs/chat` under the data
 //! folder. That folder is the player's device's alone: the repo's export
-//! writes only the files it renders, and its `.gitignore` names `logs/`, for
-//! a repo chosen on top of the data folder. A log leaves only by
+//! writes only the files it renders, and its `.gitignore` names `logs/` as a
+//! second guard. Sync refuses a repo that is the data folder or holds it, so
+//! nothing here is meant to be committed. A log leaves only by
 //! [`Logs::export`], to a place the player picks.
 //!
 //! Each kind keeps its last [`MOST_LOGS`] logs or [`MOST_BYTES`], whichever

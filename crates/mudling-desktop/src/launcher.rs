@@ -71,6 +71,10 @@ impl Launcher {
         }
     }
 
+    pub fn data_folder(&self) -> &Path {
+        &self.data_folder
+    }
+
     pub fn logs(&self) -> Logs {
         Logs::in_data_folder(&self.data_folder)
     }

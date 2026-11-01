@@ -50,6 +50,7 @@ use gpui::{
 };
 use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
+use mudling_core::git::GitError;
 #[cfg(target_os = "macos")]
 use mudling_core::logs::{LogFile, LogSettings};
 use mudling_core::map::FindStores;
@@ -64,7 +65,7 @@ use mudling_core::store::{
     RulesState, SettingsState, SheetState, StoreHub, SyncState, TargetState, TerminalChange,
     Versioned, VitalsState,
 };
-use mudling_core::sync::{RepoSettings, Syncer};
+use mudling_core::sync::{RepoSettings, Syncer, repo_holds_data_folder};
 use mudling_core::telnet::Bytes;
 use mudling_core::vault::{KeyStore, Vault};
 use std::collections::VecDeque;
@@ -425,7 +426,7 @@ impl Shell {
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
-                    SheetEvent::SetRepo(folder) => shell.set_repo(folder),
+                    SheetEvent::SetRepo(folder) => shell.set_repo(folder, cx),
                     SheetEvent::ClearRepo => shell.clear_repo(cx),
                     SheetEvent::SyncNow => {
                         if let Some(link) = &shell.sync {
@@ -822,7 +823,19 @@ impl Shell {
         }
     }
 
-    fn set_repo(&mut self, folder: &Path) {
+    /// Takes the folder the player chose for sync, unless it is or holds the
+    /// data folder: then it says so in Data & sync and changes nothing.
+    fn set_repo(&mut self, folder: &Path, cx: &mut Context<Shell>) {
+        let holds_data = self
+            .launcher
+            .as_ref()
+            .is_some_and(|launcher| repo_holds_data_folder(folder, launcher.data_folder()));
+        let refusal = holds_data.then(|| GitError::HoldsTheDataFolder.to_string());
+        self.settings
+            .update(cx, |sheet, cx| sheet.repo_refused(refusal, cx));
+        if holds_data {
+            return;
+        }
         let Some(link) = &mut self.sync else { return };
         link.clearing = false;
         link.choices.repo = Some(folder.to_owned());
@@ -4925,7 +4938,7 @@ pub mod tests {
         });
 
         let chosen = repo.path().to_owned();
-        shell.update(cx, |shell, _| shell.set_repo(&chosen));
+        shell.update(cx, |shell, cx| shell.set_repo(&chosen, cx));
         let wanted = repo.path().join(mudling_core::vault::FILE_NAME);
         applied_until(&shell, cx, "the vault moving", |shell, _| {
             shell.sync.as_ref().unwrap().vault_file == wanted
@@ -4939,6 +4952,42 @@ pub mod tests {
         applied_until(&shell, cx, "sync letting go", |shell, _| {
             shell.sync.as_ref().unwrap().choices.repo.is_none()
         });
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn a_folder_that_is_or_holds_the_data_folder_is_refused_in_words(cx: &mut TestAppContext) {
+        let outer = TempDir::new().unwrap();
+        let data = outer.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let (shell, cx, syncer) = synced_window(cx, &data, None);
+        applied_until(&shell, cx, "the first vault", |shell, cx| {
+            shell.settings.read(cx).vault().is_some()
+        });
+        let launcher = Launcher::new(data.clone(), Vec::new(), Vec::new(), || {});
+        shell.update_in(cx, |shell, window, cx| {
+            shell.use_launcher(launcher, window, cx);
+        });
+
+        for folder in [data.clone(), outer.path().to_owned()] {
+            shell.update(cx, |shell, cx| shell.set_repo(&folder, cx));
+            let kept = shell.read_with(cx, |shell, _| {
+                shell.sync.as_ref().unwrap().choices.repo.clone()
+            });
+            assert_eq!(kept, None, "{} was taken", folder.display());
+            let said = shell.read_with(cx, |shell, cx| shell.settings.read(cx).repo_refusal());
+            assert!(said.is_some_and(|words| words.contains("MUDling's own data")));
+        }
+        assert!(!data.join(".git").exists(), "nothing was made in it");
+
+        let beside = outer.path().join("repo");
+        shell.update(cx, |shell, cx| shell.set_repo(&beside, cx));
+        let kept = shell.read_with(cx, |shell, _| {
+            shell.sync.as_ref().unwrap().choices.repo.clone()
+        });
+        assert_eq!(kept.as_deref(), Some(beside.as_path()));
+        let said = shell.read_with(cx, |shell, cx| shell.settings.read(cx).repo_refusal());
+        assert_eq!(said, None, "a good choice clears the refusal");
         syncer.quit().wait();
     }
 

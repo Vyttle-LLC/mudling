@@ -50,6 +50,8 @@ pub(super) struct DataPane {
     /// `None` until the player asks, and again when the repo changes.
     history: Option<Result<Vec<SessionCommit>, String>>,
     asking_to_stop: bool,
+    /// Why the folder just chosen wasn't taken, until another is.
+    refused: Option<String>,
     _reading_sign_in: Option<Task<()>>,
     _reading_history: Option<Task<()>>,
 }
@@ -145,6 +147,18 @@ impl SettingsSheet {
             self.list_vault(cx);
         }
         cx.notify();
+    }
+
+    /// Says why a folder the player chose wasn't taken, or, with `None`, that
+    /// the choice was fine.
+    pub fn repo_refused(&mut self, why: Option<String>, cx: &mut Context<SettingsSheet>) {
+        self.data.refused = why;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn repo_refusal(&self) -> Option<String> {
+        self.data.refused.clone()
     }
 
     pub(super) fn read_sign_in(&mut self, cx: &mut Context<SettingsSheet>) {
@@ -251,6 +265,14 @@ impl SettingsSheet {
             pane.row(
                 muted_line(problem, theme)
                     .debug_selector(|| "sync-problem".to_owned())
+                    .role(Role::Alert)
+                    .text_color(theme.error),
+            );
+        }
+        if let Some(refused) = self.data.refused.clone() {
+            pane.row(
+                muted_line(refused, theme)
+                    .debug_selector(|| "repo-refused".to_owned())
                     .role(Role::Alert)
                     .text_color(theme.error),
             );

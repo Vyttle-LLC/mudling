@@ -24,6 +24,9 @@ const HTTP_STATUS_ANSWERS: [&str; 2] = [
 /// How libgit2 words a git server's error packet.
 const SERVER_ERROR_PACKET: &str = "remote error:";
 
+/// Said to the player when the folder chosen for sync holds MUDling's own data.
+const HOLDS_THE_DATA_FOLDER: &str = "That folder holds MUDling's own data folder, which keeps databases and logs that never sync. Choose a different folder, such as a new one beside it.";
+
 /// An HTTP status that says "not now": too many requests, or the server's own
 /// trouble. Every 5xx counts, because each of them can pass.
 fn is_passing_status(detail: &str) -> bool {
@@ -53,6 +56,9 @@ pub enum GitError {
     Locked(String),
     /// The chosen folder holds files and isn't a git repo.
     FolderNotEmpty,
+    /// The folder is MUDling's data folder, or holds it, so the repo would
+    /// commit the databases and logs that stay on this device.
+    HoldsTheDataFolder,
     /// A file about to be pushed seems to hold a password, so nothing was
     /// pushed. `field` says where in the file; the value itself is never
     /// repeated. Nothing moves until the player takes it out.
@@ -74,6 +80,7 @@ impl fmt::Display for GitError {
             Self::NonFastForward(detail) => write!(f, "the remote is ahead: {detail}"),
             Self::Locked(detail) => write!(f, "the repo is locked: {detail}"),
             Self::FolderNotEmpty => f.write_str("the folder holds files and isn't a git repo"),
+            Self::HoldsTheDataFolder => f.write_str(HOLDS_THE_DATA_FOLDER),
             Self::PasswordInFile { path, field } => {
                 write!(f, "not pushed: {path} seems to hold a password in {field}")
             }

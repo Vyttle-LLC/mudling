@@ -74,7 +74,7 @@ mod vault;
 mod tests;
 
 pub use crate::store::SyncState;
-pub use pass::Pass;
+pub use pass::{Pass, repo_holds_data_folder};
 
 use crate::repo::AppSettings;
 use crate::session::{HeldSession, SessionLink};

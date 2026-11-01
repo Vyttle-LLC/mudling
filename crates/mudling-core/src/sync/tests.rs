@@ -995,6 +995,73 @@ fn setting_a_repo_moves_the_local_vault_into_it_and_clearing_brings_it_home() {
     assert_eq!(state_of(&sync).vault_file, local);
 }
 
+/// A sync set to `repo`, over data in `data`, which holds a vault: it says why
+/// it won't run, and the vault is where it was with nothing committed.
+fn refused_repo_leaves_the_vault_alone(data: &Path, repo: &Path) {
+    fs::create_dir_all(data).unwrap();
+    let local = data.join(FILE_NAME);
+    let bytes = {
+        let _vault = vault_with(&local, SERVER);
+        fs::read(&local).unwrap()
+    };
+    let sync = Syncer::start(
+        SyncConfig {
+            repo: Some(RepoSettings::new(repo)),
+            ..SyncConfig::new(data)
+        },
+        || {},
+    )
+    .unwrap();
+
+    let state = wait_for(&sync, |state| state.problem.is_some());
+    sync.sync_now();
+    thread::sleep(Duration::from_millis(300));
+    sync.quit().wait();
+
+    assert!(
+        state.problem.unwrap().contains("holds MUDling's own data"),
+        "said in plain words"
+    );
+    assert_eq!(fs::read(&local).unwrap(), bytes, "the vault stays");
+    assert!(!repo.join(FILE_NAME).exists() || repo == data);
+    assert!(!repo.join(".git").exists(), "nothing was made or committed");
+    assert!(state_of(&sync).repo.is_none());
+}
+
+#[test]
+fn a_repo_that_is_the_data_folder_is_refused_and_the_vault_stays() {
+    let folder = TempDir::new().unwrap();
+    let data = folder.path().join("data");
+    refused_repo_leaves_the_vault_alone(&data, &data);
+}
+
+#[test]
+fn a_repo_that_holds_the_data_folder_is_refused_and_the_vault_stays() {
+    let folder = TempDir::new().unwrap();
+    let data = folder.path().join("everything").join("data");
+    refused_repo_leaves_the_vault_alone(&data, folder.path());
+}
+
+#[test]
+fn a_folder_beside_the_data_folder_is_no_overlap_and_a_link_to_it_is() {
+    let folder = TempDir::new().unwrap();
+    let data = folder.path().join("data");
+    let beside = folder.path().join("repo");
+    fs::create_dir_all(&data).unwrap();
+    assert!(!repo_holds_data_folder(&beside, &data));
+    assert!(!repo_holds_data_folder(&data.join("repo"), &data));
+    #[cfg(unix)]
+    {
+        let link = folder.path().join("link");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        assert!(repo_holds_data_folder(&link, &data));
+        assert!(repo_holds_data_folder(
+            &link.join("not-made-yet"),
+            &link.join("not-made-yet")
+        ));
+    }
+}
+
 #[test]
 fn choosing_another_repo_takes_the_vault_along() {
     let world = two_devices();

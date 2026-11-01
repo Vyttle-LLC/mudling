@@ -383,6 +383,9 @@ fn plain_words(failure: &Failure, wait: Option<Duration>, tries: u32, locks: &[P
         Failure::Git(GitError::RemoteRefused(detail)) => {
             format!("The remote refused: {detail}. Sync waits until that's fixed.")
         }
+        Failure::Git(error @ GitError::HoldsTheDataFolder) => {
+            format!("{error} Sync waits until it's changed.")
+        }
         Failure::Git(GitError::PasswordInFile { path, field }) => format!(
             "Nothing was pushed: {path} seems to hold a password in {field}. Take it out and sync again."
         ),
