@@ -560,3 +560,33 @@ fn signature_falls_back_when_the_machine_has_no_git_identity() {
 
     assert_eq!(signature.name().unwrap(), FALLBACK_NAME);
 }
+
+#[test]
+fn history_lists_sessions_without_merges_or_checkpoints() {
+    let (folder, repo) = empty_repo();
+    assert_eq!(session_history(folder.path(), 5).unwrap(), []);
+
+    commit(&repo, folder.path(), "a", "1");
+    write(folder.path(), "b", "2");
+    repo.commit_all("A MUD · Fikus: 3 rooms").unwrap();
+    write(folder.path(), "c", "3");
+    repo.commit_all(merge::CHECKPOINT).unwrap();
+
+    let sessions = session_history(folder.path(), 1).unwrap();
+    let messages: Vec<_> = sessions.iter().map(|s| s.message.as_str()).collect();
+    assert_eq!(messages, ["A MUD · Fikus: 3 rooms"]);
+    assert!(sessions[0].time > 0);
+}
+
+#[test]
+fn signing_in_is_told_from_the_remote_and_never_quotes_it() {
+    let (folder, _repo) = empty_repo();
+    let git = Repository::open(folder.path()).unwrap();
+    assert_eq!(sign_in_for(folder.path(), "origin"), Ok(SignIn::NoRemote));
+
+    git.remote("origin", "git@example.org:me/data.git").unwrap();
+    assert_eq!(sign_in_for(folder.path(), "origin"), Ok(SignIn::SshAgent));
+
+    git.remote_set_url("origin", "/some/folder").unwrap();
+    assert_eq!(sign_in_for(folder.path(), "origin"), Ok(SignIn::NotNeeded));
+}

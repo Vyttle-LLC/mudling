@@ -403,7 +403,9 @@ fn a_whole_session_on_a_real_connection() {
 
     drop(server);
     wait_for_status(&session, closed_by_server());
+    assert!(!every_store(&session).contains("hunter2"));
     session.quit().wait().unwrap();
+    assert!(!contains(&database_bytes(folder.path()), b"hunter2"));
 }
 
 #[test]

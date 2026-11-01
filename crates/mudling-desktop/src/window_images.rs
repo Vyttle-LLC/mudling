@@ -12,6 +12,7 @@
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
 use crate::hud::HudPlacement;
+use crate::measure;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
@@ -514,6 +515,27 @@ fn window_images() {
             open_sheet(shell, section, window, cx);
         });
     }
+    for (name, appearance, section) in [
+        ("settings-data-dark", Dark, Section::Data),
+        ("settings-data-light", Light, Section::Data),
+        ("settings-vault-filled-dark", Dark, Section::Vault),
+        ("settings-vault-filled-light", Light, Section::Vault),
+    ] {
+        render(name, appearance, WIDE, move |shell, window, cx| {
+            measure::open_sample_section(shell, section, window, cx);
+        });
+    }
+    render(
+        "settings-vault-form-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_section(shell, Section::Vault, window, cx);
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.type_sample_password("not a real one", window, cx);
+            });
+        },
+    );
     render("settings-narrow-dark", Dark, NARROW, |shell, window, cx| {
         open_sheet(shell, Section::Plugins, window, cx);
     });

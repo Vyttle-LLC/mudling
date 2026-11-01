@@ -47,10 +47,28 @@ pub(super) fn machine_callbacks<'a>(config: Config, limit: Limit) -> RemoteCallb
     callbacks
 }
 
+/// What to call a helper. Any other helper stays unnamed, because its value
+/// is a command, which can hold a token.
+pub(super) fn plain_name(helper: &str) -> Option<&'static str> {
+    [
+        ("gh", "the GitHub CLI"),
+        ("manager", "Git Credential Manager"),
+        ("osxkeychain", "the macOS keychain"),
+        ("libsecret", "the system keyring"),
+        ("wincred", "Windows Credential Manager"),
+    ]
+    .into_iter()
+    .find(|(word, _)| {
+        let words = helper.split(|c: char| !c.is_ascii_alphanumeric());
+        words.into_iter().any(|found| found == *word)
+    })
+    .map(|(_, name)| name)
+}
+
 /// The `credential.helper` values that apply to `url`, in the order git tries
 /// them: least specific config file first, and an empty value clearing the
 /// list so far, as `gh auth setup-git` writes it.
-fn helpers_for(config: &Config, url: &str) -> Vec<String> {
+pub(super) fn helpers_for(config: &Config, url: &str) -> Vec<String> {
     let mut helpers = Vec::new();
     let Ok(entries) = config.entries(Some(r"^credential\..*helper$")) else {
         return helpers;
@@ -263,6 +281,16 @@ mod tests {
             helpers_for(&config, "https://github.community/a.git"),
             ["osxkeychain"]
         );
+    }
+
+    #[test]
+    fn a_helper_is_named_only_if_known_and_never_quoted() {
+        assert_eq!(
+            plain_name("!gh auth git-credential"),
+            Some("the GitHub CLI")
+        );
+        assert_eq!(plain_name("osxkeychain"), Some("the macOS keychain"));
+        assert_eq!(plain_name("!f() { echo password=hunter2; }; f"), None);
     }
 
     #[test]

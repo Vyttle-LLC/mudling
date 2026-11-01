@@ -12,17 +12,24 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const AUTH_SOCK: &str = "SSH_AUTH_SOCK";
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long all the agents together may take. This runs before an app's first
+/// window, and a healthy agent answers within milliseconds, so one that's hung
+/// or waiting on a locked app is passed over rather than waited for.
+const PROBE_BUDGET: Duration = Duration::from_millis(100);
 const REQUEST_IDENTITIES: u8 = 11;
 const IDENTITIES_ANSWER: u8 = 12;
 
 /// Points libssh2 at the first agent with keys. With none, it stays put, and
 /// signing in fails as refused.
 pub(super) fn select() {
-    let Some(agent) = agent_sockets().into_iter().find(|socket| has_keys(socket)) else {
+    let deadline = Instant::now() + PROBE_BUDGET;
+    let found = agent_sockets()
+        .into_iter()
+        .find(|socket| has_keys(socket, deadline));
+    let Some(agent) = found else {
         return;
     };
     if env::var_os(AUTH_SOCK).as_deref() != Some(agent.as_os_str()) {
@@ -56,15 +63,19 @@ fn agent_sockets() -> Vec<PathBuf> {
         .collect()
 }
 
-fn has_keys(socket: &Path) -> bool {
-    identity_count(socket).is_ok_and(|count| count > 0)
+fn has_keys(socket: &Path, deadline: Instant) -> bool {
+    identity_count(socket, deadline).is_ok_and(|count| count > 0)
 }
 
 /// Asks an agent how many keys it holds, in the ssh-agent protocol: a
 /// big-endian length, a message type, then for this answer the key count.
-fn identity_count(socket: &Path) -> io::Result<u32> {
+fn identity_count(socket: &Path, deadline: Instant) -> io::Result<u32> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
     let mut agent = UnixStream::connect(socket)?;
-    agent.set_read_timeout(Some(PROBE_TIMEOUT))?;
+    agent.set_read_timeout(Some(left))?;
     agent.write_all(&[0, 0, 0, 1, REQUEST_IDENTITIES])?;
     let mut answer = [0; 9];
     agent.read_exact(&mut answer)?;
@@ -81,6 +92,10 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::thread;
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
 
     /// An agent that answers one request, holding `keys` keys.
     fn fake_agent(socket: &Path, keys: u32) {
@@ -103,13 +118,26 @@ mod tests {
         fake_agent(&empty, 0);
         fake_agent(&loaded, 2);
 
-        assert!(!has_keys(&empty));
-        assert!(has_keys(&loaded));
+        assert!(!has_keys(&empty, soon()));
+        assert!(has_keys(&loaded, soon()));
     }
 
     #[test]
     fn a_dead_socket_has_no_keys() {
         let folder = tempfile::tempdir().unwrap();
-        assert!(!has_keys(&folder.path().join("gone")));
+        assert!(!has_keys(&folder.path().join("gone"), soon()));
+    }
+
+    #[test]
+    fn an_agent_that_never_answers_costs_only_the_time_left() {
+        let folder = tempfile::tempdir().unwrap();
+        let socket = folder.path().join("silent");
+        let _listening = UnixListener::bind(&socket).unwrap();
+
+        let started = Instant::now();
+        let deadline = started + PROBE_BUDGET;
+        assert!(!has_keys(&socket, deadline));
+        assert!(!has_keys(&socket, deadline), "nothing is left to wait for");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

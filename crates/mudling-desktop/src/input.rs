@@ -21,6 +21,7 @@ use gpui::{
     actions, div, fill, point, prelude::*, px, relative, size,
 };
 use mudling_core::defaults::commands::parse_speedwalk;
+use mudling_core::vault::Secret;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -206,6 +207,30 @@ impl CommandInput {
             field: Some(Field { label, placeholder }),
             ..CommandInput::new(cx)
         }
+    }
+
+    /// A one-line form field for a password, masked for good.
+    pub fn secret_field(
+        label: &'static str,
+        placeholder: &'static str,
+        cx: &mut Context<CommandInput>,
+    ) -> CommandInput {
+        CommandInput {
+            masked: true,
+            ..CommandInput::field(label, placeholder, cx)
+        }
+    }
+
+    /// Takes what's in the field, leaving it empty. The [`Secret`] wipes it
+    /// when dropped. Earlier copies a growing `String` left behind can't be
+    /// reached from here.
+    pub fn take_secret(&mut self, cx: &mut Context<Self>) -> Secret {
+        let secret = Secret::from(std::mem::take(&mut self.content));
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+        secret
     }
 
     /// Fills the alias preview slot: what the typed alias would send.
@@ -432,7 +457,13 @@ impl CommandInput {
             return;
         }
         if self.field.is_some() {
-            cx.emit(InputEvent::Submitted(self.content.clone()));
+            // A password stays in the field until `take_secret` wipes it.
+            let submitted = if self.masked {
+                String::new()
+            } else {
+                self.content.clone()
+            };
+            cx.emit(InputEvent::Submitted(submitted));
             return;
         }
         let command = std::mem::take(&mut self.content);
@@ -1067,6 +1098,42 @@ mod tests {
     fn input_window(cx: &mut TestAppContext) -> (Entity<CommandInput>, &mut VisualTestContext) {
         cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
         cx.add_window_view(|_, cx| CommandInput::new(cx))
+    }
+
+    #[gpui::test]
+    fn a_secret_field_shows_a_mask_and_gives_its_text_up_once(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
+        let (input, cx) =
+            cx.add_window_view(|_, cx| CommandInput::secret_field("Password", "Password", cx));
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "hunter2", window, cx);
+            assert_eq!(input.shown(), MASK.repeat(7));
+            let secret = input.take_secret(cx);
+            assert_eq!(secret.expose(), "hunter2");
+            assert_eq!(input.content(), "");
+        });
+    }
+
+    #[gpui::test]
+    fn return_in_a_secret_field_says_nothing_of_what_is_in_it(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
+        let (input, cx) =
+            cx.add_window_view(|_, cx| CommandInput::secret_field("Password", "Password", cx));
+        let heard = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let keep = std::rc::Rc::clone(&heard);
+        let _hearing = cx.update(|_, cx| {
+            cx.subscribe(&input, move |_, event: &InputEvent, _| {
+                if let InputEvent::Submitted(text) = event {
+                    *keep.borrow_mut() = Some(text.clone());
+                }
+            })
+        });
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "hunter2", window, cx);
+            input.submit(&Submit, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(heard.borrow().as_deref(), Some(""));
     }
 
     // These drive the same EntityInputHandler calls the platform makes for an
