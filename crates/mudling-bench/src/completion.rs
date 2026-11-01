@@ -4,7 +4,7 @@
 //! The words are synthetic. Prefixes run from one to three letters, so the
 //! first Tab sees both many matches and few.
 
-use crate::verdict;
+use crate::{BudgetScale, verdict};
 use mudling_core::completion::{Completer, History, KnownWords};
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -55,7 +55,7 @@ impl Lcg {
     }
 }
 
-pub fn run() -> Report {
+pub fn run(scale: BudgetScale) -> Report {
     let mut random = Lcg(1);
     let mut known = KnownWords::new();
     let mut added = 0;
@@ -84,11 +84,12 @@ pub fn run() -> Report {
     }
 
     let complete = Summary::of(&samples).expect("completions were timed");
+    let budget_us = scale.time_us(BUDGET_US);
     Report {
         known_words: known.len(),
         history_commands: history.entries().len(),
-        within_budget: complete.p99_us <= BUDGET_US,
+        within_budget: complete.p99_us <= budget_us,
         complete,
-        budget_us: BUDGET_US,
+        budget_us,
     }
 }
