@@ -5,7 +5,7 @@ use super::buildings::MapDoor;
 use super::geometry::{DirMap, Direction, GridPoint};
 use super::info::{self, ExitInfo, RoomInfo, RoomItems};
 use super::layout::{Layout, Step, draw_id_prefix, first_id, id_prefix, is_id_prefix};
-use super::mobs::{MarkChange, MobMemory};
+use super::mobs::{Mark, MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
 use super::route::{WalkStep, route};
 use super::rows::{read_rooms, write_room};
@@ -17,10 +17,18 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Meta keys the map keeps its own state under.
-pub(crate) const CURRENT_ROOM: &str = "map.current-room";
+pub const CURRENT_ROOM: &str = "map.current-room";
 pub(crate) const ISLANDS: &str = "map.islands";
 /// This device's own: it never syncs, because it's what sets devices apart.
 const ID_PREFIX: &str = "map.id-prefix";
+
+/// Kinds of version the map saves by itself: every few minutes of play when
+/// the map changed, and when a session starts or before a restore.
+pub const VERSION_AUTOSAVE: &str = "autosave";
+pub const VERSION_SAFETY: &str = "safety";
+const BEFORE_RESTORE: &str = "Before restoring";
+/// Versions of each kind kept, as the prototype did: each copies the map.
+const VERSIONS_KEPT: i64 = 40;
 
 /// One server's map, shared by every character on it, kept up to date from
 /// GMCP, the game's text and the player's commands.
@@ -49,7 +57,7 @@ pub struct LiveMap {
     shape: u64,
     /// The shape `derived` was computed from.
     derived_shape: u64,
-    derived: Option<Derived>,
+    derived: Option<Arc<Derived>>,
     area_names: HashMap<String, AreaName>,
     /// How many times derived data was computed, for tests.
     #[cfg(test)]
@@ -79,6 +87,8 @@ pub struct MapChange {
     /// Set when where the player is changed.
     pub whereabouts: Option<Whereabouts>,
     pub marks: Vec<MarkChange>,
+    /// Set when rooms changed, so a view never scans them for this.
+    pub derived: Option<Arc<Derived>>,
 }
 
 /// One commit: the change for views and the rows for the writer.
@@ -97,6 +107,25 @@ pub struct Derived {
     /// Every area, by zone.
     pub areas: Vec<Area>,
     pub buildings: Vec<Building>,
+}
+
+impl Derived {
+    /// An area, by its zone.
+    pub fn area(&self, zone: &str) -> Option<&Area> {
+        let index = self
+            .areas
+            .binary_search_by(|area| area.zone.as_str().cmp(zone))
+            .ok()?;
+        self.areas.get(index)
+    }
+
+    pub fn building(&self, id: RoomId) -> Option<&Building> {
+        let index = self
+            .buildings
+            .binary_search_by_key(&id, |building| building.id)
+            .ok()?;
+        self.buildings.get(index)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,14 +166,7 @@ impl LiveMap {
         };
         let saved_prefix = value(ID_PREFIX).filter(|prefix| is_id_prefix(*prefix));
         let prefix = saved_prefix.unwrap_or_else(draw_id_prefix);
-        let mut layout = Layout::new(first_id(prefix));
-        for room in read_rooms(map, &*rules) {
-            // Rooms from other devices have prefixes of their own.
-            if id_prefix(room.id) == prefix {
-                layout.next_id = layout.next_id.max(room.id + 1);
-            }
-            layout.insert(room);
-        }
+        let mut layout = layout_of(map, &*rules, prefix);
         layout.current = value(CURRENT_ROOM).filter(|id| layout.contains(*id));
         layout.islands = value(ISLANDS).unwrap_or(0);
         layout.clear_dirty();
@@ -337,8 +359,10 @@ impl LiveMap {
                 room.sightings.insert(title.clone(), now);
             }
         });
-        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
-            self.note_feature(feature::AGGRESSIVE_MOB);
+        for mark in Mark::ALL {
+            if titles.iter().any(|title| self.mobs.is(mark, title)) {
+                self.note_feature(mob_feature(mark));
+            }
         }
     }
 
@@ -369,6 +393,38 @@ impl LiveMap {
                 room.features.remove(feature);
             }
         });
+    }
+
+    /// The player setting or clearing `mark` on a mob in their room, by its
+    /// room line. The rooms it was seen in follow: each one gets the mark's
+    /// feature, and a room loses it once no mob seen there has the mark. A
+    /// room that got the feature some other way, with no such sighting, keeps
+    /// it.
+    ///
+    /// This walks the map, which a player's click can afford and a line can't.
+    pub fn mark_mob(&mut self, title: &str, mark: Mark, set: bool, now: Timestamp) {
+        self.tracker.settle();
+        let before = self.rooms_seeing(mark);
+        self.mobs.set_mark(mark, title, set);
+        if set {
+            self.tracker.update_current_rooms(|room| {
+                room.sightings.entry(title.to_owned()).or_insert(now);
+            });
+        }
+        let after = self.rooms_seeing(mark);
+        let feature = mob_feature(mark);
+        for id in after.difference(&before) {
+            self.set_feature(*id, feature, true);
+        }
+        for id in before.difference(&after) {
+            self.set_feature(*id, feature, false);
+        }
+    }
+
+    /// The rooms where a mob with `mark` was seen.
+    fn rooms_seeing(&self, mark: Mark) -> BTreeSet<RoomId> {
+        let seen = |room: &&MapRoom| room.sightings.keys().any(|mob| self.mobs.is(mark, mob));
+        self.rooms().filter(seen).map(|room| room.id).collect()
     }
 
     /// "I'm here": the player telling the map where they really are. The
@@ -450,7 +506,8 @@ impl LiveMap {
     }
 
     /// The whole map, as one change: what a view starts from.
-    pub fn snapshot(&self) -> MapChange {
+    pub fn snapshot(&mut self) -> MapChange {
+        let derived = self.shared_derived();
         let layout = &self.tracker.layout;
         MapChange {
             revision: self.revision,
@@ -459,6 +516,7 @@ impl LiveMap {
                 .filter_map(|room| layout.shared_room(room.id).cloned())
                 .collect(),
             whereabouts: Some(self.whereabouts()),
+            derived: Some(derived),
             ..MapChange::default()
         }
     }
@@ -488,7 +546,8 @@ impl LiveMap {
     /// The moves from the player's room to `goal`, opening doors known to
     /// be closed; `None` when no explored path leads there.
     pub fn route_to(&self, goal: RoomId) -> Option<Vec<WalkStep>> {
-        route(&self.tracker.layout, self.tracker.layout.current?, goal)
+        let layout = &self.tracker.layout;
+        route(|id| layout.room(id), layout.current?, goal)
     }
 
     /// Areas and buildings, computed from the rooms once per shape: a move
@@ -496,10 +555,15 @@ impl LiveMap {
     pub fn derived(&mut self) -> &Derived {
         if self.derived.is_none() || self.derived_shape != self.shape {
             let derived = self.derive();
-            self.derived = Some(derived);
+            self.derived = Some(Arc::new(derived));
             self.derived_shape = self.shape;
         }
         self.derived.as_ref().expect("just derived")
+    }
+
+    fn shared_derived(&mut self) -> Arc<Derived> {
+        self.derived();
+        Arc::clone(self.derived.as_ref().expect("just derived"))
     }
 
     fn derive(&mut self) -> Derived {
@@ -642,16 +706,125 @@ impl LiveMap {
             self.revision += 1;
         }
         change.revision = self.revision;
+        if !change.rooms.is_empty() || !change.removed.is_empty() {
+            change.derived = Some(self.shared_derived());
+        }
         Some(Commit { change, batch })
     }
 
-    /// A batch saving a new version in map history. The writer copies the
-    /// map as the database holds it when it reaches this batch, so submit
-    /// every commit's batch before it.
+    /// A batch saving a new version in map history, past which the oldest of
+    /// its kind go. The writer copies the map as the database holds it when
+    /// it reaches this batch, so submit every commit's batch before it.
     pub fn save_version(kind: &str, label: &str, now: Timestamp) -> Batch {
         let mut batch = Batch::new();
         batch.save_map_version(kind, label, now);
+        batch.prune_map_versions(kind, VERSIONS_KEPT);
         batch
+    }
+
+    /// Works out what restoring a saved version's rows would make of the
+    /// map, changing nothing: the caller commits [`RestoredMap::batch`], and
+    /// only then calls [`LiveMap::finish_restore`].
+    pub fn prepare_restore(&self, version: &MapRows) -> RestoredMap {
+        let old = &self.tracker.layout;
+        let mut layout = layout_of(version, &*self.rules, id_prefix(old.next_id));
+        // A room made after this must not take an id the discarded map used.
+        layout.next_id = layout.next_id.max(old.next_id);
+        layout.islands = old.islands;
+        layout.restart = old.restart;
+        let here = old.current_room();
+        let kept = here
+            .and_then(|room| layout.room(room.id).filter(|same| same.same_place_as(room)))
+            .map(|room| room.id);
+        layout.current = kept.or_else(|| here.and_then(|room| layout.nearest_to(room)));
+        let adrift = kept.is_none() && layout.current.is_some();
+        if kept.is_none() {
+            // A room the version lacks is rebuilt where the player was.
+            layout.restart = here.map(|room| room.position).or(layout.restart);
+        }
+        layout.clear_dirty();
+        RestoredMap { layout, adrift }
+    }
+
+    /// Takes the map a committed restore left, as one change for views.
+    pub fn finish_restore(&mut self, restored: RestoredMap) -> MapChange {
+        let RestoredMap { layout, adrift } = restored;
+        let old = std::mem::replace(&mut self.committed, layout.clone());
+        self.tracker.replace_layout(layout, adrift);
+        // After the map takes it as saved, so the next commit writes what moved.
+        self.tracker.layout.rebuild_buildings();
+        self.shape += 1;
+        self.revision += 1;
+        self.committed_whereabouts = self.whereabouts();
+        let new = &self.committed;
+        let change = MapChange {
+            revision: self.revision,
+            rooms: new
+                .rooms()
+                .filter(|room| old.room(room.id) != Some(*room))
+                .filter_map(|room| new.shared_room(room.id).cloned())
+                .collect(),
+            removed: old
+                .rooms()
+                .map(|room| room.id)
+                .filter(|id| !new.contains(*id))
+                .collect(),
+            whereabouts: Some(self.committed_whereabouts),
+            ..MapChange::default()
+        };
+        MapChange {
+            derived: Some(self.shared_derived()),
+            ..change
+        }
+    }
+}
+
+/// What a saved version becomes as the live map: see
+/// [`LiveMap::prepare_restore`].
+pub struct RestoredMap {
+    layout: Layout,
+    adrift: bool,
+}
+
+impl RestoredMap {
+    /// A batch restoring `version_id` as one transaction: a version of the
+    /// map as it is now first, so the restore can be undone, then the
+    /// restore and where it leaves the player. Pruning comes last: the
+    /// version restored may be the oldest of its kind.
+    pub fn batch(&self, version_id: i64, now: Timestamp) -> Batch {
+        let mut batch = Batch::new();
+        batch.save_map_version(VERSION_SAFETY, BEFORE_RESTORE, now);
+        batch.restore_map_version(version_id, now);
+        match self.layout.current {
+            Some(id) => meta(&mut batch, CURRENT_ROOM, id, now),
+            None => {
+                batch.delete(Key::Meta(CURRENT_ROOM.to_owned()));
+            }
+        }
+        batch.prune_map_versions(VERSION_SAFETY, VERSIONS_KEPT);
+        batch
+    }
+}
+
+/// The rooms of `map`, counting on from the highest id this device's
+/// `prefix` made: rooms from other devices have prefixes of their own.
+fn layout_of(map: &MapRows, rules: &dyn MapRules, prefix: i64) -> Layout {
+    let mut layout = Layout::new(first_id(prefix));
+    for room in read_rooms(map, rules) {
+        if id_prefix(room.id) == prefix {
+            layout.next_id = layout.next_id.max(room.id + 1);
+        }
+        layout.insert(room);
+    }
+    layout
+}
+
+/// The feature a room gets from a mob with `mark`.
+fn mob_feature(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Aggressive => feature::AGGRESSIVE_MOB,
+        Mark::Gear => feature::GEAR_MOB,
+        Mark::Important => feature::IMPORTANT_MOB,
     }
 }
 

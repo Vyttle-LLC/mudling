@@ -11,7 +11,7 @@
 //! mask, tells the platform and accessibility tools only the mask, and can't
 //! be copied. History, completion and hints stay away from it.
 
-use crate::assets::Icon;
+use crate::assets::{Icon, UI_FONT};
 use crate::theme::Theme;
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Div, ElementId,
@@ -149,12 +149,14 @@ impl InputLayout {
     }
 }
 
-/// What sets a one-line form field apart: it has no history or completion,
-/// Tab leaves it, and Return keeps what's typed.
+/// What sets a form field apart: it has no history or completion, and Tab
+/// leaves it. On one line Return keeps what's typed; a notepad takes it as a
+/// new line.
 #[derive(Clone, Copy)]
 struct Field {
     label: &'static str,
     placeholder: &'static str,
+    notepad: bool,
 }
 
 pub struct CommandInput {
@@ -204,7 +206,27 @@ impl CommandInput {
         cx: &mut Context<CommandInput>,
     ) -> CommandInput {
         CommandInput {
-            field: Some(Field { label, placeholder }),
+            field: Some(Field {
+                label,
+                placeholder,
+                notepad: false,
+            }),
+            ..CommandInput::new(cx)
+        }
+    }
+
+    /// A form field of plain text over many lines.
+    pub fn notepad(
+        label: &'static str,
+        placeholder: &'static str,
+        cx: &mut Context<CommandInput>,
+    ) -> CommandInput {
+        CommandInput {
+            field: Some(Field {
+                label,
+                placeholder,
+                notepad: true,
+            }),
             ..CommandInput::new(cx)
         }
     }
@@ -360,12 +382,17 @@ impl CommandInput {
         self.field.is_none() && !self.masked && self.marked_range.is_none()
     }
 
+    fn is_notepad(&self) -> bool {
+        self.field.is_some_and(|field| field.notepad)
+    }
+
     fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.accepts_commands() {
+        if !self.accepts_commands() && !self.is_notepad() {
             return;
         }
         match self.offset_rows_away(-1.) {
             Some(offset) => self.move_to(offset, window, cx),
+            None if self.is_notepad() => {}
             None => cx.emit(InputEvent::Older {
                 line: self.content.clone(),
                 prefix: self.content[..self.cursor_offset()].to_owned(),
@@ -374,11 +401,12 @@ impl CommandInput {
     }
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.accepts_commands() {
+        if !self.accepts_commands() && !self.is_notepad() {
             return;
         }
         match self.offset_rows_away(1.) {
             Some(offset) => self.move_to(offset, window, cx),
+            None if self.is_notepad() => {}
             None => cx.emit(InputEvent::Newer {
                 line: self.content.clone(),
             }),
@@ -397,7 +425,7 @@ impl CommandInput {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.accepts_commands() {
+        if self.accepts_commands() || (self.is_notepad() && self.marked_range.is_none()) {
             self.replace_text_in_range(None, "\n", window, cx);
         }
     }
@@ -454,6 +482,10 @@ impl CommandInput {
     fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         // Return while composing confirms the composition; it doesn't send.
         if self.marked_range.is_some() {
+            return;
+        }
+        if self.is_notepad() {
+            self.replace_text_in_range(None, "\n", window, cx);
             return;
         }
         if self.field.is_some() {
@@ -518,7 +550,7 @@ impl CommandInput {
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let text = text.replace("\r\n", "\n");
-            let text = if self.masked || self.field.is_some() {
+            let text = if self.masked || (self.field.is_some() && !self.is_notepad()) {
                 text.replace('\n', " ")
             } else {
                 text
@@ -831,7 +863,11 @@ impl CommandInput {
             .border_color(theme.border)
             .bg(theme.background)
             .focus(move |style| style.border_color(theme.accent))
-            .font_family(theme.choice.font)
+            .font_family(if self.is_notepad() {
+                UI_FONT
+            } else {
+                theme.choice.font
+            })
             .text_size(theme.choice.chat_size())
             .line_height(theme.choice.chat_line_height())
             .text_color(theme.text)

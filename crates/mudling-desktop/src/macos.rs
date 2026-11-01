@@ -8,6 +8,7 @@
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
+use crate::dock::{Side, Slot};
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
 use crate::measure;
@@ -288,6 +289,18 @@ const SPLIT_DISTANCE: f32 = 2_000.;
 const FIND_PROBE: &str = "while the chat is split";
 const FIND_FIELD: &str = "Find in the scrollback";
 
+const FIND_PANEL_FIELD: &str = "Find on the map";
+/// What a screen reader must find in the Find panel on its sample.
+const FIND_PANEL_CONTROLS: [&str; 5] =
+    ["All", "Rooms", "Mobs", "Items", "Walk to The Market Square"];
+const FIND_PANEL_RESULT: &str = "The Market Square, The Old Town · 1 step away";
+/// Finds the sample's marked mob, which reads with its mark.
+const FIND_PANEL_MARKED_QUERY: &str = "wolf";
+const FIND_PANEL_MARKED: &str =
+    "A grey wolf is here, howling., aggressive, The North Gate · The Old Town · 2 steps away";
+/// In nothing on the sample.
+const FIND_PANEL_NOTHING: &str = "zzz";
+
 /// What a screen reader must find around the command bar. `look` is one of
 /// the chips [`crate::measure::fill_hotbar`] puts there.
 const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to the hotbar"];
@@ -330,6 +343,14 @@ const EMPTY_STATE_TEXT: [&str; 3] = [
     "Pick a character to log back in",
     "stay on this Mac",
 ];
+/// Map history with its sample: the section, the list, the first Restore.
+const MAP_HISTORY_CONTROLS: [&str; 3] = [
+    "Map history",
+    "Saved versions",
+    "Restore the map from Today, 11:42, 14 rooms",
+];
+const KEEP_THE_MAP: &str = "Keep this map";
+const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
@@ -447,6 +468,195 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: room_buttons.iter().all(|name| named_buttons.contains(name)),
             detail: format!("{named_buttons:?}"),
         });
+        let toggles = [
+            "Mark (Marked) a grey wolf gear",
+            "Clear aggressive on (Marked) a grey wolf",
+        ];
+        checks.push(Check {
+            name: "the Room panel's mark toggles carry their names",
+            passed: toggles.iter().all(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref()
+                    .is_some_and(|tree| !tree.find(named).is_empty())
+            }),
+            detail: format!("looked for {toggles:?}"),
+        });
+        let window = cx.update(|cx| cx.windows().first().copied());
+        if let Some(window) = window.and_then(|window| window.downcast::<Shell>()) {
+            window
+                .update(cx, crate::measure::open_notes)
+                .expect("the window is open");
+        }
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let named = |role: &str, name: &str| {
+            tree.as_ref().is_some_and(|tree| {
+                !tree
+                    .find(|e| e.is(role, None) && e.title.as_deref() == Some(name))
+                    .is_empty()
+            })
+        };
+        checks.push(Check {
+            name: "the note's editor is a text field named Note",
+            passed: named("AXTextArea", "Note") || named("AXTextField", "Note"),
+            detail: format!(
+                "{:?}",
+                tree.as_ref()
+                    .map(|tree| tree.find(|e| e.title.as_deref() == Some("Note")).len())
+            ),
+        });
+        checks.push(Check {
+            name: "an all-notes row names its room and its walk",
+            passed: named("AXButton", "Go to Square 1, 0")
+                && named("AXButton", "Walk to Square 1, 0"),
+            detail: String::new(),
+        });
+        let tabs = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.title.as_deref() == Some("Notes"))
+        });
+        checks.push(Check {
+            name: "the Notes tab and its panel are named",
+            passed: tabs.len() >= 2,
+            detail: format!("{} element(s)", tabs.len()),
+        });
+        checks.push(Check {
+            name: "the notepad's button says what it edits",
+            passed: named("AXButton", "Edit the notepad"),
+            detail: String::new(),
+        });
+        shell.update(cx, |shell, cx| {
+            shell.notes().update(cx, |notes, cx| notes.finish(cx));
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
+        });
+        let find_panel = shell.read_with(cx, |shell, _| shell.find_panel());
+        let in_shell = |run: &dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>),
+                        cx: &mut AsyncApp| {
+            cx.update(|cx| {
+                let window = cx.windows().into_iter().next()?;
+                window
+                    .update(cx, |_, window, cx| {
+                        shell.update(cx, |shell, cx| run(shell, window, cx));
+                    })
+                    .ok()
+            })
+        };
+        in_shell(
+            &|shell, window, cx| {
+                shell.find_panel().update(cx, |panel, cx| {
+                    panel.start_over(crate::measure::sample_find(), cx);
+                });
+                shell.focus_find_panel(window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the shortcut brings the keyboard to the Find panel's named field",
+            passed: focus_is_on(
+                focused.as_ref(),
+                tree.as_ref(),
+                TEXT_FIELD,
+                FIND_PANEL_FIELD,
+            ),
+            detail: format!("{focused:?}"),
+        });
+        let unnamed: Vec<_> = FIND_PANEL_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the Find panel names its filters and each result's Walk",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let says_where = |e: &AxElement| {
+            [&e.title, &e.value]
+                .into_iter()
+                .any(|text| text.as_deref() == Some(FIND_PANEL_RESULT))
+        };
+        checks.push(Check {
+            name: "a Find result says where it is",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(says_where).is_empty()),
+            detail: format!("looked for {FIND_PANEL_RESULT:?}"),
+        });
+        in_shell(
+            &|_, window, cx| {
+                find_panel.update(cx, |panel, cx| {
+                    panel.type_text(FIND_PANEL_MARKED_QUERY, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let reads_its_mark = |e: &AxElement| {
+            [&e.title, &e.value]
+                .into_iter()
+                .any(|text| text.as_deref() == Some(FIND_PANEL_MARKED))
+        };
+        checks.push(Check {
+            name: "a marked Find result reads its mark",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(reads_its_mark).is_empty()),
+            detail: format!("looked for {FIND_PANEL_MARKED:?}"),
+        });
+        in_shell(
+            &|_, window, cx| {
+                find_panel.update(cx, |panel, cx| {
+                    panel.type_text(FIND_PANEL_NOTHING, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
+        });
+        checks.push(Check {
+            name: "the Find panel's count reaches a live region",
+            passed: statuses
+                .iter()
+                .any(|s| s.value.as_deref() == Some("0 results")),
+            detail: format!(
+                "{:?}",
+                statuses.iter().map(|s| &s.value).collect::<Vec<_>>()
+            ),
+        });
+        let says_why = |e: &AxElement| {
+            e.value
+                .as_deref()
+                .is_some_and(|value| value.contains(FIND_PANEL_NOTHING))
+        };
+        checks.push(Check {
+            name: "an empty Find list says why",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(says_why).is_empty()),
+            detail: format!("looked for {FIND_PANEL_NOTHING:?}"),
+        });
+        in_shell(
+            &|shell, window, cx| {
+                // Back on the map, the panel's live region leaves the tree.
+                find_panel.update(cx, |panel, cx| panel.type_text("", window, cx));
+                shell
+                    .dock(crate::dock::Side::Left)
+                    .update(cx, |dock, cx| dock.select(crate::dock::Slot::Map, cx));
+                shell.focus_command_bar(window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
         chat.update(cx, |chat, cx| chat.scroll_back(px(SPLIT_DISTANCE), cx));
         cx.background_executor().timer(pause).await;
         let probe = stream::reads(&SPLIT_PROBE_LINES);
@@ -582,6 +792,85 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
+
+        in_window(
+            &|shell, _, cx| {
+                shell
+                    .map_history()
+                    .update(cx, |history, cx| history.show_sample(cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed: Vec<_> = MAP_HISTORY_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "map history names its list, its versions and their Restore buttons",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map_history().update(cx, |history, cx| {
+                    history.ask_about_sample(window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let questions = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| text.as_deref().is_some_and(|t| t.contains("?"));
+                says(&e.title) || says(&e.value)
+            })
+        });
+        checks.push(Check {
+            name: "a restore's question reaches the tree",
+            passed: !questions.is_empty(),
+            detail: format!("{} element(s)", questions.len()),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the question takes focus, on the button that keeps the map",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == KEEP_THE_MAP),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map_history().update(cx, |history, cx| {
+                    history.keep_the_map(window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "keeping the map takes focus back to the Restore that asked",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == MAP_HISTORY_CONTROLS[2]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(&|_, window, cx| window.focus_next(cx), cx);
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the next tab stop after one Restore is the next version's",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == NEXT_MAP_RESTORE),
+            detail: format!("{focused:?}"),
+        });
 
         in_window(
             &|shell, window, cx| {

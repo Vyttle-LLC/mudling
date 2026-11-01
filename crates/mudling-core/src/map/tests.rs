@@ -2,6 +2,7 @@
 //! made up: no game's wording belongs in the core.
 
 use super::*;
+use crate::defaults::commands::parse_speedwalk;
 use crate::persist::{Batch, Database, Timestamp, Writer};
 use std::collections::BTreeSet;
 
@@ -684,6 +685,59 @@ fn hand_laid_crossroads_that_lead_crookedly_collapse() {
     assert!(layout.current_room().unwrap().maze);
 }
 
+#[test]
+fn a_maze_keeps_the_notes_and_features_of_the_rooms_folded_into_it() {
+    let mut layout = layout::Layout::new(1);
+    for (id, x) in [(1, 0), (2, 1), (3, 2)] {
+        layout.insert(crossroads(id, x));
+    }
+    for (from, direction, to) in [
+        (1, Direction::East, 2),
+        (2, Direction::East, 3),
+        (3, Direction::North, 1),
+    ] {
+        layout.update(from, |room| room.links.insert(direction, to));
+    }
+    layout.update(1, |room| "A chest".clone_into(&mut room.notes));
+    layout.update(2, |room| {
+        "A trapdoor".clone_into(&mut room.notes);
+        room.features.insert(feature::SHOP.to_owned());
+    });
+    layout.update(3, |room| {
+        "A chest".clone_into(&mut room.notes);
+        room.features.insert(feature::DANGER.to_owned());
+    });
+
+    assert!(layout.collapse_maze(3));
+
+    let maze = layout.room(1).expect("the first room stands for the maze");
+    assert_eq!(maze.notes, "A chest\n\nA trapdoor");
+    assert!(maze.features.contains(feature::SHOP));
+    assert!(maze.features.contains(feature::DANGER));
+}
+
+#[test]
+fn a_note_inside_a_longer_note_is_kept_when_a_maze_folds() {
+    let mut layout = layout::Layout::new(1);
+    for (id, x) in [(1, 0), (2, 1), (3, 2)] {
+        layout.insert(crossroads(id, x));
+    }
+    for (from, direction, to) in [
+        (1, Direction::East, 2),
+        (2, Direction::East, 3),
+        (3, Direction::North, 1),
+    ] {
+        layout.update(from, |room| room.links.insert(direction, to));
+    }
+    layout.update(1, |room| "Key under the oak".clone_into(&mut room.notes));
+    layout.update(2, |room| "oak".clone_into(&mut room.notes));
+
+    assert!(layout.collapse_maze(3));
+
+    let maze = layout.room(1).expect("the first room stands for the maze");
+    assert_eq!(maze.notes, "Key under the oak\n\noak");
+}
+
 fn crossroads(id: RoomId, x: i64) -> MapRoom {
     MapRoom {
         name: "A crossroads".into(),
@@ -1335,6 +1389,77 @@ fn a_route_follows_explored_links_and_opens_closed_doors() {
 }
 
 #[test]
+fn a_walk_reads_back_as_the_same_speedwalk() {
+    let step = |direction, open_first| WalkStep {
+        direction,
+        open_first,
+    };
+    let mut steps = vec![step(Direction::North, false); 3];
+    steps.push(step(Direction::East, true));
+    steps.push(step(Direction::East, false));
+    steps.extend([step(Direction::South, false); 2]);
+    let text = speedwalk(&steps);
+    assert_eq!(text, "3n[e]1e2s");
+
+    let read = parse_speedwalk(&text).expect("it's speedwalk");
+    let moves: Vec<(u32, Direction, bool)> = read
+        .iter()
+        .map(|step| (step.count, step.direction, step.door))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            (3, Direction::North, false),
+            (1, Direction::East, true),
+            (1, Direction::East, false),
+            (2, Direction::South, false),
+        ]
+    );
+}
+
+#[test]
+fn one_move_and_a_long_run_both_read_as_speedwalk() {
+    let north = WalkStep {
+        direction: Direction::North,
+        open_first: false,
+    };
+    assert_eq!(speedwalk(&[north]), "1n");
+    assert!(parse_speedwalk("1n").is_some());
+    let long = speedwalk(&[north; 130]);
+    assert_eq!(long, "99n31n");
+    let total: u32 = parse_speedwalk(&long)
+        .expect("it's speedwalk")
+        .iter()
+        .map(|step| step.count)
+        .sum();
+    assert_eq!(total, 130);
+}
+
+#[test]
+fn distances_agree_with_routes_and_stop_at_a_maze() {
+    let room = |id: RoomId, north: Option<RoomId>, maze: bool| {
+        let mut room = MapRoom::empty(id);
+        room.maze = maze;
+        if let Some(to) = north {
+            room.links.insert(Direction::North, to);
+        }
+        room
+    };
+    let rooms = [
+        room(1, Some(2), false),
+        room(2, Some(3), true),
+        room(3, None, false),
+    ];
+    let find = |id: RoomId| rooms.iter().find(|room| room.id == id);
+
+    let away = distances(find, 1);
+    assert_eq!(away.get(&2), Some(&1));
+    assert_eq!(away.get(&3), None, "no way through a maze");
+    assert_eq!(route(find, 1, 2).map(|steps| steps.len()), Some(1));
+    assert_eq!(route(find, 1, 3), None);
+}
+
+#[test]
 fn no_route_reaches_an_island() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A meadow", &["e"]);
@@ -1490,12 +1615,121 @@ fn derived_data_is_computed_once_per_shape() {
 #[test]
 fn every_mark_reads_a_room_line_by_one_rule() {
     let title = "(Tag) A grey wolf is here, howling.";
-    assert!(Mark::Aggressive.covers("wolf", title));
-    assert!(!Mark::Aggressive.covers("wol", title));
-    assert!(Mark::Gear.covers("a grey wolf", title));
-    assert!(!Mark::Gear.covers("a grey", title));
-    assert!(Mark::Important.covers("a grey", title));
-    assert!(!Mark::Important.covers("a gre", title));
+    let namer = MobNamer::default();
+    assert!(Mark::Aggressive.covers("wolf", title, &namer));
+    assert!(!Mark::Aggressive.covers("wol", title, &namer));
+    assert!(Mark::Gear.covers("a grey wolf", title, &namer));
+    assert!(!Mark::Gear.covers("a grey", title, &namer));
+    assert!(Mark::Important.covers("a grey", title, &namer));
+    assert!(!Mark::Important.covers("a gre", title, &namer));
+}
+
+#[test]
+fn a_game_that_names_its_mobs_is_read_by_its_own_rule() {
+    let title = "The lair of Old Bob";
+    let namer = MobNamer::new(|title| title.strip_prefix("The lair of ").map(str::to_owned));
+    assert!(Mark::Gear.covers("old bob", title, &namer));
+    assert!(!Mark::Gear.covers("old bob", title, &MobNamer::default()));
+}
+
+/// A wolf seen in the den and a bear in the barn, from where the player
+/// stands in the barn.
+fn wolf_in_the_den_bear_here() -> Walk {
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A den", &["e"]);
+    let now = walk.now();
+    walk.map.note_sightings(&[WOLF.to_owned()], now);
+    walk.go("e", "A barn", &["w"]);
+    let now = walk.now();
+    walk.map.note_sightings(&[BEAR.to_owned()], now);
+    walk
+}
+
+const WOLF: &str = "A grey wolf is here, howling.";
+const BEAR: &str = "A brown bear is here.";
+
+#[test]
+fn a_mark_reaches_every_room_its_mob_was_seen_in_and_leaves_with_it() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let den = walk.id_of("A den");
+    let features = |walk: &Walk, id| walk.map.room(id).unwrap().features.clone();
+
+    for (mark, feature) in [
+        (Mark::Aggressive, feature::AGGRESSIVE_MOB),
+        (Mark::Gear, feature::GEAR_MOB),
+        (Mark::Important, feature::IMPORTANT_MOB),
+    ] {
+        walk.map.mark_mob(WOLF, mark, true, walk.now());
+        assert!(features(&walk, den).contains(feature), "{feature}");
+        assert!(walk.map.mobs().is(mark, WOLF), "{feature}");
+
+        walk.map.mark_mob(WOLF, mark, false, walk.now());
+        assert!(!features(&walk, den).contains(feature), "{feature}");
+        assert!(!walk.map.mobs().is(mark, WOLF), "{feature}");
+    }
+}
+
+#[test]
+fn clearing_a_mark_leaves_a_room_with_another_marked_mob() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let barn = walk.id_of("A barn");
+    let now = walk.now();
+    walk.map.note_sightings(&[WOLF.to_owned()], now);
+    walk.map.mark_mob(WOLF, Mark::Gear, true, now);
+    walk.map.mark_mob(BEAR, Mark::Gear, true, now);
+    walk.map.mark_mob(WOLF, Mark::Gear, false, now);
+    let room = walk.map.room(barn).unwrap();
+    assert!(room.features.contains(feature::GEAR_MOB));
+}
+
+#[test]
+fn clearing_a_mark_leaves_a_feature_the_map_learned_another_way() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let now = walk.now();
+    walk.map.line("The grey wolf leaps at you!", now);
+    assert!(walk.current().features.contains(feature::AGGRESSIVE_MOB));
+    walk.map.mark_mob(WOLF, Mark::Aggressive, false, now);
+    assert!(walk.current().features.contains(feature::AGGRESSIVE_MOB));
+}
+
+#[test]
+fn a_mob_marked_later_marks_the_rooms_it_walks_into() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let now = walk.now();
+    walk.map.mark_mob(BEAR, Mark::Important, true, now);
+    walk.go("w", "A den", &["e"]);
+    let now = walk.now();
+    walk.map.note_sightings(&[BEAR.to_owned()], now);
+    assert!(walk.current().features.contains(feature::IMPORTANT_MOB));
+}
+
+#[test]
+fn marking_a_mob_not_yet_seen_here_notes_it_here() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let now = walk.now();
+    let stranger = "A stranger is here.";
+    walk.map.mark_mob(stranger, Mark::Gear, true, now);
+    assert!(walk.current().sightings.contains_key(stranger));
+    assert!(walk.current().features.contains(feature::GEAR_MOB));
+}
+
+#[test]
+fn notes_features_and_marks_come_back_after_a_restart() {
+    let mut walk = wolf_in_the_den_bear_here();
+    let (den, barn) = (walk.id_of("A den"), walk.id_of("A barn"));
+    let now = walk.now();
+    walk.map.set_notes(den, "Howls at night.");
+    walk.map.set_feature(barn, feature::SHOP, true);
+    walk.map.mark_mob(BEAR, Mark::Important, true, now);
+    let (_folder, database, writer) = saved(&mut walk.map, now);
+    drop(writer);
+
+    let map = reopened(&database);
+    assert_eq!(map.room(den).unwrap().notes, "Howls at night.");
+    let barn = map.room(barn).unwrap();
+    assert!(barn.features.contains(feature::SHOP));
+    assert!(barn.features.contains(feature::IMPORTANT_MOB));
+    assert!(map.mobs().is(Mark::Important, BEAR));
 }
 
 #[test]

@@ -596,7 +596,7 @@ impl Render for Chat {
 /// readers announce it even when the text repeats itself. The text is both the
 /// label and the value: the Windows and Linux adapters announce a status node's
 /// name (its label), while macOS announces its value.
-fn live_region(name: &'static str, batch: u64, text: SharedString) -> impl IntoElement {
+pub fn live_region(name: &'static str, batch: u64, text: SharedString) -> impl IntoElement {
     div()
         .id(ElementId::NamedInteger(name.into(), batch))
         .role(Role::Status)

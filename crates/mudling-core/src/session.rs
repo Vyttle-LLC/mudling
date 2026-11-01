@@ -40,9 +40,10 @@ use crate::completion::{Completer, Completion, History, KnownWords};
 use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
+use crate::map::{Mark, RoomId};
 use crate::merge::RoomMoves;
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
-use crate::persist::{self, Timestamp};
+use crate::persist::{self, Database, MapVersion, SERVERS_FOLDER, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
@@ -176,6 +177,26 @@ pub enum RuleEdit {
     RemoveAlias(String),
     /// The hotbar's whole new list.
     SetHotbar(Vec<String>),
+    /// The server's notepad, whole.
+    SetNotepad(String),
+}
+
+/// A change the player made to the map. None of it ever goes to the server.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MapEdit {
+    /// A room's note, whole; empty clears it.
+    Note { room: RoomId, text: String },
+    Feature {
+        room: RoomId,
+        feature: String,
+        present: bool,
+    },
+    /// A mark on a mob, by the line the game shows for it.
+    Mark {
+        title: String,
+        mark: Mark,
+        set: bool,
+    },
 }
 
 enum Input {
@@ -184,12 +205,14 @@ enum Input {
     SendAction(String),
     Press(String),
     Edit(RuleEdit),
+    EditMap(MapEdit),
     Cancel,
     Replay(Vec<Bytes>),
     HoldWrites(SyncSender<()>),
     ReleaseWrites(RoomMoves),
     TurnPluginOn(PluginId),
     LoggingChanged,
+    RestoreMap(i64),
     Quit,
 }
 
@@ -251,6 +274,31 @@ pub struct Session {
     typing: Arc<Mutex<Typing>>,
     inbox: UnboundedSender<Input>,
     core: JoinHandle<Result<(), SessionError>>,
+    map_history: MapHistory,
+}
+
+/// A session's map history, for a shell to hold. Listing goes straight to
+/// the disk on a connection of its own, so it never waits behind the core
+/// thread, and never holds it up.
+#[derive(Clone)]
+pub struct MapHistory {
+    database: Database,
+    inbox: UnboundedSender<Input>,
+}
+
+impl MapHistory {
+    /// Saved versions, newest first. This blocks on the disk: call it off
+    /// the UI thread.
+    pub fn versions(&self) -> Result<Vec<MapVersion>, persist::Error> {
+        self.database.reader()?.map_versions()
+    }
+
+    /// Puts a saved version back, and saves the map as it is now first.
+    /// `SettingsState::map_restore` says how it went. Returns false if the
+    /// session has stopped, so nothing will.
+    pub fn restore(&self, version_id: i64) -> bool {
+        self.inbox.send(Input::RestoreMap(version_id)).is_ok()
+    }
 }
 
 /// A session on its way out; see [`Session::quit`].
@@ -283,6 +331,10 @@ impl Session {
                 inbox: inbox.downgrade(),
             });
         }
+        let map_history = MapHistory {
+            database: Database::at(&config.data_folder.join(SERVERS_FOLDER), &config.host),
+            inbox: inbox.clone(),
+        };
         let core = {
             let (hub, typing) = (Arc::clone(&hub), Arc::clone(&typing));
             thread::Builder::new()
@@ -294,12 +346,17 @@ impl Session {
             typing,
             inbox,
             core,
+            map_history,
         })
     }
 
     /// The stores: subscribe, then drain once per frame.
     pub fn stores(&self) -> &StoreHub {
         &self.hub
+    }
+
+    pub fn map_history(&self) -> MapHistory {
+        self.map_history.clone()
     }
 
     /// Opens a connection to the server. The settings store shows how it
@@ -328,6 +385,11 @@ impl Session {
     /// Saves a change the player made; the rules store shows it.
     pub fn edit(&self, edit: RuleEdit) {
         self.queue(Input::Edit(edit));
+    }
+
+    /// Saves a change the player made to the map; the map store shows it.
+    pub fn edit_map(&self, edit: MapEdit) {
+        self.queue(Input::EditMap(edit));
     }
 
     /// See [`Typing::alias_preview`].
@@ -486,6 +548,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
                 Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
+                Some(Input::EditMap(edit)) => engine.edit_map(edit, Timestamp::now()),
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();
@@ -497,6 +560,9 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
                 Some(Input::LoggingChanged) => engine.logging_changed(),
+                Some(Input::RestoreMap(version_id)) => {
+                    engine.restore_map(version_id, Timestamp::now());
+                }
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {
