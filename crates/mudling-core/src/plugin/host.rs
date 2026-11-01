@@ -214,8 +214,13 @@ impl PluginHost {
         })
     }
 
-    /// Replaces the player's triggers. On an error the old ones stay.
+    /// Replaces the player's triggers. On an error the old ones stay. Having
+    /// none and being given none changes nothing, so it doesn't rebuild the
+    /// matcher, which costs milliseconds with a game's patterns in it.
     pub fn set_triggers(&mut self, patterns: Vec<Pattern>) -> Result<(), PluginError> {
+        if patterns.is_empty() && self.triggers.is_empty() {
+            return Ok(());
+        }
         let lines = &self.compiled.lines;
         let plugin_rules = self.compiled.plugin_rules.last();
         let first_trigger = plugin_rules.map_or(0, |rules| rules.end);
