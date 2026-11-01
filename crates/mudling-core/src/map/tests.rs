@@ -716,6 +716,28 @@ fn a_maze_keeps_the_notes_and_features_of_the_rooms_folded_into_it() {
     assert!(maze.features.contains(feature::DANGER));
 }
 
+#[test]
+fn a_note_inside_a_longer_note_is_kept_when_a_maze_folds() {
+    let mut layout = layout::Layout::new(1);
+    for (id, x) in [(1, 0), (2, 1), (3, 2)] {
+        layout.insert(crossroads(id, x));
+    }
+    for (from, direction, to) in [
+        (1, Direction::East, 2),
+        (2, Direction::East, 3),
+        (3, Direction::North, 1),
+    ] {
+        layout.update(from, |room| room.links.insert(direction, to));
+    }
+    layout.update(1, |room| "Key under the oak".clone_into(&mut room.notes));
+    layout.update(2, |room| "oak".clone_into(&mut room.notes));
+
+    assert!(layout.collapse_maze(3));
+
+    let maze = layout.room(1).expect("the first room stands for the maze");
+    assert_eq!(maze.notes, "Key under the oak\n\noak");
+}
+
 fn crossroads(id: RoomId, x: i64) -> MapRoom {
     MapRoom {
         name: "A crossroads".into(),

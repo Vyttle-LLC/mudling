@@ -505,6 +505,10 @@ impl Layout {
         }
         let maze = twins[0];
         let merged = &twins[1..];
+        let mut notes: Vec<String> = (self.room(maze).map(|room| room.notes.clone()))
+            .filter(|notes| !notes.is_empty())
+            .into_iter()
+            .collect();
         for other in merged {
             for (from, direction) in self.inbound(*other).to_vec() {
                 self.update(from, |room| room.links.insert(direction, maze));
@@ -520,11 +524,9 @@ impl Layout {
                 }
                 // What the player said of a room outlasts it.
                 maze.features.extend(room.features.iter().cloned());
-                if !room.notes.is_empty() && !maze.notes.contains(&room.notes) {
-                    if !maze.notes.is_empty() {
-                        maze.notes.push_str("\n\n");
-                    }
-                    maze.notes.push_str(&room.notes);
+                if !room.notes.is_empty() && !notes.contains(&room.notes) {
+                    notes.push(room.notes.clone());
+                    maze.notes = notes.join("\n\n");
                 }
             });
         }
