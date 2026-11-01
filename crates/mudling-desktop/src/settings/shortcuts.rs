@@ -60,6 +60,12 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
                 &["map_history::KeepTheMap"],
             ),
             row(
+                "Pick the room shown, to join it to another",
+                &["main-shift-j"],
+                &["map_view::PickRoom"],
+            ),
+            row("Close Review", &["escape"], &["map_view::CloseReview"]),
+            row(
                 "Move along the notes",
                 &["up", "down"],
                 &["notes::PreviousNote", "notes::NextNote"],

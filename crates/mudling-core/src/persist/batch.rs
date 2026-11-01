@@ -160,6 +160,7 @@ pub(crate) trait Keyed: Stored {
 
     fn key(&self) -> Key;
     fn updated(&self) -> Timestamp;
+    fn updated_mut(&mut self) -> &mut Timestamp;
     fn owners(&self) -> Vec<Key>;
 }
 
@@ -187,6 +188,10 @@ macro_rules! records {
 
             fn updated(&self) -> Timestamp {
                 self.updated
+            }
+
+            fn updated_mut(&mut self) -> &mut Timestamp {
+                &mut self.updated
             }
 
             fn owners(&self) -> Vec<Key> {

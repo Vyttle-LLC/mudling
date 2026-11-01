@@ -63,6 +63,8 @@ const ZOOM_STEP: f32 = 1.002;
 const MIN_SIDE: i64 = 5;
 /// Ids clear of the grid's.
 const BUILDING_IDS: RoomId = 1 << 32;
+/// With `--duplicates`, how many squares apart rooms read the same.
+const DUPLICATES_REPEAT: i64 = 7;
 
 // MARK: Synthetic maps
 
@@ -186,6 +188,23 @@ pub fn grid_map(side: i64) -> MapState {
     store_of(grid_rooms(side), Vec::new())
 }
 
+/// A grid on a game with no room numbers, where every room reads the same as
+/// the ones `repeat` squares away: rooms the map marks as likely duplicates.
+pub fn duplicated_map(side: i64, repeat: i64) -> MapState {
+    const FIRST_ID: RoomId = 1 << 40;
+    let mut rooms = grid_rooms(side);
+    for room in &mut rooms {
+        let (x, y) = (room.position.x, room.position.y);
+        room.id += FIRST_ID;
+        room.name = format!("Square {}, {}", x % repeat, y % repeat);
+        let links: Vec<_> = room.links.iter().map(|(way, to)| (way, *to)).collect();
+        for (way, to) in links {
+            room.links.insert(way, to + FIRST_ID);
+        }
+    }
+    store_of(rooms, Vec::new())
+}
+
 /// A grid with one of everything the map draws: aggressive mobs, mazes,
 /// floors, a building that fits the outdoors, one that's a house at its
 /// door, and a way out of the area.
@@ -290,6 +309,8 @@ struct Options {
     /// `None` follows the OS.
     appearance: Option<WindowAppearance>,
     dark_walk: bool,
+    /// Rooms that read alike, so the map marks them.
+    duplicates: bool,
     measure: bool,
     measured_run: bool,
     seconds: u64,
@@ -303,6 +324,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         side: 45,
         appearance: None,
         dark_walk: false,
+        duplicates: false,
         measure: false,
         measured_run: false,
         seconds: 5,
@@ -322,6 +344,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--light" => options.appearance = Some(WindowAppearance::Light),
             "--dark" => options.appearance = Some(WindowAppearance::Dark),
             "--dark-walk" => options.dark_walk = true,
+            "--duplicates" => options.duplicates = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--seconds" => {
@@ -355,7 +378,11 @@ pub fn run(args: &[String]) -> ExitCode {
         return run_measured(&child, &options);
     }
     let started = Instant::now();
-    let map = sample_map(options.side, options.dark_walk);
+    let map = if options.duplicates {
+        duplicated_map(options.side, DUPLICATES_REPEAT)
+    } else {
+        sample_map(options.side, options.dark_walk)
+    };
     if options.measured_run {
         let built_ms = started.elapsed().as_secs_f64() * 1e3;
         measure::mark(&format!("info synthetic_map_ms={built_ms:.1}"));
@@ -604,7 +631,9 @@ impl Driver {
                         change: MapChange {
                             revision: 1 + frame,
                             whereabouts: Some(Whereabouts {
-                                room: Some(frame as RoomId % rooms as RoomId),
+                                room: Some(
+                                    view.model.first_room() + frame as RoomId % rooms as RoomId,
+                                ),
                                 ..Whereabouts::default()
                             }),
                             ..MapChange::default()

@@ -52,7 +52,9 @@ pub(super) fn merge_files(
     for (_, folder) in our_servers.values().chain(their_servers.values()) {
         merged.retain(|path, _| !path.strip_prefix(folder).is_ok_and(is_record_file));
     }
-    let list = merge_servers(our_servers, their_servers, &mut merged);
+    // A base that can't be read only means notes are gathered, not ranked.
+    let base_servers = servers(base).unwrap_or_default();
+    let list = merge_servers(base_servers, our_servers, their_servers, &mut merged);
     if ours.contains_key(Path::new(SERVERS)) || theirs.contains_key(Path::new(SERVERS)) {
         merged.insert(SERVERS.into(), json(&list));
     }
@@ -138,6 +140,7 @@ pub(crate) fn servers(
 /// A server only one side has merges with nothing, which keeps its records
 /// and drops any row a hand-edited file left with no parent.
 fn merge_servers(
+    base: BTreeMap<String, (ServerRows, PathBuf)>,
     mut ours: BTreeMap<String, (ServerRows, PathBuf)>,
     mut theirs: BTreeMap<String, (ServerRows, PathBuf)>,
     merged: &mut Files,
@@ -149,7 +152,8 @@ fn merge_servers(
             let rows = |side: &mut BTreeMap<_, (ServerRows, PathBuf)>| {
                 side.remove(id).map(|(rows, _)| rows).unwrap_or_default()
             };
-            merge_server(rows(&mut ours), rows(&mut theirs))
+            let base_notes = base.get(id).map_or(&[][..], |(rows, _)| &rows.map.notes);
+            merge_server(rows(&mut ours), rows(&mut theirs), base_notes)
         })
         .collect();
     let list = ServerList {

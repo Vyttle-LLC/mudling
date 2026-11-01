@@ -11,7 +11,8 @@
 //! brings back what was deleted while it was away.
 //!
 //! Rooms with no game number are named by the device that found them, so one
-//! room can reach a merge under two ids. `rooms.rs` says when they're united.
+//! room can reach a merge under two ids. `rooms.rs` says when they're united,
+//! and `join.rs` how the player joins them by hand.
 //!
 //! Files with no records are merged file by file against the commit both sides
 //! share. `secrets.vault` has a merge of its own, which needs no keys.
@@ -60,11 +61,13 @@
 //! [`Tombstone`]: crate::persist::Tombstone
 
 mod files;
+mod join;
 mod records;
 mod rooms;
 mod secrets;
 
 pub(crate) use files::{servers, three_way};
+pub(crate) use join::{join_rooms, joins_cancelled_by, rejoin_restored, undo_join};
 pub use rooms::RoomMoves;
 pub(crate) use rooms::repoint_batch;
 pub use secrets::find_password;
@@ -224,7 +227,7 @@ pub fn join(
         }
         if let Some(held) = repo.server_rows(store.server_id)? {
             let local = ServerRows::load(&store.database.reader()?)?;
-            let merged = merge_server(local.clone(), held);
+            let merged = merge_server(local.clone(), held, &[]);
             let moves = retired_rooms(&local, &merged);
             let mut batch = merged.into_batch();
             follow_current_room(&store.database.reader()?, &moves, &mut batch)?;

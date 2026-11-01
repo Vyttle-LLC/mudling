@@ -19,9 +19,9 @@ use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Login, Target};
 use crate::map_history::MapHistoryView;
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 use crate::map_view::harness::versioned;
-use crate::map_view::{MapLayout, MapView, Selection};
+use crate::map_view::{MapLayout, MapView, PickRoom, Selection};
 use crate::notes::{Host, NoteEdit, Notes, NotesEvent, NotesPanel, RoomCard};
 use crate::room_panel::{MarkMob, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
@@ -49,7 +49,7 @@ use mudling_core::defaults::hotbar;
 #[cfg(target_os = "macos")]
 use mudling_core::logs::{LogFile, LogSettings};
 use mudling_core::map::FindStores;
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 use mudling_core::map::RoomId;
 use mudling_core::persist::{SavedServers, Timestamp};
 use mudling_core::plugin::PluginId;
@@ -292,7 +292,7 @@ pub struct Shell {
     /// The selected room's note and features, under the map.
     map_card: Entity<RoomCard>,
     /// Follows the map in the left panel, which each session makes anew.
-    map_selection: Subscription,
+    map_selection: [Subscription; 2],
     settings: Entity<SettingsSheet>,
     settings_open: bool,
     /// A measured run draws its sample in the HUD, whatever the stores say.
@@ -570,14 +570,20 @@ impl Shell {
         self.map.update(cx, |map, cx| map.mount_card(card, cx));
     }
 
-    /// Keeps the card under the map on the room selected.
-    fn follow_selection(map: &Entity<MapView>, cx: &mut Context<Shell>) -> Subscription {
-        cx.subscribe(map, |shell, _, selection: &Selection, cx| {
-            let room = selection.room;
-            shell
-                .map_card
-                .update(cx, |card, cx| card.show(Some(room), cx));
-        })
+    /// Keeps the card under the map on the room selected, and hands the
+    /// session what the player tells the map about duplicates.
+    fn follow_selection(map: &Entity<MapView>, cx: &mut Context<Shell>) -> [Subscription; 2] {
+        [
+            cx.subscribe(map, |shell, _, selection: &Selection, cx| {
+                let room = selection.room;
+                shell
+                    .map_card
+                    .update(cx, |card, cx| card.show(Some(room), cx));
+            }),
+            cx.subscribe(map, |shell, _, edit: &MapEdit, _| {
+                shell.save_note(&NoteEdit::Map(edit.clone()));
+            }),
+        ]
     }
 
     /// Starts the maps and Find over on `stores`, which belong to another
@@ -599,7 +605,8 @@ impl Shell {
         notes.update(cx, |notes, cx| notes.use_map(store, cx));
     }
 
-    /// Hands the session a change to the notes, the features or the marks.
+    /// Hands the session a change to the notes, the features or the marks, or
+    /// what the player told the map about duplicates.
     fn save_note(&self, edit: &NoteEdit) {
         let Some(game) = &self.game else { return };
         match edit {
@@ -1781,8 +1788,14 @@ impl Shell {
         self.notes.clone()
     }
 
+    /// The left panel's map.
+    #[cfg(any(test, target_os = "macos"))]
+    pub fn map(&self) -> Entity<MapView> {
+        self.map.clone()
+    }
+
     /// Shows `map` in the panels, with a room selected on it.
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "macos"))]
     pub fn show_sample_map(&mut self, map: &MapState, room: RoomId, cx: &mut Context<Shell>) {
         let (panel, inset) = [MapLayout::Panel, MapLayout::Inset]
             .map(|layout| cx.new(|cx| MapView::new(versioned(map.clone()), layout, cx)))
@@ -1936,6 +1949,11 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
                 shell.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &PickRoom, window, cx| {
+                shell
+                    .map
+                    .update(cx, |map, cx| map.pick_selected(window, cx));
             }))
             .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
                 shell.focus_room_panel(window, cx);
