@@ -4,6 +4,7 @@
 use super::buildings::MapDoor;
 use super::geometry::{DirMap, Direction, GridPoint};
 use super::info::{self, ExitInfo, RoomInfo, RoomItems};
+use super::join::{JoinFacts, LastJoin, RoomPair, can_join, not_same_in, not_same_key, room_pair};
 use super::layout::{Layout, Step, draw_id_prefix, first_id, id_prefix, is_id_prefix};
 use super::mobs::{Mark, MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
@@ -15,6 +16,9 @@ use super::tracker::{Arrived, Tracker};
 use crate::persist::{Batch, Key, MapRows, Meta, MobMark, Timestamp};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+
+/// "Not the same", as the database will hold it.
+const ANSWERED: &str = "true";
 
 /// Meta keys the map keeps its own state under.
 pub const CURRENT_ROOM: &str = "map.current-room";
@@ -64,6 +68,9 @@ pub struct LiveMap {
     derived_shape: u64,
     derived: Option<Arc<Derived>>,
     area_names: HashMap<String, AreaName>,
+    joins: Arc<JoinFacts>,
+    /// Pairs newly answered "Not the same", to write at the next commit.
+    answered: Vec<RoomPair>,
     /// How many times derived data was computed, for tests.
     #[cfg(test)]
     pub(super) derivations: usize,
@@ -94,6 +101,10 @@ pub struct MapChange {
     pub marks: Vec<MarkChange>,
     /// Set when rooms changed, so a view never scans them for this.
     pub derived: Option<Arc<Derived>>,
+    /// Set when what views know about joins changed.
+    pub joins: Option<Arc<JoinFacts>>,
+    /// Set when the player's join or undo was answered.
+    pub last_join: Option<LastJoin>,
 }
 
 /// One commit: the change for views and the rows for the writer.
@@ -180,6 +191,10 @@ impl LiveMap {
         layout.clear_dirty();
         let mut map = LiveMap::with_layout(rules, layout, MobMemory::from_marks(marks));
         map.id_prefix_saved = saved_prefix.is_some();
+        map.joins = Arc::new(JoinFacts {
+            not_same: not_same_in(meta),
+            ..(*map.joins).clone()
+        });
         // After the map takes it as saved, so the next commit writes what moved.
         map.tracker.layout.rebuild_buildings();
         map
@@ -198,6 +213,10 @@ impl LiveMap {
     fn with_layout(rules: Box<dyn MapRules>, layout: Layout, mobs: MobMemory) -> LiveMap {
         let tracker = Tracker::new(layout.clone());
         let mobs = mobs.named_by(rules.mob_namer());
+        let joins = Arc::new(JoinFacts {
+            this_device: id_prefix(layout.next_id),
+            ..JoinFacts::default()
+        });
         let mut map = LiveMap {
             rules,
             tracker,
@@ -215,6 +234,8 @@ impl LiveMap {
             derived_shape: 0,
             derived: None,
             area_names: HashMap::new(),
+            joins,
+            answered: Vec::new(),
             #[cfg(test)]
             derivations: 0,
         };
@@ -476,6 +497,25 @@ impl LiveMap {
         }
     }
 
+    /// The player's "Not the same": the pair is never suggested again.
+    pub fn mark_not_same(&mut self, first: RoomId, second: RoomId) {
+        let pair = room_pair(first, second);
+        let mut joins = (*self.joins).clone();
+        if joins.not_same.insert(pair) {
+            self.joins = Arc::new(joins);
+            self.answered.push(pair);
+        }
+    }
+
+    /// Whether the player can join `first` and `second`: two rooms of a game
+    /// with no room numbers. This walks the map, which a click can afford.
+    pub fn joinable(&self, first: RoomId, second: RoomId) -> bool {
+        first != second
+            && self.holds(first)
+            && self.holds(second)
+            && self.rooms().all(|room| can_join(room.id))
+    }
+
     /// "Not a maze": the player overriding the map's guess.
     pub fn clear_tangles(&mut self, ids: &[RoomId]) {
         self.tracker.settle();
@@ -526,6 +566,7 @@ impl LiveMap {
                 .collect(),
             whereabouts: Some(self.whereabouts()),
             derived: Some(derived),
+            joins: Some(Arc::clone(&self.joins)),
             ..MapChange::default()
         }
     }
@@ -691,6 +732,14 @@ impl LiveMap {
             }
             change.marks.push(mark);
         }
+        for pair in self.answered.drain(..) {
+            batch.upsert(Meta {
+                key: not_same_key(pair),
+                value: ANSWERED.to_owned(),
+                updated: now,
+            });
+            change.joins = Some(Arc::clone(&self.joins));
+        }
         // With the first rows, so no room outlives the prefix that named it.
         if !self.id_prefix_saved && !batch.is_empty() {
             meta(&mut batch, ID_PREFIX, id_prefix(layout.next_id), now);
@@ -711,7 +760,8 @@ impl LiveMap {
         let changed = !change.rooms.is_empty()
             || !change.removed.is_empty()
             || change.whereabouts.is_some()
-            || !change.marks.is_empty();
+            || !change.marks.is_empty()
+            || change.joins.is_some();
         if !changed && batch.is_empty() {
             return None;
         }

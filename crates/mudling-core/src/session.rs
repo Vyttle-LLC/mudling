@@ -197,6 +197,13 @@ pub enum MapEdit {
         mark: Mark,
         set: bool,
     },
+    /// Two rooms are one. `MapState::last_join` says how it went.
+    Join { first: RoomId, second: RoomId },
+    /// Two rooms that look alike aren't one: stop suggesting them.
+    NotSame { first: RoomId, second: RoomId },
+    /// Puts back the join saved at `created`, on the device that made it.
+    /// `MapState::last_join` says how it went.
+    UndoJoin { created: Timestamp },
 }
 
 enum Input {
@@ -298,6 +305,14 @@ impl MapHistory {
     /// session has stopped, so nothing will.
     pub fn restore(&self, version_id: i64) -> bool {
         self.inbox.send(Input::RestoreMap(version_id)).is_ok()
+    }
+
+    /// Undoes the join saved as the version from `created`.
+    /// `MapState::last_join` says how it went. Returns false if the session
+    /// has stopped, so nothing will.
+    pub fn undo_join(&self, created: Timestamp) -> bool {
+        let edit = MapEdit::UndoJoin { created };
+        self.inbox.send(Input::EditMap(edit)).is_ok()
     }
 }
 

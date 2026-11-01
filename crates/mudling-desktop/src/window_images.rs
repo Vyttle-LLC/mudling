@@ -12,7 +12,7 @@
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
 use crate::hud::HudPlacement;
-use crate::map_view::harness::sample_map;
+use crate::map_view::harness::{duplicated_map, sample_map};
 use crate::measure;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
@@ -154,6 +154,11 @@ fn sample_logs() -> Vec<LogFile> {
     ]
 }
 
+/// The map the join scenes tidy up.
+const SAMPLE_SIDE: i64 = 12;
+const SAMPLE_REPEAT: i64 = 9;
+const SAMPLE_ROOM: i64 = (1 << 40) + 13;
+
 /// What arrives while the split is open.
 const LOOT: [&str; 2] = [
     "\x1b[32mYou get a copper bracelet.\x1b[0m",
@@ -289,6 +294,27 @@ fn open_map_marks(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     shell.show_sample_map(&sample_map(20, false), 24, cx);
     crate::measure::fill_room_panel(shell, None, cx);
     shell.open_panels(cx);
+}
+
+/// The map with rooms that look like duplicates.
+fn open_duplicates(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    shell.show_sample_map(&duplicated_map(SAMPLE_SIDE, SAMPLE_REPEAT), SAMPLE_ROOM, cx);
+    shell.open_panels(cx);
+    shell
+        .map()
+        .update(cx, |map, cx| map.find_duplicates_now(cx));
+}
+
+fn open_review(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_duplicates(shell, window, cx);
+    shell
+        .map()
+        .update(cx, |map, cx| map.review_sample(window, cx));
+}
+
+fn open_picked(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_duplicates(shell, window, cx);
+    shell.map().update(cx, |map, cx| map.pick_sample(cx));
 }
 
 /// The Notes tab, as the canvas draws it.
@@ -582,6 +608,12 @@ fn window_images() {
     render("note-editing-dark", Dark, WIDE, edit_a_note);
     render("map-marks-dark", Dark, WIDE, open_map_marks);
     render("map-marks-light", Light, WIDE, open_map_marks);
+    render("map-duplicates-dark", Dark, WIDE, open_duplicates);
+    render("map-duplicates-light", Light, WIDE, open_duplicates);
+    render("map-review-dark", Dark, WIDE, open_review);
+    render("map-review-light", Light, WIDE, open_review);
+    render("map-picked-dark", Dark, WIDE, open_picked);
+    render("map-picked-light", Light, WIDE, open_picked);
     render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
         shell.show_sample_empty_state(&sample_saved(), window, cx);
     });

@@ -12,7 +12,8 @@ use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
 use crate::line::Line;
 use crate::map::{
-    Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
+    Derived, JoinFacts, LastJoin, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep,
+    Whereabouts,
 };
 use crate::net::DisconnectReason;
 use crate::persist::Timestamp;
@@ -92,6 +93,8 @@ pub struct MapState {
     whereabouts: Whereabouts,
     revision: u64,
     derived: Option<Arc<Derived>>,
+    joins: Arc<JoinFacts>,
+    last_join: Option<LastJoin>,
 }
 
 impl MapState {
@@ -125,6 +128,16 @@ impl MapState {
         self.derived.as_ref()
     }
 
+    /// What views need to tidy up duplicates.
+    pub fn joins(&self) -> &Arc<JoinFacts> {
+        &self.joins
+    }
+
+    /// How the player's last join or undo went.
+    pub fn last_join(&self) -> Option<&LastJoin> {
+        self.last_join.as_ref()
+    }
+
     /// The fewest moves between two rooms. A search can cross the whole map,
     /// so a view runs it off the UI thread, on a clone of this state.
     pub fn route(&self, start: RoomId, goal: RoomId) -> Option<Vec<WalkStep>> {
@@ -147,7 +160,15 @@ impl StoreState for MapState {
         if let Some(derived) = &change.derived {
             self.derived = Some(Arc::clone(derived));
         }
-        !change.rooms.is_empty() || !change.removed.is_empty() || change.whereabouts.is_some()
+        if let Some(joins) = &change.joins {
+            self.joins = Arc::clone(joins);
+        }
+        self.last_join = change.last_join.clone().or(self.last_join.take());
+        !change.rooms.is_empty()
+            || !change.removed.is_empty()
+            || change.whereabouts.is_some()
+            || change.joins.is_some()
+            || change.last_join.is_some()
     }
 
     /// The pending diff can't outgrow the map: a room appears in it once.
@@ -163,6 +184,8 @@ impl StoreState for MapState {
         earlier.marks.extend(later.marks);
         earlier.revision = later.revision;
         earlier.derived = later.derived.or(earlier.derived.take());
+        earlier.joins = later.joins.or(earlier.joins.take());
+        earlier.last_join = later.last_join.or(earlier.last_join.take());
     }
 }
 

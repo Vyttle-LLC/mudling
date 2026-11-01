@@ -20,8 +20,11 @@ use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
 use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
 use crate::logs::SessionLogs;
-use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark, VERSION_AUTOSAVE, VERSION_SAFETY};
-use crate::merge::{RoomMoves, repoint_batch};
+use crate::map::{
+    Direction, JoinDone, LastJoin, LiveMap, MapChange, MapRoom, Mark, RoomId, VERSION_AUTOSAVE,
+    VERSION_JOIN, VERSION_SAFETY, room_pair, undo_pair,
+};
+use crate::merge::{self, RoomMoves, repoint_batch};
 use crate::net::DisconnectReason;
 use crate::persist::{
     self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
@@ -33,6 +36,7 @@ use crate::plugin::luau::{
 use crate::plugin::{
     Layer, MapSignal, Plugin, PluginEvent, PluginHost, PluginId, PluginSink, ServerInfo,
 };
+use crate::repo::format::ServerRows;
 use crate::store::{
     CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState,
     MapRestore, MapState, Memo, MobsState, RoomState, RulesState, SettingsState, StoreHub,
@@ -125,7 +129,8 @@ impl AddedNames {
 /// and queue their disk writes on the writer threads; opening, finishing, a
 /// merge landing, and an override coming on with the server's name (each of
 /// those two reloads the map) wait on the disk, as does a restore of the map,
-/// which nothing may build on until it's safe.
+/// which nothing may build on until it's safe, and a join or its undo, which
+/// rebuild the map from what they wrote.
 ///
 /// Feed it what happens, call [`Engine::settle`] after each batch of input to
 /// publish what changed, then send [`Engine::take_output`] to the server.
@@ -184,6 +189,7 @@ pub struct Engine {
     /// Hears when versions on their way to the disk have landed.
     versions_landing: Option<Receiver<()>>,
     restores: u64,
+    joins_answered: u64,
     output: Vec<u8>,
     lines: Vec<Line>,
     events: Vec<PluginEvent>,
@@ -270,6 +276,7 @@ impl Engine {
             version_saved: now,
             versions_landing: None,
             restores: 0,
+            joins_answered: 0,
             output: Vec::new(),
             lines: Vec::new(),
             events: Vec::new(),
@@ -463,7 +470,8 @@ impl Engine {
     }
 
     /// Applies a change the player made to the map. The next settle saves it
-    /// and publishes it, as it does a change the game made.
+    /// and publishes it, as it does a change the game made. A join or its
+    /// undo lands here and now.
     pub fn edit_map(&mut self, edit: MapEdit, now: Timestamp) {
         match edit {
             MapEdit::Note { room, text } => self.map.set_notes(room, &text),
@@ -473,7 +481,93 @@ impl Engine {
                 present,
             } => self.map.set_feature(room, &feature, present),
             MapEdit::Mark { title, mark, set } => self.map.mark_mob(&title, mark, set, now),
+            MapEdit::NotSame { first, second } => self.map.mark_not_same(first, second),
+            MapEdit::Join { first, second } => {
+                self.answer_join(now, |engine| engine.join_rooms(first, second, now));
+            }
+            MapEdit::UndoJoin { created } => {
+                self.answer_join(now, |engine| engine.undo_join(created, now));
+            }
         }
+    }
+
+    /// Runs a join or its undo, each of which rebuilds the map from what it
+    /// wrote, and tells views how it went. A merge landing counts as a
+    /// failure, as it does for a restore.
+    fn answer_join(
+        &mut self,
+        now: Timestamp,
+        run: impl FnOnce(&mut Engine) -> Result<JoinDone, String>,
+    ) {
+        self.settle(now);
+        let outcome = if self.is_holding_writes() {
+            Err("a sync is landing, so try again in a moment".to_owned())
+        } else {
+            run(self)
+        };
+        if let Err(error) = &outcome {
+            self.notice(format!("the map didn't change: {error}"));
+        }
+        self.joins_answered += 1;
+        self.hub.write::<MapState>(MapChange {
+            revision: self.map.revision(),
+            last_join: Some(LastJoin {
+                attempt: self.joins_answered,
+                outcome,
+            }),
+            ..MapChange::default()
+        });
+    }
+
+    fn join_rooms(
+        &mut self,
+        first: RoomId,
+        second: RoomId,
+        now: Timestamp,
+    ) -> Result<JoinDone, String> {
+        if !self.map.joinable(first, second) {
+            return Err("only two different rooms with no game number can join".to_owned());
+        }
+        let pair = room_pair(first, second);
+        let (rows, reader) = self.saved_rows()?;
+        let (batch, label) = merge::join_rooms(&rows, pair, &reader, now)?;
+        self.write_map_edit(batch)?;
+        Ok(JoinDone::Joined {
+            label,
+            created: now,
+        })
+    }
+
+    fn undo_join(&mut self, created: Timestamp, now: Timestamp) -> Result<JoinDone, String> {
+        let (rows, reader) = self.saved_rows()?;
+        let gone = || "that join can't be undone any more".to_owned();
+        let pair = undo_pair(&rows.meta, created).ok_or_else(gone)?;
+        let versions = reader.map_versions().map_err(say)?;
+        let version = versions
+            .iter()
+            .find(|version| version.kind == VERSION_JOIN && version.created == created)
+            .ok_or_else(gone)?;
+        let before = reader.map_version(version.id).map_err(say)?;
+        let batch = merge::undo_join(&rows, &before, pair, (version.id, created), now)?;
+        self.write_map_edit(batch)?;
+        Ok(JoinDone::Undone)
+    }
+
+    /// What the database holds, once everything queued has reached it.
+    fn saved_rows(&mut self) -> Result<(ServerRows, persist::Reader), String> {
+        self.writer.flush().map_err(say)?;
+        let reader = self.database.reader().map_err(say)?;
+        let rows = ServerRows::load(&reader).map_err(say)?;
+        Ok((rows, reader))
+    }
+
+    /// Writes rows worked out from the database, then rebuilds the map from it.
+    fn write_map_edit(&mut self, batch: Batch) -> Result<(), String> {
+        self.writer.commit(batch).map_err(say)?;
+        self.reload_map().map_err(say)?;
+        self.settings.map_versions += 1;
+        self.publish_settings();
+        Ok(())
     }
 
     /// A command a shell's button sent. It's never a password, so with echo
@@ -574,9 +668,7 @@ impl Engine {
         let outcome = if self.is_holding_writes() {
             Err("a sync is landing, so try again in a moment".to_owned())
         } else {
-            self.apply_map_version(version_id, now)
-                .map(|()| version_id)
-                .map_err(|error| error.to_string())
+            self.apply_map_version(version_id, now).map(|()| version_id)
         };
         if let Err(error) = &outcome {
             self.notice(format!("couldn't restore the map: {error}"));
@@ -590,10 +682,23 @@ impl Engine {
         self.publish_settings();
     }
 
-    fn apply_map_version(&mut self, version_id: i64, now: Timestamp) -> Result<(), persist::Error> {
-        let rows = self.database.reader()?.map_version(version_id)?;
+    /// A version from before a join comes back with the join still made, so
+    /// a restore never brings a retired room back as a duplicate: see
+    /// `merge::join`.
+    fn apply_map_version(&mut self, version_id: i64, now: Timestamp) -> Result<(), String> {
+        let reader = self.database.reader().map_err(say)?;
+        let meta = reader.meta().map_err(say)?;
+        let version = reader.map_version(version_id).map_err(say)?;
+        let (rows, cancelled) = merge::joins_over_version(version, &meta);
         let restored = self.map.prepare_restore(&rows);
-        self.writer.commit(restored.batch(version_id, now))?;
+        let mut batch = restored.batch(version_id, now);
+        for key in cancelled {
+            batch.delete(key);
+        }
+        self.writer.commit(batch).map_err(say)?;
+        let restored_rows = ServerRows::load(&reader).map_err(say)?;
+        let rejoin = merge::rejoin_restored(restored_rows);
+        self.writer.commit(rejoin).map_err(say)?;
         let change = self.map.finish_restore(restored);
         self.map_changed = false;
         self.version_saved = now;
@@ -1681,6 +1786,11 @@ impl Engine {
 /// An id for a new rule. Rows load in id order and the first rule to match
 /// wins, so ids sort by when they were made; the random end keeps two devices'
 /// apart.
+/// An error as a view shows it.
+fn say(error: impl fmt::Display) -> String {
+    error.to_string()
+}
+
 fn rule_id(made: u32) -> String {
     let random = RandomState::new().build_hasher().finish() as u32;
     format!("{:012x}{made:04x}{random:08x}", Timestamp::now().0)

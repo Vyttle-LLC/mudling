@@ -28,6 +28,7 @@ mod buildings;
 mod find;
 mod geometry;
 mod info;
+mod join;
 mod layout;
 mod live;
 mod mobs;
@@ -46,6 +47,14 @@ pub use find::{
 };
 pub use geometry::{DirMap, DirSet, Direction, GridPoint};
 pub use info::{ExitInfo, RoomInfo};
+pub use join::{
+    Duplicates, JoinDone, JoinFacts, LastJoin, RoomPair, VERSION_JOIN, can_join, likely_duplicates,
+    mapper_of, room_pair,
+};
+pub(crate) use join::{
+    JOINED, NOT_SAME, follow_joins, join_label, join_record, joined_key, joins_in, undo_key,
+    undo_pair, undo_value,
+};
 pub(crate) use layout::UNNUMBERED_IDS;
 pub(crate) use live::ISLANDS;
 pub use live::{

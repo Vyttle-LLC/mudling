@@ -8,7 +8,7 @@ use super::Error;
 use super::names::Names;
 use super::write::is_json;
 use crate::defaults::hotbar::HOTBAR_META;
-use crate::map::ISLANDS;
+use crate::map::{ISLANDS, JOINED, NOT_SAME};
 use crate::persist::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,19 @@ pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 /// devices'. Saved versions of the map stay too, since their rows hold ids a
 /// union may have retired; a restore reaches other devices as the rows it
 /// changes, and as tombstones for the rooms it drops.
-const SYNCED_META: [&str; 2] = [ISLANDS, HOTBAR_META];
+///
+/// A key ending in a dot is a family. [`JOINED`] travels because a join has to
+/// reach every device and last, unlike a tombstone: it's how a copy of the
+/// retired room finds its way to the kept room, however late it turns up.
+/// [`NOT_SAME`] travels because the player's answer holds for the map, and no
+/// device should ask it again.
+const SYNCED_META: [&str; 4] = [ISLANDS, HOTBAR_META, JOINED, NOT_SAME];
+
+fn is_synced_meta(key: &str) -> bool {
+    SYNCED_META
+        .iter()
+        .any(|synced| key == *synced || (synced.ends_with('.') && key.starts_with(synced)))
+}
 
 /// How long a delete is remembered. A device offline for longer brings back
 /// what was deleted in the meantime: the cost of not keeping them forever.
@@ -244,7 +256,7 @@ impl ServerRows {
             meta: self
                 .meta
                 .iter()
-                .filter(|meta| SYNCED_META.contains(&meta.key.as_str()))
+                .filter(|meta| is_synced_meta(&meta.key))
                 .cloned()
                 .collect(),
             characters: self.characters.characters.clone(),
@@ -479,7 +491,7 @@ impl ServerRows {
 /// Whether a delete of `key` is worth telling other devices about.
 fn syncs(key: &Key) -> bool {
     match key {
-        Key::Meta(key) => key == NOTEPAD || SYNCED_META.contains(&key.as_str()),
+        Key::Meta(key) => key == NOTEPAD || is_synced_meta(key),
         _ => true,
     }
 }

@@ -7,9 +7,10 @@
 mod git_server;
 
 use super::*;
+use crate::map::{CURRENT_ROOM, JoinDone, LastJoin, VERSION_JOIN};
 use crate::merge::{self, CHECKPOINT};
-use crate::persist::{Batch, Character, Database, Room, Server, Skill, Timestamp};
-use crate::session::{Session, SessionConfig};
+use crate::persist::{Batch, Character, Database, Room, RoomNote, Server, Skill, Timestamp};
+use crate::session::{MapEdit, Session, SessionConfig};
 use crate::store::{MapState, SettingsState, Versioned};
 use crate::telnet::Bytes;
 use crate::vault::{AutoLock, EntryKey, FILE_NAME, MemoryKeyStore, Vault};
@@ -1151,6 +1152,166 @@ fn a_session_syncs_at_its_end_and_its_map_follows_a_merge() {
     assert!(!world.mac.rooms().contains(&"A quiet road".to_owned()));
     session.quit().wait().unwrap();
     sync.quit().wait();
+}
+
+/// Two devices sharing two copies of a square, on a game with no room numbers.
+/// Returns the copies, lower id first.
+fn two_devices_with_duplicates() -> (TempDir, Device, Device, i64, i64) {
+    let folder = TempDir::new().unwrap();
+    let remote = folder.path().join("remote.git");
+    Repository::init_bare(&remote).unwrap();
+    let url = remote.to_str().unwrap();
+    let mac = Device::new(folder.path(), "mac", url);
+    let ipad = Device::new(folder.path(), "ipad", url);
+    let (kept, retired) = ((1 << 40) + 1, (1 << 40) + 2);
+    mac.apply(|batch| {
+        batch.upsert(server("{}"));
+        batch.upsert(room(kept, "Temple Square", "The Meadow"));
+        batch.upsert(room(retired, "Temple Square", "The Meadow"));
+    });
+    assert_eq!(mac.sync().problem, None);
+    assert_eq!(ipad.sync().problem, None);
+    assert_eq!(mac.sync().problem, None);
+    (folder, mac, ipad, kept, retired)
+}
+
+fn last_join(session: &Session) -> Option<LastJoin> {
+    session
+        .stores()
+        .read(|map: &Versioned<MapState>| map.value().last_join().cloned())
+}
+
+fn session_on(device: &Device) -> Session {
+    Session::open(SessionConfig::new(&device.data, SERVER, 4000), || {}).unwrap()
+}
+
+fn wait_for_answer(session: &Session, attempt: u64) -> LastJoin {
+    wait_until(|| last_join(session).is_some_and(|last| last.attempt == attempt));
+    last_join(session).unwrap()
+}
+
+/// A device syncs until nothing new comes, and a pass after that makes no
+/// commit: a merge that keeps rewriting itself fails here.
+fn settle(mac: &Device, ipad: &Device) {
+    for _ in 0..3 {
+        assert_eq!(mac.sync().problem, None);
+        assert_eq!(ipad.sync().problem, None);
+    }
+    let tips = (mac.tip(), ipad.tip());
+    assert_eq!(tips.0, tips.1);
+    assert_eq!(mac.sync().problem, None);
+    assert_eq!(ipad.sync().problem, None);
+    assert_eq!((mac.tip(), ipad.tip()), tips, "a pass made a commit");
+}
+
+fn map_of(device: &Device) -> crate::persist::MapRows {
+    device.database().reader().unwrap().map().unwrap()
+}
+
+/// Real sessions on real devices: the player joins, the join reaches the other
+/// device with no commit left to make, and Undo brings both rooms back there.
+#[test]
+fn a_join_through_a_session_syncs_and_its_undo_follows() {
+    let (_folder, mac, ipad, kept, retired) = two_devices_with_duplicates();
+    mac.apply(|batch| {
+        batch.upsert(RoomNote {
+            room_id: retired,
+            text: "Beggars at night".to_owned(),
+            updated: Timestamp::now(),
+        });
+    });
+
+    let session = session_on(&mac);
+    wait_until(|| map_rooms(&session) == 2);
+    session.edit_map(MapEdit::Join {
+        first: retired,
+        second: kept,
+    });
+    let answer = wait_for_answer(&session, 1);
+    let Ok(JoinDone::Joined { created, label, .. }) = answer.outcome else {
+        panic!("the join failed: {:?}", answer.outcome);
+    };
+    assert_eq!(label, "Joined two copies of Temple Square");
+    wait_until(|| !map_holds(&session, retired));
+    let history = session.map_history();
+    let versions = history.versions().unwrap();
+    let listed = versions.iter().find(|v| v.kind == VERSION_JOIN).unwrap();
+    assert_eq!((listed.label.as_str(), listed.room_count), (&*label, 2));
+
+    settle(&mac, &ipad);
+    assert_eq!(map_of(&ipad).rooms.len(), 1);
+    assert_eq!(map_of(&ipad).notes[0].room_id, kept);
+
+    assert!(history.undo_join(created));
+    assert_eq!(wait_for_answer(&session, 2).outcome, Ok(JoinDone::Undone));
+    wait_until(|| map_holds(&session, retired));
+    let left = history.versions().unwrap();
+    assert!(left.iter().all(|version| version.kind != VERSION_JOIN));
+    session.quit().wait().unwrap();
+
+    settle(&mac, &ipad);
+    assert_eq!(map_of(&ipad).rooms.len(), 2);
+    let notes = map_of(&ipad).notes;
+    assert_eq!((notes.len(), notes[0].room_id), (1, retired));
+    assert_eq!(map_of(&mac).rooms, map_of(&ipad).rooms);
+}
+
+/// The other device was playing on the retired room when the join came in.
+#[test]
+fn a_session_playing_on_a_retired_room_lands_on_the_kept_room() {
+    let (_folder, mac, ipad, kept, retired) = two_devices_with_duplicates();
+    let meta = |key: String, value: String| crate::persist::Meta {
+        key,
+        value,
+        updated: Timestamp::now(),
+    };
+    ipad.apply(|batch| {
+        batch.upsert(meta(CURRENT_ROOM.to_owned(), retired.to_string()));
+    });
+    let sync = Syncer::start(ipad.config(), || {}).unwrap();
+    wait_for(&sync, |state| state.last_sync.is_some() && !state.syncing);
+    let session = Session::open(
+        SessionConfig {
+            sync: Some(sync.clone()),
+            ..SessionConfig::new(&ipad.data, SERVER, 4000)
+        },
+        || {},
+    )
+    .unwrap();
+    wait_until(|| map_rooms(&session) == 2);
+
+    let joining = session_on(&mac);
+    wait_until(|| map_rooms(&joining) == 2);
+    joining.edit_map(MapEdit::Join {
+        first: kept,
+        second: retired,
+    });
+    assert!(wait_for_answer(&joining, 1).outcome.is_ok());
+    joining.quit().wait().unwrap();
+    assert_eq!(mac.sync().problem, None);
+
+    sync.foreground();
+    wait_until(|| !map_holds(&session, retired));
+    let whereabouts = session
+        .stores()
+        .read(|map: &Versioned<MapState>| map.value().whereabouts());
+    assert_eq!(whereabouts.room, Some(kept));
+    session.quit().wait().unwrap();
+    sync.quit().wait();
+}
+
+#[test]
+fn a_join_refuses_a_room_that_is_not_on_the_map() {
+    let (_folder, mac, _ipad, kept, _retired) = two_devices_with_duplicates();
+    let session = session_on(&mac);
+    wait_until(|| map_rooms(&session) == 2);
+    session.edit_map(MapEdit::Join {
+        first: kept,
+        second: kept + 1_000,
+    });
+    assert!(wait_for_answer(&session, 1).outcome.is_err());
+    assert_eq!(map_rooms(&session), 2);
+    session.quit().wait().unwrap();
 }
 
 /// The game saying the player is in room `number`, as GMCP.

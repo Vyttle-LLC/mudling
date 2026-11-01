@@ -11,6 +11,7 @@
 use crate::dock::{Side, Slot};
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
+use crate::map_view::harness::duplicated_map;
 use crate::measure;
 use crate::settings::Section;
 use crate::shell::Shell;
@@ -350,6 +351,16 @@ const MAP_HISTORY_CONTROLS: [&str; 3] = [
     "Restore the map from Today, 11:42, 14 rooms",
 ];
 const KEEP_THE_MAP: &str = "Keep this map";
+/// The map the join checks tidy up.
+const SAMPLE_SIDE: i64 = 6;
+const SAMPLE_REPEAT: i64 = 3;
+const SAMPLE_ROOM: i64 = (1 << 40) + 7;
+const REVIEW_CONTROLS: [&str; 3] = ["Skip this pair", "Not the same", "Join these rooms"];
+const PICK_CONTROLS: [&str; 3] = [
+    "Join the rooms picked",
+    "Clear the rooms picked",
+    "Pick Square 1, 1 to join",
+];
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
@@ -870,6 +881,118 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .as_ref()
                 .is_some_and(|(_, label)| label == NEXT_MAP_RESTORE),
             detail: format!("{focused:?}"),
+        });
+
+        in_window(
+            &|shell, _, cx| {
+                shell.show_sample_map(&duplicated_map(SAMPLE_SIDE, SAMPLE_REPEAT), SAMPLE_ROOM, cx);
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.find_duplicates_now(cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = |names: &[&'static str], tree: &Option<AxElement>| -> Vec<&'static str> {
+            let shown = |name: &&str| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref()
+                    .is_some_and(|tree| !tree.find(named).is_empty())
+            };
+            names.iter().filter(|name| !shown(name)).copied().collect()
+        };
+        let unnamed = missing(&["Review duplicates"], &tree);
+        checks.push(Check {
+            name: "the line above the map has a named way into Review",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let says_duplicates = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| {
+                    (text.as_deref()).is_some_and(|t| t.contains("look like duplicates"))
+                };
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+        });
+        checks.push(Check {
+            name: "the line above the map is a status a screen reader hears",
+            passed: says_duplicates.len() == 1,
+            detail: format!("{} element(s)", says_duplicates.len()),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.review_sample(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&REVIEW_CONTROLS, &tree);
+        checks.push(Check {
+            name: "Review names its three buttons",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let copies = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let copy = |t: &String| t.starts_with("First copy") || t.starts_with("Second copy");
+                e.title.as_ref().is_some_and(copy)
+            })
+        });
+        checks.push(Check {
+            name: "Review names both copies",
+            passed: copies.len() == 2,
+            detail: format!("{} element(s)", copies.len()),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "Review takes focus, on its first button",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == REVIEW_CONTROLS[0]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(&|_, window, cx| window.focus_next(cx), cx);
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the next tab stop in Review is Not the same",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == REVIEW_CONTROLS[1]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map().update(cx, |map, cx| {
+                    map.close_review(window, cx);
+                    map.pick_sample(cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&PICK_CONTROLS, &tree);
+        checks.push(Check {
+            name: "picking rooms names Join and Clear, and the room's own button",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let picked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| text.as_deref() == Some("2 rooms picked");
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+        });
+        checks.push(Check {
+            name: "what's picked is a status a screen reader hears",
+            passed: picked.len() == 1,
+            detail: format!("{} element(s)", picked.len()),
         });
 
         in_window(

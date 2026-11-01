@@ -118,7 +118,7 @@ impl Merger {
 
 /// Whether `record` beats `other`. Equal times fall to the record's bytes, so
 /// both devices pick the same copy.
-fn outranks<T: Keyed + Serialize>(record: &T, other: &T) -> bool {
+pub(super) fn outranks<T: Keyed + Serialize>(record: &T, other: &T) -> bool {
     match record.updated().cmp(&other.updated()) {
         std::cmp::Ordering::Equal => json(record) > json(other),
         order => order.is_gt(),

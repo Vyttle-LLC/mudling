@@ -17,7 +17,8 @@ use gpui::{
     BorderStyle, Bounds, ContentMask, Corners, Edges, Hsla, Path, PathBuilder, Pixels, Point,
     Window, fill, point, px, quad, size, transparent_black,
 };
-use mudling_core::map::Direction;
+use mudling_core::map::{Direction, RoomId};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The room's share of its square at any zoom, as the canvas draws it.
@@ -38,6 +39,10 @@ pub struct Scene {
     pub camera: Camera,
     pub you: Option<((i32, i32), bool)>,
     pub selected: Option<(i32, i32)>,
+    /// Rooms that look like duplicates, in the warning color.
+    pub marked: Arc<HashSet<RoomId>>,
+    /// Squares of the rooms picked to join.
+    pub picked: Vec<(i32, i32)>,
     pub colors: MapColors,
 }
 
@@ -100,6 +105,9 @@ pub fn paint(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window) {
             if let Some(square) = scene.selected {
                 paint_selection(&frame, square, window);
             }
+            for square in &scene.picked {
+                paint_pick(&frame, *square, window);
+            }
         });
     });
 }
@@ -139,9 +147,12 @@ fn paint_tile(frame: &Frame, tile: &Tile, window: &mut Window) {
     }
     let house = matches!(tile.kind, TileKind::House { .. });
     let background = if house { colors.building } else { colors.room };
+    let marked = frame.scene.marked.contains(&tile.room);
     if !detailed {
         let color = if tile.aggressive {
             colors.aggressive
+        } else if marked {
+            colors.maze
         } else {
             background
         };
@@ -149,6 +160,7 @@ fn paint_tile(frame: &Frame, tile: &Tile, window: &mut Window) {
         return;
     }
     let border = match tile.kind {
+        _ if marked => colors.maze,
         TileKind::Room => colors.room_border,
         TileKind::Indoors | TileKind::House { .. } => colors.building,
         TileKind::Maze => colors.maze,
@@ -288,6 +300,14 @@ fn paint_you(frame: &Frame, square: (i32, i32), guess: bool, window: &mut Window
     let you = frame.around(middle, frame.room * YOU_SHARE);
     let inside = if guess { colors.room } else { colors.you };
     window.paint_quad(framed(you, inside, colors.you, 1.5, radius / 2.));
+}
+
+/// A room picked to join: the mockup's moss ring.
+fn paint_pick(frame: &Frame, square: (i32, i32), window: &mut Window) {
+    let ring = frame.around(frame.at(square), frame.room + 4.);
+    let radius = corner(frame.room) + 1.;
+    let color = frame.scene.colors.you;
+    window.paint_quad(framed(ring, transparent_black(), color, 2., radius));
 }
 
 fn paint_selection(frame: &Frame, square: (i32, i32), window: &mut Window) {
