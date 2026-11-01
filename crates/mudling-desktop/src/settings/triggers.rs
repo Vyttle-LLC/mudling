@@ -261,7 +261,7 @@ impl SettingsSheet {
     }
 
     /// Opens the form on the first trigger.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn edit_sample_trigger(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         let draft = Draft::Trigger(self.rules.triggers[0].clone());
         self.open_draft(draft, window, cx);
