@@ -377,7 +377,7 @@ impl Notes {
 
     /// Works out the way to `room` off the UI thread, then walks it.
     pub fn walk(&mut self, room: RoomId, cx: &mut Context<Notes>) {
-        let Some(start) = self.book.here().map(|here| here.id) else {
+        let Some(start) = self.book.map().walk_start() else {
             self.say("The map doesn't know where you are yet.", cx);
             return;
         };

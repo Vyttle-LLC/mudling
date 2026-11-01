@@ -232,12 +232,9 @@ impl FindStores {
         self.map.value()
     }
 
-    /// The room a walk starts from, when the map is sure of one: moves from a
-    /// guess would go astray.
+    /// [`MapState::walk_start`].
     pub fn walk_start(&self) -> Option<RoomId> {
-        let whereabouts = self.map().whereabouts();
-        let sure = !whereabouts.unsure && whereabouts.dark_position.is_none();
-        whereabouts.room.filter(|_| sure)
+        self.map().walk_start()
     }
 
     fn area_name(&self, room: &MapRoom) -> String {

@@ -100,6 +100,14 @@ impl MapState {
         self.rooms.get(&id)
     }
 
+    /// The room a walk starts from, when the map is sure of one: moves from a
+    /// guess would go astray.
+    pub fn walk_start(&self) -> Option<RoomId> {
+        let whereabouts = &self.whereabouts;
+        let sure = !whereabouts.unsure && whereabouts.dark_position.is_none();
+        whereabouts.room.filter(|_| sure)
+    }
+
     pub fn whereabouts(&self) -> Whereabouts {
         self.whereabouts
     }

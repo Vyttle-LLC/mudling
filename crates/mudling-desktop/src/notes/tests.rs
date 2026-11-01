@@ -5,7 +5,7 @@ use super::*;
 use crate::map_view::harness::{grid_map, noted_map, room, versioned};
 use crate::room_panel::press_key;
 use gpui::{Modifiers, TestAppContext, VisualTestContext, WindowAppearance};
-use mudling_core::map::{MapChange, Whereabouts};
+use mudling_core::map::{GridPoint, MapChange, Whereabouts};
 use mudling_core::store::Revision;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -324,6 +324,43 @@ fn a_row_goes_to_its_room_and_walks_there(cx: &mut TestAppContext) {
     assert!(
         command.chars().all(|c| "nsewud[]0123456789".contains(c)),
         "{command}"
+    );
+}
+
+#[gpui::test]
+fn a_walk_from_a_guessed_room_is_never_sent(cx: &mut TestAppContext) {
+    let mut window = open(cx);
+    window.apply(MapChange {
+        rooms: vec![noted(8, 2, "herbs")],
+        ..MapChange::default()
+    });
+    let guesses = [
+        Whereabouts {
+            room: Some(0),
+            unsure: true,
+            ..Whereabouts::default()
+        },
+        Whereabouts {
+            room: Some(0),
+            dark: true,
+            dark_position: Some(GridPoint::new(-1, 0, 0)),
+            ..Whereabouts::default()
+        },
+    ];
+    for whereabouts in guesses {
+        window.apply(MapChange {
+            whereabouts: Some(whereabouts),
+            ..MapChange::default()
+        });
+        window.click("Walk to Square 2, 0");
+        assert!(window.heard().is_empty(), "{whereabouts:?}");
+    }
+    let message = window
+        .notes
+        .read_with(window.cx, |notes, _| notes.message().map(str::to_owned));
+    assert_eq!(
+        message.as_deref(),
+        Some("The map doesn't know where you are yet.")
     );
 }
 
