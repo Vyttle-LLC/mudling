@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const PLUGIN_BUDGET_US: f64 = 5.0;
+const PLUGIN_BUDGET_US: f64 = 5.0;
 /// One line in this many reaches the hook: a table row now and then.
 pub const HOOKED_EVERY: f64 = 20.0;
 const CALLS: usize = 100_000;

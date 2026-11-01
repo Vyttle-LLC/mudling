@@ -27,7 +27,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-pub const BUDGET_US: f64 = 5.0;
+const BUDGET_US: f64 = 5.0;
 /// Reads in the split runs are 1 to this many bytes.
 const LONGEST_SPLIT_READ: usize = 48;
 const SPLIT_RUNS: u64 = 3;
