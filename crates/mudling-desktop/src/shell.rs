@@ -13,6 +13,7 @@ use crate::assets::UI_FONT;
 use crate::chat::{self, Chat, CloseFind, column_width};
 use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
+use crate::find_panel::{self, FindPanel};
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
@@ -36,6 +37,7 @@ use gpui::{
 };
 use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
+use mudling_core::map::FindStores;
 use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::{RuleEdit, Session};
@@ -58,6 +60,7 @@ actions!(
         FocusCommandBar,
         FocusRoomPanel,
         FocusHotbar,
+        FocusFindPanel,
         PinCommand,
         FocusNext
     ]
@@ -79,10 +82,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
         KeyBinding::new(secondary!("3"), FocusRoomPanel, None),
         KeyBinding::new(secondary!("4"), FocusHotbar, None),
+        KeyBinding::new(secondary!("5"), FocusFindPanel, None),
         KeyBinding::new(secondary!("p"), PinCommand, None),
         KeyBinding::new(secondary!("l"), FocusCommandBar, None),
         KeyBinding::new("tab", FocusNext, Some(room_panel::CONTEXT)),
         KeyBinding::new("escape", FocusCommandBar, Some(room_panel::CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(find_panel::CONTEXT)),
+        // Outranks the field's own Tab for being bound after it.
+        KeyBinding::new("tab", FocusNext, Some(&find_panel::field_context())),
+        KeyBinding::new("escape", FocusCommandBar, Some(find_panel::CONTEXT)),
     ]);
 }
 
@@ -226,6 +234,7 @@ pub struct Shell {
     /// The map in the left panel, and the small one in the Room panel.
     map: Entity<MapView>,
     map_inset: Entity<MapView>,
+    find_panel: Entity<FindPanel>,
     settings: Entity<SettingsSheet>,
     settings_open: bool,
     /// A measured run draws its sample in the HUD, whatever the stores say.
@@ -236,7 +245,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 12],
+    _subscriptions: [Subscription; 13],
     _woken: Task<()>,
 }
 
@@ -266,7 +275,12 @@ impl Shell {
         let verbs = game.as_ref().map(|game| game.verbs.clone());
         let room_panel = cx.new(|cx| RoomPanel::new(verbs.unwrap_or_default(), cx));
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
-            shell.on_room_verb(sent, window, cx);
+            shell.on_panel_command(sent, window, cx);
+        });
+        let find_stores = stores.map(FindStores::subscribed).unwrap_or_default();
+        let find_panel = cx.new(|cx| FindPanel::new(find_stores, cx));
+        let walked = cx.subscribe_in(&find_panel, window, |shell, _, sent, window, cx| {
+            shell.on_panel_command(sent, window, cx);
         });
         // A panel that hides or changes tab takes its focus with it. Deferred
         // past the draw this runs in, which wouldn't redraw for the new focus,
@@ -382,6 +396,7 @@ impl Shell {
             room_panel,
             map,
             map_inset,
+            find_panel,
             settings,
             settings_open: false,
             hud_held: false,
@@ -401,6 +416,7 @@ impl Shell {
                 places,
                 sheet_events,
                 card_moves,
+                walked,
             ],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
@@ -408,6 +424,7 @@ impl Shell {
         shell.show_room(cx);
         shell.show_rules(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
+        shell.mount(Slot::Find, shell.find_panel.clone(), cx);
         shell.mount_maps(cx);
         shell
     }
@@ -432,11 +449,14 @@ impl Shell {
             .update(cx, |panel, cx| panel.mount_map(inset, cx));
     }
 
-    /// Starts the maps over on `stores`, which belong to another session or
-    /// to none.
+    /// Starts the maps and Find over on `stores`, which belong to another
+    /// session or to none.
     fn use_maps_of(&mut self, stores: Option<&StoreHub>, cx: &mut Context<Shell>) {
         (self.map, self.map_inset) = Self::new_maps(stores, cx);
         self.mount_maps(cx);
+        let find_stores = stores.map(FindStores::subscribed).unwrap_or_default();
+        self.find_panel
+            .update(cx, |panel, cx| panel.start_over(find_stores, cx));
     }
 
     /// Lets the window open games. With no game running it shows the empty
@@ -776,6 +796,8 @@ impl Shell {
                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
             self.hotbar
                 .update(cx, |hotbar, cx| hotbar.set_locked(masked, cx));
+            self.find_panel
+                .update(cx, |panel, cx| panel.set_locked(masked, cx));
         }
         if let Some(rules) = &batch.rules {
             self.copies.rules.apply_diff(rules);
@@ -808,6 +830,8 @@ impl Shell {
                 view.update(cx, |view, cx| view.apply(map, cx));
             }
         }
+        self.find_panel
+            .update(cx, |panel, cx| panel.apply(&batch, cx));
         if batch.room.is_some() || batch.mobs.is_some() {
             self.show_room(cx);
         }
@@ -1012,9 +1036,15 @@ impl Shell {
         }
     }
 
-    /// With echo off the server is asking for a password, and a command sent
-    /// now would go as one, so it's refused, as core refuses a hook's.
-    fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
+    /// A panel's button sent a command. With echo off the server is asking for
+    /// a password, and a command sent now would go as one, so it's refused, as
+    /// core refuses a hook's.
+    fn on_panel_command(
+        &mut self,
+        sent: &SendCommand,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
         if !self.copies.settings.value().echo_off {
             self.send_with(
                 &sent.command,
@@ -1100,7 +1130,7 @@ impl Shell {
         self.focus_command_bar(window, cx);
     }
 
-    fn focus_command_bar(&self, window: &mut Window, cx: &mut Context<Shell>) {
+    pub fn focus_command_bar(&self, window: &mut Window, cx: &mut Context<Shell>) {
         if self.on_empty_state() {
             self.empty_state
                 .update(cx, |empty_state, cx| empty_state.focus(window, cx));
@@ -1120,6 +1150,23 @@ impl Shell {
                 .update_in(cx, |shell, window, cx| {
                     shell
                         .room_panel
+                        .update(cx, |panel, cx| panel.focus(window, cx));
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the Find panel, opening the left panel if it's closed, and moves
+    /// the keyboard into its field, as [`Shell::focus_room_panel`] does.
+    pub fn focus_find_panel(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.dock(Side::Left)
+            .update(cx, |dock, cx| dock.select(Slot::Find, cx));
+        cx.spawn_in(window, async move |shell, cx| {
+            shell
+                .update_in(cx, |shell, window, cx| {
+                    shell
+                        .find_panel
                         .update(cx, |panel, cx| panel.focus(window, cx));
                 })
                 .ok();
@@ -1288,6 +1335,10 @@ impl Shell {
         self.room_panel.clone()
     }
 
+    pub fn find_panel(&self) -> Entity<FindPanel> {
+        self.find_panel.clone()
+    }
+
     #[cfg(target_os = "macos")]
     pub fn empty_state(&self) -> Entity<EmptyState> {
         self.empty_state.clone()
@@ -1422,6 +1473,11 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|shell, _: &FocusHotbar, window, cx| {
                 shell.focus_hotbar(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &FocusFindPanel, window, cx| {
+                if !shell.on_empty_state() {
+                    shell.focus_find_panel(window, cx);
+                }
             }))
             .on_action(cx.listener(|shell, _: &PinCommand, _, cx| {
                 shell.input.update(cx, |input, cx| input.pin(cx));
@@ -2659,6 +2715,70 @@ pub mod tests {
         });
         press_key("enter", played.cx);
         assert_eq!(played.heard_command(), "north");
+    }
+
+    /// Walks north from the hall to a gate, then brings up Find and looks for
+    /// the hall.
+    fn find_the_hall(played: &mut Played) {
+        played.enter_room();
+        played.cx.simulate_input("north");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard_command(), "north");
+        played.gmcp(r#"Room.Info {"num": 2, "name": "A gate", "exits": {"s": 1}}"#);
+        played.frames_until("the gate", |shell, cx| {
+            shell.room_panel.read(cx).room_name() == Some("A gate")
+        });
+        played.cx.simulate_keystrokes(secondary!("5"));
+        played.cx.run_until_parked();
+        played.cx.simulate_input("hall");
+        played.cx.run_until_parked();
+    }
+
+    fn click_walk_to_the_hall(played: &mut Played) {
+        let walk = played.cx.debug_bounds("Walk to A hall").unwrap().center();
+        played.cx.simulate_click(walk, Modifiers::none());
+        played.cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn find_opens_by_its_shortcut_and_its_walk_reaches_the_server(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        find_the_hall(&mut played);
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.dock(Side::Left).read(cx).state(), DockState::Open);
+            assert_eq!(shell.find_panel.read(cx).rows_for_typed(cx), Some(1));
+            assert_eq!(shell.typed(cx), "", "the field took the typing");
+        });
+
+        click_walk_to_the_hall(&mut played);
+        assert_eq!(played.heard_command(), "south");
+    }
+
+    #[gpui::test]
+    fn a_walk_is_refused_while_echo_is_off_even_once_under_way(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        find_the_hall(&mut played);
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("echo off", |shell, _| {
+            shell.copies.settings.value().echo_off
+        });
+        click_walk_to_the_hall(&mut played);
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            let sent = SendCommand {
+                command: "1s".to_owned(),
+                by_keyboard: false,
+            };
+            shell.on_panel_command(&sent, window, cx);
+        });
+
+        played.say(&[IAC, WONT, ECHO]);
+        played.frames_until("echo on", |shell, _| {
+            !shell.copies.settings.value().echo_off
+        });
+        played.shell.update(played.cx, |shell, cx| {
+            shell.submit("look", cx);
+        });
+        assert_eq!(played.heard_command(), "look", "nothing went before it");
     }
 
     /// A window with a launcher on a folder of its own, and what it's listening

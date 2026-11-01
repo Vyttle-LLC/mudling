@@ -25,6 +25,7 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
@@ -234,6 +235,20 @@ fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     shell
         .dock(Side::Right)
         .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+/// The Find panel on its sample, on `filter` if it's named.
+fn open_find_panel(
+    shell: &mut Shell,
+    filter: Option<FindFilter>,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    shell.find_panel().update(cx, |panel, cx| {
+        panel.start_over(crate::measure::sample_find(), cx);
+        panel.choose(filter.unwrap_or_default(), cx);
+    });
+    shell.focus_find_panel(window, cx);
 }
 
 /// Reads back to the top of the sample, then 14 lines arrive.
@@ -464,6 +479,34 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    render("find-panel-dark", Dark, WIDE, |shell, window, cx| {
+        open_find_panel(shell, None, window, cx);
+    });
+    render("find-panel-light", Light, WIDE, |shell, window, cx| {
+        open_find_panel(shell, None, window, cx);
+    });
+    render("find-panel-items-dark", Dark, WIDE, |shell, window, cx| {
+        open_find_panel(shell, Some(FindFilter::Items), window, cx);
+    });
+    render(
+        "find-panel-searching-dark",
+        Dark,
+        DEFAULT,
+        |shell, window, cx| {
+            open_find_panel(shell, Some(FindFilter::Rooms), window, cx);
+            shell
+                .find_panel()
+                .update(cx, |panel, cx| panel.type_text("no such room", window, cx));
+        },
+    );
+    render(
+        "find-panel-new-map-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            shell.focus_find_panel(window, cx);
+        },
+    );
     render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
         shell.show_sample_empty_state(&sample_saved(), window, cx);
     });

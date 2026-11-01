@@ -5,6 +5,7 @@
 
 use crate::ansi;
 use crate::plugin::luau::Value;
+use crate::store::CHARACTER_INVENTORY;
 use crate::telnet::gmcp;
 use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
@@ -74,13 +75,13 @@ impl Inventory {
     fn entries(&self) -> BTreeMap<String, Value> {
         let mut entries = BTreeMap::new();
         let count = Value::Number(self.items.len() as f64);
-        entries.insert("inventory.count".to_owned(), count);
+        entries.insert(format!("{CHARACTER_INVENTORY}.count"), count);
         for (index, item) in self.items.iter().enumerate() {
             let n = index + 1;
             let id = Value::Text(item.id.clone());
             let name = Value::Text(item.name.clone());
-            entries.insert(format!("inventory.{n}.id"), id);
-            entries.insert(format!("inventory.{n}.name"), name);
+            entries.insert(format!("{CHARACTER_INVENTORY}.{n}.id"), id);
+            entries.insert(format!("{CHARACTER_INVENTORY}.{n}.name"), name);
         }
         entries
     }

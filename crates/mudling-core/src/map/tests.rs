@@ -2,6 +2,7 @@
 //! made up: no game's wording belongs in the core.
 
 use super::*;
+use crate::defaults::commands::parse_speedwalk;
 use crate::persist::{Batch, Database, Timestamp, Writer};
 use std::collections::BTreeSet;
 
@@ -1331,6 +1332,77 @@ fn a_route_follows_explored_links_and_opens_closed_doors() {
     );
     let here = map.whereabouts().room.unwrap();
     assert_eq!(map.route_to(here), Some(vec![]));
+}
+
+#[test]
+fn a_walk_reads_back_as_the_same_speedwalk() {
+    let step = |direction, open_first| WalkStep {
+        direction,
+        open_first,
+    };
+    let mut steps = vec![step(Direction::North, false); 3];
+    steps.push(step(Direction::East, true));
+    steps.push(step(Direction::East, false));
+    steps.extend([step(Direction::South, false); 2]);
+    let text = speedwalk(&steps);
+    assert_eq!(text, "3n[e]1e2s");
+
+    let read = parse_speedwalk(&text).expect("it's speedwalk");
+    let moves: Vec<(u32, Direction, bool)> = read
+        .iter()
+        .map(|step| (step.count, step.direction, step.door))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            (3, Direction::North, false),
+            (1, Direction::East, true),
+            (1, Direction::East, false),
+            (2, Direction::South, false),
+        ]
+    );
+}
+
+#[test]
+fn one_move_and_a_long_run_both_read_as_speedwalk() {
+    let north = WalkStep {
+        direction: Direction::North,
+        open_first: false,
+    };
+    assert_eq!(speedwalk(&[north]), "1n");
+    assert!(parse_speedwalk("1n").is_some());
+    let long = speedwalk(&[north; 130]);
+    assert_eq!(long, "99n31n");
+    let total: u32 = parse_speedwalk(&long)
+        .expect("it's speedwalk")
+        .iter()
+        .map(|step| step.count)
+        .sum();
+    assert_eq!(total, 130);
+}
+
+#[test]
+fn distances_agree_with_routes_and_stop_at_a_maze() {
+    let room = |id: RoomId, north: Option<RoomId>, maze: bool| {
+        let mut room = MapRoom::empty(id);
+        room.maze = maze;
+        if let Some(to) = north {
+            room.links.insert(Direction::North, to);
+        }
+        room
+    };
+    let rooms = [
+        room(1, Some(2), false),
+        room(2, Some(3), true),
+        room(3, None, false),
+    ];
+    let find = |id: RoomId| rooms.iter().find(|room| room.id == id);
+
+    let away = distances(find, 1);
+    assert_eq!(away.get(&2), Some(&1));
+    assert_eq!(away.get(&3), None, "no way through a maze");
+    assert_eq!(route(find, 1, 2).map(|steps| steps.len()), Some(1));
+    assert_eq!(route(find, 1, 3), None);
 }
 
 #[test]

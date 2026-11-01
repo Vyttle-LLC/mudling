@@ -30,6 +30,10 @@
 //! from then on: the newest opens in the history pane, so `stream` is split
 //! too. The time from typing to the results goes in the report, to the frame.
 //!
+//! `--find-panel` brings the Find panel up as `stream` starts and types in it
+//! from then on, a key every few frames, so its results change throughout. The
+//! slowest search goes in the report.
+//!
 //! The child is paced by gpui's frame callbacks, not by timers: on a busy
 //! machine timers fire late and would thin out the frames being measured.
 //! Lines are due by the clock, so the pace stays exact either way.
@@ -48,25 +52,28 @@
 //! rather than wait for them ([`fail_if_frames_stop`]).
 //!
 //! `--sample-map <rooms>` gives the session a made-up map of that many rooms
-//! ([`save_sample_map`]), so `rss_mb_after_load` can be held against the PRD's
-//! 200 MB with a 10,000-room map.
+//! ([`save_sample_map`]), with a mob in every tenth and the player in the
+//! first, so `rss_mb_after_load` can be held against the PRD's 200 MB with a
+//! 10,000-room map.
 
 use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side};
+use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{ActivityGuard, AnyWindowHandle, App, Context, Entity, Window, point, px};
 use mudling_core::defaults::hud::Vital;
-use mudling_core::map::{LiveMap, PlainRules};
-use mudling_core::persist::{self, Batch, Database, Exit, Link, Room, Timestamp};
+use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
+use mudling_core::persist::{self, Batch, Database, Exit, Link, Meta, Room, Sighting, Timestamp};
 use mudling_core::plugin::luau::Value;
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Affect, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, Item, MobsState,
-    Occupant, RoomContents, RoomState, StoreHub, Target, TargetState, Versioned, VitalsState,
+    Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION,
+    CharactersState, Item, MapState, MobsState, Occupant, RoomContents, RoomState, StoreHub,
+    Target, TargetState, Versioned, VitalsState,
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
@@ -101,6 +108,13 @@ const SPLIT_DISTANCE: f32 = 2_000.;
 const CARD_SWAY: u64 = 400;
 /// Common in any English text, so results are on screen and many.
 const FIND_TEXT: &str = "the";
+/// What's typed in the Find panel, over and over: the sample map's rooms and
+/// mobs, from every room down to a few.
+const FIND_PANEL_TYPING: [&str; 8] = ["p", "pa", "pat", "path", "path 1", "path 12", "wolf", ""];
+/// Frames between keys: a quick typist, on a 120 Hz display.
+const FRAMES_PER_KEY: u32 = 8;
+/// Every this many rooms of the sample map, a mob was seen.
+const ROOMS_PER_MOB: i64 = 10;
 /// About as long as a real room's description.
 const SAMPLE_DESCRIPTION: &str = "Tall grass sways on either side of the path, which bends \
     away between low stones furred with moss. A cold wind comes down from the hills to the \
@@ -145,6 +159,66 @@ pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
         contents: contents.clone(),
     };
     (room, mobs, contents)
+}
+
+/// A small made-up world for the Find panel: rooms with a walk between them,
+/// one out of reach, mobs seen and marked, and items at hand.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn sample_find() -> FindStores {
+    let now = Timestamp(0);
+    let mut live = LiveMap::new(Box::new(PlainRules));
+    live.room_info(
+        r#"{"num": 9, "name": "A Hermit's Hut", "zone": "The Far Woods", "exits": {}}"#,
+        now,
+    );
+    live.room_info(
+        r#"{"num": 3, "name": "The North Gate", "zone": "The Old Town", "exits": {"s": 2}}"#,
+        now,
+    );
+    live.note_sightings(&["A grey wolf is here, howling.".to_owned()], now);
+    live.sent("south", now);
+    live.room_info(
+        r#"{"num": 2, "name": "The Market Square", "zone": "The Old Town",
+            "exits": {"n": 3, "s": 1}}"#,
+        now,
+    );
+    live.note_sightings(&["A healer tends her herbs.".to_owned()], now);
+    live.sent("south", now);
+    live.room_info(
+        r#"{"num": 1, "name": "A Stone Hall", "zone": "The Old Town", "exits": {"n": 2}}"#,
+        now,
+    );
+    let mut map = Versioned::default();
+    if let Some(commit) = live.commit(now) {
+        map.write(&commit.change);
+    }
+    let mark = |mark, name: &str| MarkChange {
+        name: name.to_owned(),
+        mark,
+        set: true,
+    };
+    let mut mobs: Versioned<MobsState> = Versioned::default();
+    mobs.write(&MobsState::default().with_changes(&[
+        mark(Mark::Aggressive, "wolf"),
+        mark(Mark::Gear, "a pale king"),
+    ]));
+    let (_, _, contents) = sample_room();
+    let map_state: &MapState = map.value();
+    let mut room: Versioned<RoomState> = Versioned::default();
+    room.write(&RoomState {
+        room: map_state.room(1).cloned(),
+        contents,
+        ..RoomState::default()
+    });
+    let mut characters: Versioned<CharactersState> = Versioned::default();
+    characters.write(&CharactersState(BTreeMap::from([
+        (format!("{CHARACTER_INVENTORY}.count"), Value::Number(1.)),
+        (
+            format!("{CHARACTER_INVENTORY}.1.name"),
+            Value::Text("a brass lantern".to_owned()),
+        ),
+    ])));
+    FindStores::of(map, mobs, room, characters)
 }
 
 /// The room with the most in it across `logs`, their GMCP read through an
@@ -281,13 +355,26 @@ pub fn sample_hud(lost: i64) -> (VitalsState, CharactersState, TargetState) {
 }
 
 /// Saves a made-up square grid of `rooms` rooms as `host`'s map, each room
-/// linked to its neighbours and worded like a real one, so a replay can
-/// measure the memory of a large map. Its data folder is a throwaway one.
+/// linked to its neighbours and worded like a real one, with the player in the
+/// first, so a replay can measure a large map. Its data folder is a throwaway
+/// one.
 pub fn save_sample_map(folder: &Path, host: &str, rooms: i64) -> Result<(), persist::Error> {
     let side = (rooms as f64).sqrt().ceil() as i64;
     let updated = Timestamp::now();
     let mut batch = Batch::new();
+    batch.upsert(Meta {
+        key: CURRENT_ROOM.to_owned(),
+        value: 1.to_string(),
+        updated,
+    });
     for id in 1..=rooms {
+        if id % ROOMS_PER_MOB == 0 {
+            batch.upsert(Sighting {
+                room_id: id,
+                mob: format!("A grey wolf number {id} is here, howling."),
+                updated,
+            });
+        }
         batch.upsert(Room {
             id,
             name: format!("A winding path, part {id}"),
@@ -384,7 +471,49 @@ struct Pacer {
     find_open: bool,
     /// When the find text went in, until its results show.
     find_started: Option<Instant>,
+    find_panel: Option<FindPanelTyping>,
     _no_app_nap: ActivityGuard,
+}
+
+/// Types in the Find panel through a measured run.
+struct FindPanelTyping {
+    panel: Entity<FindPanel>,
+    frames: u32,
+    keys: usize,
+    /// When the last key went in, until its results show.
+    typed_at: Option<Instant>,
+    searches: u32,
+    slowest: Duration,
+    most_rows: usize,
+}
+
+impl FindPanelTyping {
+    fn on_frame(&mut self, window: &mut Window, cx: &mut App) {
+        let rows = self.panel.read(cx).rows_for_typed(cx);
+        if let (Some(typed_at), Some(rows)) = (self.typed_at, rows) {
+            self.typed_at = None;
+            self.searches += 1;
+            self.slowest = self.slowest.max(typed_at.elapsed());
+            self.most_rows = self.most_rows.max(rows);
+        }
+        self.frames += 1;
+        if self.frames.is_multiple_of(FRAMES_PER_KEY) {
+            let text = FIND_PANEL_TYPING[self.keys % FIND_PANEL_TYPING.len()];
+            self.keys += 1;
+            self.typed_at = Some(Instant::now());
+            self.panel
+                .update(cx, |panel, cx| panel.type_text(text, window, cx));
+        }
+    }
+
+    fn report(&self) {
+        mark(&format!("info find_panel_searches={}", self.searches));
+        mark(&format!("info find_panel_most_rows={}", self.most_rows));
+        mark(&format!(
+            "info find_panel_slowest_ms={:.2}",
+            self.slowest.as_secs_f64() * 1e3
+        ));
+    }
 }
 
 impl Pacer {
@@ -445,6 +574,9 @@ impl Pacer {
             Phase::Rewrap
         } else {
             mark_rss("rss_mb_end");
+            if let Some(typing) = &self.find_panel {
+                typing.report();
+            }
             mark("phase end");
             window.remove_window();
             return;
@@ -460,6 +592,10 @@ impl Pacer {
             });
             if phase == Phase::Stream && self.find_open {
                 self.start_find(window, cx);
+            }
+            if phase == Phase::Stream && self.find_panel.is_some() {
+                self.shell
+                    .update(cx, |shell, cx| shell.focus_find_panel(window, cx));
             }
             if phase == Phase::Split {
                 self.chat
@@ -483,6 +619,9 @@ impl Pacer {
                 self.shell.read(cx).replay(reads);
             }
             self.change_hud(window, cx);
+            if let Some(typing) = &mut self.find_panel {
+                typing.on_frame(window, cx);
+            }
             if phase == Phase::Rewrap {
                 let there_and_back = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
                 let window_width = window.viewport_size().width;
@@ -528,6 +667,7 @@ pub struct Run {
     pub stream_for: Duration,
     pub hud: Option<HudRun>,
     pub find_open: bool,
+    pub find_panel: bool,
 }
 
 /// Calls `stalled` once `limit` has gone by since `last_frame`.
@@ -576,6 +716,15 @@ pub fn drive(
     run: Run,
     cx: &mut App,
 ) {
+    let find_panel = run.find_panel.then(|| FindPanelTyping {
+        panel: shell.read(cx).find_panel(),
+        frames: 0,
+        keys: 0,
+        typed_at: None,
+        searches: 0,
+        slowest: Duration::ZERO,
+        most_rows: 0,
+    });
     let pacer = Pacer {
         chat: shell.read(cx).chat(),
         shell,
@@ -591,6 +740,7 @@ pub fn drive(
         hud_frames: 0,
         find_open: run.find_open,
         find_started: None,
+        find_panel,
         _no_app_nap: cx
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
@@ -621,6 +771,7 @@ struct FrameReport {
     settings_open: bool,
     hud: Option<String>,
     find_open: bool,
+    find_panel: bool,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -709,6 +860,7 @@ pub fn run_parent(
             .and_then(|flag| child_args.get(flag + 1))
             .cloned(),
         find_open: child_args.iter().any(|arg| arg == "--find-open"),
+        find_panel: child_args.iter().any(|arg| arg == "--find-panel"),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -753,6 +905,14 @@ fn print_report(report: &FrameReport) {
     println!(
         "find bar: {}",
         if report.find_open { "open" } else { "closed" }
+    );
+    println!(
+        "Find panel: {}",
+        if report.find_panel {
+            "typing"
+        } else {
+            "closed"
+        }
     );
     for (phase, summary) in &report.phases {
         println!(

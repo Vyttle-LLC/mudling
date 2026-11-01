@@ -547,7 +547,7 @@ pub fn button(id: impl Into<ElementId>, name: SharedString, theme: &Theme) -> St
 }
 
 /// gpui has no letter spacing, so the canvas's wide-set labels use thin spaces.
-fn section_label(text: &str, theme: &Theme) -> impl IntoElement {
+pub fn section_label(text: &str, theme: &Theme) -> impl IntoElement {
     let spaced: Vec<String> = text.chars().map(String::from).collect();
     div()
         .flex_none()
@@ -565,7 +565,7 @@ fn section(label: String, name: &'static str, list: Div, theme: &Theme) -> Div {
         .child(div().id(name).role(Role::List).aria_label(name).child(list))
 }
 
-fn row_name(name: SharedString) -> impl IntoElement {
+pub fn row_name(name: SharedString) -> impl IntoElement {
     div()
         .flex_1()
         .min_w_0()
