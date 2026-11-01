@@ -28,6 +28,10 @@ const MIN_WIDTH: Pixels = px(280.);
 /// A panel never takes more than this share of the window.
 const MAX_WINDOW_SHARE: f32 = 0.6;
 const RESIZE_HANDLE_WIDTH: Pixels = px(6.);
+/// What a tab says until a later ticket fills its slot.
+const NOT_BUILT: &str = "Nothing here yet. This tab comes in a later version.";
+/// The key context anywhere in a panel.
+pub const CONTEXT: &str = "Dock";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -372,9 +376,13 @@ impl Dock {
                 let selected = slot == self.selected;
                 div()
                     .id(slot.title())
+                    .debug_selector(move || format!("tab-{}", slot.title()))
                     .role(Role::Tab)
                     .aria_label(slot.title())
                     .aria_selected(selected)
+                    .focusable()
+                    .tab_stop(true)
+                    .focus_visible(|tab| tab.border_1().border_color(theme.accent_hover))
                     .flex_grow(1.)
                     .px(px(2.))
                     .h(px(30.))
@@ -446,11 +454,18 @@ impl Dock {
                 .cached(StyleRefinement::default().size_full())
                 .into_any_element(),
             None => div()
-                .font_family(HEADING_FONT)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(18.))
-                .text_color(theme.text)
-                .child(self.selected.title())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_family(HEADING_FONT)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(18.))
+                        .text_color(theme.text)
+                        .child(self.selected.title()),
+                )
+                .child(div().text_color(theme.text_muted).child(NOT_BUILT))
                 .into_any_element(),
         };
         div()
@@ -511,6 +526,7 @@ impl Render for Dock {
         let dock = div()
             .id(id)
             .debug_selector(move || id.to_owned())
+            .key_context(CONTEXT)
             .role(Role::Group)
             .aria_label(label)
             .relative()
@@ -675,6 +691,18 @@ mod tests {
         assert_eq!(shared(840., 840., 900.), (450., 450.));
         assert_eq!(shared(600., 300., 500.), (250., 250.));
         assert_eq!(shared(0., 840., 450.), (0., 450.), "one panel open");
+    }
+
+    #[gpui::test]
+    fn a_tab_with_nothing_in_it_says_so(cx: &mut TestAppContext) {
+        let (dock, cx) = dock_window(cx, Side::Right);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        dock.update(cx, |dock, cx| dock.select(Slot::Skills, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-Skills").is_some());
+        dock.read_with(cx, |dock, _| {
+            assert!(dock.mounted.iter().all(|(slot, _)| *slot != Slot::Skills));
+        });
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub(crate) use live::CURRENT_ROOM;
 pub use live::{Area, Building, Commit, Derived, LiveMap, MapChange, Whereabouts};
 pub use mobs::{Mark, MarkChange, MobMemory, MobNamer, mob_name};
 pub use room::{ExitState, MapRoom, RoomId, feature};
-pub use route::{WalkStep, route};
+pub use route::{WalkStep, route, walk_command};
 pub use rules::{AreaName, MapRules, PlainRules, RoomIdentity};
 pub use tracker::Arrived;
 

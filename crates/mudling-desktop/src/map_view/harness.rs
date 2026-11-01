@@ -171,6 +171,15 @@ fn grid_rooms(side: i64) -> Vec<MapRoom> {
     rooms
 }
 
+/// A `side` by `side` grid with a note on every room. Made up for measuring.
+pub fn noted_map(side: i64) -> MapState {
+    let mut rooms = grid_rooms(side);
+    for room in &mut rooms {
+        room.notes = format!("Check back here after a reboot: {}.", room.name);
+    }
+    store_of(rooms, Vec::new())
+}
+
 /// A `side` by `side` grid of linked rooms.
 #[cfg(test)]
 pub fn grid_map(side: i64) -> MapState {
@@ -180,13 +189,18 @@ pub fn grid_map(side: i64) -> MapState {
 /// A grid with one of everything the map draws: aggressive mobs, mazes,
 /// floors, a building that fits the outdoors, one that's a house at its
 /// door, and a way out of the area.
-fn sample_map(side: i64, dark_walk: bool) -> MapState {
+pub fn sample_map(side: i64, dark_walk: bool) -> MapState {
     let mut rooms = grid_rooms(side);
     let id = |x: i64, y: i64| (y * side + x) as usize;
     for room in &mut rooms {
         let (x, y) = (room.position.x, room.position.y);
         if (x * 7 + y * 3) % 19 == 0 {
             room.features.insert(feature::AGGRESSIVE_MOB.to_owned());
+        }
+        if (x * 3 + y * 5) % 11 == 0 {
+            room.features.insert(feature::SHOP.to_owned());
+            room.features.insert(feature::GEAR_MOB.to_owned());
+            room.notes = "A note".to_owned();
         }
         room.maze = x % 13 == 6 && y % 13 == 6;
     }

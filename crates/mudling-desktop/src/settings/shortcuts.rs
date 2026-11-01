@@ -52,6 +52,15 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
                 &["shell::FocusRoomPanel"],
             ),
             row("Go to the hotbar", &["main-4"], &["shell::FocusHotbar"]),
+            row("Go to the Notes tab", &["main-5"], &["shell::FocusNotes"]),
+            row("Finish a note", &["escape"], &["notes::FinishNote"]),
+            row(
+                "Move along the notes",
+                &["up", "down"],
+                &["notes::PreviousNote", "notes::NextNote"],
+            ),
+            row("Go to a note's room", &["enter"], &["notes::GoToNote"]),
+            row("Walk to a note's room", &["w"], &["notes::WalkToNote"]),
             row(
                 "Search the scrollback",
                 &["main-f"],

@@ -26,6 +26,7 @@ const RING_SHARE: f32 = 38. / 28.;
 const YOU_SHARE: f32 = 12. / 28.;
 const CROSS_SHARE: f32 = 0.25;
 const ARROW_SHARE: f32 = 0.16;
+const PIP_SHARE: f32 = 0.13;
 /// Below this, in pixels, a room is a plain square.
 const DETAILED_ROOM: f32 = 8.;
 /// How far past the view to look: rooms overhang their squares, and rings
@@ -250,6 +251,24 @@ fn paint_marks(frame: &Frame, region: Region, window: &mut Window) {
     }
     if any_cross {
         paint_built(crosses.build(), colors.aggressive, window);
+    }
+    for tile in frame.scene.sheet.tiles_in(region) {
+        if !tile.pips.is_empty() {
+            paint_pips(frame, tile, window);
+        }
+    }
+}
+
+/// A room's small marks, a row of squares along its bottom edge.
+fn paint_pips(frame: &Frame, tile: &Tile, window: &mut Window) {
+    let side = frame.room * PIP_SHARE;
+    let middle = frame.at((tile.x, tile.y));
+    let (left, bottom) = (frame.room / 2. - side, frame.room / 2. - side);
+    let mut at = middle + point(px(-left), px(bottom - side));
+    for pip in tile.pips.iter() {
+        let color = frame.scene.colors.pip(pip);
+        window.paint_quad(fill(Bounds::new(at, size(px(side), px(side))), color));
+        at.x += px(side * 1.25);
     }
 }
 

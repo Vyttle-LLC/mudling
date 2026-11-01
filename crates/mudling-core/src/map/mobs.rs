@@ -35,11 +35,12 @@ impl Mark {
         Mark::ALL.into_iter().find(|mark| mark.name() == name)
     }
 
-    /// Whether this mark, held under `marked`, covers the mob on a room line.
-    pub fn covers(self, marked: &str, title: &str) -> bool {
+    /// Whether this mark, held under `marked`, covers the mob on a room line,
+    /// which `namer` names.
+    pub fn covers(self, marked: &str, title: &str, namer: &MobNamer) -> bool {
         match self {
             Mark::Aggressive => has_word(title, marked),
-            Mark::Gear | Mark::Important => self.covers_name(marked, &mob_name(title)),
+            Mark::Gear | Mark::Important => self.covers_name(marked, &namer.name(title)),
         }
     }
 
@@ -90,6 +91,17 @@ impl MobNamer {
     }
 }
 
+impl PartialEq for MobNamer {
+    fn eq(&self, other: &MobNamer) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        }
+    }
+}
+
+impl Eq for MobNamer {}
+
 impl fmt::Debug for MobNamer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("MobNamer")
@@ -125,6 +137,10 @@ impl MobMemory {
         self.namer.name(title)
     }
 
+    pub fn namer(&self) -> &MobNamer {
+        &self.namer
+    }
+
     /// A mob attacked unprovoked: its kind is aggressive.
     pub fn learn_aggressor(&mut self, name: &str) {
         if let Some(noun) = noun(name) {
@@ -136,7 +152,7 @@ impl MobMemory {
     pub fn is_aggressive(&self, title: &str) -> bool {
         words(title)
             .filter_map(|word| self.aggressive.get(&word))
-            .any(|marked| Mark::Aggressive.covers(marked, title))
+            .any(|marked| Mark::Aggressive.covers(marked, title, &self.namer))
     }
 
     /// The player marking a kind of mob, by one of its room lines, as
@@ -156,9 +172,7 @@ impl MobMemory {
 
     /// Whether a mob, by its room line, was marked for important gear.
     pub fn is_gear(&self, title: &str) -> bool {
-        let name = self.name(title);
-        let covers = |marked: &String| Mark::Gear.covers_name(marked, &name);
-        self.gear.iter().any(covers)
+        self.gear.contains(&self.name(title))
     }
 
     pub fn set_gear(&mut self, title: &str, gear: bool) {
@@ -192,6 +206,24 @@ impl MobMemory {
             for marked in marked {
                 self.set(Mark::Important, marked, false);
             }
+        }
+    }
+
+    /// Whether `mark` covers a mob, by its room line.
+    pub fn is(&self, mark: Mark, title: &str) -> bool {
+        match mark {
+            Mark::Aggressive => self.is_aggressive(title),
+            Mark::Gear => self.is_gear(title),
+            Mark::Important => self.is_important(title),
+        }
+    }
+
+    /// The player setting or clearing `mark` on a mob, by its room line.
+    pub fn set_mark(&mut self, mark: Mark, title: &str, set: bool) {
+        match mark {
+            Mark::Aggressive => self.set_aggressive(title, set),
+            Mark::Gear => self.set_gear(title, set),
+            Mark::Important => self.set_important(title, set),
         }
     }
 

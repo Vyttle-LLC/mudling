@@ -353,6 +353,22 @@ impl MapModel {
         Some(&self.map.value().room(room)?.name)
     }
 
+    /// Selects a room and goes to its sheet, looking at it.
+    pub fn go_to(&mut self, room: RoomId) {
+        let map = self.map.value();
+        let Some(found) = map.room(room) else {
+            return;
+        };
+        let (place, square) = Place::of(found, map.derived().map(|derived| &**derived));
+        self.camera.center = (square.x as f32, square.y as f32);
+        self.selection = Some(Selection {
+            room,
+            walk: Walk::Unknown,
+        });
+        self.walk_for = None;
+        self.show(place);
+    }
+
     /// Acts on a click at a point of a view of `size` pixels: a room is
     /// selected, a house opens its building's map.
     pub fn click(&mut self, point: (f32, f32), size: (f32, f32)) -> Option<Hit> {

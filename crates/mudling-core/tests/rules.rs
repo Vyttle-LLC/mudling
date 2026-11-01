@@ -3,10 +3,13 @@
 
 use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::map::{MapRoom, Mark, feature};
 use mudling_core::persist::{Database, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::Plugin;
-use mudling_core::session::{Credentials, Engine, RuleEdit, SessionConfig, Typing};
-use mudling_core::store::{CuesState, RulesState, StoreHub, TerminalState, Versioned};
+use mudling_core::session::{Credentials, Engine, MapEdit, RuleEdit, SessionConfig, Typing};
+use mudling_core::store::{
+    CuesState, MapState, MobsState, RulesState, StoreHub, TerminalState, Versioned,
+};
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, WILL, WONT};
 use mudling_core::telnet::gmcp;
@@ -73,6 +76,19 @@ impl Played {
         let status = format!(r#"{{"character_name": "{name}"}}"#);
         gmcp::encode("Char.Status", &status, &mut frame);
         self.say(&frame);
+    }
+
+    fn in_a_room(&mut self) {
+        let mut frame = Vec::new();
+        let room = r#"{"num": 1, "name": "A road", "exits": {"n": 2}}"#;
+        gmcp::encode("Room.Info", room, &mut frame);
+        self.say(&frame);
+        self.engine.take_output();
+    }
+
+    fn room(&self) -> Option<Arc<MapRoom>> {
+        self.hub
+            .read(|map: &Versioned<MapState>| map.value().room(1).cloned())
     }
 
     fn echo_off(&mut self) {
@@ -568,4 +584,54 @@ fn a_press_does_nothing_while_the_server_asks_for_a_password() {
     played.engine.press("look", NOW);
     assert_eq!(played.sent(), ["look"]);
     assert_eq!(played.chat(), ["look"]);
+}
+
+/// Words a note could hold that would do harm as commands.
+const COMMANDS: &str = "quit\ndrop all;kill everyone\n3n2e";
+
+#[test]
+fn notes_stay_notes_and_come_back_in_the_next_session() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut played = Played::plain(folder.path());
+    played.in_a_room();
+    played.engine.edit_map(
+        MapEdit::Note {
+            room: 1,
+            text: COMMANDS.to_owned(),
+        },
+        NOW,
+    );
+    played.engine.edit_map(
+        MapEdit::Feature {
+            room: 1,
+            feature: feature::SHOP.to_owned(),
+            present: true,
+        },
+        NOW,
+    );
+    played.engine.edit_map(
+        MapEdit::Mark {
+            title: "A grey wolf is here.".to_owned(),
+            mark: Mark::Gear,
+            set: true,
+        },
+        NOW,
+    );
+    played.edit(RuleEdit::SetNotepad(COMMANDS.to_owned()));
+
+    assert!(played.sent().is_empty(), "nothing reaches the server");
+    assert!(played.chat().is_empty(), "nothing runs");
+    played.finish();
+
+    let again = Played::plain(folder.path());
+    assert_eq!(again.rules().notepad, COMMANDS);
+    let room = again.room().expect("the room was saved");
+    assert_eq!(room.notes, COMMANDS);
+    assert!(room.features.contains(feature::SHOP));
+    assert!(room.features.contains(feature::GEAR_MOB));
+    let marks = again.hub.read(|mobs: &Versioned<MobsState>| {
+        mobs.value().marks_on("A grey wolf is here, sleeping.")
+    });
+    assert_eq!(marks, [Mark::Gear]);
+    again.finish();
 }

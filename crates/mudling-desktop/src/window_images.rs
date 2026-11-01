@@ -12,6 +12,7 @@
 use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side};
 use crate::hud::HudPlacement;
+use crate::map_view::harness::sample_map;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
 use crate::shell::Shell;
 use crate::theme::Theme;
@@ -201,6 +202,7 @@ fn sample_rules() -> RulesState {
         server: "mud.example".to_owned(),
         character: "sample".to_owned(),
         separator: None,
+        notepad: String::new(),
         triggers: vec![
             trigger(
                 "tells you",
@@ -234,6 +236,24 @@ fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     shell
         .dock(Side::Right)
         .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+/// The map with its marks and the selected room's card, and the Room panel
+/// with its own card.
+fn open_map_marks(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    shell.show_sample_map(&sample_map(20, false), 24, cx);
+    crate::measure::fill_room_panel(shell, None, cx);
+    shell.open_panels(cx);
+}
+
+/// The Notes tab, as the canvas draws it.
+fn open_notes_tab(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::open_notes(shell, window, cx);
+    shell.notes().update(cx, |notes, cx| notes.finish(cx));
+}
+
+fn edit_a_note(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::open_notes(shell, window, cx);
 }
 
 /// Reads back to the top of the sample, then 14 lines arrive.
@@ -464,6 +484,11 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    render("notes-tab-dark", Dark, WIDE, open_notes_tab);
+    render("notes-tab-light", Light, WIDE, open_notes_tab);
+    render("note-editing-dark", Dark, WIDE, edit_a_note);
+    render("map-marks-dark", Dark, WIDE, open_map_marks);
+    render("map-marks-light", Light, WIDE, open_map_marks);
     render("empty-state-dark", Dark, WIDE, |shell, window, cx| {
         shell.show_sample_empty_state(&sample_saved(), window, cx);
     });

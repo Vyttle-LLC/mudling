@@ -40,6 +40,7 @@ use crate::completion::{Completer, Completion, History, KnownWords};
 use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
+use crate::map::{Mark, RoomId};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
 use crate::persist::{self, Timestamp};
 use crate::plugin::luau::HookLimits;
@@ -167,6 +168,26 @@ pub enum RuleEdit {
     RemoveAlias(String),
     /// The hotbar's whole new list.
     SetHotbar(Vec<String>),
+    /// The server's notepad, whole.
+    SetNotepad(String),
+}
+
+/// A change the player made to the map. None of it ever goes to the server.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MapEdit {
+    /// A room's note, whole; empty clears it.
+    Note { room: RoomId, text: String },
+    Feature {
+        room: RoomId,
+        feature: String,
+        present: bool,
+    },
+    /// A mark on a mob, by the line the game shows for it.
+    Mark {
+        title: String,
+        mark: Mark,
+        set: bool,
+    },
 }
 
 enum Input {
@@ -175,6 +196,7 @@ enum Input {
     SendAction(String),
     Press(String),
     Edit(RuleEdit),
+    EditMap(MapEdit),
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
@@ -258,6 +280,11 @@ impl Session {
     /// Saves a change the player made; the rules store shows it.
     pub fn edit(&self, edit: RuleEdit) {
         self.queue(Input::Edit(edit));
+    }
+
+    /// Saves a change the player made to the map; the map store shows it.
+    pub fn edit_map(&self, edit: MapEdit) {
+        self.queue(Input::EditMap(edit));
     }
 
     /// See [`Typing::alias_preview`].
@@ -409,6 +436,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
                 Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
                 Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
+                Some(Input::EditMap(edit)) => engine.edit_map(edit, Timestamp::now()),
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();

@@ -11,14 +11,17 @@
 
 use crate::assets::UI_FONT;
 use crate::chat::{self, Chat, CloseFind, column_width};
-use crate::dock::{Dock, DockState, Side, Slot, fit_docks};
+use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
-use crate::map_view::{MapLayout, MapView};
-use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
+#[cfg(test)]
+use crate::map_view::harness::versioned;
+use crate::map_view::{MapLayout, MapView, Selection};
+use crate::notes::{Host, NoteEdit, Notes, NotesEvent, NotesPanel, RoomCard};
+use crate::room_panel::{MarkMob, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
 use crate::sound::Speaker;
@@ -36,9 +39,11 @@ use gpui::{
 };
 use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
+#[cfg(test)]
+use mudling_core::map::RoomId;
 use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
-use mudling_core::session::{RuleEdit, Session};
+use mudling_core::session::{MapEdit, RuleEdit, Session};
 use mudling_core::store::{
     CharactersState, ConnectionStatus, CuesState, MapState, MobsState, RoomState, RulesState,
     SettingsState, StoreHub, TargetState, Versioned, VitalsState,
@@ -58,6 +63,7 @@ actions!(
         FocusCommandBar,
         FocusRoomPanel,
         FocusHotbar,
+        FocusNotes,
         PinCommand,
         FocusNext
     ]
@@ -79,11 +85,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(secondary!("2"), ToggleRightPanel, None),
         KeyBinding::new(secondary!("3"), FocusRoomPanel, None),
         KeyBinding::new(secondary!("4"), FocusHotbar, None),
+        KeyBinding::new(secondary!("5"), FocusNotes, None),
         KeyBinding::new(secondary!("p"), PinCommand, None),
         KeyBinding::new(secondary!("l"), FocusCommandBar, None),
-        KeyBinding::new("tab", FocusNext, Some(room_panel::CONTEXT)),
-        KeyBinding::new("escape", FocusCommandBar, Some(room_panel::CONTEXT)),
+        KeyBinding::new("tab", FocusNext, Some(dock::CONTEXT)),
+        KeyBinding::new("escape", FocusCommandBar, Some(dock::CONTEXT)),
     ]);
+    crate::notes::bind_keys(cx);
 }
 
 /// What the window runs on. Without one, and with a [`Launcher`], it shows the
@@ -226,6 +234,12 @@ pub struct Shell {
     /// The map in the left panel, and the small one in the Room panel.
     map: Entity<MapView>,
     map_inset: Entity<MapView>,
+    notes: Entity<Notes>,
+    notes_panel: Entity<NotesPanel>,
+    /// The selected room's note and features, under the map.
+    map_card: Entity<RoomCard>,
+    /// Follows the map in the left panel, which each session makes anew.
+    map_selection: Subscription,
     settings: Entity<SettingsSheet>,
     settings_open: bool,
     /// A measured run draws its sample in the HUD, whatever the stores say.
@@ -236,7 +250,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 12],
+    _subscriptions: [Subscription; 14],
     _woken: Task<()>,
 }
 
@@ -268,6 +282,20 @@ impl Shell {
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
             shell.on_room_verb(sent, window, cx);
         });
+        let mob_marked = cx.subscribe(&room_panel, |shell, _, marked: &MarkMob, _| {
+            shell.save_note(&NoteEdit::Map(MapEdit::Mark {
+                title: marked.title.clone(),
+                mark: marked.mark,
+                set: marked.set,
+            }));
+        });
+        let notes = cx.new(Notes::new);
+        Self::use_notes_of(&notes, stores, cx);
+        let note_events = cx.subscribe(&notes, |shell, _, event, cx| shell.on_notes(event, cx));
+        let notes_panel = cx.new(|cx| NotesPanel::new(notes.clone(), cx));
+        let room_card = cx.new(|cx| RoomCard::new(notes.clone(), Host::RoomPanel, cx));
+        room_panel.update(cx, |panel, cx| panel.mount_card(room_card, cx));
+        let map_card = cx.new(|cx| RoomCard::new(notes.clone(), Host::Map, cx));
         // A panel that hides or changes tab takes its focus with it. Deferred
         // past the draw this runs in, which wouldn't redraw for the new focus,
         // and the bar only takes text once it's drawn focused.
@@ -360,6 +388,7 @@ impl Shell {
             );
         });
         let (map, map_inset) = Self::new_maps(stores, cx);
+        let map_selection = Self::follow_selection(&map, cx);
         let mut shell = Shell {
             game,
             launcher: None,
@@ -382,6 +411,10 @@ impl Shell {
             room_panel,
             map,
             map_inset,
+            notes,
+            notes_panel,
+            map_card,
+            map_selection,
             settings,
             settings_open: false,
             hud_held: false,
@@ -401,6 +434,8 @@ impl Shell {
                 places,
                 sheet_events,
                 card_moves,
+                mob_marked,
+                note_events,
             ],
             _woken: Self::apply_stores_when_woken(woken, window, cx),
         };
@@ -408,6 +443,7 @@ impl Shell {
         shell.show_room(cx);
         shell.show_rules(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
+        shell.mount(Slot::Notes, shell.notes_panel.clone(), cx);
         shell.mount_maps(cx);
         shell
     }
@@ -430,13 +466,63 @@ impl Shell {
         let inset = self.map_inset.clone();
         self.room_panel
             .update(cx, |panel, cx| panel.mount_map(inset, cx));
+        let card = self.map_card.clone();
+        self.map.update(cx, |map, cx| map.mount_card(card, cx));
+    }
+
+    /// Keeps the card under the map on the room selected.
+    fn follow_selection(map: &Entity<MapView>, cx: &mut Context<Shell>) -> Subscription {
+        cx.subscribe(map, |shell, _, selection: &Selection, cx| {
+            let room = selection.room;
+            shell
+                .map_card
+                .update(cx, |card, cx| card.show(Some(room), cx));
+        })
     }
 
     /// Starts the maps over on `stores`, which belong to another session or
     /// to none.
     fn use_maps_of(&mut self, stores: Option<&StoreHub>, cx: &mut Context<Shell>) {
         (self.map, self.map_inset) = Self::new_maps(stores, cx);
+        self.map_selection = Self::follow_selection(&self.map, cx);
         self.mount_maps(cx);
+        self.map_card.update(cx, |card, cx| card.show(None, cx));
+        Self::use_notes_of(&self.notes, stores, cx);
+    }
+
+    fn use_notes_of(notes: &Entity<Notes>, stores: Option<&StoreHub>, cx: &mut Context<Shell>) {
+        let store: Versioned<MapState> =
+            stores.map(|stores| stores.subscribe()).unwrap_or_default();
+        notes.update(cx, |notes, cx| notes.use_map(store, cx));
+    }
+
+    /// Hands the session a change to the notes, the features or the marks.
+    fn save_note(&self, edit: &NoteEdit) {
+        let Some(game) = &self.game else { return };
+        match edit {
+            NoteEdit::Map(edit) => game.session.edit_map(edit.clone()),
+            NoteEdit::Rules(edit) => game.session.edit(edit.clone()),
+        }
+    }
+
+    fn on_notes(&mut self, event: &NotesEvent, cx: &mut Context<Shell>) {
+        match event {
+            NotesEvent::Edit(edit) => self.save_note(edit),
+            NotesEvent::Walk(command) => self.send_button_command(command, cx),
+            NotesEvent::GoTo(room) => {
+                self.dock(Side::Left)
+                    .update(cx, |dock, cx| dock.select(Slot::Map, cx));
+                self.map.update(cx, |map, cx| map.go_to(*room, cx));
+            }
+        }
+    }
+
+    /// Lets go of the game, with what's typed in the notes saved first.
+    fn take_game(&mut self, cx: &mut Context<Shell>) -> Option<Game> {
+        if let Some(edit) = self.notes.update(cx, |notes, _| notes.unsaved()) {
+            self.save_note(&edit);
+        }
+        self.game.take()
     }
 
     /// Lets the window open games. With no game running it shows the empty
@@ -595,7 +681,7 @@ impl Shell {
         if running || self.launcher.is_none() {
             return;
         }
-        let leaving = self.game.take();
+        let leaving = self.take_game(cx);
         self.switching = leaving.is_some();
         let connecting = SessionLabel::new(target.host.clone(), None, "Connecting…");
         self.title_bar
@@ -622,7 +708,7 @@ impl Shell {
 
     /// Ends the session and goes back to the empty state.
     fn choose_server(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
-        let leaving = self.game.take();
+        let leaving = self.take_game(cx);
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(
             move |launcher| Outcome {
@@ -807,6 +893,8 @@ impl Shell {
             for view in [&self.map, &self.map_inset] {
                 view.update(cx, |view, cx| view.apply(map, cx));
             }
+            self.notes
+                .update(cx, |notes, cx| notes.apply(map, window, cx));
         }
         if batch.room.is_some() || batch.mobs.is_some() {
             self.show_room(cx);
@@ -819,6 +907,9 @@ impl Shell {
             .update(cx, |hotbar, cx| hotbar.show(&rules.hotbar, cx));
         self.settings
             .update(cx, |sheet, cx| sheet.show_rules(rules, cx));
+        self.notes.update(cx, |notes, cx| {
+            notes.show_server(&rules.server, &rules.notepad, cx);
+        });
         self.show_alias_preview(cx);
     }
 
@@ -1015,17 +1106,21 @@ impl Shell {
     /// With echo off the server is asking for a password, and a command sent
     /// now would go as one, so it's refused, as core refuses a hook's.
     fn on_room_verb(&mut self, sent: &SendCommand, window: &mut Window, cx: &mut Context<Shell>) {
+        self.send_button_command(&sent.command, cx);
+        if !sent.by_keyboard {
+            window.focus(&self.input.focus_handle(cx), cx);
+        }
+    }
+
+    fn send_button_command(&mut self, command: &str, cx: &mut Context<Shell>) {
         if !self.copies.settings.value().echo_off {
             self.send_with(
-                &sent.command,
+                command,
                 |session, command| {
                     session.send_action(command);
                 },
                 cx,
             );
-        }
-        if !sent.by_keyboard {
-            window.focus(&self.input.focus_handle(cx), cx);
         }
     }
 
@@ -1120,6 +1215,22 @@ impl Shell {
                 .update_in(cx, |shell, window, cx| {
                     shell
                         .room_panel
+                        .update(cx, |panel, cx| panel.focus(window, cx));
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// [`Shell::focus_room_panel`], for the Notes tab.
+    fn focus_notes(&self, window: &mut Window, cx: &mut Context<Shell>) {
+        self.dock(Side::Right)
+            .update(cx, |dock, cx| dock.select(Slot::Notes, cx));
+        cx.spawn_in(window, async move |shell, cx| {
+            shell
+                .update_in(cx, |shell, window, cx| {
+                    shell
+                        .notes_panel
                         .update(cx, |panel, cx| panel.focus(window, cx));
                 })
                 .ok();
@@ -1284,6 +1395,24 @@ impl Shell {
         self.chat.clone()
     }
 
+    pub fn notes(&self) -> Entity<Notes> {
+        self.notes.clone()
+    }
+
+    /// Shows `map` in the panels, with a room selected on it.
+    #[cfg(test)]
+    pub fn show_sample_map(&mut self, map: &MapState, room: RoomId, cx: &mut Context<Shell>) {
+        let (panel, inset) = [MapLayout::Panel, MapLayout::Inset]
+            .map(|layout| cx.new(|cx| MapView::new(versioned(map.clone()), layout, cx)))
+            .into();
+        (self.map, self.map_inset) = (panel, inset);
+        self.map_selection = Self::follow_selection(&self.map, cx);
+        self.mount_maps(cx);
+        self.notes
+            .update(cx, |notes, cx| notes.use_map(versioned(map.clone()), cx));
+        self.map.update(cx, |map, cx| map.go_to(room, cx));
+    }
+
     pub fn room_panel(&self) -> Entity<RoomPanel> {
         self.room_panel.clone()
     }
@@ -1313,7 +1442,7 @@ impl Shell {
             return None;
         }
         let job = self.job.take();
-        let game = self.game.take();
+        let game = self.take_game(cx);
         let saved_settings = self.saved_settings.take();
         Some(cx.background_spawn(async move {
             drop(saved_settings);
@@ -1413,6 +1542,9 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &FocusRoomPanel, window, cx| {
                 shell.focus_room_panel(window, cx);
             }))
+            .on_action(cx.listener(|shell, _: &FocusNotes, window, cx| {
+                shell.focus_notes(window, cx);
+            }))
             .on_action(cx.listener(|shell, _: &ToggleHud, window, cx| {
                 // The empty state draws no HUD, so there is nothing to open
                 // or move, and focus sent to it would be lost.
@@ -1453,6 +1585,7 @@ impl Render for Shell {
 pub mod tests {
     use super::*;
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
+    use crate::notes::NoteTarget;
     use crate::room_panel::press_key;
     use crate::settings::Section;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
@@ -2505,6 +2638,52 @@ pub mod tests {
             })
         })
         .expect("the plugin loads")
+    }
+
+    #[gpui::test]
+    fn a_note_typed_in_the_room_panel_outlives_the_walk_and_never_reaches_the_server(
+        cx: &mut TestAppContext,
+    ) {
+        let mut played = play(cx);
+        played.enter_room();
+        let notes = played.shell.read_with(played.cx, |shell, _| shell.notes());
+        notes.update_in(played.cx, |notes, window, cx| {
+            notes.edit(NoteTarget::Room(1), Host::RoomPanel, window, cx);
+        });
+        played.cx.run_until_parked();
+        played.cx.simulate_input("quit");
+
+        played.gmcp(r#"Room.Info {"num": 2, "name": "A yard", "exits": {"s": 1}}"#);
+        played.frames_until("the next room", |shell, cx| {
+            shell.room_panel.read(cx).room_name() == Some("A yard")
+        });
+        played.cx.executor().advance_clock(Duration::from_secs(1));
+        played.frames_until("the note", |shell, cx| {
+            !shell.notes.read(cx).rows().is_empty()
+        });
+
+        let rows = notes.read_with(played.cx, |notes, _| notes.rows().to_vec());
+        assert_eq!((rows[0].room, rows[0].note.as_str()), (1, "quit"));
+        played.shell.update(played.cx, |shell, cx| {
+            shell.submit("look", cx);
+        });
+        assert_eq!(played.heard_command(), "look");
+    }
+
+    #[gpui::test]
+    fn the_notes_shortcut_opens_the_tab_and_takes_the_keyboard_into_it(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            shell.focus_notes(window, cx);
+        });
+        played.cx.run_until_parked();
+        assert!(played.cx.debug_bounds("notes-panel").is_some());
+        assert!(played.cx.debug_bounds("Add a note here").is_some());
+        let in_the_bar = played.shell.update_in(played.cx, |shell, window, cx| {
+            shell.input.focus_handle(cx).is_focused(window)
+        });
+        assert!(!in_the_bar);
     }
 
     #[gpui::test]

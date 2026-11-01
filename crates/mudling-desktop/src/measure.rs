@@ -52,11 +52,15 @@
 //! 200 MB with a 10,000-room map.
 
 use crate::chat::{COLUMN_WIDTH, Chat};
-use crate::dock::{Dock, DockState, Side};
+use crate::dock::{Dock, DockState, Side, Slot};
 use crate::hud::HudPlacement;
+use crate::map_view::harness::{noted_map, versioned};
+use crate::notes::{Host, NoteTarget};
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{ActivityGuard, AnyWindowHandle, App, Context, Entity, Window, point, px};
+use gpui::{
+    ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, Window, point, px,
+};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::map::{LiveMap, PlainRules};
 use mudling_core::persist::{self, Batch, Database, Exit, Link, Room, Timestamp};
@@ -105,6 +109,12 @@ const FIND_TEXT: &str = "the";
 const SAMPLE_DESCRIPTION: &str = "Tall grass sways on either side of the path, which bends \
     away between low stones furred with moss. A cold wind comes down from the hills to the \
     north, smelling of rain and old smoke, and somewhere ahead a bird calls twice and stops.";
+
+/// Notes on a square of this side, for the Notes tab: 400 of them.
+const NOTED_SIDE: i64 = 20;
+const SAMPLE_NOTEPAD: &str = "Goals\n- Reach level 7.\n\nPeople\n- The healer in the square.";
+/// Frames between keys while typing a note: ten keys a second at 60 Hz.
+const FRAMES_PER_KEY: u64 = 6;
 
 /// A filled Room panel's room, what the map remembers and what's in it.
 pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
@@ -201,6 +211,21 @@ pub fn fill_room_panel(shell: &Shell, room: Option<RoomState>, cx: &mut App) {
     shell.room_panel().update(cx, |panel, cx| {
         panel.show_room(&room, &mobs, cx);
         panel.show_contents(room.contents.clone(), cx);
+    });
+}
+
+/// The Notes tab open on 400 made-up notes, with the editor on the first.
+pub fn open_notes(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    let notes = shell.notes();
+    notes.update(cx, |notes, cx| {
+        notes.use_map(versioned(noted_map(NOTED_SIDE)), cx);
+        notes.show_server("mud.example", SAMPLE_NOTEPAD, cx);
+    });
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.select(Slot::Notes, cx));
+    notes.update(cx, |notes, cx| {
+        notes.edit(NoteTarget::Room(0), Host::NotesTab, window, cx);
     });
 }
 
@@ -384,6 +409,8 @@ struct Pacer {
     find_open: bool,
     /// When the find text went in, until its results show.
     find_started: Option<Instant>,
+    notes_open: bool,
+    frames: u64,
     _no_app_nap: ActivityGuard,
 }
 
@@ -483,6 +510,7 @@ impl Pacer {
                 self.shell.read(cx).replay(reads);
             }
             self.change_hud(window, cx);
+            self.type_a_key(window, cx);
             if phase == Phase::Rewrap {
                 let there_and_back = (elapsed.as_secs_f32() % 2.0 - 1.0).abs();
                 let window_width = window.viewport_size().width;
@@ -498,6 +526,17 @@ impl Pacer {
             self.lines_sent = due;
         }
         window.on_next_frame(move |window, cx| self.on_frame(window, cx));
+    }
+
+    /// Types into the note, at about a typist's pace.
+    fn type_a_key(&mut self, window: &mut Window, cx: &mut App) {
+        self.frames += 1;
+        if self.notes_open && self.frames.is_multiple_of(FRAMES_PER_KEY) {
+            let editor = self.shell.read(cx).notes().read(cx).editor().clone();
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(None, "a", window, cx);
+            });
+        }
     }
 
     /// What a frame of a fight does to the HUD, and a mouse to the card.
@@ -528,6 +567,7 @@ pub struct Run {
     pub stream_for: Duration,
     pub hud: Option<HudRun>,
     pub find_open: bool,
+    pub notes_open: bool,
 }
 
 /// Calls `stalled` once `limit` has gone by since `last_frame`.
@@ -591,6 +631,8 @@ pub fn drive(
         hud_frames: 0,
         find_open: run.find_open,
         find_started: None,
+        notes_open: run.notes_open,
+        frames: 0,
         _no_app_nap: cx
             .background_executor()
             .prevent_app_nap("MUDling measured replay"),
@@ -621,6 +663,7 @@ struct FrameReport {
     settings_open: bool,
     hud: Option<String>,
     find_open: bool,
+    notes_open: bool,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -709,6 +752,7 @@ pub fn run_parent(
             .and_then(|flag| child_args.get(flag + 1))
             .cloned(),
         find_open: child_args.iter().any(|arg| arg == "--find-open"),
+        notes_open: child_args.iter().any(|arg| arg == "--notes-open"),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -753,6 +797,14 @@ fn print_report(report: &FrameReport) {
     println!(
         "find bar: {}",
         if report.find_open { "open" } else { "closed" }
+    );
+    println!(
+        "Notes tab: {}",
+        if report.notes_open {
+            "typing"
+        } else {
+            "closed"
+        }
     );
     for (phase, summary) in &report.phases {
         println!(

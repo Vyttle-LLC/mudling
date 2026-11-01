@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 pub const CONTEXT: &str = "RoomPanel";
 const MAP_HEIGHT: Pixels = px(176.);
 const BUTTON_HEIGHT: Pixels = px(28.);
+const MARK_HEIGHT: Pixels = px(24.);
 const ITEM_ROW_HEIGHT: Pixels = px(48.);
 /// A room's memory can grow; the panel shows the mobs seen most recently.
 const MOST_SIGHTINGS: usize = 8;
@@ -133,16 +134,8 @@ fn sightings(room: &MapRoom, mobs: &MobsState) -> Vec<Sighting> {
         .take(MOST_SIGHTINGS)
         .map(|(title, _)| Sighting {
             name: title.clone().into(),
-            marks: marks_on(title, mobs),
+            marks: mobs.marks_on(title),
         })
-        .collect()
-}
-
-fn marks_on(title: &str, mobs: &MobsState) -> Vec<Mark> {
-    mobs.marks
-        .iter()
-        .filter(|(mark, marked)| mark.covers(marked, title))
-        .map(|(mark, _)| *mark)
         .collect()
 }
 
@@ -166,13 +159,26 @@ pub struct SendCommand {
 
 impl EventEmitter<SendCommand> for RoomPanel {}
 
+/// The player set or cleared a mark on a mob, by the line the game shows.
+pub struct MarkMob {
+    pub title: String,
+    pub mark: Mark,
+    pub set: bool,
+}
+
+impl EventEmitter<MarkMob> for RoomPanel {}
+
 pub struct RoomPanel {
     focus_handle: FocusHandle,
     verbs: Verbs,
     place: Option<Place>,
     doubt: Option<&'static str>,
     contents: RoomContents,
+    mobs: MobsState,
+    /// Each occupant's marks, worked out when the room or the marks change.
+    occupant_marks: Vec<Vec<Mark>>,
     map: Option<AnyView>,
+    card: Option<AnyView>,
 }
 
 impl RoomPanel {
@@ -183,7 +189,10 @@ impl RoomPanel {
             place: None,
             doubt: None,
             contents: RoomContents::default(),
+            mobs: MobsState::default(),
+            occupant_marks: Vec::new(),
             map: None,
+            card: None,
         }
     }
 
@@ -202,19 +211,38 @@ impl RoomPanel {
             self.doubt = doubt;
             cx.notify();
         }
+        if *mobs != self.mobs {
+            self.mobs = mobs.clone();
+            self.mark_occupants();
+            cx.notify();
+        }
     }
 
     /// Who and what is in the room, from the room store.
     pub fn show_contents(&mut self, contents: RoomContents, cx: &mut Context<RoomPanel>) {
         if contents != self.contents {
             self.contents = contents;
+            self.mark_occupants();
             cx.notify();
         }
+    }
+
+    fn mark_occupants(&mut self) {
+        let occupants = self.contents.occupants.iter();
+        self.occupant_marks = occupants
+            .map(|occupant| self.mobs.marks_on(&occupant.name))
+            .collect();
     }
 
     /// Puts the small map in its place above the exits.
     pub fn mount_map(&mut self, map: impl Into<AnyView>, cx: &mut Context<RoomPanel>) {
         self.map = Some(map.into());
+        cx.notify();
+    }
+
+    /// Puts the room's note and features in their place under the exits.
+    pub fn mount_card(&mut self, card: impl Into<AnyView>, cx: &mut Context<RoomPanel>) {
+        self.card = Some(card.into());
         cx.notify();
     }
 
@@ -363,16 +391,12 @@ impl RoomPanel {
             .enumerate()
             .map(|(index, occupant)| {
                 let name = SharedString::from(occupant.name.clone());
-                div()
-                    .id(("occupant", index))
-                    .debug_selector(move || format!("occupant-{index}"))
-                    .role(Role::ListItem)
-                    .aria_label(name.clone())
+                let marks = self.occupant_marks.get(index);
+                let marks = marks.map_or(&[][..], Vec::as_slice);
+                let verbs = div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_3()
-                    .py(px(10.))
                     .child(row_name(name.clone()))
                     .when_some(occupant.target.as_ref(), |row, target| {
                         row.child(verb_button(
@@ -393,7 +417,26 @@ impl RoomPanel {
                             theme,
                             cx,
                         ))
-                    })
+                    });
+                div()
+                    .id(("occupant", index))
+                    .debug_selector(move || format!("occupant-{index}"))
+                    .role(Role::ListItem)
+                    .aria_label(name.clone())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py(px(8.))
+                    .child(verbs)
+                    .child(mark_toggles(
+                        "occupant-mark",
+                        index,
+                        &name,
+                        marks,
+                        theme,
+                        cx,
+                    ))
             })
             .collect();
         section(
@@ -462,33 +505,34 @@ impl RoomPanel {
 
     /// What the map remembers about the room's mobs: all a store holds on
     /// targets so far.
-    fn render_seen(&self, seen: &[Sighting], theme: &Theme) -> impl IntoElement {
+    fn render_seen(
+        &self,
+        seen: &[Sighting],
+        theme: &Theme,
+        cx: &mut Context<RoomPanel>,
+    ) -> impl IntoElement {
         let rows: Vec<_> = seen
             .iter()
             .enumerate()
             .map(|(index, mob)| {
-                let marks = mob.marks.iter().map(|mark| {
-                    let color = match mark {
-                        Mark::Aggressive => theme.danger,
-                        Mark::Gear | Mark::Important => theme.text_muted,
-                    };
-                    div()
-                        .flex_none()
-                        .text_size(px(12.))
-                        .text_color(color)
-                        .child(mark.name())
-                });
                 div()
                     .id(("seen", index))
                     .role(Role::ListItem)
                     .aria_label(mob.name.clone())
-                    .h(BUTTON_HEIGHT)
                     .flex()
-                    .items_center()
-                    .gap_2()
+                    .flex_col()
+                    .gap_1()
                     .px_2()
+                    .py_1()
                     .child(row_name(mob.name.clone()))
-                    .children(marks.collect::<Vec<_>>())
+                    .child(mark_toggles(
+                        "seen-mark",
+                        index,
+                        &mob.name,
+                        &mob.marks,
+                        theme,
+                        cx,
+                    ))
             })
             .collect();
         section(
@@ -498,6 +542,53 @@ impl RoomPanel {
             theme,
         )
     }
+}
+
+/// A toggle for each mark a mob can have, lit for the ones it has. The player
+/// sees what's marked in the same place they mark it.
+fn mark_toggles(
+    id: &'static str,
+    index: usize,
+    name: &SharedString,
+    marks: &[Mark],
+    theme: &Theme,
+    cx: &mut Context<RoomPanel>,
+) -> impl IntoElement {
+    let toggles = Mark::ALL.into_iter().map(|mark| {
+        let on = marks.contains(&mark);
+        let word = mark.name();
+        let action = if on {
+            format!("Clear {word} on {name}")
+        } else {
+            format!("Mark {name} {word}")
+        };
+        let color = match mark {
+            Mark::Aggressive if on => theme.danger,
+            _ if on => theme.accent,
+            _ => theme.text_muted,
+        };
+        let title = name.to_string();
+        button(
+            (id, index * Mark::ALL.len() + mark as usize),
+            action.into(),
+            theme,
+        )
+        .aria_toggled(on.into())
+        .h(MARK_HEIGHT)
+        .px_2()
+        .text_size(px(12.))
+        .text_color(color)
+        .when(on, |toggle| toggle.bg(theme.selected))
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.emit(MarkMob {
+                title: title.clone(),
+                mark,
+                set: !on,
+            });
+        }))
+        .child(word)
+    });
+    div().flex().gap_1().children(toggles.collect::<Vec<_>>())
 }
 
 fn verb_button(
@@ -547,7 +638,7 @@ pub fn button(id: impl Into<ElementId>, name: SharedString, theme: &Theme) -> St
 }
 
 /// gpui has no letter spacing, so the canvas's wide-set labels use thin spaces.
-fn section_label(text: &str, theme: &Theme) -> impl IntoElement {
+pub fn section_label(text: &str, theme: &Theme) -> impl IntoElement {
     let spaced: Vec<String> = text.chars().map(String::from).collect();
     div()
         .flex_none()
@@ -565,7 +656,7 @@ fn section(label: String, name: &'static str, list: Div, theme: &Theme) -> Div {
         .child(div().id(name).role(Role::List).aria_label(name).child(list))
 }
 
-fn row_name(name: SharedString) -> impl IntoElement {
+pub fn row_name(name: SharedString) -> impl IntoElement {
     div()
         .flex_1()
         .min_w_0()
@@ -604,6 +695,7 @@ impl Render for RoomPanel {
                     .filter(|exits| !exits.is_empty())
                     .map(|exits| self.render_exits(exits, &theme, cx)),
             )
+            .children(self.card.clone())
             .when(!self.contents.occupants.is_empty(), |panel| {
                 panel.child(self.render_occupants(&theme, cx))
             })
@@ -612,7 +704,7 @@ impl Render for RoomPanel {
             })
             .children(
                 seen.filter(|seen| !seen.is_empty())
-                    .map(|seen| self.render_seen(seen, &theme)),
+                    .map(|seen| self.render_seen(seen, &theme, cx)),
             )
     }
 }
@@ -820,6 +912,36 @@ mod tests {
         }
         let commands: Vec<_> = sent.borrow().iter().map(|(c, _)| c.clone()).collect();
         assert_eq!(commands, ["look traveller", "kill traveller", "get coins"]);
+    }
+
+    #[gpui::test]
+    fn a_toggle_marks_a_mob_and_clears_a_mark(cx: &mut TestAppContext) {
+        let (panel, cx, _) = panel_window(cx);
+        fill(&panel, cx);
+        let marked = Rc::new(RefCell::new(Vec::new()));
+        let log = marked.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &MarkMob, _| {
+                log.borrow_mut()
+                    .push((event.title.clone(), event.mark, event.set));
+            })
+            .detach();
+        });
+
+        let toggle = "Mark A traveller resting by the wall gear";
+        let toggle = cx.debug_bounds(toggle).unwrap().center();
+        cx.simulate_click(toggle, Modifiers::none());
+        let traveller = "A traveller resting by the wall".to_owned();
+        assert_eq!(*marked.borrow(), [(traveller, Mark::Gear, true)]);
+
+        // The wolf came marked aggressive, so its toggle clears.
+        let clear = "Clear aggressive on (Marked) a grey wolf";
+        let toggle = cx.debug_bounds(clear).unwrap().center();
+        cx.simulate_click(toggle, Modifiers::none());
+        assert_eq!(
+            marked.borrow().last(),
+            Some(&("(Marked) a grey wolf".to_owned(), Mark::Aggressive, false))
+        );
     }
 
     #[gpui::test]

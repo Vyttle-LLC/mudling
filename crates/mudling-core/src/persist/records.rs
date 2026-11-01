@@ -125,6 +125,9 @@ impl Stored for Character {
     }
 }
 
+/// The [`Meta`] key the server's notepad is kept under.
+pub const NOTEPAD: &str = "notes.notepad";
+
 /// A small per-server value, such as the room the player was last in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Meta {

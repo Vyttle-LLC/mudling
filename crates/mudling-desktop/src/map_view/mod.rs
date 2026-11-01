@@ -17,12 +17,14 @@ mod sheet;
 use crate::assets::HEADING_FONT;
 use crate::theme::{MapColors, Theme};
 use gpui::{
-    Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollEvent, Window, canvas, div, point, prelude::*, px,
+    AnyView, Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels, Point, Render,
+    ScrollDelta, ScrollEvent, Window, canvas, div, point, prelude::*, px,
 };
 pub use model::{MapModel, Selection, Walk};
+use mudling_core::map::RoomId;
 use mudling_core::store::{Diff, MapState, Versioned};
+pub use sheet::Pip;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -50,6 +52,8 @@ pub struct MapView {
     press: Option<Press>,
     /// Where the map was last painted, for turning clicks into squares.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// What's shown of the selected room.
+    card: Option<AnyView>,
 }
 
 /// Sent when a room is selected, and again when its walk is known.
@@ -66,6 +70,7 @@ impl MapView {
             layout,
             press: None,
             bounds: Rc::default(),
+            card: None,
         };
         view.start_work(cx);
         view
@@ -338,9 +343,11 @@ impl MapView {
         div()
             .absolute()
             .left_3()
+            .right_3()
             .bottom_2()
             .flex()
-            .gap_4()
+            .flex_wrap()
+            .gap_x_4()
             .text_size(px(12.))
             .text_color(colors.muted)
             .child(
@@ -364,6 +371,28 @@ impl MapView {
             .when(sheet.has_mazes(), |legend| {
                 legend.child(entry(ring(colors.maze), "Maze"))
             })
+            .children(
+                sheet
+                    .pips()
+                    .iter()
+                    .map(|pip| entry(swatch(colors.pip(pip)).size(px(6.)), pip.label())),
+            )
+    }
+
+    /// Selects a room and brings its sheet into view.
+    pub fn go_to(&mut self, room: RoomId, cx: &mut Context<MapView>) {
+        self.model.go_to(room);
+        if let Some(selection) = self.model.selection().cloned() {
+            cx.emit(selection);
+        }
+        self.start_work(cx);
+        cx.notify();
+    }
+
+    /// Puts the selected room's card under the map.
+    pub fn mount_card(&mut self, card: impl Into<AnyView>, cx: &mut Context<MapView>) {
+        self.card = Some(card.into());
+        cx.notify();
     }
 }
 
@@ -405,7 +434,10 @@ impl Render for MapView {
                 .flex()
                 .flex_col()
                 .child(self.header(colors, cx))
-                .child(div().flex_1().min_h_0().child(self.map_surface(colors, cx))),
+                .child(div().flex_1().min_h_0().child(self.map_surface(colors, cx)))
+                .when(self.model.selection().is_some(), |view| {
+                    view.children(self.card.clone().map(|card| div().pt_3().child(card)))
+                }),
         }
     }
 }

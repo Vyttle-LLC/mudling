@@ -5,7 +5,7 @@ use super::buildings::MapDoor;
 use super::geometry::{DirMap, Direction, GridPoint};
 use super::info::{self, ExitInfo, RoomInfo, RoomItems};
 use super::layout::{Layout, Step, UNNUMBERED_IDS};
-use super::mobs::{MarkChange, MobMemory};
+use super::mobs::{Mark, MarkChange, MobMemory};
 use super::room::{ExitState, MapRoom, RoomId, feature};
 use super::route::{WalkStep, route};
 use super::rows::{read_rooms, write_room};
@@ -205,20 +205,13 @@ impl LiveMap {
         if is("Room.WrongDir") {
             self.tracker.move_failed(now);
         } else if is("Room.Players") || is("Room.AddPlayer") {
-            self.mobs_here(&info::mob_titles(json), now);
+            self.note_sightings(&info::mob_titles(json), now);
         } else if is("Char.Status") {
             self.status(json);
         } else if is("Char.Items.List") || is("Char.Items.Add") {
             self.items_here(json);
         }
         None
-    }
-
-    fn mobs_here(&mut self, titles: &[String], now: Timestamp) {
-        self.note_sightings(titles, now);
-        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
-            self.note_feature(feature::AGGRESSIVE_MOB);
-        }
     }
 
     /// A door changed in place, which brings no Room.Info.
@@ -346,8 +339,10 @@ impl LiveMap {
                 room.sightings.insert(title.clone(), now);
             }
         });
-        if titles.iter().any(|title| self.mobs.is_aggressive(title)) {
-            self.note_feature(feature::AGGRESSIVE_MOB);
+        for mark in Mark::ALL {
+            if titles.iter().any(|title| self.mobs.is(mark, title)) {
+                self.note_feature(mob_feature(mark));
+            }
         }
     }
 
@@ -378,6 +373,38 @@ impl LiveMap {
                 room.features.remove(feature);
             }
         });
+    }
+
+    /// The player setting or clearing `mark` on a mob in their room, by its
+    /// room line. The rooms it was seen in follow: each one gets the mark's
+    /// feature, and a room loses it once no mob seen there has the mark. A
+    /// room that got the feature some other way, with no such sighting, keeps
+    /// it.
+    ///
+    /// This walks the map, which a player's click can afford and a line can't.
+    pub fn mark_mob(&mut self, title: &str, mark: Mark, set: bool, now: Timestamp) {
+        self.tracker.settle();
+        let before = self.rooms_seeing(mark);
+        self.mobs.set_mark(mark, title, set);
+        if set {
+            self.tracker.update_current_rooms(|room| {
+                room.sightings.entry(title.to_owned()).or_insert(now);
+            });
+        }
+        let after = self.rooms_seeing(mark);
+        let feature = mob_feature(mark);
+        for id in after.difference(&before) {
+            self.set_feature(*id, feature, true);
+        }
+        for id in before.difference(&after) {
+            self.set_feature(*id, feature, false);
+        }
+    }
+
+    /// The rooms where a mob with `mark` was seen.
+    fn rooms_seeing(&self, mark: Mark) -> BTreeSet<RoomId> {
+        let seen = |room: &&MapRoom| room.sightings.keys().any(|mob| self.mobs.is(mark, mob));
+        self.rooms().filter(seen).map(|room| room.id).collect()
     }
 
     /// "I'm here": the player telling the map where they really are. The
@@ -667,6 +694,15 @@ impl LiveMap {
         let mut batch = Batch::new();
         batch.save_map_version(kind, label, now);
         batch
+    }
+}
+
+/// The feature a room gets from a mob with `mark`.
+fn mob_feature(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Aggressive => feature::AGGRESSIVE_MOB,
+        Mark::Gear => feature::GEAR_MOB,
+        Mark::Important => feature::IMPORTANT_MOB,
     }
 }
 
