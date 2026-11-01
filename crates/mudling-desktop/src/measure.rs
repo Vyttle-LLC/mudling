@@ -20,7 +20,7 @@
 //! `--long-lines` measures all of this with lines that wrap.
 //!
 //! `--settings-open` runs all of this with the settings sheet open, and
-//! `--settings-section` with Data & sync or Vault open and filled.
+//! `--settings-section` with Data & sync, Vault or Logs open and filled.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -72,6 +72,7 @@ use gpui::{
 use mudling_core::defaults::hud::Vital;
 use mudling_core::gear::sets::GearRules;
 use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
+use mudling_core::logs::{Kind, LogFile, LogSettings};
 use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
 use mudling_core::persist::{
     self, Batch, Database, Exit, GearPiece, GearSet, Link, Meta, Room, Sighting, StatMap, Timestamp,
@@ -1187,7 +1188,26 @@ pub fn open_sample_section(
             .map(|character| EntryKey::new(SAMPLE_HOST, character))
             .to_vec();
         sheet.show_sample_vault(entries, 1, cx);
+        sheet.show_logs(LogSettings::default(), sample_logs(), cx);
     });
+}
+
+/// Made-up logs with no files behind them.
+pub fn sample_logs() -> Vec<LogFile> {
+    let log = |kind, started, bytes, pinned, live| LogFile {
+        kind,
+        path: "sample.log".into(),
+        server: "mud.example".to_owned(),
+        started: Timestamp(started),
+        bytes,
+        pinned,
+        live,
+    };
+    vec![
+        log(Kind::Debug, 1_793_500_000_000, 2_500_000, false, true),
+        log(Kind::Debug, 1_793_400_000_000, 31_000_000, true, false),
+        log(Kind::Chat, 1_793_300_000_000, 840_000, false, false),
+    ]
 }
 
 /// Runs the app as a measured child and writes the report to `report_path`.

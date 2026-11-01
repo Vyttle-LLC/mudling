@@ -27,9 +27,9 @@ use crate::shell::{FocusHotbar, PinCommand, ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::{Appearance, CHAT_FONTS, Theme};
 use crate::title_bar::{FindInScrollback, OpenSettings, problems_text};
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
-    KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Stateful, Window, actions,
-    div, point, prelude::*, px, transparent_black,
+    AnyElement, App, Bounds, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
+    KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Size, Stateful, Task,
+    Window, actions, div, point, prelude::*, px, size, transparent_black,
 };
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
@@ -42,6 +42,8 @@ const WIDTH: Pixels = px(1000.);
 const HEIGHT: Pixels = px(716.);
 /// The space kept around the sheet in a small window.
 const MARGIN: Pixels = px(24.);
+/// No less than the sheet's corner radius.
+const CORNER: Pixels = px(16.);
 const NAV_WIDTH: Pixels = px(264.);
 /// The most of a small sheet the sections take.
 const NAV_SHARE: f32 = 0.36;
@@ -191,6 +193,20 @@ impl Pane {
     }
 }
 
+/// Where the sheet sits in a window of this size.
+fn sheet_bounds(room: Size<Pixels>) -> Bounds<Pixels> {
+    let sheet = size(
+        WIDTH.min(room.width - MARGIN * 2.),
+        HEIGHT.min(room.height - MARGIN * 2.),
+    );
+    Bounds::centered_at(point(room.width / 2., room.height / 2.), sheet)
+}
+
+/// What the open sheet hides for certain: its corners are round.
+pub fn hidden_under_sheet(room: Size<Pixels>) -> Bounds<Pixels> {
+    sheet_bounds(room).dilate(-CORNER)
+}
+
 /// A heading inside a section.
 fn section_heading(title: &'static str, theme: &Theme) -> Stateful<Div> {
     div()
@@ -311,6 +327,10 @@ pub struct SettingsSheet {
     /// A stop to bring into view at the next draw, once its row exists.
     reveal: Option<FocusHandle>,
     scroll: ScrollHandle,
+    /// Keeps "minutes ago" true while Data & sync shows it.
+    _ago_ticks: Option<Task<()>>,
+    #[cfg(test)]
+    renders: usize,
 }
 
 impl EventEmitter<SheetEvent> for SettingsSheet {}
@@ -348,6 +368,9 @@ impl SettingsSheet {
             stops: Stops::default(),
             reveal: None,
             scroll: ScrollHandle::new(),
+            _ago_ticks: None,
+            #[cfg(test)]
+            renders: 0,
         }
     }
 
@@ -384,6 +407,7 @@ impl SettingsSheet {
             self.forget_typed(cx);
         }
         self.section = section;
+        self._ago_ticks = (section == Section::Data).then(|| self.tick_ago(cx));
         match section {
             Section::Data => self.read_sign_in(cx),
             Section::Vault => self.list_vault(cx),
@@ -677,9 +701,14 @@ impl SettingsSheet {
 
 impl gpui::Render for SettingsSheet {
     fn render(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         let theme = *cx.global::<Theme>();
         let room = window.viewport_size();
-        let width = WIDTH.min(room.width - MARGIN * 2.);
+        let sheet = sheet_bounds(room).size;
+        let width = sheet.width;
         let scrim_click = cx.listener(|sheet, _, window, cx| {
             window.prevent_default();
             sheet.close(cx);
@@ -694,7 +723,7 @@ impl gpui::Render for SettingsSheet {
             .track_focus(&self.dialog)
             .occlude()
             .w(width)
-            .h(HEIGHT.min(room.height - MARGIN * 2.))
+            .h(sheet.height)
             .flex()
             .overflow_hidden()
             .rounded_xl()
@@ -765,11 +794,15 @@ mod tests {
     use crate::hud::HudPlacement;
     use crate::shell::{Shell, tests::window_with_keys};
     use crate::theme::{LARGEST_CHAT_SIZE, ThemeChoice};
-    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
+    use gpui::{
+        Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext,
+        WindowAppearance,
+    };
     use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
     use mudling_core::plugin::luau::DisabledReason;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
@@ -815,6 +848,157 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_input("look");
         assert_eq!(shell.read_with(cx, |shell, cx| shell.typed(cx)), "look");
+    }
+
+    fn renders(sheet: &Entity<SettingsSheet>, cx: &mut VisualTestContext) -> usize {
+        sheet.read_with(cx, |sheet, _| sheet.renders)
+    }
+
+    fn line_arrives(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        chat.update(cx, |chat, cx| chat.echo_unsent("look", cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn lines_arriving_leave_the_sheet_as_it_was_drawn(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let before = renders(&sheet, cx);
+        (0..5).for_each(|_| line_arrives(&shell, cx));
+        assert_eq!(renders(&sheet, cx), before);
+        assert!(
+            cx.debug_bounds("settings-sheet").is_some(),
+            "it still shows"
+        );
+    }
+
+    #[gpui::test]
+    fn what_changes_in_the_sheet_still_draws_it(cx: &mut TestAppContext) {
+        let (shell, cx, _edits) = open_rules(cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+
+        let before = renders(&sheet, cx);
+        click("new-trigger", cx);
+        assert!(renders(&sheet, cx) > before, "a click");
+
+        let before = renders(&sheet, cx);
+        cx.simulate_input("t");
+        assert!(renders(&sheet, cx) > before, "typing in a field");
+
+        let before = renders(&sheet, cx);
+        let theme = Appearance {
+            theme: ThemeChoice::Light,
+            ..chosen(cx)
+        };
+        sheet.update(cx, |sheet, cx| sheet.choose(theme, cx));
+        cx.run_until_parked();
+        assert!(renders(&sheet, cx) > before, "the theme");
+
+        let before = renders(&sheet, cx);
+        cx.simulate_resize(size(px(1200.), px(760.)));
+        cx.run_until_parked();
+        assert!(renders(&sheet, cx) > before, "the window's size");
+    }
+
+    #[gpui::test]
+    fn a_wheel_scrolls_a_long_section(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(700.), px(420.)));
+        open(&shell, cx);
+        section(Section::Shortcuts, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let before = renders(&sheet, cx);
+        let over_rows = sheet.read_with(cx, |sheet, _| sheet.scroll.bounds().center());
+        cx.simulate_event(ScrollEvent {
+            position: over_rows,
+            delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
+            ..ScrollEvent::default()
+        });
+        cx.run_until_parked();
+        assert!(sheet.read_with(cx, |sheet, _| sheet.scroll.offset().y < px(0.)));
+        assert!(renders(&sheet, cx) > before);
+    }
+
+    #[gpui::test]
+    fn minutes_ago_moves_on_while_data_shows_it(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        section(Section::Data, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let before = renders(&sheet, cx);
+        cx.executor().advance_clock(Duration::from_secs(61));
+        cx.run_until_parked();
+        assert!(renders(&sheet, cx) > before);
+
+        section(Section::Appearance, cx);
+        let before = renders(&sheet, cx);
+        cx.executor().advance_clock(Duration::from_secs(61));
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), before, "no section to keep current");
+    }
+
+    #[gpui::test]
+    fn the_chat_draws_the_lines_the_sheet_leaves_in_view(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1300.), px(1400.)));
+        cx.run_until_parked();
+        (0..100).for_each(|_| line_arrives(&shell, cx));
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        let in_view = chat.read_with(cx, |chat, _| chat.lines_drawn());
+        assert!(in_view > 30, "the window is tall: {in_view}");
+
+        open(&shell, cx);
+        line_arrives(&shell, cx);
+        let beside_the_sheet = chat.read_with(cx, |chat, _| chat.lines_drawn());
+        assert!(beside_the_sheet > 0, "above and below it, lines still show");
+        assert!(
+            beside_the_sheet < in_view,
+            "{beside_the_sheet} of {in_view}"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(cx, |chat, _| chat.lines_drawn()), in_view);
+    }
+
+    #[gpui::test]
+    fn the_chat_measures_only_what_it_draws_beside_the_sheet(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        (0..100).for_each(|_| line_arrives(&shell, cx));
+        open(&shell, cx);
+        line_arrives(&shell, cx);
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        let before = chat.read_with(cx, |chat, _| chat.lines_measured());
+        line_arrives(&shell, cx);
+        let (measured, drawn) = chat.read_with(cx, |chat, _| {
+            (chat.lines_measured() - before, chat.lines_drawn())
+        });
+        assert!(measured <= drawn + 1, "{measured} measured, {drawn} drawn");
+    }
+
+    /// What's known of a line's height can't outlive the size it was
+    /// measured at, drawn or not.
+    #[gpui::test]
+    fn a_new_chat_size_measures_the_lines_under_the_sheet_again(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1300.), px(1400.)));
+        cx.run_until_parked();
+        (0..100).for_each(|_| line_arrives(&shell, cx));
+        open(&shell, cx);
+        section(Section::Appearance, cx);
+        line_arrives(&shell, cx);
+        let chat = shell.read_with(cx, |shell, _| shell.chat());
+        let (before, drawn) =
+            chat.read_with(cx, |chat, _| (chat.lines_measured(), chat.lines_drawn()));
+
+        click("chat-size-larger", cx);
+        let measured = chat.read_with(cx, |chat, _| chat.lines_measured()) - before;
+        assert!(
+            measured > drawn,
+            "{measured} measured, {drawn} drawn before"
+        );
     }
 
     #[gpui::test]

@@ -32,7 +32,7 @@ use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 use crate::settings::Section;
 use crate::settings::{
     LockAfter, PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent, SyncChoices,
-    app_settings, with_app_settings,
+    app_settings, hidden_under_sheet, with_app_settings,
 };
 use crate::skills_panel::{self, SkillsPanel};
 use crate::sound::Speaker;
@@ -45,8 +45,8 @@ use crate::title_bar::{
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString, Subscription,
-    Task, Window, actions, deferred, div, prelude::*,
+    AnyView, App, Context, Entity, FocusHandle, Focusable, KeyBinding, SharedString,
+    StyleRefinement, Subscription, Task, Window, actions, deferred, div, prelude::*,
 };
 use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
@@ -2069,6 +2069,11 @@ impl Render for Shell {
             window.viewport_size().width,
             cx,
         );
+        let reader_listens = window.is_a11y_active();
+        // A screen reader reads the lines the chat draws, seen or not.
+        let covered = (self.settings_open && !reader_listens)
+            .then(|| hidden_under_sheet(window.viewport_size()));
+        self.chat.update(cx, |chat, _| chat.set_covered(covered));
         let theme = *cx.global::<Theme>();
         let hud_at = |place: HudPlacement| (theme.choice.hud == place).then(|| self.hud.clone());
         let command_bar = div()
@@ -2193,7 +2198,19 @@ impl Render for Shell {
             .children(hud_at(HudPlacement::TopStrip).filter(|_| !on_empty_state))
             .child(body)
             .when(self.settings_open, |shell_view| {
-                shell_view.child(deferred(self.settings.clone()).with_priority(SHEET_PRIORITY))
+                // The chat draws every frame, and the sheet only when it changes.
+                let sheet = if reader_listens {
+                    // A cached view leaves its nodes out of the accessibility
+                    // tree, so a screen reader gets the sheet drawn afresh.
+                    self.settings.clone().into_any_element()
+                } else {
+                    let over_the_window = StyleRefinement::default().absolute().size_full();
+                    self.settings
+                        .clone()
+                        .cached(over_the_window)
+                        .into_any_element()
+                };
+                shell_view.child(deferred(sheet).with_priority(SHEET_PRIORITY))
             })
     }
 }

@@ -14,6 +14,7 @@ use mudling_core::persist::Timestamp;
 use mudling_core::store::SyncState;
 use mudling_core::sync::RepoSettings;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const NO_SYNC: &str = "Sync isn't running in this window, so nothing here leaves this device.";
 const KEPT_HERE: &str = "Everything stays on this device. Choose a folder to keep a copy in a \
@@ -57,6 +58,8 @@ impl DataPane {
         usize::from(self.sync.problem.is_some()) + self.sync.unsynced
     }
 }
+
+const AGO_STEP: Duration = Duration::from_secs(60);
 
 /// How this device signs in, as the player reads it (PRD §10).
 pub(super) fn sign_in_words(sign_in: SignIn) -> String {
@@ -216,6 +219,19 @@ impl SettingsSheet {
             ..DataPane::default()
         };
         cx.notify();
+    }
+
+    /// Draws the sheet again every minute, the finest step "ago" shows. Lines
+    /// arriving no longer do.
+    pub(super) fn tick_ago(&self, cx: &mut Context<SettingsSheet>) -> Task<()> {
+        cx.spawn(async move |sheet, cx| {
+            loop {
+                cx.background_executor().timer(AGO_STEP).await;
+                if sheet.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        })
     }
 
     pub(super) fn fill_data(

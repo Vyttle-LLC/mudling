@@ -28,7 +28,7 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
-use mudling_core::logs::{Kind, LogFile, LogSettings};
+use mudling_core::logs::LogSettings;
 use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
@@ -121,7 +121,7 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
             None,
             cx,
         );
-        sheet.show_logs(sample_log_settings(), sample_logs(), cx);
+        sheet.show_logs(sample_log_settings(), measure::sample_logs(), cx);
     });
     shell.open_settings(window, cx);
     shell
@@ -136,24 +136,6 @@ fn sample_log_settings() -> LogSettings {
     };
     settings.set_chat("mud.example", true);
     settings
-}
-
-/// Made-up logs with no files behind them.
-fn sample_logs() -> Vec<LogFile> {
-    let log = |kind, started, bytes, pinned, live| LogFile {
-        kind,
-        path: "sample.log".into(),
-        server: "mud.example".to_owned(),
-        started: Timestamp(started),
-        bytes,
-        pinned,
-        live,
-    };
-    vec![
-        log(Kind::Debug, 1_793_500_000_000, 2_500_000, false, true),
-        log(Kind::Debug, 1_793_400_000_000, 31_000_000, true, false),
-        log(Kind::Chat, 1_793_300_000_000, 840_000, false, false),
-    ]
 }
 
 /// The map the join scenes tidy up.
