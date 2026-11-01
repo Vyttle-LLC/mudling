@@ -71,7 +71,7 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows, base_n
             deleted: now.max(Timestamp(room.updated.0 + 1)),
         })
         .collect();
-    gather_notes(&mut ours.map, &mut theirs.map, &united, &[]);
+    gather_notes(&mut ours.map, &mut theirs.map, &united, &BTreeMap::new());
     for side in [&mut *ours, &mut *theirs] {
         repoint_rows(&mut side.map, &united);
         for tombstone in &mut side.tombstones {
@@ -88,8 +88,13 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows, base_n
 /// kept room from before the join was about that room's row, not this one.
 fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &[RoomNote]) {
     let mut joins = standing_joins(ours, theirs);
-    let kept = joins.values().map(|(kept, _)| *kept);
-    let both_changed = notes_both_changed(&ours.map, &theirs.map, base_notes, kept.collect());
+    let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
+    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
+        let newest = deleted.entry(tombstone.key.clone()).or_default();
+        *newest = tombstone.deleted.max(*newest);
+    }
+    let holders: BTreeMap<RoomId, RoomId> = joins.iter().map(|(id, (to, _))| (*id, *to)).collect();
+    let both_changed = notes_both_changed(&ours.map, &theirs.map, base_notes, &holders, &deleted);
     let held = room_ids(ours).into_iter().chain(room_ids(theirs));
     let held: HashSet<RoomId> = held.collect();
     joins.retain(|retired, _| held.contains(retired));
@@ -116,11 +121,6 @@ fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &
         })
         .collect::<Vec<_>>();
     let moves: BTreeMap<RoomId, RoomId> = joins.iter().map(|(id, (to, _))| (*id, *to)).collect();
-    let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
-    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
-        let newest = deleted.entry(tombstone.key.clone()).or_default();
-        *newest = tombstone.deleted.max(*newest);
-    }
     for side in [&mut *ours, &mut *theirs] {
         let map = &mut side.map;
         ready_to_move(&mut map.exits, &joins, &deleted);
@@ -220,14 +220,17 @@ fn ready_to_move<T: Keyed>(
 /// the kept room says, newest first, then each retired room's by id, unless
 /// that text is in it already. Anything that gathered them before reads the
 /// same, so a second merge changes nothing. The kept rooms in `both_changed`
-/// gather both sides' notes as well: see [`notes_both_changed`].
+/// gather both sides' notes as well, and outlast the time each is mapped to:
+/// see [`notes_both_changed`].
 fn gather_notes(
     ours: &mut MapRows,
     theirs: &mut MapRows,
     moves: &BTreeMap<RoomId, RoomId>,
-    both_changed: &[RoomId],
+    both_changed: &BTreeMap<RoomId, Timestamp>,
 ) {
-    let kept_ids: BTreeSet<RoomId> = (moves.values().chain(both_changed)).copied().collect();
+    let kept_ids: BTreeSet<RoomId> = (moves.values().chain(both_changed.keys()))
+        .copied()
+        .collect();
     let mut moved: BTreeMap<RoomId, RoomNote> = BTreeMap::new();
     let mut kept: BTreeMap<RoomId, RoomNote> = BTreeMap::new();
     for note in ours.notes.iter().chain(&theirs.notes) {
@@ -253,7 +256,7 @@ fn gather_notes(
         return;
     }
     for note in ours.notes.iter().chain(&theirs.notes) {
-        if both_changed.contains(&note.room_id)
+        if both_changed.contains_key(&note.room_id)
             && let Some(held) = kept.get_mut(&note.room_id)
         {
             add_note(held, note);
@@ -268,6 +271,11 @@ fn gather_notes(
             Entry::Occupied(mut entry) => add_note(entry.get_mut(), &note),
         }
     }
+    for (room, deleted) in both_changed {
+        if let Some(held) = kept.get_mut(room) {
+            held.updated = held.updated.max(*deleted);
+        }
+    }
     let settled =
         |note: &RoomNote| !moves.contains_key(&note.room_id) && !kept.contains_key(&note.room_id);
     ours.notes.retain(settled);
@@ -275,33 +283,56 @@ fn gather_notes(
     ours.notes.extend(kept.into_values());
 }
 
-/// The rooms in `kept` whose note each side changed from `base_notes`, the
-/// commit both build on, to a different text. A join can stamp a note with a
-/// time its text doesn't earn, so time can't choose between them, and nothing
-/// but the sides themselves says what the other never saw: both texts stay. A
-/// note only one side changed takes the newest as any record does, so a note
-/// rewritten once both sides have the join stays rewritten.
+/// The kept rooms whose notes each side changed from `base_notes`, the commit
+/// both build on, in different ways, with when each room's note was last
+/// deleted. What a side holds for a room is every note row on it or on a room
+/// joined to it, time included, or nothing if it cleared them: a join can stamp
+/// a note with a time its text doesn't earn, and leave the text as it was.
+///
+/// Time can't choose between such changes, and neither can a delete: nothing
+/// but the sides themselves says what the other never saw, so all of it stays.
+/// A change only one side made takes the newest as any record does, so a note
+/// rewritten or cleared once both sides have the join stays that way.
 fn notes_both_changed(
     ours: &MapRows,
     theirs: &MapRows,
     base_notes: &[RoomNote],
-    kept: BTreeSet<RoomId>,
-) -> Vec<RoomId> {
-    let text_of = |notes: &'_ [RoomNote], room: RoomId| {
-        let note = notes.iter().find(|note| note.room_id == room);
-        note.map(|note| note.text.clone())
-    };
+    holders: &BTreeMap<RoomId, RoomId>,
+    deleted: &BTreeMap<Key, Timestamp>,
+) -> BTreeMap<RoomId, Timestamp> {
+    let kept: BTreeSet<RoomId> = holders.values().copied().collect();
+    let (our_notes, their_notes) = (
+        notes_held(&ours.notes, holders, &kept),
+        notes_held(&theirs.notes, holders, &kept),
+    );
+    let base = notes_held(base_notes, holders, &kept);
     kept.into_iter()
         .filter(|room| {
-            let base = text_of(base_notes, *room);
-            match (text_of(&ours.notes, *room), text_of(&theirs.notes, *room)) {
-                (Some(ours), Some(theirs)) => {
-                    ours != theirs && base.as_ref() != Some(&ours) && base.as_ref() != Some(&theirs)
-                }
-                _ => false,
-            }
+            let (mine, yours, was) = (our_notes.get(room), their_notes.get(room), base.get(room));
+            mine != yours && mine != was && yours != was
+        })
+        .map(|room| {
+            let gone = deleted.get(&Key::RoomNote(room)).copied();
+            (room, gone.unwrap_or_default())
         })
         .collect()
+}
+
+/// Each room in `kept`, with the note rows on it and on the rooms joined to it.
+fn notes_held<'a>(
+    notes: &'a [RoomNote],
+    holders: &BTreeMap<RoomId, RoomId>,
+    kept: &BTreeSet<RoomId>,
+) -> BTreeMap<RoomId, BTreeSet<(RoomId, &'a str, Timestamp)>> {
+    let mut held: BTreeMap<RoomId, BTreeSet<_>> = BTreeMap::new();
+    for note in notes {
+        let room = holders.get(&note.room_id).copied().unwrap_or(note.room_id);
+        if kept.contains(&room) {
+            let row = (note.room_id, note.text.as_str(), note.updated);
+            held.entry(room).or_default().insert(row);
+        }
+    }
+    held
 }
 
 /// Adds `note`'s text to `held`, unless one of them already holds the other.

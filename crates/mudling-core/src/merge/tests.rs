@@ -2208,6 +2208,131 @@ fn both_devices_joining_lose_no_note_when_the_edit_is_the_newest() {
     assert_same_maps(&mac, &ipad);
 }
 
+/// The join changes the note's time and not its text: the retired room's note
+/// is already in the kept one.
+fn join_adding_no_text(also_join: bool, first: fn(&Device, &Device)) {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Shop", T1));
+    });
+    converge(&mac, &ipad);
+    ipad.apply(|batch| {
+        batch.upsert(note(kept, "Shop by the well", T2));
+    });
+    mac.apply(|batch| {
+        batch.upsert(note(retired, "Shop", T3));
+    });
+    join_on(&mac, kept, retired);
+    if also_join {
+        join_on(&ipad, kept, retired);
+    }
+
+    first(&mac, &ipad);
+
+    assert_eq!(note_of(&mac, kept).as_deref(), Some("Shop by the well"));
+    assert_same_maps(&mac, &ipad);
+}
+
+fn mac_first(mac: &Device, ipad: &Device) {
+    converge(mac, ipad);
+}
+
+fn ipad_first(mac: &Device, ipad: &Device) {
+    converge(ipad, mac);
+}
+
+#[test]
+fn a_join_that_adds_no_text_leaves_an_edit_elsewhere_alone() {
+    for sync in [mac_first, ipad_first] {
+        join_adding_no_text(false, sync);
+        join_adding_no_text(true, sync);
+    }
+}
+
+fn clear_note(device: &Device, room: i64) {
+    device.apply(|batch| {
+        batch.delete(Key::RoomNote(room));
+    });
+}
+
+/// `clear_first` puts the other device's clear before the join in time.
+fn clear_elsewhere(clear_first: bool, sync: fn(&Device, &Device)) {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Original", T1));
+    });
+    converge(&mac, &ipad);
+    mac.apply(|batch| {
+        batch.upsert(note(retired, "Beggars at night", T2));
+    });
+    if clear_first {
+        clear_note(&ipad, kept);
+    }
+    join_on(&mac, kept, retired);
+    if !clear_first {
+        clear_note(&ipad, kept);
+    }
+
+    sync(&mac, &ipad);
+
+    let gathered = note_of(&mac, kept).expect("the join's note stays");
+    assert!(gathered.contains("Beggars at night"), "{gathered}");
+    assert_same_maps(&mac, &ipad);
+}
+
+#[test]
+fn clearing_a_kept_note_elsewhere_loses_nothing_it_never_saw() {
+    for sync in [mac_first, ipad_first] {
+        clear_elsewhere(true, sync);
+        clear_elsewhere(false, sync);
+    }
+}
+
+/// The note is still on the retired room, on a device yet to hear of the join,
+/// and the device that joined cleared the kept note without ever seeing it.
+#[test]
+fn a_late_copy_on_the_retired_room_outlasts_a_clear_that_never_saw_it() {
+    for sync in [mac_first, ipad_first] {
+        let (_folder, mac, ipad, kept, retired) = two_squares();
+        mac.apply(|batch| {
+            batch.upsert(note(kept, "Original", T1));
+        });
+        converge(&mac, &ipad);
+        mac.apply(|batch| {
+            batch.upsert(note(retired, "Beggars at night", T2));
+        });
+        join_on(&ipad, kept, retired);
+        clear_note(&ipad, kept);
+
+        sync(&mac, &ipad);
+
+        let gathered = note_of(&ipad, kept).expect("the retired room's note stays");
+        assert!(gathered.contains("Beggars at night"), "{gathered}");
+        assert_same_maps(&mac, &ipad);
+    }
+}
+
+/// Everyone has the join, and one side clears: that's the player's word.
+#[test]
+fn a_kept_note_cleared_after_the_join_has_landed_stays_cleared() {
+    let (_folder, mac, ipad, kept, retired) = two_squares();
+    mac.apply(|batch| {
+        batch.upsert(note(kept, "Original", T1));
+        batch.upsert(note(retired, "Beggars at night", T2));
+    });
+    join_on(&mac, kept, retired);
+    converge(&mac, &ipad);
+
+    clear_note(&ipad, kept);
+    mac.apply(|batch| {
+        batch.upsert(feature(kept, "shop"));
+    });
+    converge(&mac, &ipad);
+
+    assert_eq!(note_of(&mac, kept), None);
+    assert_same_maps(&mac, &ipad);
+}
+
 #[test]
 fn two_rewrites_of_a_kept_note_at_once_both_stay() {
     let (_folder, mac, ipad, kept, retired) = two_squares();
