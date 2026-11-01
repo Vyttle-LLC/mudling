@@ -13,16 +13,16 @@
 //! - **A move:** a `Room.Info` through the session, the map updated, its
 //!   rows queued for the writer and the stores written, walking a map up to
 //!   10,000 rooms and then wandering it.
-//! - **A sighting:** a mob arriving by `Room.AddPlayer` on that full map, with
-//!   500 aggressive kinds remembered, held to the line budget, since one can
-//!   come with any line.
+//! - **A sighting:** a mob arriving by `Room.AddPlayer` on that full map,
+//!   reopened with 500 aggressive kinds remembered, held to the line budget,
+//!   since one can come with any line.
 //! - **Memory:** the live Rust heap of the session and a shell's stores with
 //!   that map and 100,000 lines. SQLite's and Luau's C heaps aren't counted.
 //! - **Cold start:** the session opened on that map's database, as far as
 //!   connected: no socket, so no network time.
 
 use crate::plugin_host::PLUGIN_BUDGET_US;
-use crate::{HEAP_BYTES, heap_mb, verdict};
+use crate::{BudgetScale, HEAP_BYTES, heap_mb, verdict};
 use mudling_core::defaults::triggers::{Highlight, TriggerRule};
 use mudling_core::map::Mark;
 use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
@@ -64,9 +64,11 @@ const MATCHING_EVERY: usize = 5;
 #[derive(Serialize)]
 pub struct Report {
     pub lines: usize,
-    /// With [`PLAYER_TRIGGERS`] of the player's triggers on.
     pub whole_line: Summary,
-    pub without_triggers: Summary,
+    /// The same lines with [`PLAYER_TRIGGERS`] of the player's triggers on,
+    /// held to the same budget. A name of its own: `whole_line` is the
+    /// workload the base measures, which `compare` reads it against.
+    pub whole_line_200_triggers: Summary,
     pub without_game_plugin: Summary,
     pub with_game_plugin: Summary,
     pub one_more_plugin_p99_us: f64,
@@ -84,7 +86,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
+pub fn run(source: &[String], plugins: &[Plugin], scale: BudgetScale) -> Report {
     let count = source.len().max(MIN_LINES);
     let reads: Vec<Bytes> = source
         .iter()
@@ -94,8 +96,8 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         .map(|(index, line)| read(index, line))
         .collect();
 
-    let without_triggers = measure_lines(&reads, plugins, &[]);
-    let whole_line = measure_lines(&reads, plugins, &player_triggers(source));
+    let whole_line = measure_lines(&reads, plugins, &[]);
+    let whole_line_200_triggers = measure_lines(&reads, plugins, &player_triggers(source));
     let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads, plugins);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
     let Moves {
@@ -105,17 +107,22 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         memory_mb,
         cold_start,
     } = measure_world(&reads, plugins);
+    let line_budget_us = scale.time_us(LINE_BUDGET_US);
+    let plugin_budget_us = scale.time_us(PLUGIN_BUDGET_US);
+    let move_budget_us = scale.time_us(MOVE_BUDGET_US);
+    let cold_start_budget_us = scale.time_us(COLD_START_BUDGET_US);
     Report {
         lines: count,
-        within_budget: whole_line.p99_us <= LINE_BUDGET_US
-            && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
-            && mapping.p99_us <= MOVE_BUDGET_US
-            && wandering.p99_us <= MOVE_BUDGET_US
-            && sighting.p99_us <= LINE_BUDGET_US
+        within_budget: whole_line.p99_us <= line_budget_us
+            && whole_line_200_triggers.p99_us <= line_budget_us
+            && one_more_plugin_p99_us <= plugin_budget_us
+            && mapping.p99_us <= move_budget_us
+            && wandering.p99_us <= move_budget_us
+            && sighting.p99_us <= line_budget_us
             && memory_mb <= MEMORY_BUDGET_MB
-            && cold_start.p99_us <= COLD_START_BUDGET_US,
+            && cold_start.p99_us <= cold_start_budget_us,
         whole_line,
-        without_triggers,
+        whole_line_200_triggers,
         without_game_plugin,
         with_game_plugin,
         one_more_plugin_p99_us,
@@ -125,11 +132,11 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         sighting,
         memory_mb,
         cold_start,
-        line_budget_us: LINE_BUDGET_US,
-        plugin_budget_us: PLUGIN_BUDGET_US,
-        move_budget_us: MOVE_BUDGET_US,
+        line_budget_us,
+        plugin_budget_us,
+        move_budget_us,
         memory_budget_mb: MEMORY_BUDGET_MB,
-        cold_start_budget_us: COLD_START_BUDGET_US,
+        cold_start_budget_us,
     }
 }
 
@@ -139,14 +146,16 @@ pub fn print(report: &Report) {
         report.lines
     );
     println!(
-        "  whole line, {PLAYER_TRIGGERS} player triggers: {}; budget p99 ≤ {} µs: {}",
+        "  whole line: {}; budget p99 ≤ {} µs: {}",
         report.whole_line,
         report.line_budget_us,
         verdict(report.whole_line.p99_us <= report.line_budget_us)
     );
     println!(
-        "  whole line, no player triggers: {}",
-        report.without_triggers
+        "  whole line, {PLAYER_TRIGGERS} player triggers: {}; budget p99 ≤ {} µs: {}",
+        report.whole_line_200_triggers,
+        report.line_budget_us,
+        verdict(report.whole_line_200_triggers.p99_us <= report.line_budget_us)
     );
     println!(
         "  one more plugin: {} without, {} with; +{:.2} µs p99; budget ≤ {} µs: {}",
@@ -279,13 +288,12 @@ pub struct Bench {
 
 impl Bench {
     pub fn new(plugins: Vec<Plugin>) -> Bench {
-        Bench::remembering(plugins, 0)
+        let folder = tempfile::tempdir().expect("a temporary folder");
+        Bench::on(folder, plugins)
     }
 
-    /// A session whose saved map remembers `marks` kinds of aggressive mob.
-    pub fn remembering(plugins: Vec<Plugin>, marks: i64) -> Bench {
-        let folder = tempfile::tempdir().expect("a temporary folder");
-        save_marks(folder.path(), marks);
+    /// A session on `folder`, which may hold what an earlier one saved.
+    fn on(folder: tempfile::TempDir, plugins: Vec<Plugin>) -> Bench {
         let hub = Arc::new(StoreHub::new(|| {}));
         let shell = subscribe(&hub);
         let typing = Arc::new(Mutex::new(Typing::default()));
@@ -460,11 +468,13 @@ struct Moves {
 }
 
 /// Builds the §6 world: maps 10,000 rooms and wanders them, timing each move,
-/// then a mob walks in on that full map, and last fills the terminal to weigh
-/// it all, and opens it again from the disk.
+/// then fills the terminal to weigh it all, and opens it again from the disk.
+/// Last, a mob walks in on that map, reopened with aggressive kinds remembered:
+/// that comes after, so the numbers above are of the same world the base
+/// measures.
 fn measure_world(reads: &[Bytes], plugins: &[Plugin]) -> Moves {
     let heap_before = HEAP_BYTES.load(Ordering::Relaxed);
-    let mut bench = Bench::remembering(plugins.to_vec(), AGGRESSIVE_MARKS);
+    let mut bench = Bench::new(plugins.to_vec());
     let walk = serpentine();
     let mut mapping = Vec::with_capacity(walk.len());
     for (x, y, direction) in &walk {
@@ -485,14 +495,6 @@ fn measure_world(reads: &[Bytes], plugins: &[Plugin]) -> Moves {
         wandering.push(bench.read(room_info(x, y), Timestamp(0)));
         bench.drain();
     }
-    // A mob walks in, on the full map, each at a later time than the last.
-    let mut sightings = Vec::with_capacity(SIGHTINGS as usize);
-    for arrival in 1..=SIGHTINGS {
-        sightings.push(bench.read(mob_arrives(arrival), Timestamp(arrival)));
-        if arrival % LINES_PER_FRAME as i64 == 0 {
-            bench.drain();
-        }
-    }
     for (index, read) in reads.iter().enumerate() {
         bench.read(read.clone(), Timestamp(0));
         if index % LINES_PER_FRAME == 0 {
@@ -502,13 +504,34 @@ fn measure_world(reads: &[Bytes], plugins: &[Plugin]) -> Moves {
     bench.drain();
     let memory_mb = heap_mb(HEAP_BYTES.load(Ordering::Relaxed) - heap_before);
     let (folder, _) = bench.finish();
+    let cold_start = measure_cold_start(folder.path(), plugins);
+    let sighting = measure_sightings(folder, plugins);
     Moves {
         mapping: Summary::of(&mapping).expect("moves were timed"),
         wandering: Summary::of(&wandering).expect("moves were timed"),
-        sighting: Summary::of(&sightings).expect("sightings were timed"),
+        sighting,
         memory_mb,
-        cold_start: measure_cold_start(folder.path(), plugins),
+        cold_start,
     }
+}
+
+/// A mob walks in on the saved map, each at a later time than the last, in
+/// the session reopened with `AGGRESSIVE_MARKS` kinds of aggressive mob added
+/// to what it remembers.
+fn measure_sightings(folder: tempfile::TempDir, plugins: &[Plugin]) -> Summary {
+    save_marks(folder.path(), AGGRESSIVE_MARKS);
+    let mut bench = Bench::on(folder, plugins.to_vec());
+    // The map knows the room the walk ended in, once the game says it's there.
+    bench.read(room_info(0, GRID_SIDE - 1), Timestamp(0));
+    let mut sightings = Vec::with_capacity(SIGHTINGS as usize);
+    for arrival in 1..=SIGHTINGS {
+        sightings.push(bench.read(mob_arrives(arrival), Timestamp(arrival)));
+        if arrival % LINES_PER_FRAME as i64 == 0 {
+            bench.drain();
+        }
+    }
+    bench.finish();
+    Summary::of(&sightings).expect("sightings were timed")
 }
 
 /// Opens the session on a saved map. Each loads the plugins and reads the

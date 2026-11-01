@@ -2,7 +2,7 @@
 //! each replayed line goes through split, decode and ANSI strip on its own,
 //! so every line gets its own timing.
 
-use crate::verdict;
+use crate::{BudgetScale, verdict};
 use mudling_core::line::LinePipeline;
 use mudling_core::stats::Summary;
 use serde::Serialize;
@@ -22,7 +22,7 @@ pub struct Report {
 
 /// Replays `source` (at least [`MIN_LINES`] lines, starting over as needed),
 /// each line ended as Diku-family servers end them, with `\n\r`.
-pub fn run(source: &[String]) -> Report {
+pub fn run(source: &[String], scale: BudgetScale) -> Report {
     let count = source.len().max(MIN_LINES);
     let mut pipeline = LinePipeline::default();
     let mut lines = Vec::with_capacity(1);
@@ -38,11 +38,12 @@ pub fn run(source: &[String]) -> Report {
         lines.clear();
     }
     let per_line = Summary::of(&samples).expect("lines were timed");
+    let budget_us = scale.time_us(BUDGET_US);
     Report {
         lines: count,
-        within_budget: per_line.p99_us <= BUDGET_US,
+        within_budget: per_line.p99_us <= budget_us,
         per_line,
-        budget_us: BUDGET_US,
+        budget_us,
     }
 }
 

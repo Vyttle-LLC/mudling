@@ -1343,7 +1343,7 @@ impl Shell {
             .update(cx, |sheet, cx| sheet.show_rules(&rules, cx));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn show_sample_alias_preview(&self, preview: &'static str, cx: &mut Context<Shell>) {
         self.input.update(cx, |input, cx| {
             input.set_alias_preview(Some(preview.into()), cx)
@@ -1404,7 +1404,7 @@ impl Shell {
         self.title_bar.update(cx, |bar, cx| bar.show(session, cx));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn open_session_menu(&self, window: &mut Window, cx: &mut Context<Shell>) {
         self.title_bar
             .update(cx, |bar, cx| bar.open_menu(window, cx));
@@ -1432,7 +1432,7 @@ impl Shell {
     }
 
     /// Shows the row a closed connection brings, with no session behind it.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub fn show_sample_offers(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
         let launcher = Launcher::new("unused".into(), Vec::new(), Vec::new(), || {});
         let offers = Offers::of(settings, &[], false, Some(&launcher));
