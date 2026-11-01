@@ -53,6 +53,12 @@ name: a rule named `<reader>.stale` asks for that reader's command again, and
 one named `<reader>.none` is a one-line answer that isn't a table. A rule of
 the Gear point's `wear` and `remove` lists asks for the Gear point's command.
 
+Only what a reader's patterns match stays out of the chat, so a line of a
+table that holds no facts is still a row: a plugin's rows cover its ruled
+lines and headings as well. Anything else shows, so a tell landing between
+pages reaches the player. `BackgroundCommand` in
+`crates/mudling-core/src/plugin/points.rs` is the reference for plugin authors.
+
 ## Events
 
 Each match is a `PluginEvent` named below, its named captures as data. Hooks

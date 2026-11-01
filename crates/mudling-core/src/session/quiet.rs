@@ -31,11 +31,16 @@
 //! read when idle, not when a panel opens.
 //!
 //! **What stays quiet.** The game answers commands in order, so with a read
-//! out the next table from its reader is its answer. That table's lines, the
-//! prompt that ends it and blank lines before it stay out of the chat, and
-//! fire no trigger; a rule named `<reader>.none` marks a one-line answer that
-//! isn't a table. Anything else that arrives shows as usual, and a table the
-//! player asks for after the answer shows too.
+//! out the next table from its reader is its answer. Only the answer's own
+//! text stays out of the chat and fires no trigger, and what the plugin
+//! declares says which that is: lines its reader's start, row or end patterns
+//! match, the pager's prompt, blank lines, and the prompt that ends the table.
+//! So a reader's rows must cover every line of its table that should hide,
+//! rules and headings too. A rule named `<reader>.none` marks a one-line
+//! answer that isn't a table. Anything else shows as usual, tells and
+//! `.stale` lines between a table's rows or pages among them, however long
+//! the table stays open, and a table the player asks for after the answer
+//! shows too.
 //!
 //! An answer that hasn't come after [`ANSWER_WAIT`] stops holding up the next
 //! read, but it's still owed: however late its table comes, it stays hidden.
@@ -64,6 +69,7 @@ const BUSY_POSITIONS: [&str; 6] = ["fight", "sleep", "stun", "dying", "dead", "i
 const ENDED: &str = "end";
 const STARTED: &str = "start";
 const CUT: &str = "cut";
+const ROW: &str = "row";
 const STALE: &str = "stale";
 const NO_TABLE: &str = "none";
 
@@ -106,6 +112,9 @@ pub(super) struct Seen<'a> {
     /// Text follows the prompt, or there's no prompt and the line is blank.
     pub(super) glued: bool,
     pub(super) blank: bool,
+    /// The line is the pager's prompt. Asked only while hiding: it costs a
+    /// match.
+    pub(super) pager: bool,
 }
 
 /// One connection's quiet reads.
@@ -299,7 +308,9 @@ impl QuietReads {
                 self.answer = None;
                 !(seen.prompt && seen.glued)
             }
-            Some(Answer::Arriving { .. }) => true,
+            Some(Answer::Arriving { read }) => {
+                named(read, ROW) || named(read, STARTED) || seen.blank || seen.pager
+            }
             Some(Answer::Closing) => {
                 self.answer = None;
                 seen.blank || (seen.prompt && !seen.glued)
@@ -389,6 +400,7 @@ mod tests {
             prompt: false,
             glued: false,
             blank: false,
+            pager: false,
         }
     }
 
@@ -584,7 +596,6 @@ mod tests {
         assert!(reads.read_line(line(&[event("stats.start")]), at));
         assert!(reads.is_hiding());
         assert!(reads.read_line(line(&[event("stats.row")]), at));
-        assert!(reads.read_line(line(&[]), at), "a table's ruled line");
         assert!(reads.read_line(prompt(&[event("stats.end")]), at));
         assert!(!reads.is_hiding());
         assert!(
@@ -616,13 +627,39 @@ mod tests {
     }
 
     #[test]
-    fn a_table_that_stalls_stays_hidden_until_it_ends() {
+    fn a_table_with_no_closing_prompt_hides_only_its_own_lines() {
         let mut reads = reads();
+        let row = [event("stats.row")];
         reads.next(AT_EASE, Timestamp(0));
         reads.read_line(line(&[event("stats.start")]), Timestamp(1_000));
-        assert!(reads.read_line(line(&[]), Timestamp(60_000)));
-        assert!(reads.read_line(prompt(&[event("stats.end")]), Timestamp(60_000)));
-        assert!(!reads.read_line(line(&[]), Timestamp(60_000)));
+        for hours in 1..4 {
+            let now = Timestamp(hours * 3_600_000);
+            assert!(reads.read_line(line(&row), now), "the table's row");
+            assert!(!reads.read_line(line(&[]), now), "anything else");
+        }
+        let at = Timestamp(0);
+        let blank = Seen {
+            blank: true,
+            ..line(&[])
+        };
+        let pager = Seen {
+            pager: true,
+            ..line(&[])
+        };
+        assert!(reads.read_line(blank, at));
+        assert!(reads.read_line(pager, at));
+        assert!(reads.read_line(prompt(&[event("stats.end")]), at));
+    }
+
+    #[test]
+    fn a_line_inside_a_table_can_still_make_a_read_stale() {
+        let mut reads = reads();
+        reads.reads.iter_mut().for_each(|read| read.due = false);
+        reads.reads[0].due = true;
+        reads.next(AT_EASE, Timestamp(0));
+        reads.read_line(line(&[event("stats.start")]), Timestamp(0));
+        assert!(!reads.read_line(line(&[event("spells.stale")]), Timestamp(0)));
+        assert!(reads.reads[1].due);
     }
 
     #[test]
@@ -677,7 +714,8 @@ mod tests {
         reads.reads[1].due = false;
         reads.next(AT_EASE, Timestamp(0));
         reads.read_line(line(&[event("stats.start")]), Timestamp(0));
-        reads.read_line(line(&[event("stats.stale")]), Timestamp(0));
+        let own = [event("stats.row"), event("stats.stale")];
+        reads.read_line(line(&own), Timestamp(0));
         reads.read_line(prompt(&[event("stats.end")]), Timestamp(0));
         assert!(!reads.reads[0].due);
     }

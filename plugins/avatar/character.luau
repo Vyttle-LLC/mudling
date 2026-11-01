@@ -20,6 +20,8 @@ local SCORE_FACTS = {
     Incarnation = "incarnation",
 }
 
+-- Reads a row, and says whether it's one only `score` prints. The rest are
+-- there so a quiet read hides them; a table of those alone is no score.
 local function read_score_row(reader, line)
     local write = function(key, value)
         Readers.write(reader, "character", key, value)
@@ -33,12 +35,12 @@ local function read_score_row(reader, line)
         write("level", tonumber(level))
         write("race", race)
         write("class", class)
-        return
+        return true
     end
     local age = string.match(line, "^You are (%d+) years old")
     if age then
         write("age", tonumber(age))
-        return
+        return true
     end
     -- "Str    :    14 (17)     You have 110/110 hps."
     local stat, now, perm = string.match(line, "^(%a%a%a)%s*:%s*(%d+)%s*%((%d+)%)")
@@ -46,15 +48,18 @@ local function read_score_row(reader, line)
         local key = string.lower(stat)
         write(key, tonumber(now))
         write(key .. "_perm", tonumber(perm))
-        return
+        return true
     end
     -- "Gold   :        141     Gold Weight :          1     In Bank     :          0"
+    local found = string.find(line, "^Auto") ~= nil
     for label, value in string.gmatch(line, "(%u[%a ]-)%s*:%s+(%S+)") do
         local key = SCORE_FACTS[trim(label)]
         if key then
             write(key, tonumber(value) or value)
+            found = true
         end
     end
+    return found
 end
 
 local finish_score = Readers.count_rows("character", "score.read")
@@ -64,9 +69,8 @@ function read_score(event)
     if kind == "start" then
         Readers.write(reader, "character", "name", event.captures.name)
         Readers.write(reader, "character", "title", event.captures.title)
-    elseif kind == "row" then
+    elseif kind == "row" and read_score_row(reader, Readers.body(event)) then
         Readers.row(reader)
-        read_score_row(reader, event.plain)
     end
 end
 
@@ -95,8 +99,14 @@ function read_practice(event)
     elseif kind ~= "row" then
         return
     end
+    -- Only a skill's cells go to the long pattern: on a row of words, such as
+    -- what can be trained, its backtracking runs a hook out of budget.
+    local line = Readers.body(event)
+    if not string.find(line, "%d%s+%d+%s+%S+%s+%d") then
+        return
+    end
     -- "dodge              90   4   -    0  kick                33   7   -    0"
-    for name, learned, level, mana in string.gmatch(Readers.body(event), "([a-z][a-z' %-]-)%s+(%d+)%s+(%d+)%s+%S+%s+(%d+)") do
+    for name, learned, level, mana in string.gmatch(line, "([a-z][a-z' %-]-)%s+(%d+)%s+(%d+)%s+%S+%s+(%d+)") do
         name = trim(name)
         Readers.row(reader)
         Readers.write(reader, "skills", name .. ".learned", tonumber(learned))
@@ -189,6 +199,9 @@ function read_affects(event)
         return
     end
     local name, detail = event.captures.name, event.captures.detail or ""
+    if not name then
+        return
+    end
     -- The same spell cast twice is listed twice; it's on once.
     local entry = name .. "\n" .. detail
     if reader.seen[entry] then

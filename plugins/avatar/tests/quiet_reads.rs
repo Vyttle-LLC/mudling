@@ -8,7 +8,7 @@ use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{CharacterRows, Database, SERVERS_FOLDER, Timestamp};
 use mudling_core::session::{Engine, RuleEdit, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, CuesState, SheetState, StoreHub, TerminalState, Versioned,
+    CharactersState, CuesState, SettingsState, SheetState, StoreHub, TerminalState, Versioned,
 };
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
@@ -342,6 +342,58 @@ fn a_practice_lowers_the_practices_left_with_the_live_count() {
         "practice",
         "and read again for a game that won't say"
     );
+}
+
+#[test]
+fn every_line_of_the_games_own_tables_is_a_row_and_a_tell_inside_one_shows() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    let trigger = TriggerRule {
+        sound: Some("ding".to_owned()),
+        ..TriggerRule::new("tells you")
+    };
+    let now = game.at();
+    game.engine.edit(RuleEdit::SaveTrigger(trigger), now);
+    let shown = game.chat().len();
+    game.read_up_to("practice");
+
+    // Between the rows, then between the pages.
+    let first_page = "You have 2 practice sessions left.\r\n\
+        Name                 % Lvl Sub Mana  Name                 % Lvl Sub Mana\r\n\
+        -----------------------------------  -----------------------------------\r\n\
+        dodge               95   4   -    0  kick                33   7   -    0\r\n\
+        Bren tells you 'one'\r\n\
+        bash                50   9   -    0  trip                20  12   -    0\r\n\
+        [B]ack,[H]elp,[R]efresh, or [C]ontinue: ";
+    game.receive(first_page.as_bytes().to_vec());
+    assert_eq!(game.tick(0), "c", "the pager's answered");
+    game.say(
+        "\nMira tells you 'two'\n\
+        hide                95  11   -    0  sneak               90  12   -    0\n\
+        \n\
+        'It is still possible for you to train the following :'\n\
+        Statistic       Current    Max Trainable    Cost\n\
+        ------------    -------    -------------    ----\n\
+        Strength            14             18         4\n\
+        HP                  99         999999        12",
+    );
+    game.wait_until("the last page", |sheet| {
+        sheet.skills.iter().any(|skill| skill.name == "sneak")
+    });
+    let chat = game.chat();
+    assert_eq!(
+        chat[shown..],
+        ["Bren tells you 'one'", "Mira tells you 'two'"],
+        "only what wasn't the table"
+    );
+    let sounds = game
+        .hub
+        .read(|cues: &Versioned<CuesState>| cues.value().sounds.clone());
+    assert_eq!(sounds, ["ding"], "the trigger heard them");
+    let notices = game
+        .hub
+        .read(|settings: &Versioned<SettingsState>| settings.value().notices.clone());
+    assert_eq!(notices, [""; 0], "no row ran a hook out of its budget");
 }
 
 #[test]

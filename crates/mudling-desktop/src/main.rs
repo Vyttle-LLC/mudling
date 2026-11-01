@@ -336,6 +336,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     empty_state::bind_keys(cx);
     session_bar::bind_keys(cx);
     settings::bind_keys(cx);
+    character_panel::bind_keys(cx);
     cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 }
 

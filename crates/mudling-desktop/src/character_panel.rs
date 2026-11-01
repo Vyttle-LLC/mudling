@@ -8,10 +8,11 @@
 
 use crate::assets::HEADING_FONT;
 use crate::room_panel::{button, row_name, section_label};
+use crate::settings::{PageDown, PageUp, SCROLL_STEP, ScrollDown, ScrollUp};
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, Context, Div, EventEmitter, FocusHandle, FontWeight, Role, Stateful, Task, Window,
-    div, prelude::*, px,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, FontWeight, KeyBinding, Pixels, Role,
+    ScrollHandle, Stateful, Task, Window, div, point, prelude::*, px,
 };
 use mudling_core::defaults::hud::Vital;
 use mudling_core::persist::Timestamp;
@@ -22,6 +23,8 @@ use mudling_core::store::{
 };
 use std::time::Duration;
 
+/// The key context while focus is in the panel.
+const CONTEXT: &str = "CharacterPanel";
 /// How often "updated 2 min ago" is worked out again.
 pub const CLOCK_TICK: Duration = Duration::from_secs(30);
 const NAMELESS: &str = "Your character shows here once the game names them.";
@@ -41,6 +44,18 @@ const MILLIS_PER_MINUTE: i64 = 60_000;
 const MINUTES_PER_HOUR: i64 = 60;
 const MINUTES_PER_DAY: i64 = 24 * 60;
 const MINUS: char = '\u{2212}';
+
+/// The arrow and page keys scroll what's in the panel, as in the settings
+/// sheet: Refresh, its one tab stop, sits inside it.
+pub fn bind_keys(cx: &mut App) {
+    let bound_here = Some(CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("up", ScrollUp, bound_here),
+        KeyBinding::new("down", ScrollDown, bound_here),
+        KeyBinding::new("pageup", PageUp, bound_here),
+        KeyBinding::new("pagedown", PageDown, bound_here),
+    ]);
+}
 
 /// The player asked for the character's tables again.
 pub struct RefreshCharacter {
@@ -307,6 +322,7 @@ fn fact_rows(
 pub struct CharacterPanel {
     sheet: Sheet,
     focus_handle: FocusHandle,
+    scroll: ScrollHandle,
     _clock: Task<()>,
 }
 
@@ -315,6 +331,7 @@ impl CharacterPanel {
         CharacterPanel {
             sheet: Sheet::default(),
             focus_handle: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
             _clock: cx.spawn(async move |panel, cx| {
                 loop {
                     cx.background_executor().timer(CLOCK_TICK).await;
@@ -324,6 +341,14 @@ impl CharacterPanel {
                 }
             }),
         }
+    }
+
+    fn scroll_by(&self, distance: Pixels, cx: &mut Context<CharacterPanel>) {
+        let offset = self.scroll.offset();
+        let lowest = -self.scroll.max_offset().y;
+        self.scroll
+            .set_offset(point(offset.x, (offset.y - distance).clamp(lowest, px(0.))));
+        cx.notify();
     }
 
     /// Takes in the stores; only a real change redraws.
@@ -546,6 +571,15 @@ impl Render for CharacterPanel {
         let panel = div()
             .id("character-panel")
             .debug_selector(|| "character-panel".to_owned())
+            .key_context(CONTEXT)
+            .on_action(cx.listener(|panel, _: &ScrollUp, _, cx| panel.scroll_by(-SCROLL_STEP, cx)))
+            .on_action(cx.listener(|panel, _: &ScrollDown, _, cx| panel.scroll_by(SCROLL_STEP, cx)))
+            .on_action(cx.listener(|panel, _: &PageUp, _, cx| {
+                panel.scroll_by(-panel.scroll.bounds().size.height, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &PageDown, _, cx| {
+                panel.scroll_by(panel.scroll.bounds().size.height, cx);
+            }))
             .track_focus(&self.focus_handle)
             // The mouse never moves focus here: typing stays with the bar.
             .capture_any_mouse_down(|_, window, _| window.prevent_default())
@@ -577,6 +611,7 @@ impl Render for CharacterPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .flex()
                     .flex_col()
                     .gap_4()
@@ -751,6 +786,44 @@ mod tests {
         cx.run_until_parked();
         press_key("enter", cx);
         assert_eq!(refreshes.get(), 2, "the keyboard reaches it");
+    }
+
+    #[gpui::test]
+    fn the_keyboard_scrolls_every_row_into_reach(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        panel.update(cx, |panel, cx| {
+            let (mut sheet, characters, vitals) = sample_sheet();
+            let settings = SettingsState::default();
+            sheet.affects = (0..80)
+                .map(|index| Affect {
+                    name: format!("affect {index}"),
+                    detail: String::new(),
+                })
+                .collect();
+            panel.show(&sheet, &characters, &vitals, &settings, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        let offset =
+            |cx: &mut VisualTestContext| panel.read_with(cx, |panel, _| panel.scroll.offset().y);
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), -SCROLL_STEP);
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(offset(cx), px(0.));
+        for _ in 0..40 {
+            cx.simulate_keystrokes("pagedown");
+            cx.run_until_parked();
+        }
+        let lowest = panel.read_with(cx, |panel, _| panel.scroll.max_offset().y);
+        assert!(lowest > px(0.), "the list overflows");
+        assert_eq!(offset(cx), -lowest, "down to the last row");
+        cx.simulate_keystrokes("pageup");
+        cx.run_until_parked();
+        assert!(offset(cx) > -lowest);
     }
 
     #[gpui::test]

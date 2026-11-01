@@ -316,6 +316,10 @@ pub fn sample_sheet() -> (SheetState, CharactersState, VitalsState) {
         learned: Some(index * 7 % 100),
         mana: Some(if index % 3 == 0 { 20 } else { 0 }),
     }));
+    skills.push(SkillRow {
+        level: Some(90),
+        ..SkillRow::named("mass invigorate")
+    });
     let sheet = SheetState {
         character: "altissima".to_owned(),
         stats: BTreeMap::from([

@@ -3333,6 +3333,35 @@ pub mod tests {
         assert_eq!(played.heard_command(), "look", "nothing went before it");
     }
 
+    #[gpui::test]
+    fn practice_is_refused_while_echo_is_off(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.say(&[IAC, WILL, ECHO]);
+        played.frames_until("echo off", |shell, _| {
+            shell.copies.settings.value().echo_off
+        });
+        let panel = played
+            .shell
+            .read_with(played.cx, |shell, _| shell.skills_panel.clone());
+        panel.update(played.cx, |_, cx| {
+            cx.emit(SendCommand {
+                command: "practice dodge".to_owned(),
+                by_keyboard: true,
+            });
+        });
+        played.cx.run_until_parked();
+
+        played.say(&[IAC, WONT, ECHO]);
+        played.frames_until("echo on", |shell, _| {
+            !shell.copies.settings.value().echo_off
+        });
+        played.shell.update(played.cx, |shell, cx| {
+            shell.submit("look", cx);
+        });
+        assert_eq!(played.heard_command(), "look", "nothing went before it");
+    }
+
     /// A window with a launcher on a folder of its own, and what it's listening
     /// for: the fake servers are real sockets on loopback.
     struct Launched<'a> {

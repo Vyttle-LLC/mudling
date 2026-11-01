@@ -33,6 +33,8 @@ const PLACEHOLDER: &str = "Filter";
 const PRACTICE_VERB: &str = "practice";
 const LOCKED_NOTE: &str = "Practice is off while the game asks for a password.";
 const NOTHING_READ: &str = "Nothing read from the game yet.";
+/// A row the game hasn't offered to teach: it has no percent and no Practice.
+const NOT_YET: &str = "not learned yet";
 const ROW_HEIGHT: Pixels = px(52.);
 const BUTTON_HEIGHT: Pixels = px(28.);
 const TAB_HEIGHT: Pixels = px(28.);
@@ -63,7 +65,13 @@ impl Kind {
         }
     }
 
+    /// A class list names what's taught later without saying what it costs,
+    /// so until the game lists it to practice, it could be either: it shows
+    /// in both.
     fn holds(self, skill: &SkillRow) -> bool {
+        if skill.mana.is_none() && skill.learned.is_none() {
+            return true;
+        }
         let spell = skill.mana.is_some_and(|mana| mana > 0);
         spell == (self == Kind::Spells)
     }
@@ -88,16 +96,11 @@ fn details(skill: &SkillRow, just_improved: bool) -> String {
         (skill.mana)
             .filter(|mana| *mana > 0)
             .map(|mana| format!("{mana} mana")),
+        skill.learned.is_none().then(|| NOT_YET.to_owned()),
         just_improved.then(|| "just improved".to_owned()),
     ];
     let parts: Vec<String> = parts.into_iter().flatten().collect();
     parts.join(" · ")
-}
-
-fn learned_words(skill: &SkillRow) -> String {
-    skill
-        .learned
-        .map_or_else(|| "–".to_owned(), |learned| format!("{learned}%"))
 }
 
 fn practices_left(practices: i64) -> String {
@@ -311,32 +314,72 @@ impl SkillsPanel {
             .fresh_improvement(now)
             .is_some_and(|improved| improved.skill == skill.name);
         let details = details(skill, just_improved);
-        let learned = learned_words(skill);
-        let practice = button(
-            ("skills-practice", index),
-            format!("Practice {name}").into(),
-            theme,
-        )
-        .track_focus(&self.practices[index])
-        .h(BUTTON_HEIGHT)
-        .px_3()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.accent)
-        .child("Practice")
-        .map(|practice| {
-            if self.locked {
-                practice.opacity(0.5).aria_description(LOCKED_NOTE)
-            } else {
-                practice.on_click(cx.listener(move |panel, event, _, cx| {
-                    panel.practice(index, ClickEvent::is_keyboard(event), cx);
-                }))
-            }
+        let practice = skill.learned.map(|_| {
+            button(
+                ("skills-practice", index),
+                format!("Practice {name}").into(),
+                theme,
+            )
+            .track_focus(&self.practices[index])
+            .h(BUTTON_HEIGHT)
+            .px_3()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.accent)
+            .child("Practice")
+            .map(|practice| {
+                if self.locked {
+                    practice.opacity(0.5).aria_description(LOCKED_NOTE)
+                } else {
+                    practice.on_click(cx.listener(move |panel, event, _, cx| {
+                        panel.practice(index, ClickEvent::is_keyboard(event), cx);
+                    }))
+                }
+            })
+        });
+        let label = match skill.learned {
+            Some(learned) => format!("{name}, {learned}%, {details}"),
+            None => format!("{name}, {details}"),
+        };
+        let progress = skill.learned.map(|learned| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(BAR_WIDTH)
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(theme.segment)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(learned as f32 / 100.))
+                                .rounded_full()
+                                .bg(theme.accent),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(36.))
+                        .flex()
+                        .justify_end()
+                        .text_size(px(13.))
+                        .child(format!("{learned}%")),
+                )
         });
         div()
             .id(("skills-row", index))
             .debug_selector(move || format!("skills-row-{index}"))
             .role(Role::ListItem)
-            .aria_label(format!("{name}, {learned}, {details}"))
+            .aria_label(label)
+            // Tab stops on every row, so one with no button is reachable too.
+            .when(practice.is_none(), |row| {
+                row.track_focus(&self.practices[index])
+            })
             .flex()
             .flex_none()
             .w_full()
@@ -360,31 +403,8 @@ impl SkillsPanel {
                             .child(details),
                     ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .w(BAR_WIDTH)
-                    .h(px(4.))
-                    .rounded_full()
-                    .bg(theme.segment)
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(skill.learned.unwrap_or(0) as f32 / 100.))
-                            .rounded_full()
-                            .bg(theme.accent),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(36.))
-                    .flex()
-                    .justify_end()
-                    .text_size(px(13.))
-                    .child(learned),
-            )
-            .child(practice)
+            .children(progress)
+            .children(practice)
     }
 
     fn render_list(&self, theme: &Theme, cx: &mut Context<SkillsPanel>) -> Stateful<Div> {
@@ -565,6 +585,36 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_the_class_list_gave_shows_in_both_lists_as_not_learned() {
+        let later = SkillRow {
+            level: Some(50),
+            ..SkillRow::named("mass invigorate")
+        };
+        let list = [later.clone()];
+        assert_eq!(rows_of(&list, Kind::Spells, "").len(), 1);
+        assert_eq!(rows_of(&list, Kind::Skills, "").len(), 1);
+        assert_eq!(details(&later, false), "Level 50 · not learned yet");
+    }
+
+    #[gpui::test]
+    fn a_row_not_learned_yet_has_no_practice_but_the_keyboard_reaches_it(cx: &mut TestAppContext) {
+        let (panel, cx, sent) = panel_window(cx);
+        let last = panel.read_with(cx, |panel, _| panel.rows.len() - 1);
+        panel.update_in(cx, |panel, window, cx| panel.focus_row(last, window, cx));
+        cx.run_until_parked();
+        let (name, learned) = panel.read_with(cx, |panel, _| {
+            (panel.rows[last].name.clone(), panel.rows[last].learned)
+        });
+        assert_eq!((name.as_str(), learned), ("mass invigorate", None));
+        assert!(cx.debug_bounds("Practice mass invigorate").is_none());
+        press_key("enter", cx);
+        assert!(sent.borrow().is_empty());
+        panel.update_in(cx, |panel, window, _| {
+            assert_eq!(panel.focused_row(window), Some(last));
+        });
+    }
+
+    #[test]
     fn the_filter_ignores_case_and_outer_spaces() {
         let list = [
             skill("Magic Missile", 1, Some(15)),
@@ -579,7 +629,6 @@ mod tests {
         let spell = skill("magic missile", 1, Some(15));
         assert_eq!(details(&spell, true), "Level 1 · 15 mana · just improved");
         assert_eq!(details(&skill("kick", 7, Some(0)), false), "Level 7");
-        assert_eq!(learned_words(&spell), "40%");
         assert_eq!(practices_left(1), "1 practice left");
         assert_eq!(practices_left(4), "4 practices left");
     }
@@ -602,15 +651,16 @@ mod tests {
         let (panel, cx, sent) = panel_window(cx);
         panel.update_in(cx, |panel, window, cx| panel.focus_row(0, window, cx));
         cx.run_until_parked();
-        let rows = panel.read_with(cx, |panel, _| panel.rows.len());
-        for _ in 1..rows {
+        // The very last row isn't learned yet, so it has no Practice.
+        let learned = panel.read_with(cx, |panel, _| panel.rows.len()) - 1;
+        for _ in 1..learned {
             cx.simulate_keystrokes("tab");
             cx.run_until_parked();
         }
         press_key("enter", cx);
         let (command, by_keyboard) = sent.borrow().last().cloned().expect("it was pressed");
         assert!(by_keyboard);
-        let last = panel.read_with(cx, |panel, _| panel.rows[rows - 1].name.clone());
+        let last = panel.read_with(cx, |panel, _| panel.rows[learned - 1].name.clone());
         assert_eq!(command, format!("practice {last}"));
     }
 
@@ -621,7 +671,16 @@ mod tests {
         cx.run_until_parked();
         let bounds = cx.debug_bounds("Practice magic missile").unwrap();
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
-        assert!(sent.borrow().is_empty());
+        assert!(sent.borrow().is_empty(), "by mouse");
+        panel.update_in(cx, |panel, window, cx| panel.focus_row(0, window, cx));
+        cx.run_until_parked();
+        press_key("enter", cx);
+        assert!(sent.borrow().is_empty(), "by keyboard");
+
+        panel.update(cx, |panel, cx| panel.set_locked(false, cx));
+        cx.run_until_parked();
+        press_key("enter", cx);
+        assert_eq!(sent.borrow().len(), 1, "back once the password's done");
     }
 
     #[gpui::test]

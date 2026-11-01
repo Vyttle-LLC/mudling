@@ -799,6 +799,7 @@ impl Engine {
                             prompt: true,
                             glued: false,
                             blank: false,
+                            pager: false,
                         };
                         link.quiet.read_line(ended, now);
                     }
@@ -857,6 +858,7 @@ impl Engine {
                 prompt: prompt.is_some(),
                 glued: output_at > 0,
                 blank: text.trim().is_empty(),
+                pager: link.quiet.is_hiding() && self.plugins.settings().is_pager(text),
             };
             let quiet = link.quiet.read_line(seen, now);
             let response = if quiet {
