@@ -728,8 +728,11 @@ mod tests {
     use crate::defaults::hotbar::HOTBAR_META;
     use crate::map::{LiveMap, Whereabouts};
     use crate::persist::SERVERS_FOLDER;
-    use crate::persist::{Batch, Database, Key, Meta, NOTEPAD, Room};
-    use crate::store::{MapState, RulesState, Versioned};
+    use crate::persist::{
+        Batch, Character, CharacterStat, Database, GearSet, Key, Meta, NOTEPAD, Room,
+    };
+    use crate::plugin::luau::{HookOutput, StoreWrite, Value};
+    use crate::store::{ItemsState, MapState, RulesState, SheetState, Versioned};
     use std::sync::mpsc::sync_channel;
     use std::time::Instant;
 
@@ -869,6 +872,75 @@ mod tests {
         hub.read(|rules: &Versioned<RulesState>| {
             assert_eq!(rules.value().notepad, "from the other device");
             assert_eq!(rules.value().hotbar, ["look"]);
+        });
+        engine.finish().unwrap();
+    }
+
+    /// What another device brings: sets and a stat for each of two characters,
+    /// the one playing and another who never played here.
+    fn merge_brings_two_characters(folder: &std::path::Path) {
+        let database = Database::open(&folder.join(SERVERS_FOLDER), HOST).unwrap();
+        let writer = database.writer().unwrap();
+        let mut batch = Batch::new();
+        for (owner, strength) in [("alda", "14"), ("bryn", "9")] {
+            batch.upsert(Character {
+                id: owner.to_owned(),
+                server_id: HOST.to_owned(),
+                name: owner.to_owned(),
+                updated: Timestamp::now(),
+            });
+            batch.upsert(CharacterStat {
+                character_id: owner.to_owned(),
+                key: "character.str".to_owned(),
+                value: strength.to_owned(),
+                updated: Timestamp::now(),
+            });
+            batch.upsert(GearSet {
+                id: format!("{owner}-set"),
+                character_id: owner.to_owned(),
+                name: format!("{owner}'s set"),
+                container: None,
+                pieces: Vec::new(),
+                updated: Timestamp::now(),
+            });
+        }
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn whoever_plays_has_what_a_merge_brought_and_none_of_another_characters() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        let named = StoreWrite {
+            plugin: PluginId::try_from("avatar".to_owned()).unwrap(),
+            store: "character".to_owned(),
+            key: "name".to_owned(),
+            value: Value::Text("Alda".to_owned()),
+        };
+        engine.hook_output(HookOutput::StoreWrite(named), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_two_characters(folder.path());
+        engine.release_writes(&RoomMoves::new());
+        engine.settle(Timestamp::now());
+
+        hub.read(|sheet: &Versioned<SheetState>| {
+            assert_eq!(sheet.value().character, "alda");
+            assert_eq!(sheet.value().stats.get("str"), Some(&Value::Number(14.)));
+        });
+        hub.read(|items: &Versioned<ItemsState>| {
+            let sets: Vec<_> = items
+                .value()
+                .sets
+                .iter()
+                .map(|set| set.id.as_str())
+                .collect();
+            assert_eq!(sets, ["alda-set"]);
         });
         engine.finish().unwrap();
     }

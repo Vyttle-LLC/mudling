@@ -1002,9 +1002,9 @@ impl Engine {
     }
 
     /// A merge has landed: writes what was held, moved off any retired room,
-    /// and rebuilds the map and the player's rules (triggers, aliases, hotbar
-    /// and notepad) from the database, since a merge may have brought newer
-    /// ones. Rows of the merge's window reach the disk first so the new map
+    /// and rebuilds the map, the player's rules (triggers, aliases, hotbar
+    /// and notepad) and whoever plays (sheet, sets and worn gear) from the
+    /// database, since a merge may have brought newer ones. Rows of the merge's window reach the disk first so the new map
     /// holds them. This waits on the disk, which only a merge during play
     /// costs.
     pub(super) fn release_writes(&mut self, moves: &RoomMoves) {
@@ -1020,6 +1020,7 @@ impl Engine {
             .map_err(SessionError::from)
             .and_then(|()| self.reload_map())
             .and_then(|()| self.load_rules())
+            .map(|()| self.reload_character())
         {
             self.notice(error.to_string());
         }
@@ -1827,6 +1828,27 @@ impl Engine {
             self.publish_sheet();
             return;
         }
+        self.batch.upsert(Character {
+            id: self.playing.clone(),
+            server_id: self.config.host.clone(),
+            name: self.playing.clone(),
+            updated: now,
+        });
+        self.load_character();
+    }
+
+    /// After a merge: whoever plays has what the merge brought, and nobody
+    /// has anything another's rows could have left.
+    fn reload_character(&mut self) {
+        if !self.playing.is_empty() {
+            self.load_character();
+        }
+    }
+
+    /// Takes what the database holds of whoever plays: their sheet, worn gear
+    /// and sets, and the values hooks read back. Another character's rows,
+    /// which the database holds too, don't come into it.
+    fn load_character(&mut self) {
         let saved = (self.database.reader())
             .and_then(|reader| reader.characters())
             .unwrap_or_else(|error| {
@@ -1835,12 +1857,6 @@ impl Engine {
                     .push(format!("couldn't load the character: {error}"));
                 persist::CharacterRows::default()
             });
-        self.batch.upsert(Character {
-            id: self.playing.clone(),
-            server_id: self.config.host.clone(),
-            name: self.playing.clone(),
-            updated: now,
-        });
         self.sheet = Sheet::of(&self.playing, &saved);
         self.gear.wear_of(&self.playing, saved.worn.clone());
         self.gear.sets_of(&self.playing, &saved.gear_sets);

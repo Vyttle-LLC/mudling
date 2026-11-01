@@ -1125,6 +1125,55 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_set_leaves_a_tombstone_for_other_devices() {
+        let folder = tempfile::tempdir().unwrap();
+        let database = crate::persist::Database::open(folder.path(), "mud.example.org").unwrap();
+        let writer = database.writer().unwrap();
+        let set = GearSet {
+            id: "s1".to_owned(),
+            character_id: "alda".to_owned(),
+            name: "Hunting".to_owned(),
+            container: None,
+            pieces: Vec::new(),
+            updated: Timestamp(1),
+        };
+        let mut keeper = GearKeeper::default();
+        let mut batch = Batch::new();
+        batch.upsert(crate::persist::Server {
+            id: "mud.example.org".to_owned(),
+            name: "A MUD".to_owned(),
+            host: "mud.example.org".to_owned(),
+            port: 4000,
+            settings: "{}".to_owned(),
+            updated: Timestamp(1),
+        });
+        batch.upsert(crate::persist::Character {
+            id: "alda".to_owned(),
+            server_id: "mud.example.org".to_owned(),
+            name: "alda".to_owned(),
+            updated: Timestamp(1),
+        });
+        keeper.save_set(set, &mut batch);
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+
+        let mut batch = Batch::new();
+        keeper.remove_set("s1", &mut batch);
+        writer.submit(batch).unwrap();
+        writer.flush().unwrap();
+
+        let reader = database.reader().unwrap();
+        assert!(reader.characters().unwrap().gear_sets.is_empty());
+        let buried: Vec<_> = reader
+            .tombstones()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.key)
+            .collect();
+        assert_eq!(buried, [Key::GearSet("s1".to_owned())]);
+    }
+
+    #[test]
     fn an_older_database_moves_to_rows_and_loses_its_meta() {
         let meta = |key: &str, value: &str| Meta {
             key: key.to_owned(),
