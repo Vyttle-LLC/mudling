@@ -78,6 +78,11 @@ impl GearRules {
         self.verb(verb.map_or(WEAR, String::as_str))
     }
 
+    /// The game's word for taking gear off.
+    pub fn removing(&self) -> &str {
+        self.verb(REMOVE)
+    }
+
     /// The command that puts `item` into `container`, each as commands name it.
     pub fn put_away(&self, item: &str, container: &str) -> String {
         format!("{} {item} {container}", self.verb(PUT))

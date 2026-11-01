@@ -697,6 +697,26 @@ impl GearKeeper {
         None
     }
 
+    /// A shell's button sent `command`. A remove naming a worn copy by its id
+    /// says which copy comes off: the game's answer names only the item.
+    pub(super) fn button_sent(&self, command: &str, watch: &mut GearWatch, now: Timestamp) {
+        let mut words = command.split_whitespace();
+        let (Some(verb), Some(id), None) = (words.next(), words.next(), words.next()) else {
+            return;
+        };
+        let worn = self
+            .worn
+            .iter()
+            .find(|worn| worn.copy.as_deref() == Some(id));
+        let Some(worn) = worn.filter(|_| verb == self.rules.removing()) else {
+            return;
+        };
+        watch
+            .naming_off
+            .push((plain_name(&worn.item), id.to_owned()));
+        watch.naming_until = Timestamp(now.0 + sets::CHANGE_WINDOW_MS);
+    }
+
     /// Notes gear going on or coming off, from a plugin's event. Gives the
     /// command that puts it away, if a set going on wants that.
     pub(super) fn event(

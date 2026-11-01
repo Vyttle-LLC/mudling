@@ -299,6 +299,37 @@ fn two_worn_copies_of_a_name_stay_two_across_a_reconnect() {
 }
 
 #[test]
+fn removing_the_second_of_two_rings_by_its_id_takes_that_copy_off() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let list = r#"{"location":"inv","items":[
+        {"id":"1","name":"a pink ring"},{"id":"2","name":"a pink ring"}]}"#;
+    engine
+        .receive(gmcp("Char.Items.List", &list.replace('\n', " ")), now)
+        .unwrap();
+    engine.settle(now);
+    let wore = b"You wear a pink ring on your left finger.\r\n\
+        You wear a pink ring on your right finger.\r\n";
+    engine.receive(Bytes::from_static(wore), now).unwrap();
+    settle_until(&mut engine, &hub, |items| items.worn.len() == 2);
+
+    engine.send_action("remove 2", now);
+    let removed = b"You stop using a pink ring.\r\n(1h-1m-1v-1)(-/-)";
+    engine.receive(Bytes::from_static(removed), now).unwrap();
+    engine.settle(now);
+
+    let state = items(&hub);
+    let on: Vec<_> = (state.worn.iter())
+        .filter(|worn| !worn.item.is_empty())
+        .map(|worn| worn.copy.as_deref())
+        .collect();
+    assert_eq!(on, [Some("1")], "copy 2 came off, not the first");
+    let carried: Vec<_> = state.carried.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(carried, ["2"]);
+}
+
+#[test]
 fn an_item_keeps_the_games_spelling_live_and_after_a_restart() {
     let folder = tempfile::tempdir().unwrap();
     let hat = "an official Cult of Bonk Hat";

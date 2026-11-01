@@ -554,9 +554,13 @@ impl Engine {
     /// off it goes nowhere: a click made a frame before the server asked for
     /// one mustn't land in the password box.
     pub fn send_action(&mut self, command: &str, now: Timestamp) {
-        if !self.settings.echo_off {
-            self.send(command, now);
+        if self.settings.echo_off {
+            return;
         }
+        if let Some(link) = &mut self.link {
+            self.gear.button_sent(command, &mut link.gear, now);
+        }
+        self.send(command, now);
     }
 
     /// The player has text in the command field, or no longer has.
