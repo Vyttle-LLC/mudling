@@ -364,7 +364,7 @@ impl GearKeeper {
         self.changed = true;
     }
 
-    /// Whether `id` is one of the sets on show.
+    /// The set on show with this id.
     fn set(&self, id: &str) -> Option<&GearSet> {
         self.sets.iter().find(|set| set.id == id)
     }

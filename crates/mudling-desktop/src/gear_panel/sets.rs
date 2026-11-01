@@ -156,8 +156,8 @@ pub(super) struct Editor {
     pieces: Vec<GearPiece>,
     container: Option<String>,
     picking_container: bool,
-    /// The item whose words are being edited.
-    words_of: Option<String>,
+    /// The piece whose item's words are being edited.
+    words_of: Option<usize>,
     words: Entity<CommandInput>,
     asking_to_delete: bool,
     /// The bags that can be chosen, by name.
@@ -235,6 +235,7 @@ impl Editor {
     /// Takes the worn pieces as the set, each knowing its slot and copy.
     fn use_whats_worn(&mut self, items: &ItemsState) {
         self.pieces = worn_pieces(items);
+        self.words_of = None;
     }
 }
 
@@ -411,16 +412,16 @@ impl GearPanel {
         self.close_editor(window, cx);
     }
 
-    fn open_words(&mut self, item: String, window: &mut Window, cx: &mut Context<GearPanel>) {
+    fn open_words(&mut self, at: usize, window: &mut Window, cx: &mut Context<GearPanel>) {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let known = self.items.book.item(&item);
+        let known = self.items.book.item(&editor.pieces[at].item);
         let words = known.and_then(|known| known.facts.keywords.clone());
         let text = words.unwrap_or_default();
         let cursor = text.len();
         let field = editor.words.clone();
-        editor.words_of = Some(item);
+        editor.words_of = Some(at);
         field.update(cx, |field, cx| field.show(text, cursor, window, cx));
         window.focus(&field.focus_handle(cx), cx);
         cx.notify();
@@ -430,9 +431,10 @@ impl GearPanel {
         let Some(editor) = &mut self.editor else {
             return;
         };
-        let Some(item) = editor.words_of.take() else {
+        let Some(at) = editor.words_of.take() else {
             return;
         };
+        let item = shown_name(&editor.pieces[at].item);
         cx.emit(SetAction::Edit(GearEdit::SetKeywords { item, words }));
         window.focus(&self.focus_handle, cx);
         cx.notify();
@@ -693,6 +695,7 @@ impl GearPanel {
                 cx.listener(move |panel, event: &gpui::ClickEvent, window, cx| {
                     panel.edit_set(cx, |editor, _| {
                         editor.pieces.remove(at);
+                        editor.words_of = None;
                     });
                     if event.is_keyboard() {
                         window.focus(&panel.focus_handle, cx);
@@ -726,7 +729,6 @@ impl GearPanel {
                 });
             }))
         });
-        let item = name.clone();
         let words = row.seen.then(|| {
             self.small_button(
                 gpui::ElementId::NamedInteger("gear-piece-words".into(), at as u64),
@@ -735,7 +737,7 @@ impl GearPanel {
                 theme,
             )
             .on_click(cx.listener(move |panel, _, window, cx| {
-                panel.open_words(item.clone(), window, cx);
+                panel.open_words(at, window, cx);
             }))
         });
         let detail_color = if row.seen {
@@ -744,7 +746,7 @@ impl GearPanel {
             theme.warning
         };
         let index = at;
-        let words_field = (editor.words_of.as_deref() == Some(row.name.as_str())).then(|| {
+        let words_field = (editor.words_of == Some(at)).then(|| {
             let field = editor.words.clone();
             let save = self
                 .small_button(
