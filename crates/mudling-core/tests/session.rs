@@ -432,6 +432,43 @@ fn plugin_outputs_reach_the_right_place() {
     assert_eq!((&*kick.character_id, &*kick.value), ("tamsin", "12.0"));
 }
 
+/// Tab knows the room and mob names the game listed. A room changes with every
+/// sighting, so each name is added once, and a name that comes later still is.
+#[test]
+fn tab_completes_the_room_and_mob_names_the_game_has_listed() {
+    let folder = tempfile::tempdir().unwrap();
+    let (listener, port) = FakeServer::listen();
+    let session = open(config(folder.path(), port));
+    session.connect();
+    let mut server = FakeServer::accept(&listener);
+    wait_for_status(&session, ConnectionStatus::Connected);
+    let completes = |typed: &str, word: &str| {
+        let done = session.complete(typed, typed.len());
+        done.is_some_and(|done| done.line.eq_ignore_ascii_case(word))
+    };
+
+    server.say(&gmcp_frame(
+        r#"Room.Info {"num": 1, "name": "The Orchard", "exits": {"n": 2}}"#,
+    ));
+    let wolf = r#"Room.AddPlayer {"1": {"name": "1", "fullname": "A grey wolf stands here."}}"#;
+    server.say(&gmcp_frame(wolf));
+    wait_for("the wolf", || completes("wol", "wolf"));
+    assert!(completes("orc", "orchard"), "the room's name");
+
+    server.say(&gmcp_frame(wolf));
+    let bear = r#"Room.AddPlayer {"2": {"name": "2", "fullname": "A tall bear stands here."}}"#;
+    server.say(&gmcp_frame(bear));
+    wait_for("the bear", || completes("bea", "bear"));
+    assert!(completes("wol", "wolf"), "the wolf, still");
+
+    server.say(&gmcp_frame(
+        r#"Room.Info {"num": 2, "name": "The Mill", "exits": {"s": 1}}"#,
+    ));
+    wait_for("the mill", || completes("mil", "mill"));
+    assert!(completes("orc", "orchard"), "the first room, still");
+    session.quit().wait().unwrap();
+}
+
 /// What's typed with echo off goes to the server, verbatim, and nowhere else.
 #[test]
 fn a_password_typed_with_echo_off_is_kept_nowhere() {

@@ -22,7 +22,7 @@
 //!   connected: no socket, so no network time.
 
 use crate::plugin_host::PLUGIN_BUDGET_US;
-use crate::{BudgetScale, HEAP_BYTES, heap_mb, verdict};
+use crate::{HEAP_BYTES, heap_mb, verdict};
 use mudling_core::defaults::triggers::{Highlight, TriggerRule};
 use mudling_core::map::Mark;
 use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
@@ -86,7 +86,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(source: &[String], plugins: &[Plugin], scale: BudgetScale) -> Report {
+pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
     let count = source.len().max(MIN_LINES);
     let reads: Vec<Bytes> = source
         .iter()
@@ -107,20 +107,16 @@ pub fn run(source: &[String], plugins: &[Plugin], scale: BudgetScale) -> Report 
         memory_mb,
         cold_start,
     } = measure_world(&reads, plugins);
-    let line_budget_us = scale.time_us(LINE_BUDGET_US);
-    let plugin_budget_us = scale.time_us(PLUGIN_BUDGET_US);
-    let move_budget_us = scale.time_us(MOVE_BUDGET_US);
-    let cold_start_budget_us = scale.time_us(COLD_START_BUDGET_US);
     Report {
         lines: count,
-        within_budget: whole_line.p99_us <= line_budget_us
-            && whole_line_200_triggers.p99_us <= line_budget_us
-            && one_more_plugin_p99_us <= plugin_budget_us
-            && mapping.p99_us <= move_budget_us
-            && wandering.p99_us <= move_budget_us
-            && sighting.p99_us <= line_budget_us
+        within_budget: whole_line.p99_us <= LINE_BUDGET_US
+            && whole_line_200_triggers.p99_us <= LINE_BUDGET_US
+            && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
+            && mapping.p99_us <= MOVE_BUDGET_US
+            && wandering.p99_us <= MOVE_BUDGET_US
+            && sighting.p99_us <= LINE_BUDGET_US
             && memory_mb <= MEMORY_BUDGET_MB
-            && cold_start.p99_us <= cold_start_budget_us,
+            && cold_start.p99_us <= COLD_START_BUDGET_US,
         whole_line,
         whole_line_200_triggers,
         without_game_plugin,
@@ -132,11 +128,11 @@ pub fn run(source: &[String], plugins: &[Plugin], scale: BudgetScale) -> Report 
         sighting,
         memory_mb,
         cold_start,
-        line_budget_us,
-        plugin_budget_us,
-        move_budget_us,
+        line_budget_us: LINE_BUDGET_US,
+        plugin_budget_us: PLUGIN_BUDGET_US,
+        move_budget_us: MOVE_BUDGET_US,
         memory_budget_mb: MEMORY_BUDGET_MB,
-        cold_start_budget_us,
+        cold_start_budget_us: COLD_START_BUDGET_US,
     }
 }
 

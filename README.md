@@ -37,7 +37,7 @@ MUDling is a Cargo workspace:
 ```sh
 cargo build --release
 cargo test
-cargo run --release -p mudling-bench                 # the core's budgets (--check gates them; --budget-scale <n> relaxes the time ones)
+cargo run --release -p mudling-bench                 # the core's budgets (--check exits 1 on a miss)
 cargo run --release -p mudling-desktop -- --synthetic # the chat, with made-up lines
 ```
 
@@ -46,6 +46,13 @@ gpui needs.
 
 Release builds carry line-table debug info, so daily builds are release
 builds that still give useful backtraces.
+
+**Benchmarks.** `mudling-bench --check` holds the core to PRD §6's numbers. Run
+it locally, on a quiet machine, before each phase's pull request. CI runs the
+benchmark and keeps its report, but gates none of the numbers: GitHub's shared
+runners read up to 4× over them and vary 2× from run to run. What CI does gate
+is `mudling-bench compare`, which runs a pull request's build and its base's in
+turns on one machine and fails a loss of more than 10%.
 
 **gpui is pinned** to `gpui-pre 0.3.10`, an exact published snapshot of Zed's
 `main` (zed@08cbb88). The crates.io `gpui` release (0.2.2) predates gpui's

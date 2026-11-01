@@ -55,13 +55,22 @@ struct Present {
     name: String,
     /// The line the game shows for them.
     title: String,
+    /// What to target them by: worked out once, as the room's contents are
+    /// published after every change to it.
+    keyword: Option<String>,
 }
 
 impl Present {
     fn of(key: String, player: RoomPlayer) -> Present {
         let name = player.name.unwrap_or(key);
         let title = ansi::plain(player.fullname.as_deref().unwrap_or(&name));
-        Present { name, title }
+        let mut present = Present {
+            name,
+            title,
+            keyword: None,
+        };
+        present.keyword = present.target_keyword();
+        present
     }
 
     /// Mobs go by a number, players by name.
@@ -69,7 +78,7 @@ impl Present {
         !self.name.is_empty() && self.name.bytes().all(|byte| byte.is_ascii_digit())
     }
 
-    fn keyword(&self) -> Option<String> {
+    fn target_keyword(&self) -> Option<String> {
         if self.is_mob() {
             mob_keyword(&self.title)
         } else {
@@ -154,7 +163,7 @@ impl GameFeed {
             .filter(|present| !is_you(present))
             .map(|present| Occupant {
                 name: present.title.clone(),
-                target: present.keyword(),
+                target: present.keyword.clone(),
             })
             .collect();
         let mut items: Vec<Item> = Vec::new();

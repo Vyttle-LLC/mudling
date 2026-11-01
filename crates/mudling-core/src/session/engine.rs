@@ -52,6 +52,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 const CORE_GMCP: [&str; 3] = ["Core 1", "Char 1", "Room 1"];
 /// The word list map words are kept under.
 const MAP_WORDS: &str = "map";
+/// How many room names and mob titles are remembered as added to the map's
+/// words, each, before the memory starts over.
+const NAMES_REMEMBERED: usize = 4096;
 /// Notices kept for a shell to show.
 const MOST_NOTICES: usize = 32;
 /// How often plugin costs are published: each one sorts its samples.
@@ -92,6 +95,27 @@ struct HookOutputs(UnboundedSender<HookOutput>);
 impl HookSink for HookOutputs {
     fn output(&mut self, output: HookOutput) {
         let _ = self.0.send(output);
+    }
+}
+
+/// The room names and mob titles whose words the map's words already hold.
+/// A mob's name depends on the plugins, so a change of them starts it over.
+#[derive(Default)]
+struct AddedNames {
+    generation: u64,
+    rooms: HashSet<String>,
+    mobs: HashSet<String>,
+}
+
+impl AddedNames {
+    fn keep_to(&mut self, generation: u64) {
+        let full = self.rooms.len() > NAMES_REMEMBERED || self.mobs.len() > NAMES_REMEMBERED;
+        if self.generation != generation || full {
+            *self = AddedNames {
+                generation,
+                ..AddedNames::default()
+            };
+        }
     }
 }
 
@@ -139,6 +163,8 @@ pub struct Engine {
     costs_published: Option<Timestamp>,
     /// The plugin set the shared link rules came from.
     link_rules_of: u64,
+    /// What the map's words already hold, to add each only once.
+    added_names: AddedNames,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
     /// The last line shown was a blank one from the server, or none has been.
@@ -229,6 +255,7 @@ impl Engine {
             playing: String::new(),
             costs_published: None,
             link_rules_of: 0,
+            added_names: AddedNames::default(),
             terminal: Vec::new(),
             blank_shown: true,
             batch: Batch::new(),
@@ -1452,17 +1479,22 @@ impl Engine {
     }
 
     /// Room and mob names, for Tab. Only names go in: never what's typed.
-    fn add_map_words(&self, rooms: &[Arc<MapRoom>]) {
+    /// A room changes with every sighting, and its names are already in.
+    fn add_map_words(&mut self, rooms: &[Arc<MapRoom>]) {
         if rooms.is_empty() {
             return;
         }
+        self.added_names.keep_to(self.plugins.generation());
         let mut typing = lock(&self.typing);
         for room in rooms {
-            typing.known.add_words(MAP_WORDS, words_of(&room.name));
+            if self.added_names.rooms.insert(room.name.clone()) {
+                typing.known.add_words(MAP_WORDS, words_of(&room.name));
+            }
             for title in room.sightings.keys() {
-                typing
-                    .known
-                    .add_words(MAP_WORDS, words_of(&self.map.mobs().name(title)));
+                if self.added_names.mobs.insert(title.clone()) {
+                    let name = self.map.mobs().name(title);
+                    typing.known.add_words(MAP_WORDS, words_of(&name));
+                }
             }
         }
     }
@@ -1562,4 +1594,28 @@ fn write_line(text: &str, encoding: Encoding, output: &mut Vec<u8>) {
 
 fn lock(typing: &Mutex<Typing>) -> MutexGuard<'_, Typing> {
     typing.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_names_added_start_over_with_new_plugins_and_when_full() {
+        let mut added = AddedNames::default();
+        added.keep_to(1);
+        assert!(added.mobs.insert("a grey wolf".to_owned()));
+        added.keep_to(1);
+        assert!(!added.mobs.insert("a grey wolf".to_owned()), "remembered");
+
+        added.keep_to(2);
+        assert!(added.mobs.insert("a grey wolf".to_owned()), "new plugins");
+
+        for number in 0..=NAMES_REMEMBERED {
+            added.rooms.insert(format!("Room {number}"));
+        }
+        added.keep_to(2);
+        assert!(added.rooms.is_empty(), "full");
+        assert!(added.mobs.is_empty());
+    }
 }
