@@ -666,14 +666,20 @@ impl Engine {
             if response.hides {
                 continue;
             }
-            let shown = match prompt.filter(|_| hud_repeats_it) {
-                Some(at) => shown.with_prompt(at),
-                None => shown,
-            };
+            let prompt_len = prompt.filter(|_| hud_repeats_it).unwrap_or(0);
             if already_shown == 0 {
-                self.show(shown);
+                self.show(match prompt_len {
+                    0 => shown,
+                    len => shown.with_prompt(len),
+                });
             } else if already_shown < text.len() {
-                self.show(shown.after(already_shown));
+                // What a command cut off is out already; the rest of the prompt
+                // is still the prompt, so it stays marked.
+                let rest = shown.after(already_shown);
+                self.show(match prompt_len.saturating_sub(already_shown) {
+                    0 => rest,
+                    len => rest.with_prompt(len),
+                });
             }
         }
         // The buffer is kept: it's reused for every read.

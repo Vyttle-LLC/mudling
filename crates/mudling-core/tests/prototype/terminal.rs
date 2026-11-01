@@ -50,6 +50,23 @@ fn blank_lines_around_a_padded_hidden_prompt_show_as_one() {
     assert_eq!(driven.terminal(), ["a", "", "b"]);
 }
 
+/// A command lands in the middle of a prompt the HUD repeats. What came before
+/// it is already out, but the rest is the same prompt and stays hidden.
+#[test]
+fn the_rest_of_a_known_prompt_a_command_split_stays_hidden() {
+    let mut driven = learned();
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19");
+    driven.send("look");
+    driven.say(b"hp> ");
+    driven.say(b"You see a stag.\r\n");
+    assert_eq!(driven.terminal(), ["<19", "look", "You see a stag."]);
+    assert_eq!(
+        driven.terminal_with_prompts(),
+        ["<20hp> ", "<19", "look", "hp> ", "You see a stag."]
+    );
+}
+
 #[test]
 fn a_blank_line_follows_a_command() {
     let mut driven = Driven::new();
