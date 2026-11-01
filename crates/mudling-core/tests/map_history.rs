@@ -308,6 +308,25 @@ fn a_view_hears_of_a_version_only_once_it_can_be_read() {
 }
 
 #[test]
+fn the_oldest_version_kept_can_still_be_restored() {
+    let mut played = Played::new();
+    let oldest = played.saved_after(&[(ROAD, "A road")]);
+    played.room(GATE, "A gate", 0);
+    for _ in 0..39 {
+        played.save_version();
+    }
+    assert_eq!(played.versions().len(), 40);
+    assert_eq!(played.versions()[39].id, oldest);
+
+    played.engine.restore_map(oldest, Timestamp(5));
+
+    assert_eq!(played.settings().map_restore.unwrap().outcome, Ok(oldest));
+    assert_eq!(played.shown_rooms(), [ROAD]);
+    assert_eq!(played.saved_rooms(), [ROAD]);
+    assert_eq!(played.versions().len(), 40);
+}
+
+#[test]
 fn old_automatic_versions_go_and_their_rooms_with_them() {
     let mut played = Played::new();
     played.room(ROAD, "A road", 0);

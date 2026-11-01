@@ -9,15 +9,18 @@
 use crate::assets::UI_FONT;
 use crate::room_panel::{button, section_label};
 use crate::theme::Theme;
+use crate::title_bar::FocusNextControl;
 use chrono::{DateTime, Datelike, Local};
 use gpui::{
-    Context, FocusHandle, KeyDownEvent, Pixels, Role, ScrollHandle, SharedString, Task, Window,
-    div, prelude::*, px,
+    App, Context, FocusHandle, KeyBinding, KeyDownEvent, Pixels, Role, ScrollHandle, SharedString,
+    Task, Window, div, prelude::*, px,
 };
 use mudling_core::persist::{MapVersion, Timestamp};
 use mudling_core::session::MapHistory;
 use mudling_core::store::SettingsState;
 
+/// The key context while focus is in the section.
+const CONTEXT: &str = "MapHistory";
 /// The whole section's height, which never changes: the list scrolls.
 pub const HEIGHT: Pixels = px(164.);
 const NOTHING_SAVED: &str =
@@ -25,6 +28,10 @@ const NOTHING_SAVED: &str =
 const NOT_READ: &str = "Couldn't read map history.";
 const NOT_RESTORED: &str = "Couldn't restore that version. Your map is as it was.";
 const RESTORING: &str = "Restoring…";
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("tab", FocusNextControl, Some(CONTEXT))]);
+}
 
 /// A version as the list shows it.
 struct Row {
@@ -40,7 +47,7 @@ impl Row {
             id: version.id,
             when: when(version.created, now).into(),
             rooms: rooms(version.room_count).into(),
-            restore: cx.focus_handle(),
+            restore: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -92,7 +99,7 @@ impl MapHistoryView {
             asking: None,
             answered: settings.map_restore.as_ref().map_or(0, |last| last.attempt),
             line: None,
-            keep: cx.focus_handle(),
+            keep: cx.focus_handle().tab_stop(true),
             scroll: ScrollHandle::new(),
             in_view: None,
         };
@@ -299,7 +306,6 @@ impl MapHistoryView {
                     theme,
                 )
                 .track_focus(&row.restore)
-                .tab_stop(true)
                 .px_2()
                 .border_color(gpui::transparent_black())
                 .text_color(theme.accent)
@@ -339,7 +345,7 @@ impl MapHistoryView {
                 id: id as i64,
                 when: when.into(),
                 rooms: rooms(count).into(),
-                restore: cx.focus_handle(),
+                restore: cx.focus_handle().tab_stop(true),
             })
             .collect();
         cx.notify();
@@ -366,6 +372,8 @@ impl Render for MapHistoryView {
         });
         div()
             .id("map-history")
+            .key_context(CONTEXT)
+            .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
             .role(Role::Group)
             .aria_label("Map history")
             .font_family(UI_FONT)
@@ -416,7 +424,7 @@ fn rooms(count: i64) -> String {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use gpui::{TestAppContext, WindowAppearance};
+    use gpui::{KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, WindowAppearance};
     use mudling_core::map::LiveMap;
     use mudling_core::persist::{Batch, Database, Room, SERVERS_FOLDER};
     use mudling_core::session::{Session, SessionConfig};
@@ -512,6 +520,54 @@ mod tests {
             .read(|map: &Versioned<MapState>| map.value().rooms().len());
         assert_eq!(rooms, 1);
         session.quit().wait().unwrap();
+    }
+
+    /// Enter activates a focused control when it's let go.
+    fn press_enter(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").unwrap(),
+        });
+        cx.run_until_parked();
+    }
+
+    /// Tab, as a player presses it: from a row to the next, from the question
+    /// to its Restore, and Enter there confirms.
+    #[gpui::test]
+    fn the_keyboard_reaches_each_restore_and_confirms(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(WindowAppearance::Dark));
+            crate::bind_keys(cx);
+        });
+        let (view, cx) =
+            cx.add_window_view(|_, cx| MapHistoryView::new(None, &SettingsState::default(), cx));
+        view.update(cx, |view, cx| view.show_sample(cx));
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.rows[0].restore, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert!(view.rows[1].restore.is_focused(window));
+        });
+
+        press_enter(cx);
+        view.update_in(cx, |view, window, _| {
+            assert_eq!(view.asking, Some(view.rows[1].id));
+            assert!(view.keep.is_focused(window));
+        });
+
+        // No session to restore through, so confirming reads as a failure.
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        press_enter(cx);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.asking, None);
+            assert_eq!(view.line, Some(Line::Failed));
+        });
     }
 
     #[gpui::test]

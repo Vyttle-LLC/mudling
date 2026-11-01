@@ -308,6 +308,7 @@ fn main() -> ExitCode {
 /// Every shortcut. `settings::shortcuts` lists them for the player.
 pub(crate) fn bind_keys(cx: &mut App) {
     input::bind_keys(cx);
+    map_history::bind_keys(cx);
     shell::bind_keys(cx);
     hud::bind_keys(cx);
     title_bar::bind_keys(cx);

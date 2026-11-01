@@ -293,6 +293,7 @@ const MAP_HISTORY_CONTROLS: [&str; 3] = [
     "Restore the map from Today, 11:42, 14 rooms",
 ];
 const KEEP_THE_MAP: &str = "Keep this map";
+const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
@@ -612,6 +613,16 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: focused
                 .as_ref()
                 .is_some_and(|(_, label)| label == MAP_HISTORY_CONTROLS[2]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(&|_, window, cx| window.focus_next(cx), cx);
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the next tab stop after one Restore is the next version's",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == NEXT_MAP_RESTORE),
             detail: format!("{focused:?}"),
         });
 

@@ -740,9 +740,11 @@ pub struct RestoredMap {
 impl RestoredMap {
     /// A batch restoring `version_id` as one transaction: a version of the
     /// map as it is now first, so the restore can be undone, then the
-    /// restore and where it leaves the player.
+    /// restore and where it leaves the player. Pruning comes last: the
+    /// version restored may be the oldest of its kind.
     pub fn batch(&self, version_id: i64, now: Timestamp) -> Batch {
-        let mut batch = LiveMap::save_version(VERSION_SAFETY, BEFORE_RESTORE, now);
+        let mut batch = Batch::new();
+        batch.save_map_version(VERSION_SAFETY, BEFORE_RESTORE, now);
         batch.restore_map_version(version_id, now);
         match self.layout.current {
             Some(id) => meta(&mut batch, CURRENT_ROOM, id, now),
@@ -750,6 +752,7 @@ impl RestoredMap {
                 batch.delete(Key::Meta(CURRENT_ROOM.to_owned()));
             }
         }
+        batch.prune_map_versions(VERSION_SAFETY, VERSIONS_KEPT);
         batch
     }
 }
