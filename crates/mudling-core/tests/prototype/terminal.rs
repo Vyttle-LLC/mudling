@@ -40,6 +40,16 @@ fn blank_lines_around_a_hidden_prompt_show_as_one() {
     assert_eq!(driven.terminal(), ["a", "", "b"]);
 }
 
+/// A hidden prompt that the server pads with spaces is still no line.
+#[test]
+fn blank_lines_around_a_padded_hidden_prompt_show_as_one() {
+    let mut driven = learned();
+    driven.say(b"a\r\n\r\n");
+    driven.gmcp(r#"Char.Vitals {"hp": 19}"#);
+    driven.say(b"<19hp>   \r\n\r\nb\r\n");
+    assert_eq!(driven.terminal(), ["a", "", "b"]);
+}
+
 #[test]
 fn a_blank_line_follows_a_command() {
     let mut driven = Driven::new();

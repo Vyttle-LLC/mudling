@@ -172,9 +172,10 @@ impl Line {
         self.0.prompt_len as usize
     }
 
-    /// Whether this line is a prompt the HUD repeats and nothing else.
+    /// Whether this line is a prompt the HUD repeats and nothing else: only
+    /// whitespace may follow it, as a server often pads one.
     pub fn is_only_prompt(&self) -> bool {
-        self.prompt_len() > 0 && self.prompt_len() == self.plain().len()
+        self.prompt_len() > 0 && self.plain()[self.prompt_len()..].trim().is_empty()
     }
 
     /// The text that shows, without a copy: from past a prompt the HUD repeats,
@@ -483,6 +484,25 @@ mod tests {
 
     fn plain_lines(chunks: &[&[u8]]) -> (Vec<String>, Option<String>) {
         run(&mut LinePipeline::default(), chunks)
+    }
+
+    #[test]
+    fn a_prompt_and_only_whitespace_is_only_a_prompt() {
+        let (lines, _) = plain_lines(&[b"<19hp> \n<19hp>   \n<19hp> You rest.\n"]);
+        assert_eq!(lines.len(), 3);
+        let mut finished = Vec::new();
+        LinePipeline::default().push(b"<19hp> \n<19hp>   \n<19hp> You rest.\n", &mut finished);
+        let marked: Vec<Line> = finished.iter().map(|line| line.with_prompt(6)).collect();
+        assert!(marked[0].is_only_prompt());
+        assert!(marked[1].is_only_prompt());
+        assert!(!marked[2].is_only_prompt());
+        assert_eq!(marked[1].without_prompt(), None);
+        assert_eq!(
+            marked[2]
+                .without_prompt()
+                .map(|line| line.plain().to_owned()),
+            Some(" You rest.".to_owned())
+        );
     }
 
     #[test]
