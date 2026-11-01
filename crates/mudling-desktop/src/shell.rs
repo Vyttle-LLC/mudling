@@ -288,6 +288,8 @@ pub struct Shell {
     waiting: VecDeque<Request>,
     /// What the last job ran into, for a window on a game.
     trouble: Option<String>,
+    /// The saved servers as last shown.
+    listed: SavedServers,
     /// One session is ending and the next opening, so the window stays on the
     /// chat rather than flash the empty state.
     switching: bool,
@@ -524,6 +526,7 @@ impl Shell {
             job: None,
             waiting: VecDeque::new(),
             trouble: None,
+            listed: SavedServers::default(),
             switching: false,
             copies,
             left: false,
@@ -946,8 +949,10 @@ impl Shell {
     fn job_done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Shell>) {
         self.job = None;
         if outcome.only_listing {
-            self.show_listing(&outcome.saved, cx);
-            self.start_waiting(window, cx);
+            if !self.left {
+                self.show_listing(&outcome.saved, cx);
+                self.start_waiting(window, cx);
+            }
             return;
         }
         self.switching = false;
@@ -956,6 +961,7 @@ impl Shell {
             return;
         }
         self.trouble = outcome.problem.clone();
+        self.listed = outcome.saved.clone();
         self.empty_state.update(cx, |empty_state, cx| {
             empty_state.show(&outcome.saved, cx);
             if let Some(problem) = outcome.problem.clone() {
@@ -993,8 +999,15 @@ impl Shell {
 
     /// Shows what the saved servers are now and nothing else: a problem on
     /// show stays, and so does the keyboard, which a sync running behind the
-    /// player's back must not move.
+    /// player's back must not move. A list that's the one on show changes
+    /// nothing at all. When it did change, the title bar menu's rows are
+    /// replaced, as with any change to the servers, so a keyboard on one of
+    /// them loses it.
     fn show_listing(&mut self, saved: &SavedServers, cx: &mut Context<Shell>) {
+        if *saved == self.listed {
+            return;
+        }
+        self.listed = saved.clone();
         let trouble = self.trouble.clone();
         self.empty_state.update(cx, |empty_state, cx| {
             empty_state.show(saved, cx);
@@ -4375,6 +4388,64 @@ pub mod tests {
             assert_eq!(shell.trouble.as_deref(), Some(STUCK_SESSION));
             assert!(shell.focus_before_settings.is_some(), "still remembered");
         });
+    }
+
+    fn relisting(folder: &Path) -> Outcome {
+        Outcome {
+            saved: persist::saved_servers(folder),
+            only_listing: true,
+            ..Outcome::default()
+        }
+    }
+
+    #[gpui::test]
+    fn a_relisting_of_the_same_servers_leaves_the_title_bar_menus_rows_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let mut launched = launch(&[("one.example", 1), ("two.example", 2)], cx);
+        launched.frames_until("the cards", |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == 2
+        });
+        let rows = |launched: &Launched<'_>| {
+            let bar = launched
+                .shell
+                .read_with(launched.cx, |shell, _| shell.title_bar.clone());
+            bar.read_with(launched.cx, |bar, _| bar.saved_row_handles())
+        };
+        let before = rows(&launched);
+        assert_eq!(before.len(), 2);
+
+        let same = relisting(launched.folder.path());
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.job_done(same, window, cx);
+        });
+        assert_eq!(rows(&launched), before, "the rows kept their handles");
+
+        persist::save_server(launched.folder.path(), "three.example", 3).unwrap();
+        let more = relisting(launched.folder.path());
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.job_done(more, window, cx);
+        });
+        assert_eq!(rows(&launched).len(), 3, "a change still shows");
+    }
+
+    #[gpui::test]
+    fn nothing_waiting_starts_behind_a_relisting_once_the_window_has_left(cx: &mut TestAppContext) {
+        let launched = launch(&[], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.left = true;
+            shell
+                .waiting
+                .push_back(Request::Save(target("late.example", 9)));
+            let listing = Outcome {
+                only_listing: true,
+                ..Outcome::default()
+            };
+            shell.job_done(listing, window, cx);
+            assert_eq!(shell.waiting.len(), 1, "it stayed queued");
+            assert!(shell.job.is_none(), "nothing started");
+        });
+        assert!(saved_hosts(launched.folder.path()).is_empty());
     }
 
     #[gpui::test]
