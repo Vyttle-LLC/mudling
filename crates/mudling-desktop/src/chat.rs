@@ -141,10 +141,11 @@ pub struct Chat {
     find: Option<Find>,
     items: ItemsState,
     /// Where something opaque lies over the chat, as of this frame. Lines
-    /// wholly under it are measured but not drawn.
+    /// wholly under it aren't drawn.
     covered: Option<Bounds<Pixels>>,
     /// Heights by line number while the chat is covered, so a frame measures
-    /// only the lines it draws. They hold for one width and appearance.
+    /// only new lines and those it draws. They hold for the width, appearance
+    /// and showing of prompts in `heights_for`.
     known_heights: HashMap<u64, Pixels>,
     heights_for: Option<(Pixels, Appearance, bool)>,
     #[cfg(test)]

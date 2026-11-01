@@ -221,8 +221,8 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// Draws the sheet again every minute, the finest step "ago" shows. Lines
-    /// arriving no longer do.
+    /// Draws the sheet again every minute, the finest step "ago" shows. The
+    /// sheet draws only when told to, and time passing tells it nothing.
     pub(super) fn tick_ago(&self, cx: &mut Context<SettingsSheet>) -> Task<()> {
         cx.spawn(async move |sheet, cx| {
             loop {
