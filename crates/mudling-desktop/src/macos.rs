@@ -286,6 +286,13 @@ const EMPTY_STATE_TEXT: [&str; 3] = [
     "Pick a character to log back in",
     "stay on this Mac",
 ];
+/// Map history with its sample: the section, the list, the first Restore.
+const MAP_HISTORY_CONTROLS: [&str; 3] = [
+    "Map history",
+    "Saved versions",
+    "Restore the map from Today, 11:42, 14 rooms",
+];
+const KEEP_THE_MAP: &str = "Keep this map";
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
@@ -538,6 +545,75 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
+
+        in_window(
+            &|shell, _, cx| {
+                shell
+                    .map_history()
+                    .update(cx, |history, cx| history.show_sample(cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed: Vec<_> = MAP_HISTORY_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "map history names its list, its versions and their Restore buttons",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map_history().update(cx, |history, cx| {
+                    history.ask_about_sample(window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let questions = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| {
+                let says = |text: &Option<String>| text.as_deref().is_some_and(|t| t.contains("?"));
+                says(&e.title) || says(&e.value)
+            })
+        });
+        checks.push(Check {
+            name: "a restore's question reaches the tree",
+            passed: !questions.is_empty(),
+            detail: format!("{} element(s)", questions.len()),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the question takes focus, on the button that keeps the map",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == KEEP_THE_MAP),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map_history().update(cx, |history, cx| {
+                    history.keep_the_map(window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "keeping the map takes focus back to the Restore that asked",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == MAP_HISTORY_CONTROLS[2]),
+            detail: format!("{focused:?}"),
+        });
 
         in_window(
             &|shell, window, cx| {

@@ -15,11 +15,12 @@ mod paint;
 mod sheet;
 
 use crate::assets::HEADING_FONT;
+use crate::map_history;
 use crate::theme::{MapColors, Theme};
 use gpui::{
-    Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels, Point, Render, ScrollDelta,
-    ScrollEvent, Window, canvas, div, point, prelude::*, px,
+    AnyView, Bounds, Context, EventEmitter, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, PinchEvent, Pixels, Point, Render,
+    ScrollDelta, ScrollEvent, StyleRefinement, Window, canvas, div, point, prelude::*, px,
 };
 pub use model::{MapModel, Selection, Walk};
 use mudling_core::store::{Diff, MapState, Versioned};
@@ -50,6 +51,8 @@ pub struct MapView {
     press: Option<Press>,
     /// Where the map was last painted, for turning clicks into squares.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// What sits under the map in the panel: map history.
+    below: Option<AnyView>,
 }
 
 /// Sent when a room is selected, and again when its walk is known.
@@ -66,9 +69,15 @@ impl MapView {
             layout,
             press: None,
             bounds: Rc::default(),
+            below: None,
         };
         view.start_work(cx);
         view
+    }
+
+    pub fn mount_below(&mut self, view: AnyView, cx: &mut Context<MapView>) {
+        self.below = Some(view);
+        cx.notify();
     }
 
     /// Takes a frame's diff of the map store.
@@ -405,7 +414,16 @@ impl Render for MapView {
                 .flex()
                 .flex_col()
                 .child(self.header(colors, cx))
-                .child(div().flex_1().min_h_0().child(self.map_surface(colors, cx))),
+                .child(div().flex_1().min_h_0().child(self.map_surface(colors, cx)))
+                // Cached: a pan redraws the map, not the list.
+                .children(self.below.clone().map(|view| {
+                    view.cached(
+                        StyleRefinement::default()
+                            .flex_none()
+                            .w_full()
+                            .h(map_history::HEIGHT),
+                    )
+                })),
         }
     }
 }

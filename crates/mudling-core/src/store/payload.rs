@@ -384,6 +384,19 @@ pub struct SettingsState {
     /// The plugins the core turned off, and why, until
     /// [`crate::session::Session::turn_plugin_on`] brings one back.
     pub turned_off: Vec<PluginDisabled>,
+    /// Bumps when map history has changed on the disk, so a view lists it
+    /// again. Zero until the database is open.
+    pub map_versions: u64,
+    /// How the last restore of a map version went.
+    pub map_restore: Option<MapRestore>,
+}
+
+/// How a restore of a map version went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapRestore {
+    /// Counts restores, so two that went the same way are two changes.
+    pub attempt: u64,
+    pub outcome: Result<i64, String>,
 }
 
 /// What the player set up for this session: what Settings edits, and the

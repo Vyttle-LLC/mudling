@@ -17,6 +17,7 @@ use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
+use crate::map_history::MapHistoryView;
 use crate::map_view::{MapLayout, MapView};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
@@ -226,6 +227,7 @@ pub struct Shell {
     /// The map in the left panel, and the small one in the Room panel.
     map: Entity<MapView>,
     map_inset: Entity<MapView>,
+    map_history: Entity<MapHistoryView>,
     settings: Entity<SettingsSheet>,
     settings_open: bool,
     /// A measured run draws its sample in the HUD, whatever the stores say.
@@ -360,6 +362,7 @@ impl Shell {
             );
         });
         let (map, map_inset) = Self::new_maps(stores, cx);
+        let map_history = Self::new_history(game.as_ref(), copies.settings.value(), cx);
         let mut shell = Shell {
             game,
             launcher: None,
@@ -382,6 +385,7 @@ impl Shell {
             room_panel,
             map,
             map_inset,
+            map_history,
             settings,
             settings_open: false,
             hud_held: false,
@@ -425,8 +429,21 @@ impl Shell {
         (map(MapLayout::Panel, cx), map(MapLayout::Inset, cx))
     }
 
+    /// Map history of `game`, or an empty one.
+    fn new_history(
+        game: Option<&Game>,
+        settings: &SettingsState,
+        cx: &mut Context<Shell>,
+    ) -> Entity<MapHistoryView> {
+        let history = game.map(|game| game.session.map_history());
+        cx.new(|cx| MapHistoryView::new(history, settings, cx))
+    }
+
     fn mount_maps(&self, cx: &mut Context<Shell>) {
         self.mount(Slot::Map, self.map.clone(), cx);
+        let history = self.map_history.clone();
+        self.map
+            .update(cx, |map, cx| map.mount_below(history.into(), cx));
         let inset = self.map_inset.clone();
         self.room_panel
             .update(cx, |panel, cx| panel.mount_map(inset, cx));
@@ -552,6 +569,7 @@ impl Shell {
         let stores = game.session.stores();
         let terminal = stores.subscribe();
         self.copies = Copies::of(Some(stores));
+        self.map_history = Self::new_history(Some(&game), self.copies.settings.value(), cx);
         self.use_maps_of(Some(stores), cx);
         self.chat = cx.new(|_| Chat::new(terminal));
         self.room_panel
@@ -771,6 +789,9 @@ impl Shell {
         }
         if let Some(settings) = &batch.settings {
             self.copies.settings.apply_diff(settings);
+            let saved = self.copies.settings.value();
+            self.map_history
+                .update(cx, |history, cx| history.show(saved, cx));
             let masked = self.copies.settings.value().echo_off;
             self.input
                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
@@ -961,6 +982,7 @@ impl Shell {
     /// bar, the hotbar, the find bar and the command bar said about the last
     /// session goes with it.
     fn forget_the_session(&mut self, cx: &mut Context<Shell>) {
+        self.map_history = Self::new_history(None, &SettingsState::default(), cx);
         self.use_maps_of(None, cx);
         self.show_problems(&SettingsState::default(), cx);
         self.settings.update(cx, |sheet, cx| {
@@ -1067,6 +1089,10 @@ impl Shell {
     }
 
     /// Opens both panels: the frame budget holds with everything open.
+    pub fn map_history(&self) -> &Entity<MapHistoryView> {
+        &self.map_history
+    }
+
     pub fn open_panels(&self, cx: &mut Context<Shell>) {
         for side in [Side::Left, Side::Right] {
             self.dock(side)

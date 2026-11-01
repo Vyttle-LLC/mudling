@@ -50,6 +50,7 @@ mod input;
 mod launcher;
 #[cfg(target_os = "macos")]
 mod macos;
+mod map_history;
 mod map_view;
 mod measure;
 mod motion;
