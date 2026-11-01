@@ -63,20 +63,24 @@ pub(crate) fn undo_pair(meta: &[Meta], created: Timestamp) -> Option<RoomPair> {
     Some((kept.parse().ok()?, retired.parse().ok()?))
 }
 
-/// One join's record, if `row` is one.
+/// One join's record, if `row` is one. The lower id always stays, so a record
+/// that says otherwise isn't one MUDling wrote: sync reads what any device or
+/// hand left in the repo.
 pub(crate) fn join_record(row: &Meta) -> Option<(RoomId, RoomId, Timestamp)> {
-    let retired = row.key.strip_prefix(JOINED)?.parse().ok()?;
-    Some((retired, row.value.parse().ok()?, row.updated))
+    let retired: RoomId = row.key.strip_prefix(JOINED)?.parse().ok()?;
+    let kept: RoomId = row.value.parse().ok()?;
+    (kept < retired).then_some((retired, kept, row.updated))
 }
 
 /// Each retired room with the room that holds it now, which a later join may
-/// have moved again. Kept ids are lower, so this always ends.
+/// have moved again. A cycle ends where it would come back round.
 pub(crate) fn follow_joins(joins: &BTreeMap<RoomId, RoomId>) -> BTreeMap<RoomId, RoomId> {
     joins
         .keys()
         .map(|retired| {
             let mut kept = *retired;
-            while let Some(next) = joins.get(&kept) {
+            let mut seen = BTreeSet::from([kept]);
+            while let Some(next) = joins.get(&kept).filter(|next| seen.insert(**next)) {
                 kept = *next;
             }
             (*retired, kept)
@@ -240,6 +244,36 @@ mod tests {
         assert_eq!(pairs(&rooms, &[(0, 1)]), [(0, 2), (1, 2)]);
         assert_eq!(pairs(&rooms, &[(0, 1), (0, 2)]), [(1, 2)]);
         assert!(pairs(&rooms, &[(0, 1), (0, 2), (1, 2)]).is_empty());
+    }
+
+    fn record(retired: RoomId, kept: RoomId) -> Meta {
+        Meta {
+            key: joined_key(retired),
+            value: kept.to_string(),
+            updated: Timestamp(1),
+        }
+    }
+
+    #[test]
+    fn a_record_keeping_anything_but_the_lower_id_is_no_join() {
+        assert!(join_record(&record(5, 4)).is_some());
+        assert!(join_record(&record(5, 5)).is_none());
+        assert!(join_record(&record(5, 6)).is_none());
+        let joins = joins_in(&[record(5, 5), record(6, 7), record(7, 6), record(9, 8)]);
+        assert_eq!(joins, BTreeMap::from([(7, 6), (9, 8)]));
+    }
+
+    #[test]
+    fn following_stops_on_a_cycle() {
+        let cycle = BTreeMap::from([(5, 6), (6, 7), (7, 5), (9, 5)]);
+        let held = follow_joins(&cycle);
+        assert_eq!(held.len(), 4, "every room gets an answer");
+    }
+
+    #[test]
+    fn following_goes_on_through_a_chain() {
+        let chain = BTreeMap::from([(9, 7), (7, 5)]);
+        assert_eq!(follow_joins(&chain), BTreeMap::from([(7, 5), (9, 5)]));
     }
 
     #[test]

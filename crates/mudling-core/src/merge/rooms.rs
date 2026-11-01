@@ -52,8 +52,8 @@ pub type RoomMoves = BTreeMap<RoomId, Option<RoomId>>;
 
 /// Moves both sides onto one id for each room they share, so the merge after
 /// this sees two copies of one record.
-pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
-    carry_out_joins(ours, theirs);
+pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &[RoomNote]) {
+    carry_out_joins(ours, theirs, base_notes);
     let united = pairs(ours, theirs);
     if united.is_empty() {
         return;
@@ -71,7 +71,7 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
             deleted: now.max(Timestamp(room.updated.0 + 1)),
         })
         .collect();
-    gather_notes(&mut ours.map, &mut theirs.map, &united, &BTreeSet::new());
+    gather_notes(&mut ours.map, &mut theirs.map, &united, &[]);
     for side in [&mut *ours, &mut *theirs] {
         repoint_rows(&mut side.map, &united);
         for tombstone in &mut side.tombstones {
@@ -86,12 +86,20 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows) {
 /// write one file. A delete in the retired room stays there: moved with its
 /// room, it would take a row the kept room has of its own. And a delete in the
 /// kept room from before the join was about that room's row, not this one.
-fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows) {
+fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &[RoomNote]) {
     let mut joins = standing_joins(ours, theirs);
+    let kept = joins.values().map(|(kept, _)| *kept);
+    let both_changed = notes_both_changed(&ours.map, &theirs.map, base_notes, kept.collect());
     let held = room_ids(ours).into_iter().chain(room_ids(theirs));
     let held: HashSet<RoomId> = held.collect();
     joins.retain(|retired, _| held.contains(retired));
     if joins.is_empty() {
+        gather_notes(
+            &mut ours.map,
+            &mut theirs.map,
+            &BTreeMap::new(),
+            &both_changed,
+        );
         return;
     }
     let retired = ours
@@ -122,13 +130,7 @@ fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows) {
         ready_to_move(&mut map.features, &joins, &deleted);
         ready_to_move(&mut map.sightings, &joins, &deleted);
     }
-    let (our_ids, their_ids) = (room_ids(ours), room_ids(theirs));
-    let unheard: BTreeSet<RoomId> = joins
-        .iter()
-        .filter(|(id, _)| our_ids.contains(*id) != their_ids.contains(*id))
-        .map(|(_, (kept, _))| *kept)
-        .collect();
-    gather_notes(&mut ours.map, &mut theirs.map, &moves, &unheard);
+    gather_notes(&mut ours.map, &mut theirs.map, &moves, &both_changed);
     repoint_rows(&mut ours.map, &moves);
     repoint_rows(&mut theirs.map, &moves);
     ours.tombstones.extend(retired);
@@ -217,19 +219,15 @@ fn ready_to_move<T: Keyed>(
 /// A room holds one note, so rooms becoming one write theirs together: what
 /// the kept room says, newest first, then each retired room's by id, unless
 /// that text is in it already. Anything that gathered them before reads the
-/// same, so a second merge changes nothing.
-///
-/// In `unheard` rooms, one side hasn't heard of the join yet. The other side's
-/// note there was gathered, so its time says nothing about which text is newer,
-/// and neither side's text can rank the other's out: they're gathered too. The
-/// next merge finds the side has heard, and newest wins again.
+/// same, so a second merge changes nothing. The kept rooms in `both_changed`
+/// gather both sides' notes as well: see [`notes_both_changed`].
 fn gather_notes(
     ours: &mut MapRows,
     theirs: &mut MapRows,
     moves: &BTreeMap<RoomId, RoomId>,
-    unheard: &BTreeSet<RoomId>,
+    both_changed: &[RoomId],
 ) {
-    let kept_ids: BTreeSet<RoomId> = moves.values().copied().collect();
+    let kept_ids: BTreeSet<RoomId> = (moves.values().chain(both_changed)).copied().collect();
     let mut moved: BTreeMap<RoomId, RoomNote> = BTreeMap::new();
     let mut kept: BTreeMap<RoomId, RoomNote> = BTreeMap::new();
     for note in ours.notes.iter().chain(&theirs.notes) {
@@ -251,11 +249,11 @@ fn gather_notes(
             }
         }
     }
-    if moved.is_empty() && unheard.is_empty() {
+    if moved.is_empty() && both_changed.is_empty() {
         return;
     }
     for note in ours.notes.iter().chain(&theirs.notes) {
-        if unheard.contains(&note.room_id)
+        if both_changed.contains(&note.room_id)
             && let Some(held) = kept.get_mut(&note.room_id)
         {
             add_note(held, note);
@@ -275,6 +273,35 @@ fn gather_notes(
     ours.notes.retain(settled);
     theirs.notes.retain(settled);
     ours.notes.extend(kept.into_values());
+}
+
+/// The rooms in `kept` whose note each side changed from `base_notes`, the
+/// commit both build on, to a different text. A join can stamp a note with a
+/// time its text doesn't earn, so time can't choose between them, and nothing
+/// but the sides themselves says what the other never saw: both texts stay. A
+/// note only one side changed takes the newest as any record does, so a note
+/// rewritten once both sides have the join stays rewritten.
+fn notes_both_changed(
+    ours: &MapRows,
+    theirs: &MapRows,
+    base_notes: &[RoomNote],
+    kept: BTreeSet<RoomId>,
+) -> Vec<RoomId> {
+    let text_of = |notes: &'_ [RoomNote], room: RoomId| {
+        let note = notes.iter().find(|note| note.room_id == room);
+        note.map(|note| note.text.clone())
+    };
+    kept.into_iter()
+        .filter(|room| {
+            let base = text_of(base_notes, *room);
+            match (text_of(&ours.notes, *room), text_of(&theirs.notes, *room)) {
+                (Some(ours), Some(theirs)) => {
+                    ours != theirs && base.as_ref() != Some(&ours) && base.as_ref() != Some(&theirs)
+                }
+                _ => false,
+            }
+        })
+        .collect()
 }
 
 /// Adds `note`'s text to `held`, unless one of them already holds the other.

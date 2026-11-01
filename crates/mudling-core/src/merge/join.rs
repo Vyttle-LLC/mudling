@@ -53,7 +53,7 @@ fn about(map: &MapRows, ids: &[RoomId]) -> MapRows {
 /// as a batch: what's left of the rooms in `kept`, and a tombstone for each room
 /// in `retired`.
 fn carried(rows: ServerRows, retired: &[RoomId], kept: &[RoomId]) -> Batch {
-    let merged = merge_server(rows.clone(), rows);
+    let merged = merge_server(rows.clone(), rows, &[]);
     let meta =
         (merged.meta.iter()).filter(|row| retired.iter().any(|id| row.key == joined_key(*id)));
     ServerRows {
@@ -143,7 +143,7 @@ pub(crate) fn undo_join(
             .collect(),
         ..ServerRows::default()
     };
-    let joined = about(&merge_server(view.clone(), view).map, &ids);
+    let joined = about(&merge_server(view.clone(), view, &[]).map, &ids);
     let (before, current) = (about(before, &ids), about(&rows.map, &ids));
 
     let retired_key = Key::Room(retired);

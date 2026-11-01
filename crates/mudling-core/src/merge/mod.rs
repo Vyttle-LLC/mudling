@@ -227,7 +227,7 @@ pub fn join(
         }
         if let Some(held) = repo.server_rows(store.server_id)? {
             let local = ServerRows::load(&store.database.reader()?)?;
-            let merged = merge_server(local.clone(), held);
+            let merged = merge_server(local.clone(), held, &[]);
             let moves = retired_rooms(&local, &merged);
             let mut batch = merged.into_batch();
             follow_current_room(&store.database.reader()?, &moves, &mut batch)?;

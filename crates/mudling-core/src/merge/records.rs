@@ -1,16 +1,23 @@
 //! Merging two copies of a server's rows, record by record.
 
 use super::rooms::unite_rooms;
-use crate::persist::{CharacterRows, GearRows, Key, Keyed, MapRows, Timestamp, Tombstone};
+use crate::persist::{
+    CharacterRows, GearRows, Key, Keyed, MapRows, RoomNote, Timestamp, Tombstone,
+};
 use crate::repo::format::{ServerRows, json};
 use serde::Serialize;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The newest copy of every record, without what a tombstone rules out.
-/// Parents go before their children, which can't outlive them.
-pub(super) fn merge_server(mut ours: ServerRows, mut theirs: ServerRows) -> ServerRows {
-    unite_rooms(&mut ours, &mut theirs);
+/// Parents go before their children, which can't outlive them. `base_notes` are
+/// the room notes of the commit both sides build on, if they share one.
+pub(super) fn merge_server(
+    mut ours: ServerRows,
+    mut theirs: ServerRows,
+    base_notes: &[RoomNote],
+) -> ServerRows {
+    unite_rooms(&mut ours, &mut theirs, base_notes);
     let mut merger = Merger::new(ours.tombstones, theirs.tombstones);
     ServerRows {
         servers: merger.rows(ours.servers, theirs.servers),
