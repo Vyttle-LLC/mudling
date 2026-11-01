@@ -99,6 +99,22 @@ impl Layout {
         self.rooms.len()
     }
 
+    /// The room here most like `lost`, a room of another map: the same place
+    /// if there's one, then the same area, then the closest square.
+    pub fn nearest_to(&self, lost: &MapRoom) -> Option<RoomId> {
+        self.rooms()
+            .min_by_key(|room| {
+                let away = room.position - lost.position;
+                (
+                    !room.same_place_as(lost),
+                    room.zone != lost.zone,
+                    away.x.abs() + away.y.abs() + away.z.abs(),
+                    room.id,
+                )
+            })
+            .map(|room| room.id)
+    }
+
     pub fn current_room(&self) -> Option<&MapRoom> {
         self.current.and_then(|id| self.room(id))
     }

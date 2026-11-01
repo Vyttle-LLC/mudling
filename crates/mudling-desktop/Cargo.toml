@@ -19,6 +19,7 @@ shots = ["gpui/test-support", "gpui_platform/test-support"]
 mudling-core.workspace = true
 aho-corasick = "1.1"
 mudling-plugin-avatar = { path = "../../plugins/avatar" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true

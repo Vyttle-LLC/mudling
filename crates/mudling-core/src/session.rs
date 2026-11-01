@@ -41,7 +41,7 @@ use crate::defaults::aliases::{AliasRule, AliasSet};
 use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
-use crate::persist::{self, Timestamp};
+use crate::persist::{self, Database, MapVersion, SERVERS_FOLDER, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
@@ -178,6 +178,7 @@ enum Input {
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
+    RestoreMap(i64),
     Quit,
 }
 
@@ -187,6 +188,31 @@ pub struct Session {
     typing: Arc<Mutex<Typing>>,
     inbox: UnboundedSender<Input>,
     core: JoinHandle<Result<(), SessionError>>,
+    map_history: MapHistory,
+}
+
+/// A session's map history, for a shell to hold. Listing goes straight to
+/// the disk on a connection of its own, so it never waits behind the core
+/// thread, and never holds it up.
+#[derive(Clone)]
+pub struct MapHistory {
+    database: Database,
+    inbox: UnboundedSender<Input>,
+}
+
+impl MapHistory {
+    /// Saved versions, newest first. This blocks on the disk: call it off
+    /// the UI thread.
+    pub fn versions(&self) -> Result<Vec<MapVersion>, persist::Error> {
+        self.database.reader()?.map_versions()
+    }
+
+    /// Puts a saved version back, and saves the map as it is now first.
+    /// `SettingsState::map_restore` says how it went. Returns false if the
+    /// session has stopped, so nothing will.
+    pub fn restore(&self, version_id: i64) -> bool {
+        self.inbox.send(Input::RestoreMap(version_id)).is_ok()
+    }
 }
 
 /// A session on its way out; see [`Session::quit`].
@@ -213,6 +239,10 @@ impl Session {
         let hub = Arc::new(StoreHub::new(waker));
         let typing = Arc::new(Mutex::new(Typing::default()));
         let (inbox, inputs) = mpsc::unbounded_channel();
+        let map_history = MapHistory {
+            database: Database::at(&config.data_folder.join(SERVERS_FOLDER), &config.host),
+            inbox: inbox.clone(),
+        };
         let core = {
             let (hub, typing) = (Arc::clone(&hub), Arc::clone(&typing));
             thread::Builder::new()
@@ -224,12 +254,17 @@ impl Session {
             typing,
             inbox,
             core,
+            map_history,
         })
     }
 
     /// The stores: subscribe, then drain once per frame.
     pub fn stores(&self) -> &StoreHub {
         &self.hub
+    }
+
+    pub fn map_history(&self) -> MapHistory {
+        self.map_history.clone()
     }
 
     /// Opens a connection to the server. The settings store shows how it
@@ -417,6 +452,9 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::Replay(chunks)) if socket.is_none() => replay(&mut engine, chunks),
                 Some(Input::Replay(_)) => {}
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
+                Some(Input::RestoreMap(version_id)) => {
+                    engine.restore_map(version_id, Timestamp::now());
+                }
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {

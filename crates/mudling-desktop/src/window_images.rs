@@ -351,6 +351,26 @@ fn window_images() {
     render("panels-open-light", Light, WIDE, |shell, _, cx| {
         shell.open_panels(cx);
     });
+    for (name, appearance) in [("map-history-dark", Dark), ("map-history-light", Light)] {
+        render(name, appearance, WIDE, |shell, _, cx| {
+            shell.open_panels(cx);
+            shell
+                .map_history()
+                .update(cx, |history, cx| history.show_sample(cx));
+        });
+    }
+    render(
+        "map-history-asking-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            shell.open_panels(cx);
+            shell.map_history().update(cx, |history, cx| {
+                history.show_sample(cx);
+                history.ask_about_sample(window, cx);
+            });
+        },
+    );
     render(
         "panels-open-default-size-dark",
         Dark,

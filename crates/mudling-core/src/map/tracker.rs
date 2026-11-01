@@ -71,6 +71,9 @@ pub(super) struct Tracker {
     expected: VecDeque<Pending>,
     /// Set while the player walks rooms too dark to see.
     dark: Option<DarkWalk>,
+    /// A restored map lacks the player's room, and no room has been shown
+    /// since: the current room is only the nearest guess.
+    adrift: bool,
     /// Fingerprints of areas straightened, or found impossible to, since
     /// they last changed.
     settled_areas: HashSet<u64>,
@@ -141,12 +144,26 @@ impl Tracker {
             doubt: None,
             expected: VecDeque::new(),
             dark: None,
+            adrift: false,
             settled_areas: HashSet::new(),
         }
     }
 
     pub fn is_unsure(&self) -> bool {
-        self.doubt.is_some()
+        self.doubt.is_some() || self.adrift
+    }
+
+    /// Takes `layout` over, dropping what was worked out on the old one.
+    /// `adrift` says its current room is only the nearest guess at where
+    /// the player is, so the next room isn't linked to it.
+    pub fn replace_layout(&mut self, layout: Layout, adrift: bool) {
+        self.layout = layout;
+        self.doubt = None;
+        self.dark = None;
+        self.adrift = adrift;
+        if adrift {
+            self.expected.clear();
+        }
     }
 
     pub fn is_in_dark(&self) -> bool {
@@ -244,6 +261,9 @@ impl Tracker {
     pub fn enter(&mut self, mut step: Step, dark: bool, now: Timestamp) -> Arrived {
         let previous = self.layout.current_room().cloned();
         let next = self.next_expectation(now);
+        // A room shown now says where the player really is, whatever led here.
+        let adrift = std::mem::take(&mut self.adrift);
+        let next = next.filter(|_| !adrift);
         if dark {
             return self.walk_in_dark(next, &step.zone);
         }
@@ -439,9 +459,9 @@ impl Tracker {
     /// Applies something seen in the player's room to every explanation of
     /// where that is, so it survives whichever one wins. Not in the dark:
     /// the game still sends the dark room's exits and occupants, and the
-    /// current room is only a guess.
+    /// current room is only a guess. Nor adrift, for the same reason.
     pub fn update_current_rooms(&mut self, change: impl Fn(&mut MapRoom)) {
-        if self.dark.is_some() {
+        if self.dark.is_some() || self.adrift {
             return;
         }
         self.layout.update_current(&change);

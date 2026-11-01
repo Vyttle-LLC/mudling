@@ -92,6 +92,12 @@ impl MapRoom {
             && self.doorways == other.doorways
     }
 
+    /// Whether two rooms read as the same place, as a room's id alone can't
+    /// say across versions of a map where ids are handed out in turn.
+    pub(super) fn same_place_as(&self, other: &MapRoom) -> bool {
+        self.name == other.name && self.zone == other.zone
+    }
+
     /// Doors in four or more directions: each a way into a story of its own.
     pub fn is_hub(&self) -> bool {
         self.doorways.len() >= 4

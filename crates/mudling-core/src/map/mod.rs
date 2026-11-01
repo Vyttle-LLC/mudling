@@ -46,7 +46,10 @@ pub use find::{
 };
 pub use geometry::{DirMap, DirSet, Direction, GridPoint};
 pub use info::{ExitInfo, RoomInfo};
-pub use live::{Area, Building, CURRENT_ROOM, Commit, Derived, LiveMap, MapChange, Whereabouts};
+pub use live::{
+    Area, Building, CURRENT_ROOM, Commit, Derived, LiveMap, MapChange, RestoredMap,
+    VERSION_AUTOSAVE, VERSION_SAFETY, Whereabouts,
+};
 pub use mobs::{Mark, MarkChange, MobMemory, MobNamer, mob_name};
 pub use room::{ExitState, MapRoom, RoomId, feature};
 pub use route::{WalkStep, distances, route, speedwalk};

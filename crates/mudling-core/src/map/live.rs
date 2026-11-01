@@ -20,6 +20,14 @@ use std::sync::Arc;
 pub const CURRENT_ROOM: &str = "map.current-room";
 const ISLANDS: &str = "map.islands";
 
+/// Kinds of version the map saves by itself: every few minutes of play when
+/// the map changed, and when a session starts or before a restore.
+pub const VERSION_AUTOSAVE: &str = "autosave";
+pub const VERSION_SAFETY: &str = "safety";
+const BEFORE_RESTORE: &str = "Before restoring";
+/// Versions of each kind kept, as the prototype did: each copies the map.
+const VERSIONS_KEPT: i64 = 40;
+
 /// One server's map, shared by every character on it, kept up to date from
 /// GMCP, the game's text and the player's commands.
 ///
@@ -148,12 +156,7 @@ impl LiveMap {
         marks: &[MobMark],
         meta: &[Meta],
     ) -> LiveMap {
-        let first = first_id(&*rules);
-        let mut layout = Layout::new(first);
-        for room in read_rooms(map, &*rules) {
-            layout.next_id = layout.next_id.max(room.id + 1);
-            layout.insert(room);
-        }
+        let mut layout = layout_of(map, &*rules);
         let value = |key: &str| {
             meta.iter()
                 .find(|entry| entry.key == key)
@@ -660,14 +663,107 @@ impl LiveMap {
         Some(Commit { change, batch })
     }
 
-    /// A batch saving a new version in map history. The writer copies the
-    /// map as the database holds it when it reaches this batch, so submit
-    /// every commit's batch before it.
+    /// A batch saving a new version in map history, past which the oldest of
+    /// its kind go. The writer copies the map as the database holds it when
+    /// it reaches this batch, so submit every commit's batch before it.
     pub fn save_version(kind: &str, label: &str, now: Timestamp) -> Batch {
         let mut batch = Batch::new();
         batch.save_map_version(kind, label, now);
+        batch.prune_map_versions(kind, VERSIONS_KEPT);
         batch
     }
+
+    /// Works out what restoring a saved version's rows would make of the
+    /// map, changing nothing: the caller commits [`RestoredMap::batch`], and
+    /// only then calls [`LiveMap::finish_restore`].
+    pub fn prepare_restore(&self, version: &MapRows) -> RestoredMap {
+        let old = &self.tracker.layout;
+        let mut layout = layout_of(version, &*self.rules);
+        // A room made after this must not take an id the discarded map used.
+        layout.next_id = layout.next_id.max(old.next_id);
+        layout.islands = old.islands;
+        layout.restart = old.restart;
+        let here = old.current_room();
+        let kept = here
+            .and_then(|room| layout.room(room.id).filter(|same| same.same_place_as(room)))
+            .map(|room| room.id);
+        layout.current = kept.or_else(|| here.and_then(|room| layout.nearest_to(room)));
+        let adrift = kept.is_none() && layout.current.is_some();
+        if kept.is_none() {
+            // A room the version lacks is rebuilt where the player was.
+            layout.restart = here.map(|room| room.position).or(layout.restart);
+        }
+        layout.clear_dirty();
+        RestoredMap { layout, adrift }
+    }
+
+    /// Takes the map a committed restore left, as one change for views.
+    pub fn finish_restore(&mut self, restored: RestoredMap) -> MapChange {
+        let RestoredMap { layout, adrift } = restored;
+        let old = std::mem::replace(&mut self.committed, layout.clone());
+        self.tracker.replace_layout(layout, adrift);
+        // After the map takes it as saved, so the next commit writes what moved.
+        self.tracker.layout.rebuild_buildings();
+        self.shape += 1;
+        self.revision += 1;
+        self.committed_whereabouts = self.whereabouts();
+        let new = &self.committed;
+        let change = MapChange {
+            revision: self.revision,
+            rooms: new
+                .rooms()
+                .filter(|room| old.room(room.id) != Some(*room))
+                .filter_map(|room| new.shared_room(room.id).cloned())
+                .collect(),
+            removed: old
+                .rooms()
+                .map(|room| room.id)
+                .filter(|id| !new.contains(*id))
+                .collect(),
+            whereabouts: Some(self.committed_whereabouts),
+            ..MapChange::default()
+        };
+        MapChange {
+            derived: Some(self.shared_derived()),
+            ..change
+        }
+    }
+}
+
+/// What a saved version becomes as the live map: see
+/// [`LiveMap::prepare_restore`].
+pub struct RestoredMap {
+    layout: Layout,
+    adrift: bool,
+}
+
+impl RestoredMap {
+    /// A batch restoring `version_id` as one transaction: a version of the
+    /// map as it is now first, so the restore can be undone, then the
+    /// restore and where it leaves the player. Pruning comes last: the
+    /// version restored may be the oldest of its kind.
+    pub fn batch(&self, version_id: i64, now: Timestamp) -> Batch {
+        let mut batch = Batch::new();
+        batch.save_map_version(VERSION_SAFETY, BEFORE_RESTORE, now);
+        batch.restore_map_version(version_id, now);
+        match self.layout.current {
+            Some(id) => meta(&mut batch, CURRENT_ROOM, id, now),
+            None => {
+                batch.delete(Key::Meta(CURRENT_ROOM.to_owned()));
+            }
+        }
+        batch.prune_map_versions(VERSION_SAFETY, VERSIONS_KEPT);
+        batch
+    }
+}
+
+fn layout_of(map: &MapRows, rules: &dyn MapRules) -> Layout {
+    let mut layout = Layout::new(first_id(rules));
+    for room in read_rooms(map, rules) {
+        layout.next_id = layout.next_id.max(room.id + 1);
+        layout.insert(room);
+    }
+    layout
 }
 
 fn exit_states(exits: &DirMap<ExitInfo>) -> DirMap<ExitState> {
