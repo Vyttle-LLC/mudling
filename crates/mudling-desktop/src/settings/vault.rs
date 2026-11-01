@@ -46,7 +46,9 @@ const WORKING: &str = "Working…";
 const AUTO_LOCK_TODAY: &str = "Locking takes the vault's key out of memory. This device keeps its \
                                own copy, so Unlock on this device and auto-login open the vault \
                                again without asking. Until Touch ID or Face ID guards that copy, \
-                               locking doesn't stop someone using this computer.";
+                               locking doesn't stop someone using this computer. A password already \
+                               used to log in to a game stays in this app's memory as plain text \
+                               after a lock, for as long as that game's session is open.";
 const NEW_MASTER_NOTE: &str = "A new master password protects future commits only. Old copies of \
                                the vault in git history still open with the old one, so if it \
                                may have leaked, change your passwords on the servers too. You'll \
