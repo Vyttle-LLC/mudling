@@ -28,10 +28,13 @@ const NOT_SYNCED_YET: &str = "Not synced yet.";
 const SYNCING: &str = "Syncing…";
 /// The history lists this many sessions, the newest first.
 const HISTORY_LENGTH: usize = 50;
-/// PRD §10's list. Nothing here comes from a game.
-const WHATS_KEPT: [(&str, &str); 3] = [
+/// PRD §10's list, said as it is. Installed plugins and which are on stay on
+/// the device until plugin folders sync, which is Phase 7. Nothing here comes
+/// from a game.
+const WHATS_KEPT: [(&str, &str); 4] = [
     ("Maps, characters and notes", "Synced"),
-    ("Triggers, aliases, plugins and settings", "Synced"),
+    ("Triggers, aliases and settings", "Synced"),
+    ("Plugins", "On this device"),
     ("Game logs and typing", "Never synced"),
 ];
 
@@ -409,6 +412,17 @@ mod tests {
             ago(Timestamp(now.0 + MINUTE), now),
             "just now",
             "clock skew"
+        );
+    }
+
+    #[test]
+    fn plugins_are_said_to_stay_on_this_device_not_to_sync() {
+        let how = |what: &str| WHATS_KEPT.iter().find(|row| row.0 == what).map(|row| row.1);
+        assert_eq!(how("Plugins"), Some("On this device"));
+        assert!(
+            WHATS_KEPT
+                .iter()
+                .all(|(what, how)| *how != "Synced" || !what.contains("lugins"))
         );
     }
 
