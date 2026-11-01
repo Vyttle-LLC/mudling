@@ -9,6 +9,7 @@
 
 use crate::assets::HEADING_FONT;
 use crate::dpad;
+use crate::find_panel::marked_label;
 use crate::theme::Theme;
 use gpui::{
     AnyView, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
@@ -124,6 +125,12 @@ impl Place {
 struct Sighting {
     name: SharedString,
     marks: Vec<Mark>,
+}
+
+impl Sighting {
+    fn label(&self) -> String {
+        marked_label(&self.name, &self.marks)
+    }
 }
 
 fn sightings(room: &MapRoom, mobs: &MobsState) -> Vec<Sighting> {
@@ -481,7 +488,7 @@ impl RoomPanel {
                 div()
                     .id(("seen", index))
                     .role(Role::ListItem)
-                    .aria_label(mob.name.clone())
+                    .aria_label(mob.label())
                     .h(BUTTON_HEIGHT)
                     .flex()
                     .items_center()
@@ -720,6 +727,19 @@ mod tests {
         assert_eq!(seen[0].name, "(Marked) a grey Wolf");
         assert_eq!(seen[0].marks, [Mark::Aggressive, Mark::Gear]);
         assert!(!seen.iter().any(|mob| mob.name == "forgotten"));
+    }
+
+    #[test]
+    fn a_sightings_marks_are_read_with_its_name() {
+        let sighting = |marks| Sighting {
+            name: "a grey wolf".into(),
+            marks,
+        };
+        assert_eq!(sighting(Vec::new()).label(), "a grey wolf");
+        assert_eq!(
+            sighting(vec![Mark::Aggressive, Mark::Gear]).label(),
+            "a grey wolf, aggressive, gear"
+        );
     }
 
     type Sent = Rc<RefCell<Vec<(String, bool)>>>;

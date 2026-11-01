@@ -112,12 +112,17 @@ fn shown_name(row: &FindRow) -> SharedString {
     }
 }
 
-/// What a screen reader reads for a row. The marks' own text is out of its
-/// reach.
-fn row_label(name: &str, marks: &[Mark], place: &str) -> String {
+/// What a screen reader reads for a name and its marks, whose own text is
+/// out of its reach.
+pub fn marked_label(name: &str, marks: &[Mark]) -> String {
     let marks = marks.iter().map(|mark| mark.name());
-    let parts: Vec<&str> = [name].into_iter().chain(marks).chain([place]).collect();
+    let parts: Vec<&str> = [name].into_iter().chain(marks).collect();
     parts.join(", ")
+}
+
+/// What a screen reader reads for a row.
+fn row_label(name: &str, marks: &[Mark], place: &str) -> String {
+    format!("{}, {place}", marked_label(name, marks))
 }
 
 /// The room Walk goes to, unless there's nothing to walk.
