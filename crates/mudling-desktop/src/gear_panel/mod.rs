@@ -341,6 +341,11 @@ impl GearPanel {
         self.rebuild(cx);
     }
 
+    #[cfg(test)]
+    pub fn items(&self) -> &ItemsState {
+        &self.items
+    }
+
     /// Takes the character's level, for the level locks.
     pub fn show_character(&mut self, character: &CharactersState, cx: &mut Context<GearPanel>) {
         let level = match character.0.get(CHARACTER_LEVEL) {

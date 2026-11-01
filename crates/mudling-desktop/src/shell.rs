@@ -1258,6 +1258,10 @@ impl Shell {
             &SettingsState::default(),
             cx,
         );
+        self.gear_panel.update(cx, |panel, cx| {
+            panel.show_items(ItemsState::default(), cx);
+            panel.show_character(&CharactersState::default(), cx);
+        });
         self.show_problems(&SettingsState::default(), cx);
         self.settings.update(cx, |sheet, cx| {
             sheet.show_plugins(Vec::new(), cx);
@@ -4127,6 +4131,32 @@ pub mod tests {
             assert!(sheet.turned_off().is_empty());
             assert!(sheet.costs().is_empty());
             assert!(sheet.plugins().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn leaving_for_the_empty_state_empties_the_gear_panel(cx: &mut TestAppContext) {
+        let (mut launched, _socket) = launch_playing(game_plugin(), cx);
+        launched.shell.update(launched.cx, |shell, cx| {
+            let items = crate::measure::sample_items_with_sets();
+            shell
+                .gear_panel
+                .update(cx, |panel, cx| panel.show_items(items, cx));
+        });
+        launched.cx.run_until_parked();
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let items = shell.gear_panel.read(cx).items();
+            assert!(!items.worn.is_empty() && !items.carried.is_empty());
+            assert!(!items.sets.is_empty());
+        });
+
+        launched.click("session-switcher");
+        launched.click("session-choose-server");
+        launched.frames_until("the empty state", |shell, _| shell.on_empty_state());
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let items = shell.gear_panel.read(cx).items();
+            assert!(items.worn.is_empty() && items.carried.is_empty());
+            assert!(items.sets.is_empty());
         });
     }
 
