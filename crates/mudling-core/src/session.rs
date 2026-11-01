@@ -189,6 +189,7 @@ enum Input {
     HoldWrites(SyncSender<()>),
     ReleaseWrites(RoomMoves),
     TurnPluginOn(PluginId),
+    LoggingChanged,
     Quit,
 }
 
@@ -352,6 +353,13 @@ impl Session {
         self.queue(Input::TurnPluginOn(plugin));
     }
 
+    /// The player saved new [`LogSettings`]: a running connection follows.
+    ///
+    /// [`LogSettings`]: crate::logs::LogSettings
+    pub fn logging_changed(&self) {
+        self.queue(Input::LoggingChanged);
+    }
+
     /// The links the enabled plugins find in `line`, for a shell to offer.
     /// Ask for lines shown, not lines read.
     pub fn links(&self, line: &Line) -> Vec<Link> {
@@ -488,6 +496,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::HoldWrites(done)) => engine.hold_writes(done),
                 Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
+                Some(Input::LoggingChanged) => engine.logging_changed(),
                 Some(Input::Quit) | None => break,
             },
             Some(event) = socket_event(&mut socket) => {

@@ -5,6 +5,7 @@
 use crate::room_panel::Verbs;
 use crate::settings::PluginRow;
 use crate::shell::Game;
+use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::session::{Session, SessionConfig};
@@ -50,6 +51,10 @@ impl Launcher {
             command_line,
             wake: Arc::new(wake),
         }
+    }
+
+    pub fn logs(&self) -> Logs {
+        Logs::in_data_folder(&self.data_folder)
     }
 
     pub fn saved(&self) -> persist::SavedServers {

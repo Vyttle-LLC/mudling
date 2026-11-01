@@ -90,7 +90,10 @@ pub fn run(
     let mut bench = Bench::new(plugins.to_vec());
     let pause = pace.map(|lines_per_second| Duration::from_secs(1) / lines_per_second);
     let samples = play(&mut bench, &reads, pause)?;
-    let heap = HEAP_BYTES.load(Ordering::Relaxed) - heap_before;
+    // The count is the process's: other threads can free more than this adds.
+    let heap = HEAP_BYTES
+        .load(Ordering::Relaxed)
+        .saturating_sub(heap_before);
     let hook_writes = hook_writes(&bench);
     let (_folder, writer_catch_up) = bench.finish();
 
@@ -399,7 +402,11 @@ fn through_the_session(reads: &[Read], plugins: &[Plugin], lines: usize) -> Thre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mudling_core::store::MapState;
+    use mudling_core::logs::Logs;
+    use mudling_core::store::{MapState, TerminalState};
+
+    /// Lines a second, as `--pace`: a test has no use for a real one.
+    const FAST_PACE: u32 = 100_000;
 
     fn replayed(log: &str) -> Vec<String> {
         let events = mudling_core::replay::events(log);
@@ -455,6 +462,45 @@ mod tests {
 
         assert_eq!(replayed("You walk east."), (1, 2));
         assert_eq!(replayed("You can't go that way."), (1, 0));
+    }
+
+    /// A bug report's way in: both logs a session wrote play here, with what
+    /// the server said in them.
+    #[test]
+    fn the_logs_the_app_writes_replay_through_the_session() {
+        let played = mudling_core::replay::events(
+            "[connected]\nA quiet glade.\r\nA path leads east.\r\n\
+             \n[GMCP] Char.Vitals {\"hp\": 7}\n",
+        );
+        let played: Vec<&Event> = played.iter().collect();
+        let mut app = Bench::logging(Vec::new());
+        play(&mut app, &reads(&played), None).unwrap();
+        let (folder, _) = app.finish();
+
+        let logs = Logs::in_data_folder(folder.path()).list().unwrap();
+        let texts: Vec<String> = logs
+            .iter()
+            .map(|log| std::fs::read_to_string(&log.path).unwrap())
+            .filter(|text| text.contains("A quiet glade."))
+            .collect();
+        assert_eq!(texts.len(), 2, "a debug log and a chat log");
+        for text in &texts {
+            let events = mudling_core::replay::events(text);
+            let events: Vec<&Event> = events.iter().collect();
+            let mut bench = Bench::new(Vec::new());
+            play(&mut bench, &reads(&events), None).unwrap();
+            let shown = bench.hub.read(|terminal: &Versioned<TerminalState>| {
+                (terminal.value().lines().iter())
+                    .map(|line| line.plain().to_owned())
+                    .collect::<Vec<_>>()
+            });
+            bench.finish();
+            assert_eq!(shown, ["A quiet glade.", "A path leads east."], "{text}");
+
+            let logs = [mudling_core::replay::events(text)];
+            let report = run("a log", &logs, &[], Some(FAST_PACE)).unwrap();
+            assert_eq!(report.lines, 2, "{text}");
+        }
     }
 
     #[test]

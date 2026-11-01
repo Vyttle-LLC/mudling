@@ -6,6 +6,7 @@ pub mod completion;
 pub mod defaults;
 pub mod git;
 pub mod line;
+pub mod logs;
 pub mod map;
 pub mod merge;
 pub mod net;

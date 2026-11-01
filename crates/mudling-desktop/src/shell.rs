@@ -19,6 +19,8 @@ use crate::input::{self, CommandInput, InputEvent};
 use crate::launcher::{Launcher, Target};
 use crate::room_panel::{self, RoomPanel, SendCommand, Verbs};
 use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
+#[cfg(target_os = "macos")]
+use crate::settings::Section;
 use crate::settings::{PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent};
 use crate::sound::Speaker;
 use crate::status::{StatusLines, lines_for};
@@ -35,6 +37,8 @@ use gpui::{
 };
 use mudling_core::completion::Completion;
 use mudling_core::defaults::hotbar;
+#[cfg(target_os = "macos")]
+use mudling_core::logs::{LogFile, LogSettings};
 use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::{RuleEdit, Session};
@@ -296,6 +300,7 @@ impl Shell {
                     SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
+                    SheetEvent::LoggingChanged => shell.logging_changed(),
                 },
             );
         let quitting = cx.on_app_quit(|shell, cx| {
@@ -412,6 +417,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
+        let logs = launcher.logs();
+        self.settings
+            .update(cx, |sheet, cx| sheet.use_logs(logs, cx));
         self.launcher = Some(launcher);
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(
@@ -947,6 +955,12 @@ impl Shell {
         }
     }
 
+    fn logging_changed(&self) {
+        if let Some(game) = &self.game {
+            game.session.logging_changed();
+        }
+    }
+
     fn on_typing(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Shell>) {
         match event {
             InputEvent::Submitted(command) => return self.submit(command, cx),
@@ -1105,6 +1119,16 @@ impl Shell {
     #[cfg(test)]
     pub fn settings_sheet(&self) -> Entity<SettingsSheet> {
         self.settings.clone()
+    }
+
+    /// Shows the sheet's Logs section with `log` on it, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn show_sample_logs(&self, host: &str, log: LogFile, cx: &mut Context<Shell>) {
+        self.settings.update(cx, |sheet, cx| {
+            sheet.show_playing(Some(host), cx);
+            sheet.select(Section::Logs, cx);
+            sheet.show_logs(LogSettings::default(), vec![log], cx);
+        });
     }
 
     #[cfg(test)]

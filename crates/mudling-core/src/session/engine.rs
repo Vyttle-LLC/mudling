@@ -19,6 +19,7 @@ use crate::defaults::hud::{self, Field, FieldMap};
 use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
 use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
+use crate::logs::SessionLogs;
 use crate::map::{Direction, LiveMap, MapChange, MapRoom, Mark};
 use crate::merge::{RoomMoves, repoint_batch};
 use crate::net::DisconnectReason;
@@ -130,6 +131,7 @@ pub struct Engine {
     history_writer: HistoryWriter,
     database: Database,
     writer: Writer,
+    logs: SessionLogs,
     plugins: PluginHost,
     map: LiveMap,
     walk: WalkSyntax,
@@ -223,6 +225,7 @@ impl Engine {
         let walk = WalkSyntax::of(&plugins);
         let mut engine = Engine {
             map: LiveMap::new(Box::new(PluginRules::of(&plugins))),
+            logs: SessionLogs::new(&config.data_folder, &config.host),
             config,
             hub,
             typing,
@@ -303,6 +306,7 @@ impl Engine {
             mssp_name: None,
             gmcp_enabled: false,
         });
+        self.logs.connection_started();
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
@@ -457,6 +461,7 @@ impl Engine {
                 }
             }
         }
+        notices.extend(self.logs.take_notices());
         for notice in notices {
             self.notice(notice);
         }
@@ -565,6 +570,11 @@ impl Engine {
         self.publish_settings();
     }
 
+    /// The player saved new log settings.
+    pub fn logging_changed(&mut self) {
+        self.logs.follow_settings();
+    }
+
     /// The connection ended. Runs what its hooks still hold, so nothing they
     /// read is lost; that can wait on a slow hook, so call it on a core
     /// thread.
@@ -580,6 +590,7 @@ impl Engine {
             link.hooks.wait_until_idle();
         }
         self.settle(now);
+        self.logs.connection_ended(Some(&reason.to_string()));
         let was_connected = self.settings.connection == ConnectionStatus::Connected;
         self.link = None;
         self.map.connection_lost();
@@ -690,6 +701,7 @@ impl Engine {
         }
         let flushed = self.writer.flush();
         let saved = self.history_writer.finish();
+        self.logs.finish();
         flushed?;
         saved.map_err(SessionError::History)
     }
@@ -697,6 +709,7 @@ impl Engine {
     fn server_said(&mut self, event: Event, now: Timestamp) {
         match event {
             Event::Data(text) => {
+                self.logs.server_text(&text);
                 let Some(link) = &mut self.link else { return };
                 link.pipeline.push(&text, &mut self.lines);
                 self.read_lines(now);
@@ -712,7 +725,10 @@ impl Engine {
                     self.route_events(now);
                 }
             }
-            Event::Gmcp { package, data } => self.gmcp(&package, &data, now),
+            Event::Gmcp { package, data } => {
+                self.logs.gmcp(&package, &data);
+                self.gmcp(&package, &data, now);
+            }
             Event::GmcpEnabled => {
                 if let Some(link) = &mut self.link {
                     link.gmcp_enabled = true;
@@ -720,6 +736,9 @@ impl Engine {
                 self.subscribe_gmcp();
             }
             Event::Echo(echo) => {
+                let line_open =
+                    (self.link.as_ref()).is_some_and(|link| link.pipeline.pending().is_some());
+                self.logs.echo_changed(!echo, line_open);
                 self.settings.echo_off = !echo;
                 self.publish_settings();
             }
@@ -1310,6 +1329,7 @@ impl Engine {
         }
         let blank = line.kind() == LineKind::Server && line.plain().trim().is_empty();
         if !(blank && self.blank_shown) {
+            self.logs.shown(&line);
             self.terminal.push(line);
         }
         self.blank_shown = blank;

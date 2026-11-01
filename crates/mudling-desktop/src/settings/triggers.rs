@@ -156,8 +156,8 @@ fn row_button(
         .child(label)
 }
 
-/// Turns a rule on or off.
-fn switch(
+/// Turns something on or off.
+pub(super) fn switch(
     id: String,
     what: &str,
     on: bool,

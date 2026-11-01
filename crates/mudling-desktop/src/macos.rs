@@ -13,7 +13,8 @@ use crate::launcher::Launcher;
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{App, AsyncApp, Context, Entity, Window, px};
-use mudling_core::persist;
+use mudling_core::logs::{Kind, LogFile};
+use mudling_core::persist::{self, Timestamp};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -208,13 +209,14 @@ const PROBE_LINES: [&str; 2] = [
 ];
 
 /// What a screen reader must find in the open settings sheet.
-const SETTINGS_CONTROLS: [&str; 13] = [
+const SETTINGS_CONTROLS: [&str; 14] = [
     "Servers & characters",
     "Plugins",
     "Triggers & aliases",
     "Appearance",
     "Shortcuts",
     "Data & sync",
+    "Logs",
     "Vault",
     "Close settings",
     "Theme",
@@ -223,6 +225,30 @@ const SETTINGS_CONTROLS: [&str; 13] = [
     "Floating card",
     "Show prompt lines",
 ];
+
+/// The server the Logs section's sample log is for.
+const LOG_SERVER: &str = "mud.example";
+/// What a screen reader must find in the Logs section with one chat log kept.
+const LOGS_CONTROLS: [&str; 5] = [
+    "Keep debug logs, on",
+    "Keep chat logs for mud.example, on",
+    "Clear chat logs",
+    "Pin chat log of mud.example, 2026-03-01 00:04",
+    "Export chat log of mud.example, 2026-03-01 00:04",
+];
+
+/// A log to show, with no file behind it: the check clicks nothing.
+fn sample_log() -> LogFile {
+    LogFile {
+        kind: Kind::Chat,
+        path: "sample.log".into(),
+        server: LOG_SERVER.to_owned(),
+        started: Timestamp(1_772_323_440_000),
+        bytes: 2_500_000,
+        pinned: false,
+        live: false,
+    }
+}
 
 /// The HUD's meters, by name, with a value each must read as.
 const HUD_METERS: [(&str, &str); 4] = [
@@ -607,6 +633,27 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 role == "Tab" && SETTINGS_CONTROLS.contains(&label.as_str())
             }),
             detail: format!("{accesskit_focus:?}"),
+        });
+
+        let on_logs = in_window(
+            &|shell, _, cx| {
+                shell.show_sample_logs(LOG_SERVER, sample_log(), cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing: Vec<_> = LOGS_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the Logs section names its switches, pin, export and clear",
+            passed: on_logs.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
         });
 
         // Throwaway, like the replay's: the check never reads the player's list.

@@ -1,4 +1,5 @@
-//! Replays session logs recorded by the Swift prototype (MUDPad).
+//! Replays session logs recorded by the Swift prototype (MUDPad) or by
+//! [`crate::logs`], which writes the same format.
 //!
 //! The prototype's `SessionLogger` writes the server's text as it arrives,
 //! and interleaves its own notes on separate lines, each written as
@@ -13,17 +14,24 @@
 use std::io;
 use std::path::Path;
 
-/// Notes written by the prototype, not by the server.
-const NOTE_PREFIXES: [&str; 5] = [
+/// Notes written by the prototype and [`crate::logs`], not by the server.
+const NOTE_PREFIXES: [&str; 7] = [
     GMCP_NOTE,
     "[telnet] ",
     "[auto-login] ",
-    "[disconnected] ",
+    DISCONNECTED_NOTE,
     MAP_NOTE,
+    SENT_NOTE,
+    LOG_NOTE,
 ];
-const CONNECTED_NOTE: &str = "[connected]";
-const GMCP_NOTE: &str = "[GMCP] ";
+pub(crate) const CONNECTED_NOTE: &str = "[connected]";
+pub(crate) const DISCONNECTED_NOTE: &str = "[disconnected] ";
+pub(crate) const GMCP_NOTE: &str = "[GMCP] ";
 const MAP_NOTE: &str = "[MAP] ";
+/// A command in a chat log.
+pub(crate) const SENT_NOTE: &str = "[sent] ";
+/// Something a log says about itself.
+pub(crate) const LOG_NOTE: &str = "[log] ";
 
 /// What a log recorded, in order.
 #[derive(Debug, PartialEq)]

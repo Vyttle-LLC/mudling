@@ -1,4 +1,4 @@
-//! The settings sheet: one modal sheet with seven sections, opened by the title
+//! The settings sheet: one modal sheet with eight sections, opened by the title
 //! bar's sprocket or its shortcut.
 //!
 //! The sheet walks its own stops, because gpui's Tab order spans the window and
@@ -8,6 +8,7 @@
 //! has no control to land on, like the list of shortcuts.
 
 mod appearance;
+mod logs;
 mod plugins;
 mod saved;
 mod servers;
@@ -80,17 +81,19 @@ pub enum Section {
     Appearance,
     Shortcuts,
     Data,
+    Logs,
     Vault,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
         Section::Servers,
         Section::Plugins,
         Section::Triggers,
         Section::Appearance,
         Section::Shortcuts,
         Section::Data,
+        Section::Logs,
         Section::Vault,
     ];
 
@@ -102,6 +105,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Shortcuts => "Shortcuts",
             Section::Data => "Data & sync",
+            Section::Logs => "Logs",
             Section::Vault => "Vault",
         }
     }
@@ -126,6 +130,8 @@ pub enum SheetEvent {
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
     TrySound(&'static str),
+    /// New log settings are saved, for the session to follow.
+    LoggingChanged,
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -286,6 +292,7 @@ pub struct SettingsSheet {
     removing: Option<SharedString>,
     plugins: Vec<PluginRow>,
     rules: RulesState,
+    logs: logs::LogsPanel,
     form: triggers::Form,
     notices: Vec<String>,
     turned_off: Vec<PluginDisabled>,
@@ -323,6 +330,7 @@ impl SettingsSheet {
             removing: None,
             plugins: Vec::new(),
             rules: RulesState::default(),
+            logs: logs::LogsPanel::default(),
             form: triggers::Form::new(window, cx),
             notices: Vec::new(),
             turned_off: Vec::new(),
@@ -352,8 +360,11 @@ impl SettingsSheet {
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         self.removing = None;
+        self.logs.stop_asking();
         if self.problems() > 0 {
             self.select(Section::Plugins, cx);
+        } else if self.section == Section::Logs {
+            self.refresh_logs(cx);
         }
         window.focus(&self.tabs[self.section as usize], cx);
     }
@@ -361,6 +372,9 @@ impl SettingsSheet {
     pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
         self.section = section;
         self.scroll.set_offset(point(px(0.), px(0.)));
+        if section == Section::Logs {
+            self.refresh_logs(cx);
+        }
         cx.notify();
     }
 
@@ -574,6 +588,7 @@ impl SettingsSheet {
             Section::Triggers => self.fill_triggers_section(&mut pane, theme, cx),
             Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
             Section::Shortcuts => shortcuts::fill(&mut pane, theme),
+            Section::Logs => self.fill_logs(&mut pane, theme, cx),
             section => pane.row(muted_line(section.not_yet().unwrap_or_default(), theme)),
         }
         if let Some(wanted) = self.reveal.take()
@@ -777,7 +792,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn seven_sections_each_show_something(cx: &mut TestAppContext) {
+    fn every_section_shows_something(cx: &mut TestAppContext) {
         let (shell, cx) = window_with_keys(cx);
         open(&shell, cx);
         for section_shown in Section::ALL {
