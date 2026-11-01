@@ -2,9 +2,9 @@
 # write.
 
 # The 15 slots in the order `equipment` lists them, by the short names the
-# equipment and gear stores use. `equipment` lists every slot, "<nothing>"
-# in an empty one; finger, neck and wrist each hold two and show a second
-# line when both are filled.
+# equipment and gear stores use. With anything worn, `equipment` lists every
+# slot, "<nothing>" in an empty one; finger, neck and wrist each hold two and
+# show a second line when both are filled.
 slots = [
     "light",   # <used as light>
     "finger",  # <worn on finger>
@@ -24,11 +24,15 @@ slots = [
 ]
 
 # "You are using:", then "<worn on finger>    a pink ice ring"; an empty
-# slot holds "<nothing>".
+# slot holds "<nothing>". With nothing worn the table is one line, "Nothing.",
+# which is a row only so a quiet read hides it: it has no slot to read.
 [equipment]
 name = "equipment"
 start = '''^\s*{prompt}?\s*You are using:'''
-row = '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$'''
+row = [
+    '''^<(?<slot>[a-z ]+)>\s+(?<item>.+?)\s*$''',
+    '''^Nothing\.$''',
+]
 hook = "read_equipment"
 
 [identify]

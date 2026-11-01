@@ -245,9 +245,6 @@ impl GearKeeper {
         saving: &mut Saving<'_>,
     ) {
         self.book = GearBook::from_rows(rows);
-        self.saved_worn = worn;
-        (self.saved_worn).retain(|row| row.character_id == character);
-        self.saved_worn.sort_by_key(|row| row.position);
         self.reading.clear();
         self.worn_rows.clear();
         adopt_old_meta(&mut self.book, meta, saving.now, saving.batch);
@@ -283,12 +280,22 @@ impl GearKeeper {
             flat.insert(format!("gear.{key}"), value);
         }
         hub.write::<GearState>(GearState(flat));
+        self.wear_of(character, worn);
         self.worn_by = hub.read(|characters: &Versioned<CharactersState>| {
             match characters.value().0.get(CHARACTER_NAME) {
                 Some(Value::Text(name)) => name.to_lowercase(),
                 _ => String::new(),
             }
         });
+        self.note_book(true);
+    }
+
+    /// `character` has been named, with the record's worn rows. Their list
+    /// takes the place of whoever's was there.
+    pub(super) fn wear_of(&mut self, character: &str, worn: Vec<Worn>) {
+        self.saved_worn = worn;
+        (self.saved_worn).retain(|row| row.character_id == character);
+        self.saved_worn.sort_by_key(|row| row.position);
         self.worn = (self.saved_worn.iter())
             .map(|row| WornItem {
                 slot: row.slot.clone(),
@@ -296,8 +303,8 @@ impl GearKeeper {
                 copy: row.copy_id.clone(),
             })
             .collect();
+        self.worn_by = character.to_owned();
         self.changed = true;
-        self.note_book(true);
     }
 
     fn note_book(&mut self, changed: bool) {

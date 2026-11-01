@@ -4,7 +4,7 @@
 use crate::log::{self, Happened};
 use crate::model::{Room, World, plain_item};
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::{Database, Identification, MapRows, Timestamp};
+use mudling_core::persist::{Affect, Database, Identification, MapRows, Skill, Timestamp};
 use mudling_core::plugin::luau::HookLimits;
 use mudling_core::session::{Credentials, Engine, SessionConfig, Typing};
 use mudling_core::store::StoreHub;
@@ -194,40 +194,46 @@ fn row_text(row: &str) -> String {
 }
 
 /// A character's saved stats as the shared flat keys.
-fn flat_character(stats: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+fn flat_stats(stats: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut flat = BTreeMap::new();
-    let count = |key: &str| {
-        stats
-            .get(key)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0)
-    };
     for (key, value) in stats {
         if let Some(stat) = key.strip_prefix("character.") {
             match stat {
                 "title" => {
                     flat.insert("title".to_owned(), value.clone());
                 }
-                "score.read" => {}
+                // The prototype shows these from GMCP but keeps no record.
+                "score.read" | "ac" | "alignment" | "damroll" | "hitroll" => {}
                 _ => {
                     flat.insert(format!("stat.{stat}"), value.clone());
                 }
             }
-        } else if let Some(skill) = key.strip_prefix("skills.")
-            && !matches!(skill, "practice.read" | "slist.read" | "practice.sessions")
-        {
-            flat.insert(format!("skill.{skill}"), value.clone());
-        }
-    }
-    for index in 1..=count("affects.count") {
-        if let Some(name) = stats.get(&format!("affects.{index}.name")) {
-            let detail = stats
-                .get(&format!("affects.{index}.detail"))
-                .map_or("", String::as_str);
-            flat.insert(format!("affect.{name}: {detail}"), "on".to_owned());
         }
     }
     flat
+}
+
+/// A character's `skills` row as the shared flat keys.
+fn flat_skill(skill: &Skill, flat: &mut BTreeMap<String, String>) {
+    let fields = [
+        ("learned", skill.learned),
+        ("level", skill.level),
+        ("mana", skill.cost),
+    ];
+    for (field, value) in fields {
+        if let Some(value) = value {
+            flat.insert(format!("skill.{}.{field}", skill.name), value.to_string());
+        }
+    }
+}
+
+/// A character's `affects` row as the shared flat keys. A name the game lists
+/// with two details is one row, its details on a line each.
+fn flat_affect(affect: &Affect, flat: &mut BTreeMap<String, String>) {
+    for detail in affect.detail.as_deref().unwrap_or_default().split('\n') {
+        let key = format!("affect.{}: {detail}", affect.name);
+        flat.insert(key, "on".to_owned());
+    }
 }
 
 /// A character's `worn` rows as the shared flat keys, without empty slots.
@@ -286,9 +292,17 @@ pub fn run(logs: &[PathBuf], folder: &Path) -> Result<Replay, String> {
             .insert(stat.key, row_text(&stat.value));
     }
     for (character, stats) in stats {
-        let mut flat = flat_character(&stats);
+        let mut flat = flat_stats(&stats);
         flat.extend(flat_worn(&stats));
         world.characters.insert(character, flat);
+    }
+    for skill in &rows.skills {
+        let flat = world.characters.entry(skill.character_id.clone());
+        flat_skill(skill, flat.or_default());
+    }
+    for affect in &rows.affects {
+        let flat = world.characters.entry(affect.character_id.clone());
+        flat_affect(affect, flat.or_default());
     }
     let gear = reader.gear().map_err(|error| error.to_string())?;
     for facts in gear.facts {

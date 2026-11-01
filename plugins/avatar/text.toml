@@ -31,17 +31,32 @@ hook = "on_welcome"
 
 # `aff` with nothing on: Avatar's "You are not under the affects of any
 # spells", or the ROM wording "You are not affected by any spells". A whole
-# answer on one line, so no table.
+# answer on one line, so no table: `<reader>.none` tells a quiet read so.
 [[pattern]]
-name = "character.affects.none"
+name = "affects.none"
 pattern = '''^\s*{prompt}?\s*You are not (?:under the affects of|affected by) any'''
 hook = "on_no_affects"
 
 # Spells landing and wearing off, and gear that grants affects: "You feel
-# more frail.", "Your armor spell wears off."
+# more frail.", "Your armor spell wears off." `<reader>.stale` asks for
+# that reader's command again.
 [[pattern]]
-name = "character.affects_changed"
+name = "affects.stale"
 pattern = '''^\s*{prompt}?\s*You feel |wears off'''
+
+# A new level brings new skills and practice sessions: "You raise a level!!
+# Your gain is: 13/86 hp, 2/122 m, 10/150 mv 5/16 prac."
+[[pattern]]
+name = "practice.stale"
+pattern = '''^\s*{prompt}?\s*You raise a level'''
+
+[[pattern]]
+name = "slist.stale"
+pattern = '''^\s*{prompt}?\s*You raise a level'''
+
+[[pattern]]
+name = "score.stale"
+pattern = '''^\s*{prompt}?\s*You raise a level'''
 
 # A zone as Avatar names it. It shows in text in "You see a vision of your
 # corpse in:" and the area list.

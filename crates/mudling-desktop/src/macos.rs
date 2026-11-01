@@ -322,6 +322,17 @@ const MAP_HISTORY_CONTROLS: [&str; 3] = [
 ];
 const KEEP_THE_MAP: &str = "Keep this map";
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
+/// The Character tab on its sample, by accessibility role and name.
+const CHARACTER_CONTROLS: [(&str, &str); 2] = [
+    ("AXButton", "Refresh the character"),
+    ("AXGroup", "Character"),
+];
+/// The Skills tab on its sample: a row's button and the two lists' tabs.
+const SKILLS_CONTROLS: [(&str, &str); 3] = [
+    ("AXButton", "Practice magic missile"),
+    ("AXRadioButton", "Spells"),
+    ("AXRadioButton", "Skills"),
+];
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
@@ -547,6 +558,38 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         shell.update(cx, |shell, cx| {
             shell.notes().update(cx, |notes, cx| notes.finish(cx));
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
+        });
+        // A read of a tab on its sample: what's named, by role and name.
+        for (tab, expected) in [
+            (Slot::Character, CHARACTER_CONTROLS.as_slice()),
+            (Slot::Skills, SKILLS_CONTROLS.as_slice()),
+        ] {
+            shell.update(cx, |shell, cx| {
+                crate::measure::open_sheet_tab(shell, tab, cx);
+            });
+            cx.background_executor().timer(pause).await;
+            let tree = window_tree();
+            let missing: Vec<&str> = expected
+                .iter()
+                .filter(|(role, name)| {
+                    !tree.as_ref().is_some_and(|tree| {
+                        !tree
+                            .find(|e| e.is(role, None) && e.title.as_deref() == Some(*name))
+                            .is_empty()
+                    })
+                })
+                .map(|(_, name)| *name)
+                .collect();
+            checks.push(Check {
+                name: "the Character and Skills tabs name their controls",
+                passed: missing.is_empty(),
+                detail: format!("missing {missing:?}"),
+            });
+        }
+        shell.update(cx, |shell, cx| {
             shell
                 .dock(Side::Right)
                 .update(cx, |dock, cx| dock.select(Slot::Room, cx));

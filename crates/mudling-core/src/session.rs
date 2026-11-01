@@ -32,6 +32,8 @@ mod inventory;
 mod latency;
 mod login;
 mod map_rules;
+mod quiet;
+mod sheet;
 mod values;
 
 pub use engine::Engine;
@@ -59,6 +61,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// How long a clean quit waits for the socket to close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often a connection looks for a quiet read to send.
+const QUIET_READ_CHECK: Duration = Duration::from_secs(1);
 
 /// What a session is for. Plain data, so it can cross into a session from
 /// any shell.
@@ -196,6 +200,8 @@ enum Input {
     Send(String),
     SendAction(String),
     Press(String),
+    Typing(bool),
+    RefreshCharacter,
     Edit(RuleEdit),
     EditMap(MapEdit),
     Cancel,
@@ -311,6 +317,18 @@ impl Session {
     /// asks for a password it does nothing: it would go as the password.
     pub fn press(&self, command: impl Into<String>) {
         self.queue(Input::Press(command.into()));
+    }
+
+    /// Says whether the command field holds text the player hasn't sent:
+    /// quiet reads wait while it does.
+    pub fn set_typing(&self, typing: bool) {
+        self.queue(Input::Typing(typing));
+    }
+
+    /// Reads the character's tables again, quietly, once the game can spare
+    /// it. [`crate::store::SheetState::reading`] shows it's under way.
+    pub fn refresh_character(&self) {
+        self.queue(Input::RefreshCharacter);
     }
 
     /// Saves a change the player made; the rules store shows it.
@@ -448,6 +466,8 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
     let host = engine.host().to_owned();
     let port = engine.port();
     let timeout = engine.connect_timeout();
+    let mut quiet_reads = tokio::time::interval(QUIET_READ_CHECK);
+    quiet_reads.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             input = inputs.recv() => match input {
@@ -471,6 +491,8 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                     engine.send_action(&command, Timestamp::now());
                 }
                 Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
+                Some(Input::Typing(typing)) => engine.set_typing(typing),
+                Some(Input::RefreshCharacter) => engine.refresh_character(),
                 Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
                 Some(Input::EditMap(edit)) => engine.edit_map(edit, Timestamp::now()),
                 Some(Input::Cancel) => {
@@ -504,6 +526,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
             }
             output = engine.next_hook_output() => engine.hook_output(output, Timestamp::now()),
+            _ = quiet_reads.tick(), if socket.is_some() => engine.tick(Timestamp::now()),
         }
         engine.settle(Timestamp::now());
         let output = engine.take_output();

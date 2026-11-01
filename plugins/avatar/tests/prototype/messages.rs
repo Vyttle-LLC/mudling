@@ -79,7 +79,7 @@ fn gear_and_affect_messages_are_events() {
          You light Nom's Crystal Lantern and hold it.\n\
          You wield a long sword.",
     );
-    assert_eq!(transcript.events("character.affects_changed", &[]).len(), 1);
+    assert_eq!(transcript.events("affects.stale", &[]).len(), 1);
     assert_eq!(
         items(&transcript, "gear.removed"),
         ["an official Cult of Bonk Hat"]

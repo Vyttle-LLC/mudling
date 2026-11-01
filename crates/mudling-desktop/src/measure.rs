@@ -79,8 +79,9 @@ use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
     Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CarriedItem,
-    CharactersState, Item, ItemsState, MapState, MobsState, Occupant, RoomContents, RoomState,
-    StoreHub, Target, TargetState, Versioned, VitalsState, WornItem,
+    CharactersState, ConnectionStatus, Improved, Item, ItemsState, MapState, MobsState, Occupant,
+    RoomContents, RoomState, SettingsState, SheetState, SkillRow, StoreHub, Target, TargetState,
+    Versioned, VitalsState, WornItem,
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
@@ -421,6 +422,99 @@ pub fn fill_room_panel(shell: &Shell, room: Option<RoomState>, cx: &mut App) {
     });
 }
 
+/// A made-up character, as the canvas draws them, and 60 skills: a long list
+/// for a game's middle levels.
+pub fn sample_sheet() -> (SheetState, CharactersState, VitalsState) {
+    let number = |key: &str, value: f64| (key.to_owned(), Value::Number(value));
+    let text = |key: &str, value: &str| (key.to_owned(), Value::Text(value.to_owned()));
+    let mut skills: Vec<SkillRow> = [
+        ("magic missile", 1, 76, 15),
+        ("armor", 1, 60, 5),
+        ("detect magic", 2, 45, 5),
+        ("chill touch", 3, 1, 15),
+        ("invisibility", 4, 1, 5),
+        ("burning hands", 5, 1, 15),
+        ("shield", 6, 1, 12),
+    ]
+    .map(|(name, level, learned, mana)| SkillRow {
+        name: name.to_owned(),
+        level: Some(level),
+        learned: Some(learned),
+        mana: Some(mana),
+    })
+    .into();
+    skills.extend((0..60).map(|index| SkillRow {
+        name: format!("technique {index:02}"),
+        level: Some(1 + index / 4),
+        learned: Some(index * 7 % 100),
+        mana: Some(if index % 3 == 0 { 20 } else { 0 }),
+    }));
+    skills.push(SkillRow {
+        level: Some(90),
+        ..SkillRow::named("mass invigorate")
+    });
+    let sheet = SheetState {
+        character: "altissima".to_owned(),
+        stats: BTreeMap::from([
+            text("name", "Altissima"),
+            text("race", "Human"),
+            text("class", "Mage"),
+            number("level", 2.),
+            number("str", 14.),
+            number("str_perm", 16.),
+            number("int", 17.),
+            number("int_perm", 19.),
+            number("wis", 13.),
+            number("wis_perm", 16.),
+            number("dex", 15.),
+            number("dex_perm", 17.),
+            number("con", 13.),
+            number("con_perm", 15.),
+            number("gold", 312.),
+            number("trains", 1.),
+            number("quest_points", 0.),
+            number("hitroll", 2.),
+            number("damroll", 1.),
+            number("ac", -4.),
+            number("saves", -1.),
+            number("alignment", 350.),
+            number("wimpy", 10.),
+        ]),
+        skills,
+        practices: Some(4),
+        sources: vec!["score".to_owned(), "aff".to_owned()],
+        character_read: Some(Timestamp(Timestamp::now().0 - 2 * 60_000)),
+        skills_read: Some(Timestamp::now()),
+        improved: Some(Improved {
+            skill: "magic missile".to_owned(),
+            learned: 76,
+            at: Timestamp::now(),
+        }),
+        ..SheetState::default()
+    };
+    let characters = CharactersState(BTreeMap::from([text(CHARACTER_POSITION, "Standing")]));
+    let vitals = VitalsState(BTreeMap::from([
+        (Vital::ToNextLevel, 5_001),
+        (Vital::MaxToNextLevel, 8_000),
+    ]));
+    (sheet, characters, vitals)
+}
+
+/// Opens the Character or Skills tab on the sample.
+pub fn open_sheet_tab(shell: &mut Shell, tab: Slot, cx: &mut Context<Shell>) {
+    let (sheet, characters, vitals) = sample_sheet();
+    let settings = SettingsState {
+        connection: ConnectionStatus::Connected,
+        ..SettingsState::default()
+    };
+    shell.hold_sheet();
+    shell.show_sheet_of(&sheet, &characters, &vitals, &settings, cx);
+    shell.dock(Side::Right).update(cx, |dock, cx| {
+        dock.move_to(DockState::Open, cx);
+        dock.select(tab, cx);
+    });
+}
+
 /// The Notes tab open on 400 made-up notes, with the editor on the first.
 pub fn open_notes(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
     let notes = shell.notes();
@@ -631,6 +725,7 @@ struct Pacer {
     find_started: Option<Instant>,
     find_panel: Option<FindPanelTyping>,
     notes_open: bool,
+    sheet_tab: Option<Slot>,
     frames: u64,
     _no_app_nap: ActivityGuard,
 }
@@ -753,6 +848,10 @@ impl Pacer {
             if phase == Phase::Stream && self.find_open {
                 self.start_find(window, cx);
             }
+            if let Some(tab) = self.sheet_tab.filter(|_| phase == Phase::Stream) {
+                self.shell
+                    .update(cx, |shell, cx| open_sheet_tab(shell, tab, cx));
+            }
             if phase == Phase::Stream && self.find_panel.is_some() {
                 self.shell
                     .update(cx, |shell, cx| shell.focus_find_panel(window, cx));
@@ -841,6 +940,8 @@ pub struct Run {
     pub find_open: bool,
     pub find_panel: bool,
     pub notes_open: bool,
+    /// The Character or Skills tab, open on its sample while lines stream.
+    pub sheet_tab: Option<Slot>,
 }
 
 /// Calls `stalled` once `limit` has gone by since `last_frame`.
@@ -915,6 +1016,7 @@ pub fn drive(
         find_started: None,
         find_panel,
         notes_open: run.notes_open,
+        sheet_tab: run.sheet_tab,
         frames: 0,
         _no_app_nap: cx
             .background_executor()
@@ -948,6 +1050,8 @@ struct FrameReport {
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
+    character_open: bool,
+    skills_open: bool,
     lines_per_second: f64,
     stream_seconds: f64,
     time_to_first_frame_ms: Option<f64>,
@@ -1038,6 +1142,8 @@ pub fn run_parent(
         find_open: child_args.iter().any(|arg| arg == "--find-open"),
         find_panel: child_args.iter().any(|arg| arg == "--find-panel"),
         notes_open: child_args.iter().any(|arg| arg == "--notes-open"),
+        character_open: child_args.iter().any(|arg| arg == "--character-open"),
+        skills_open: child_args.iter().any(|arg| arg == "--skills-open"),
         lines_per_second,
         stream_seconds: stream_for.as_secs_f64(),
         time_to_first_frame_ms: time_to_first_frame.map(|d| d.as_secs_f64() * 1e3),
@@ -1098,6 +1204,18 @@ fn print_report(report: &FrameReport) {
         } else {
             "closed"
         }
+    );
+    println!(
+        "Character tab: {}",
+        if report.character_open {
+            "open"
+        } else {
+            "closed"
+        }
+    );
+    println!(
+        "Skills tab: {}",
+        if report.skills_open { "open" } else { "closed" }
     );
     for (phase, summary) in &report.phases {
         println!(

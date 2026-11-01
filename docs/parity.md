@@ -65,10 +65,17 @@ environment) except two descriptions, below. Aggressive mobs match. MUDling
 has every identify reading the prototype has, and a few it dropped, below.
 
 Everything is read from the final database and the final baseline, nothing
-from partway through. Characters' `score`, skills, affects and worn items are
-the plugin's own stores, as their stats rows. Gear is read from its typed
-rows, `worn` among them. The typed `skills` and `affects` tables have no rows
-yet: filling them is Phase 5's.
+from partway through. Characters' `score` facts are stats rows, and skills and
+affects come from the typed `skills` and `affects` tables, per character.
+Worn items are the plugin's own store, as stats rows: the checker reads them
+there, though the app keeps a typed `worn` list as well. Gear's slots, keywords,
+measurements and readings are read from its typed rows.
+
+A replay sends no quiet reads, as it has no game to answer them: only
+`Engine::tick` sends one, and the checker doesn't call it. So quiet reads don't
+change any reading here, and the 126 `character.skill` and 47 score differences
+stay. All of those are rows MUDling has and the prototype doesn't, and no
+change on MUDling's side would close them but losing the rows.
 
 Room ids don't match, and aren't compared: the prototype spends two on Lost in
 the Dark Woods before it works out that's a maze, where the plugin declares
@@ -102,6 +109,7 @@ Not compared, on purpose:
 | `updated` and sighting times | The replay's clock isn't the session's. |
 | The map's next id and island count | Bookkeeping; ids aren't compared, and positions show any effect of islands. |
 | Skills' `practice.sessions`, `practice.read`, `slist.read` and `score.read` | The plugin's own counts, with no prototype field. |
+| Stats `ac`, `alignment`, `damroll` and `hitroll` | MUDling keeps them from Char.Status for the Character panel. The prototype shows them live and keeps no record of them. |
 
 The differences these replaced were fixed, not excused:
 

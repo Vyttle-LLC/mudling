@@ -114,7 +114,7 @@ impl Points {
         rules
     }
 
-    pub(super) fn readers(&self) -> Vec<(Point, &TableReader)> {
+    pub(crate) fn readers(&self) -> Vec<(Point, &TableReader)> {
         let character = self.character.iter().flat_map(|point| &point.readers);
         let gear = self
             .gear
@@ -810,6 +810,23 @@ pub struct Character {
 }
 
 /// A command the client may send quietly, and the reader for its reply.
+///
+/// It goes out when the character enters the game, and again when a line
+/// says its table is stale. Its reply stays out of the chat, line by line, so:
+///
+/// - The reader's `start`, `row` and `end` patterns must match every line of
+///   the reply that should hide, ruled lines and headings too. Any other line
+///   shows and fires triggers, as text the game sent meanwhile would. A
+///   hook is free to ignore a row that holds no facts, and should do so
+///   cheaply: every row counts against its budget.
+/// - Name a rule of any point `<reader>.stale` to ask for the command again
+///   when its line appears: one rule per reader, each with the same pattern if
+///   one line makes several stale. It needs no hook.
+/// - Name a rule `<reader>.none` if the game may answer with one line and no
+///   table. That line and the prompt after it hide too.
+///
+/// Neither name changes the rule's shape: the rule is matched and delivered
+/// as usual, and a plugin that doesn't use the names loses nothing.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackgroundCommand {
