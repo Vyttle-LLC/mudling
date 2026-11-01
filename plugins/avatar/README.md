@@ -4,8 +4,10 @@ The Avatar game plugin (avatar.outland.org): TOML with Luau hooks, written
 only against the public plugin API (PRD §11). Everything MUDling knows about
 Avatar is in this folder; the core holds none of its wording.
 
-It's also the first worked example for plugin authors (the cookbook,
-VYT-235): each file says what it reads, and each regex has a comment.
+It's also the first worked example for plugin authors: each file says what it
+reads, and each regex has a comment. The
+[cookbook](../../docs/plugins/cookbook.md) works through it, quoting these files,
+so a change to a quoted line goes there too.
 
 The desktop app ships it compiled in (`bundled()` in `src/lib.rs`, which names
 every file here, so a new file goes there too). It stays off until the player

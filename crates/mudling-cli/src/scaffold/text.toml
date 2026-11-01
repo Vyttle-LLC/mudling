@@ -1,0 +1,23 @@
+# What the game prints. Each regex is in a '''literal''' string, so nothing
+# needs escaping twice.
+
+# A prompt, known by its shape: "<20hp 30m>". A server that sends GA or EOR
+# after its prompts doesn't need this.
+[[prompt]]
+pattern = '''^<\d+hp \d+m>'''
+
+# "Welcome back, Ana.": the hook on_welcome reads the name.
+[[pattern]]
+name = "character.welcome"
+pattern = '''^Welcome back, (?<name>\w+)\.$'''
+hook = "on_welcome"
+
+# "It starts to rain.": a named event, with no hook.
+[[pattern]]
+name = "weather"
+pattern = '''^It starts to (?<weather>\w+)\.$'''
+
+# Shows speech in color, on a server that sends none.
+[[color]]
+pattern = ''' says '.*'$'''
+fg = 6
