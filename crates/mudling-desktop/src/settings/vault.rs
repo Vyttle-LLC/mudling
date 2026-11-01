@@ -270,7 +270,6 @@ impl SettingsSheet {
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
-        self.forget_vault_secrets(cx);
         self.vault._watching = follow_states(&vault, window, cx);
         let state = vault.state();
         self.vault.state = state;
@@ -282,6 +281,11 @@ impl SettingsSheet {
     /// The handle the shell logs in with.
     pub fn vault(&self) -> Option<Vault> {
         self.vault.vault.clone()
+    }
+
+    /// Whether a server is waiting for the player to unlock the vault.
+    pub(super) fn is_waited_on(&self) -> bool {
+        self.vault.waiting_host.is_some()
     }
 
     /// Says which server is waiting for an unlock, and shows the section.
@@ -339,18 +343,23 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) {
         self.vault.state = state;
+        self.keep_focus_in_sheet(window, cx);
         if state == VaultState::Unlocked {
             self.vault.waiting_host = None;
             self.list_vault(cx);
             cx.emit(SheetEvent::VaultUnlocked);
         } else {
-            let was_here = self.a_stop_of_the_section_has_focus(window);
             self.forget_vault_secrets(cx);
-            if was_here {
-                window.focus(&self.tabs[Section::Vault as usize], cx);
-            }
         }
         cx.notify();
+    }
+
+    /// Moves focus off a stop that's about to go with its form, so the sheet
+    /// keeps the keyboard. A focused stop means the sheet is on the screen.
+    fn keep_focus_in_sheet(&self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        if self.a_stop_of_the_section_has_focus(window) {
+            window.focus(&self.tabs[Section::Vault as usize], cx);
+        }
     }
 
     fn a_stop_of_the_section_has_focus(&self, window: &Window) -> bool {
@@ -413,9 +422,20 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    fn issued(&mut self, issued: RecoveryKeyIssued, cx: &mut Context<SettingsSheet>) {
+    fn issued(
+        &mut self,
+        issued: RecoveryKeyIssued,
+        window: &mut Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
         self.vault.recovery = Some(issued.recovery_key);
         self.cached(issued.device_cache);
+        self.finish_vault_form(window, cx);
+    }
+
+    /// The form did its job, so it goes, and the keyboard stays in the sheet.
+    fn finish_vault_form(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        self.keep_focus_in_sheet(window, cx);
         self.close_vault_form(cx);
     }
 
@@ -524,7 +544,7 @@ impl SettingsSheet {
         if let Some(master) = self.new_master(cx) {
             self.vault_job(
                 async move { vault.create(master).await },
-                |sheet, issued, _, cx| sheet.issued(issued, cx),
+                |sheet, issued, window, cx| sheet.issued(issued, window, cx),
                 window,
                 cx,
             );
@@ -539,7 +559,7 @@ impl SettingsSheet {
         if let Some(master) = self.new_master(cx) {
             self.vault_job(
                 async move { vault.change_master_password(master).await },
-                |sheet, issued, _, cx| sheet.issued(issued, cx),
+                |sheet, issued, window, cx| sheet.issued(issued, window, cx),
                 window,
                 cx,
             );
@@ -661,8 +681,8 @@ impl SettingsSheet {
         }
         self.vault_job(
             async move { vault.set_password(entry, password).await },
-            |sheet, (), _, cx| {
-                sheet.close_vault_form(cx);
+            |sheet, (), window, cx| {
+                sheet.finish_vault_form(window, cx);
                 sheet.list_vault(cx);
             },
             window,
@@ -740,8 +760,8 @@ impl SettingsSheet {
                 let conflicts = vault.conflicts(again()).await?;
                 Ok((old_master, brought_back, conflicts))
             },
-            |sheet, (old_master, brought_back, conflicts), _, cx| {
-                sheet.close_vault_form(cx);
+            |sheet, (old_master, brought_back, conflicts), window, cx| {
+                sheet.finish_vault_form(window, cx);
                 sheet.vault.note = Some(brought_back_words(brought_back).into());
                 if !conflicts.is_empty() {
                     sheet.vault.conflicts = Some(Conflicts {
@@ -771,13 +791,14 @@ impl SettingsSheet {
         self.hide_passwords(cx);
         self.vault_job(
             async move { vault.settle_conflict(old_master, entry, keep).await },
-            |sheet, (), _, cx| {
+            |sheet, (), window, cx| {
                 let conflicts = sheet.vault.conflicts.as_mut();
                 let left = conflicts.map_or(0, |conflicts| {
                     conflicts.waiting.pop_front();
                     conflicts.waiting.len()
                 });
                 if left == 0 {
+                    sheet.keep_focus_in_sheet(window, cx);
                     sheet.vault.conflicts = None;
                 }
                 sheet.list_vault(cx);
@@ -1494,6 +1515,58 @@ mod tests {
         };
         open.until("the vault's state", |pane| pane.state == VaultState::Locked);
         open
+    }
+
+    impl Open<'_> {
+        /// Puts focus in `field`, as Tab would, and types `text` there.
+        fn focus_and_type(&mut self, field: &Entity<CommandInput>, text: &str) {
+            let (field, text) = (field.clone(), text.to_owned());
+            self.cx.update(|window, cx| {
+                window.focus(&gpui::Focusable::focus_handle(field.read(cx), cx), cx);
+                let end = text.len();
+                field.update(cx, |field, cx| field.show(text, end, window, cx));
+            });
+            self.cx.run_until_parked();
+        }
+
+        /// The sheet still has the keyboard: focus sits on the Vault tab, and
+        /// Esc, bound only inside the sheet, reaches it.
+        fn assert_sheet_keeps_keys(&mut self) {
+            let sheet = self.sheet();
+            let on_tab = self.cx.update(|window, cx| {
+                sheet.read(cx).tabs[Section::Vault as usize].is_focused(window)
+            });
+            assert!(on_tab, "focus stays in the sheet");
+            self.cx.simulate_keystrokes("escape");
+            self.cx.run_until_parked();
+            assert!(self.cx.debug_bounds("settings-sheet").is_none());
+        }
+    }
+
+    #[gpui::test]
+    fn return_in_the_master_field_unlocks_and_the_sheet_keeps_the_keyboard(
+        cx: &mut TestAppContext,
+    ) {
+        let mut open = opened(cx);
+        let master = open.pane(|pane| pane.fields.master.clone());
+        open.focus_and_type(&master, FIXTURE_MASTER);
+        open.cx.simulate_keystrokes("enter");
+        open.until("the list", |pane| !pane.entries.is_empty());
+        open.cx.run_until_parked();
+        open.assert_sheet_keeps_keys();
+    }
+
+    #[gpui::test]
+    fn return_in_a_saved_form_leaves_the_sheet_the_keyboard(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        open.unlock();
+        open.click("vault-change-0");
+        let password = open.pane(|pane| pane.fields.password.clone());
+        open.focus_and_type(&password, "a new one");
+        open.cx.simulate_keystrokes("enter");
+        open.until("the save", |pane| pane.form.is_none() && !pane.busy);
+        open.cx.run_until_parked();
+        open.assert_sheet_keeps_keys();
     }
 
     #[gpui::test]

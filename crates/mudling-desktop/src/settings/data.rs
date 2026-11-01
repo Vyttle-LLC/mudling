@@ -334,8 +334,10 @@ impl SettingsSheet {
                 .text_color(theme.text),
         );
         let keep = text_button("keep-sync", "Keep syncing", &pane.stop(cx), theme).on_click(
-            cx.listener(|sheet, _, _, cx| {
+            cx.listener(|sheet, _, window, cx| {
                 sheet.data.asking_to_stop = false;
+                // This stop goes with the question.
+                window.focus(&sheet.tabs[Section::Data as usize], cx);
                 cx.notify();
             }),
         );

@@ -357,7 +357,9 @@ impl SettingsSheet {
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         self.removing = None;
-        let opening_on = if self.problems() > 0 {
+        let opening_on = if self.is_waited_on() {
+            Section::Vault
+        } else if self.problems() > 0 {
             Section::Plugins
         } else if self.sync_problems() > 0 {
             Section::Data
@@ -1276,6 +1278,39 @@ mod tests {
             shell.settings_sheet().read(cx).details.clone()
         });
         assert_eq!(open, Some(disabled.to_string()));
+    }
+
+    #[gpui::test]
+    fn keep_syncing_leaves_the_sheet_the_keyboard(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        section(Section::Data, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| sheet.show_sample_data(cx));
+        cx.run_until_parked();
+        click("stop-sync", cx);
+        click("keep-sync", cx);
+        assert!(cx.debug_bounds("keep-sync").is_none());
+        let on_tab =
+            cx.update(|window, cx| sheet.read(cx).tabs[Section::Data as usize].is_focused(window));
+        assert!(on_tab, "focus stays in the sheet");
+    }
+
+    #[gpui::test]
+    fn a_server_waiting_on_the_vault_opens_the_vault_over_any_problems(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let settings = SettingsState {
+            notices: vec!["A notice".to_owned()],
+            ..SettingsState::default()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_problems(&settings, cx));
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| sheet.wait_for_unlock("mud.example", cx));
+        open(&shell, cx);
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.section),
+            Section::Vault
+        );
     }
 
     #[gpui::test]
