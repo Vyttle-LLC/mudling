@@ -44,7 +44,7 @@ const COPIES: &str = "copies.json";
 const TRIGGERS: &str = "triggers.json";
 const ALIASES: &str = "aliases.json";
 pub(crate) const NOTES: &str = "notes.txt";
-const TOMBSTONES: &str = "tombstones.json";
+pub(crate) const TOMBSTONES: &str = "tombstones.json";
 
 /// What stays out of git, whatever else a player's `.gitignore` says: the
 /// vault's half-written copies, MUDling's own, and all logs (PRD §10).
@@ -97,6 +97,17 @@ const GEAR_KEYWORD: &str = "plugin.gear.keyword.";
 /// which can say anything, such as `a password scroll`.
 pub(crate) fn is_game_words(key: &str) -> bool {
     key.starts_with(GEAR_NAME) || key.starts_with(GEAR_KEYWORD)
+}
+
+/// Whether a tombstone for `key` names only what the game wrote: its map,
+/// characters, gear and mobs, and an item's name or word. What the player
+/// wrote, a trigger, an alias or a setting, is not.
+pub(crate) fn is_game_tombstone(key: &Key) -> bool {
+    match key {
+        Key::Trigger(_) | Key::Alias(_) => false,
+        Key::Meta(key) => is_game_words(key),
+        _ => true,
+    }
 }
 
 fn is_synced_meta(key: &str) -> bool {

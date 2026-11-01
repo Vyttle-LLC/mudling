@@ -6,7 +6,9 @@
 //! file and in JSON held inside a string (`Server.settings`), whatever the
 //! field holds besides a flag; `password: x` in text the player wrote; and a
 //! trigger that answers a password prompt. Game text doesn't count, because a
-//! room may well say "password: mellon".
+//! room may well say "password: mellon". That includes an item's name and word
+//! in `servers.json`, and the tombstone of any record the game wrote; a
+//! tombstone of a trigger, an alias or a setting does count.
 //!
 //! So it can't catch:
 //! - a password with no password word beside it: an alias `in` that expands to
@@ -27,8 +29,10 @@
 //! A field named for a password that holds a number trips it too, such as
 //! `password_length`, which would need renaming before it could be pushed.
 
+use crate::persist::Key;
 use crate::repo::format::{
-    CHARACTERS_FOLDER, GEAR_FOLDER, MAP_FOLDER, MOBS, NOTES, SETTINGS, is_game_words,
+    CHARACTERS_FOLDER, GEAR_FOLDER, MAP_FOLDER, MOBS, NOTES, SETTINGS, TOMBSTONES,
+    is_game_tombstone, is_game_words,
 };
 use crate::vault;
 use regex::Regex;
@@ -86,6 +90,9 @@ pub fn find_password(path: &Path, bytes: &[u8]) -> Option<String> {
         {
             settings.remove("shortcuts");
         }
+        if path.file_name().is_some_and(|name| name == TOMBSTONES) {
+            drop_game_tombstones(&mut value);
+        }
         let scan = Scan {
             authored: !is_game_text(path),
         };
@@ -98,6 +105,20 @@ pub fn find_password(path: &Path, bytes: &[u8]) -> Option<String> {
     };
     let line = text.lines().position(|line| pattern.is_match(line))?;
     Some(format!("line {}", line + 1))
+}
+
+/// Takes out of a tombstones file the ones whose key is the game's text, such
+/// as a sighting of `a password hound`. A tombstone of what the player wrote
+/// stays to be looked at, and so does one that can't be read.
+fn drop_game_tombstones(file: &mut Value) {
+    let Some(entries) = file.get_mut("tombstones").and_then(Value::as_array_mut) else {
+        return;
+    };
+    entries.retain(|entry| {
+        let key = entry.get("key").cloned();
+        let key = key.and_then(|key| serde_json::from_value::<Key>(key).ok());
+        !key.is_some_and(|key| is_game_tombstone(&key))
+    });
 }
 
 /// Whether the game wrote this file's text, not the player: a server folder's
@@ -236,6 +257,42 @@ mod tests {
         // A player's own setting still counts.
         let list = row("login.password", "hunter2");
         assert!(found("servers.json", &list).is_some());
+    }
+
+    fn tombstones(keys: &[&str]) -> String {
+        let entries: Vec<String> = keys
+            .iter()
+            .map(|key| format!(r#"{{"key":{key},"deleted":1}}"#))
+            .collect();
+        format!(r#"{{"tombstones":[{}]}}"#, entries.join(","))
+    }
+
+    #[test]
+    fn a_tombstone_of_the_games_words_is_game_text_even_if_it_says_password() {
+        let file = tombstones(&[
+            r#"{"sighting":{"room_id":1,"mob":"a hound, password: woof"}}"#,
+            r#"{"item_facts":"a scroll, password=mellon"}"#,
+            r#"{"meta":"plugin.gear.name.pwd: scroll"}"#,
+            r#"{"meta":"plugin.gear.keyword.password: x"}"#,
+            r#"{"room_feature":{"room_id":2,"feature":"password: x"}}"#,
+        ]);
+
+        assert_eq!(found("mud.example.org/tombstones.json", &file), None);
+    }
+
+    #[test]
+    fn a_tombstone_of_what_the_player_wrote_is_still_looked_at() {
+        for key in [
+            r#"{"alias":"password: hunter2"}"#,
+            r#"{"trigger":"pwd=hunter2"}"#,
+            r#"{"meta":"login.password: hunter2"}"#,
+        ] {
+            let file = tombstones(&[r#"{"room":1}"#, key]);
+            assert!(
+                found("mud.example.org/tombstones.json", &file).is_some(),
+                "{key}"
+            );
+        }
     }
 
     #[test]
