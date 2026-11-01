@@ -284,6 +284,62 @@ fn a_rule_for_one_character_follows_the_name_the_game_gives() {
     );
 }
 
+/// Two characters share a server and, on the desktop, a session id, so what
+/// the last one's name left saved says nothing about who plays now.
+#[test]
+fn a_new_session_does_not_borrow_the_last_characters_rules() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut first = Played::plain(folder.path());
+    first.trigger(TriggerRule {
+        scope: Scope::Character("bren".to_owned()),
+        ..hiding("bat")
+    });
+    first.edit(RuleEdit::SaveAlias(AliasRule {
+        scope: Scope::Character("bren".to_owned()),
+        ..AliasRule::new("gb", "get bread")
+    }));
+    first.named("Bren");
+    assert_eq!(first.rules().character, "bren");
+    first.finish();
+
+    let mut second = Played::plain(folder.path());
+    assert_eq!(second.rules().character, "", "nobody has been named yet");
+    second.say(b"a bat\r\n");
+    assert_eq!(second.sent_for("gb"), ["gb"]);
+    second.named("Ana");
+    second.say(b"another bat\r\n");
+    assert_eq!(second.rules().character, "ana");
+    second.named("Bren");
+    assert_eq!(second.sent_for("gb"), ["get bread"]);
+    assert_eq!(second.chat(), ["a bat", "gb", "another bat", "gb"]);
+}
+
+/// Connecting again reuses the session, so who played before must not linger
+/// until the game says who plays now.
+#[test]
+fn connecting_again_forgets_who_was_playing() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut played = Played::plain(folder.path());
+    played.trigger(TriggerRule {
+        scope: Scope::Character("bren".to_owned()),
+        ..hiding("bat")
+    });
+    played.named("Bren");
+    played.say(b"seen by Bren: a bat\r\n");
+
+    played.engine.start_connection().unwrap();
+    played.engine.take_output();
+    assert_eq!(played.rules().character, "", "the new login isn't named");
+    played.say(b"before the name: a bat\r\n");
+    played.named("Ana");
+    played.say(b"as Ana: a bat\r\n");
+    assert_eq!(
+        played.chat(),
+        ["before the name: a bat", "as Ana: a bat"][..],
+        "only the line Bren saw was hidden"
+    );
+}
+
 #[test]
 fn a_trigger_for_one_character_passes_the_others_by() {
     let folder = tempfile::tempdir().unwrap();

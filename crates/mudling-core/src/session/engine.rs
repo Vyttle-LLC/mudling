@@ -126,6 +126,9 @@ pub struct Engine {
     contents_changed: bool,
     /// The game or a plugin named the character, at the next settle.
     character_renamed: bool,
+    /// Who plays on this connection, by id: what the login, the game or a
+    /// plugin has said since it opened, and nothing from an earlier one.
+    playing: String,
     /// When plugin costs were last published.
     costs_published: Option<Timestamp>,
     /// The plugin set the shared link rules came from.
@@ -209,6 +212,7 @@ impl Engine {
             affects_field: Memo::default(),
             contents_changed: false,
             character_renamed: false,
+            playing: String::new(),
             costs_published: None,
             link_rules_of: 0,
             terminal: Vec::new(),
@@ -270,7 +274,11 @@ impl Engine {
         self.settings.connection = ConnectionStatus::Connecting;
         self.settings.echo_off = false;
         self.publish_settings();
-        // Until the game names the character, it's who's logging in.
+        // Each connection starts unnamed. Until the game says who plays, it's
+        // who's logging in, if anyone is.
+        self.playing = (self.config.credentials.as_ref())
+            .map(|credentials| credentials.name.to_lowercase())
+            .unwrap_or_default();
         if let Some(credentials) = self
             .config
             .credentials
@@ -281,8 +289,8 @@ impl Engine {
             let change = [(CHARACTER_NAME.to_owned(), name)];
             self.hub
                 .write::<CharactersState>(CharactersState(change.into()));
-            self.rules_follow_the_character();
         }
+        self.rules_follow_the_character();
         Ok(())
     }
 
@@ -763,7 +771,10 @@ impl Engine {
         }
         let heard = link.game.read(package, json);
         self.contents_changed |= heard.contents;
-        self.character_renamed |= heard.character.contains_key(CHARACTER_NAME);
+        if let Some(HookValue::Text(name)) = heard.character.get(CHARACTER_NAME) {
+            self.playing = name.to_lowercase();
+            self.character_renamed = true;
+        }
         if !heard.character.is_empty() {
             let lasting = heard
                 .character
@@ -1207,7 +1218,12 @@ impl Engine {
         } = write;
         let key = format!("{store}.{key}");
         self.contents_changed |= key == CHARACTER_NAME;
-        self.character_renamed |= key == CHARACTER_NAME;
+        if key == CHARACTER_NAME
+            && let HookValue::Text(name) = &value
+        {
+            self.playing = name.to_lowercase();
+            self.character_renamed = true;
+        }
         let row = values::to_row(&value);
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
@@ -1228,10 +1244,11 @@ impl Engine {
         }
     }
 
-    /// Who is playing, by id: the name the game gave, lowercased, which is
-    /// what a rule for one character names. Empty until anything has said.
+    /// Who is playing, by id: what a rule for one character names. Empty
+    /// until this connection has been told. The name saved from an earlier
+    /// one doesn't count: on the desktop every character shares a session id.
     fn playing_as(&self) -> String {
-        self.character_name().unwrap_or_default().to_lowercase()
+        self.playing.clone()
     }
 
     /// The character's name changed, so which rules apply to them did too.
