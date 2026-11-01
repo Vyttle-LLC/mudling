@@ -1,7 +1,7 @@
-//! Prints what a sync costs at 10,000 rooms, over a bare repo in a temp folder.
-//! Run it in release:
+//! Prints what a sync costs at 10,000 rooms, or at the number of rooms given,
+//! over a bare repo in a temp folder. Run it in release:
 //!
-//!   cargo run --release -p mudling-core --example sync_cost
+//!   cargo run --release -p mudling-core --example sync_cost [-- <rooms>]
 
 use mudling_core::map::{LiveMap, PlainRules};
 use mudling_core::persist::{Batch, Database, Exit, Room, Server, Timestamp};
@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HOST: &str = "mud.example.org";
-const ROOMS: i64 = 10_000;
+const DEFAULT_ROOMS: i64 = 10_000;
 const ZONES: i64 = 100;
 const DESCRIPTION: &str = "A plain stretch of road runs on between low stone walls, and \
     the fields beyond them lie quiet under a wide and empty sky.";
@@ -35,6 +35,13 @@ fn room(id: i64, name: &str) -> Room {
     }
 }
 
+fn rooms_wanted() -> i64 {
+    let given = std::env::args().nth(1);
+    given.map_or(DEFAULT_ROOMS, |rooms| {
+        rooms.parse().expect("a number of rooms")
+    })
+}
+
 fn seed(data: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::open(&data.join("servers"), HOST)?;
     let writer = database.writer()?;
@@ -47,7 +54,7 @@ fn seed(data: &Path) -> Result<(), Box<dyn std::error::Error>> {
         settings: "{}".to_owned(),
         updated: Timestamp::now(),
     });
-    for id in 1..=ROOMS {
+    for id in 1..=rooms_wanted() {
         batch.upsert(room(id, &format!("Road {id}")));
         for direction in ["north", "south"] {
             batch.upsert(Exit {
