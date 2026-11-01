@@ -79,7 +79,7 @@ fn gear_and_affect_messages_are_events() {
          You light Nom's Crystal Lantern and hold it.\n\
          You wield a long sword.",
     );
-    assert_eq!(transcript.events("character.affects_changed", &[]).len(), 1);
+    assert_eq!(transcript.events("affects.stale", &[]).len(), 1);
     assert_eq!(
         items(&transcript, "gear.removed"),
         ["an official Cult of Bonk Hat"]
@@ -150,9 +150,17 @@ fn the_spell_gives_the_words_and_adds_up_what_it_names() {
          Modifies saving throw by -1\n\
          (1h-1m-1v-1)(-/-)",
     );
-    let identify = transcript.store("identify");
-    let value = |key: &str| identify.get(&format!("ring hematite black.{key}")).cloned();
+    let readings = transcript.readings();
+    let value = |key: &str| readings[0].get(key).cloned();
     assert_eq!(value("name"), None);
+    assert_eq!(
+        value("keywords"),
+        Some(Value::Text("ring hematite black".to_owned()))
+    );
+    assert_eq!(
+        value("detail.1"),
+        Some(Value::Text("Modifies saving throw by -1".to_owned()))
+    );
     assert_eq!(value("base.hitroll"), Some(Value::Number(2.0)));
     assert_eq!(value("base.damroll"), Some(Value::Number(3.0)));
     assert_eq!(value("base.health_max"), Some(Value::Number(15.0)));

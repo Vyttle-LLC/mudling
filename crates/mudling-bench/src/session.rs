@@ -304,6 +304,7 @@ pub struct Bench {
 impl Bench {
     pub fn new(plugins: Vec<Plugin>) -> Bench {
         let folder = tempfile::tempdir().expect("a temporary folder");
+        crate::gear::save_gear(folder.path());
         Bench::on(folder, plugins)
     }
 

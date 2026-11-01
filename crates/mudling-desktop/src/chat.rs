@@ -20,18 +20,21 @@ mod find;
 mod lines;
 
 use crate::assets::Icon;
+use crate::gear_panel::{item_tip, tip};
 use crate::theme::Theme;
 pub use find::CloseFind;
 use find::{Find, Results};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Context, Div, DragMoveEvent, ElementId, Entity,
-    FontWeight, HighlightStyle, KeyBinding, Pixels, Role, ScrollEvent, SharedString, StyledText,
-    Window, actions, div, font, point, prelude::*, px, relative, size,
+    FontWeight, HighlightStyle, InteractiveText, KeyBinding, Pixels, Role, ScrollEvent,
+    SharedString, StyledText, UnderlineStyle, Window, actions, combine_highlights, div, font,
+    point, prelude::*, px, relative, size,
 };
 use lines::{LineList, LinePosition, Pane};
-use mudling_core::store::{Diff, TerminalChange, TerminalState, Versioned};
+use mudling_core::store::{Diff, ItemsState, TerminalChange, TerminalState, Versioned};
 use mudling_core::{Line, LineKind, Scrollback};
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// A row at the default chat size, and what a notch of the wheel scrolls.
 pub const LINE_HEIGHT: Pixels = px(20.);
@@ -134,6 +137,7 @@ pub struct Chat {
     unannounced: Vec<SharedString>,
     announcement: Option<(u64, SharedString)>,
     find: Option<Find>,
+    items: ItemsState,
 }
 
 /// What of `line` the chat draws, if anything.
@@ -156,7 +160,14 @@ impl Chat {
             unannounced: Vec::new(),
             announcement: None,
             find: None,
+            items: ItemsState::default(),
         }
+    }
+
+    /// Takes what's known about gear, for the lines' tooltips.
+    pub fn show_items(&mut self, items: ItemsState, cx: &mut Context<Chat>) {
+        self.items = items;
+        cx.notify();
     }
 
     /// Applies a frame's new lines and queues what shows of the server's for
@@ -351,6 +362,8 @@ impl Chat {
         let lines = self.terminal.value().lines();
         let evicted = lines.evicted();
         let prompts_shown = self.prompts_shown;
+        let items = &self.items;
+        let reader_listens = window.is_a11y_active();
         let space = size(
             AvailableSpace::Definite(bounds.size.width),
             AvailableSpace::MinContent,
@@ -366,8 +379,9 @@ impl Chat {
             }
             let (_, line_size) = measured.entry(index).or_insert_with(|| {
                 let line = shown(line, prompts_shown).expect("it isn't only a prompt");
-                let mut element =
-                    render_line(&line, evicted + index as u64, found, &theme).into_any_element();
+                let number = evicted + index as u64;
+                let mut element = render_line(&line, number, found, items, reader_listens, &theme)
+                    .into_any_element();
                 let line_size = element.layout_as_root(space, window, cx);
                 (element, line_size)
             });
@@ -479,11 +493,15 @@ fn drawn_len(line: &Line) -> usize {
     line.plain().trim_end_matches(' ').len().max(painted_end)
 }
 
-/// One line, with what `found` found in it highlighted.
+/// One line, with what `found` found in it highlighted and the items it names
+/// underlined, each with a tooltip. The words are worked out on hover, or for
+/// every line in view only when `reader_listens`, as a screen reader needs them.
 fn render_line(
     line: &Line,
     number: u64,
     found: Option<&Results>,
+    items: &ItemsState,
+    reader_listens: bool,
     theme: &Theme,
 ) -> impl IntoElement {
     let drawn = drawn_len(line);
@@ -509,24 +527,67 @@ fn render_line(
     let matches = found.map_or_else(Vec::new, |found| {
         found.paint(line.plain(), drawn, number, theme)
     });
-    let styled =
-        StyledText::new(SharedString::from(line.plain()[..drawn].to_owned())).with_highlights(
-            find::paint_matches(highlights.chain(quiet_prompt).collect(), matches),
-        );
+    let text = SharedString::from(line.plain()[..drawn].to_owned());
+    let mentions: Vec<(Range<usize>, String)> = (items.matcher.find(&text).into_iter())
+        .map(|mention| (mention.range, mention.item.to_owned()))
+        .collect();
+    let underlined = mentions.iter().map(|(range, _)| {
+        let style = HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(theme.text_muted),
+                wavy: false,
+            }),
+            ..HighlightStyle::default()
+        };
+        (range.clone(), style)
+    });
+    let painted = find::paint_matches(highlights.chain(quiet_prompt).collect(), matches);
+    let styled = StyledText::new(text).with_highlights(combine_highlights(painted, underlined));
     let row = div()
         .id(ElementId::Integer(number))
         .role(Role::Label)
         .aria_value(SharedString::from(line.plain().to_owned()))
+        .when(reader_listens && !mentions.is_empty(), |row| {
+            let tips = mentions.iter().map(|(_, item)| spoken_tip(items, item));
+            row.aria_description(SharedString::from(tips.collect::<Vec<_>>().join("\n")))
+        })
         .min_h(theme.choice.chat_line_height())
         .w_full();
+    let text = if mentions.is_empty() {
+        styled.into_any_element()
+    } else {
+        let items = items.clone();
+        InteractiveText::new(("chat-items", number), styled)
+            .tooltip(move |index, _, cx| {
+                let (_, item) = mentions.iter().find(|(range, _)| range.contains(&index))?;
+                Some(item_tip(
+                    shown_tip_name(&items, item),
+                    tip(&items, item),
+                    cx,
+                ))
+            })
+            .into_any_element()
+    };
     if line.kind() == LineKind::Command {
         row.flex()
             .gap_2()
             .child(div().text_color(theme.command).child("›"))
-            .child(div().flex_1().min_w_0().child(styled))
+            .child(div().flex_1().min_w_0().child(text))
     } else {
-        row.child(styled)
+        row.child(text)
     }
+}
+
+/// An item's name as the game writes it.
+fn shown_tip_name(items: &ItemsState, item: &str) -> String {
+    let known = items.book.item(item);
+    known.map_or_else(|| item.to_owned(), |known| known.name.clone())
+}
+
+/// A tooltip, as a screen reader hears it.
+fn spoken_tip(items: &ItemsState, item: &str) -> String {
+    format!("{}: {}", shown_tip_name(items, item), tip(items, item))
 }
 
 impl Render for Chat {
@@ -1043,6 +1104,37 @@ mod tests {
         narrow_window(cx);
         assert_eq!(top_line(&chat, cx), reading);
         assert!(chat.read_with(cx, |chat, _| chat.top_line_height()) > height);
+    }
+
+    #[gpui::test]
+    fn hovering_an_item_shows_what_is_known_and_the_rest_of_the_line_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_window(cx, 0);
+        chat.update(cx, |chat, cx| {
+            chat.show_items(crate::measure::sample_items(), cx);
+            let line = "        You see a small necklace here.".to_owned();
+            chat.apply(&server_lines([line]), cx);
+        });
+        cx.run_until_parked();
+        let tip_shows_at = |x: f32, cx: &mut gpui::VisualTestContext| {
+            let at = gpui::point(px(x), px(32.));
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(2));
+            cx.run_until_parked();
+            cx.debug_bounds("item-tip").is_some()
+        };
+        let area = cx.debug_bounds("chat-area").unwrap();
+        let column = area.left() + COLUMN_PADDING;
+        let cell = cx.update(|window, cx| {
+            let run = window.text_system().resolve_font(&font("JetBrains Mono"));
+            let size = cx.global::<Theme>().choice.chat_size();
+            window.text_system().ch_advance(run, size)
+        });
+        let on_item = column + cell.unwrap_or(px(8.)) * 19.;
+        assert!(!tip_shows_at(f32::from(column + px(2.)), cx));
+        assert!(tip_shows_at(f32::from(on_item), cx));
     }
 
     #[gpui::test]

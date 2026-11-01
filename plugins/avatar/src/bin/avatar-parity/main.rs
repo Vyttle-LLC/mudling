@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The kinds of difference docs/parity.md explains. Any other fails the run.
-const INTENDED: [&str; 11] = [
+const INTENDED: [&str; 12] = [
     "character.affect",
     "character.item-slot",
     "character.skill",
@@ -38,8 +38,9 @@ const INTENDED: [&str; 11] = [
     "character.title",
     "character.worn",
     "gear.copies",
-    "gear.identify-earlier-reading",
-    "gear.measured",
+    "gear.identify-more-readings",
+    "gear.measured-only-in-mudling",
+    "gear.measured-only-in-prototype",
     "gear.slot",
     "map.description",
 ];

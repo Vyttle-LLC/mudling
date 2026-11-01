@@ -7,9 +7,9 @@
 use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, CuesState, Diff, GearState, MapState, MobsState, RoomState, RulesState,
-    SettingsState, Store, StoreHub, StoreKind, SyncState, TargetState, TerminalChange,
-    TerminalState, Versioned, VitalsState,
+    CharactersState, CuesState, Diff, GearState, ItemsState, MapState, MobsState, RoomState,
+    RulesState, SettingsState, SheetState, Store, StoreHub, StoreKind, SyncState, TargetState,
+    TerminalChange, TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -26,8 +26,10 @@ pub enum StoreKind {
     Map,
     Mobs,
     Characters,
+    Sheet,
     Target,
     Gear,
+    Items,
     Settings,
     Sync,
     Rules,
@@ -109,8 +111,10 @@ impl Session {
             map,
             mobs,
             characters,
+            sheet,
             target,
             gear,
+            items,
             settings,
             sync,
             rules,
@@ -123,8 +127,10 @@ impl Session {
             map.map(MapState::diff),
             mobs.map(MobsState::diff),
             characters.map(CharactersState::diff),
+            sheet.map(SheetState::diff),
             target.map(TargetState::diff),
             gear.map(GearState::diff),
+            items.map(ItemsState::diff),
             settings.map(SettingsState::diff),
             sync.map(SyncState::diff),
             rules.map(RulesState::diff),
@@ -171,12 +177,20 @@ macro_rules! with_store {
                 type $S = CharactersState;
                 $body
             }
+            StoreKind::Sheet => {
+                type $S = SheetState;
+                $body
+            }
             StoreKind::Target => {
                 type $S = TargetState;
                 $body
             }
             StoreKind::Gear => {
                 type $S = GearState;
+                $body
+            }
+            StoreKind::Items => {
+                type $S = ItemsState;
                 $body
             }
             StoreKind::Settings => {
@@ -295,6 +309,17 @@ impl FieldStore for GearState {
     }
 }
 
+impl FieldStore for ItemsState {
+    fn fields(&self) -> HashMap<String, String> {
+        [
+            ("known".to_owned(), self.book.len().to_string()),
+            ("worn".to_owned(), self.worn.len().to_string()),
+            ("carried".to_owned(), self.carried.len().to_string()),
+        ]
+        .into()
+    }
+}
+
 impl FieldStore for RoomState {
     fn fields(&self) -> HashMap<String, String> {
         self.room
@@ -316,6 +341,16 @@ impl FieldStore for MobsState {
             .iter()
             .map(|(mark, name)| (name.clone(), mark.name().to_owned()))
             .collect()
+    }
+}
+
+impl FieldStore for SheetState {
+    fn fields(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("character".to_owned(), self.character.clone()),
+            ("skills".to_owned(), self.skills.len().to_string()),
+            ("reading".to_owned(), self.reading.to_string()),
+        ])
     }
 }
 

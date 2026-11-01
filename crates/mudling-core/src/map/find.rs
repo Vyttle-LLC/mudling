@@ -1,6 +1,6 @@
 //! What the Find panel searches (PRD §5 #7): rooms from the map, mobs from
-//! sightings and marks, items from what's carried, what's on the ground here
-//! and the rooms noted for gear or a fountain.
+//! sightings and marks, items from what's worn and carried, what's on the
+//! ground here, the gear database, and the rooms noted for gear or a fountain.
 //!
 //! Scanning the stores is the costly part, so [`FindCache`] keeps what it read
 //! against their revisions, and a search only walks that list. A shell runs
@@ -9,9 +9,11 @@
 use super::mobs::Mark;
 use super::room::{MapRoom, RoomId, feature};
 use super::route::distances;
+use crate::gear::plain_name;
 use crate::persist::Timestamp;
 use crate::store::{
-    Batch, CharactersState, MapState, Memo, MobsState, Revision, RoomState, StoreHub, Versioned,
+    Batch, CharactersState, ItemsState, MapState, Memo, MobsState, Revision, RoomState, StoreHub,
+    Versioned,
 };
 use memchr::memmem::Finder;
 use std::cmp::Reverse;
@@ -61,6 +63,9 @@ impl FindFilter {
 enum Spot {
     Room(RoomId),
     Carried,
+    Worn,
+    /// In the gear database, and not with the character.
+    Known,
     /// Marked, but never seen in a room of this map.
     Unseen,
 }
@@ -74,6 +79,8 @@ pub enum FindPlace {
         area: String,
     },
     Carried,
+    Worn,
+    Known,
     Unseen,
 }
 
@@ -175,6 +182,7 @@ pub struct FindStores {
     mobs: Versioned<MobsState>,
     room: Versioned<RoomState>,
     characters: Versioned<CharactersState>,
+    items: Versioned<ItemsState>,
 }
 
 impl FindStores {
@@ -186,6 +194,7 @@ impl FindStores {
             mobs: hub.subscribe(),
             room: hub.subscribe(),
             characters: hub.subscribe(),
+            items: hub.subscribe(),
         }
     }
 
@@ -202,7 +211,14 @@ impl FindStores {
             mobs,
             room,
             characters,
+            items: Versioned::default(),
         }
+    }
+
+    /// These stores, with gear from `items`.
+    pub fn with_items(mut self, items: Versioned<ItemsState>) -> FindStores {
+        self.items = items;
+        self
     }
 
     /// Takes a frame's batch; `true` when it changed anything Find reads.
@@ -222,10 +238,14 @@ impl FindStores {
         if let Some(characters) = &batch.characters {
             self.characters.apply_diff(characters);
         }
+        if let Some(items) = &batch.items {
+            self.items.apply_diff(items);
+        }
         batch.map.is_some()
             || batch.mobs.is_some()
             || batch.room.is_some()
             || batch.characters.is_some()
+            || batch.items.is_some()
     }
 
     pub fn map(&self) -> &MapState {
@@ -317,12 +337,28 @@ impl FindStores {
             FindEntry::held(name, here)
         });
         let carried = self.characters.value().carried();
+        let items = self.items.value();
+        let worn = items.worn.iter().filter(|worn| !worn.item.is_empty());
+        let mut with_you: BTreeSet<String> = carried.iter().map(|name| plain_name(name)).collect();
+        with_you.extend(worn.clone().map(|worn| plain_name(&worn.item)));
+        let known = (items.book.items())
+            .filter(|(key, _)| !with_you.contains(*key))
+            .map(|(_, item)| {
+                let entry = FindEntry::held(item.name.clone(), Spot::Known);
+                let words = [&item.facts.keywords, &item.facts.slot];
+                let words = words.into_iter().flatten();
+                words.fold(entry, |entry, word| {
+                    entry.also_found_by(&word.to_lowercase())
+                })
+            });
         ground
             .chain(
                 carried
                     .into_iter()
                     .map(|name| FindEntry::held(name, Spot::Carried)),
             )
+            .chain(worn.map(|worn| FindEntry::held(worn.item.clone(), Spot::Worn)))
+            .chain(known)
             .collect()
     }
 
@@ -338,6 +374,8 @@ impl FindStores {
                     })
             }
             Spot::Carried => FindPlace::Carried,
+            Spot::Worn => FindPlace::Worn,
+            Spot::Known => FindPlace::Known,
             Spot::Unseen => FindPlace::Unseen,
         };
         FindRow {
@@ -354,7 +392,7 @@ impl FindStores {
 #[derive(Debug, Default)]
 pub struct FindCache {
     world: Memo<(Revision, Revision), Vec<FindEntry>>,
-    at_hand: Memo<(Revision, Revision), Vec<FindEntry>>,
+    at_hand: Memo<(Revision, Revision, Revision), Vec<FindEntry>>,
     moves_away: Memo<(Revision, Option<RoomId>), HashMap<RoomId, u32>>,
 }
 
@@ -364,7 +402,11 @@ impl FindCache {
     pub fn search(&mut self, stores: &FindStores, query: &str, filter: FindFilter) -> FindResults {
         let start = stores.walk_start();
         let world_key = (stores.rooms_changed, stores.mobs.revision());
-        let hand_key = (stores.room.revision(), stores.characters.revision());
+        let hand_key = (
+            stores.room.revision(),
+            stores.characters.revision(),
+            stores.items.revision(),
+        );
         let world = self.world.get(world_key, || stores.world());
         let at_hand = self.at_hand.get(hand_key, || stores.at_hand());
         let moves_away = self.moves_away.get((stores.rooms_changed, start), || {
@@ -379,7 +421,7 @@ impl FindCache {
                 .get(&room)
                 .map_or(Reach::NoPath, |moves| Reach::Steps(*moves)),
             (Spot::Room(_), None) => Reach::PlayerLost,
-            (Spot::Carried | Spot::Unseen, _) => Reach::NotARoom,
+            (Spot::Carried | Spot::Worn | Spot::Known | Spot::Unseen, _) => Reach::NotARoom,
         };
 
         let query = query.to_lowercase();
@@ -412,9 +454,10 @@ impl FindCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gear::GearBook;
     use crate::map::{Direction, LiveMap, MapChange, MarkChange, PlainRules, Whereabouts};
     use crate::plugin::luau::Value;
-    use crate::store::{Diff, Item, RoomContents};
+    use crate::store::{Diff, Item, RoomContents, WornItem};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -594,6 +637,45 @@ mod tests {
         );
         assert_eq!(found.rows[0].reach, Reach::Here);
         assert_eq!(found.rows[3].place, FindPlace::Carried);
+    }
+
+    #[test]
+    fn items_reach_what_is_worn_and_known_and_each_only_once() {
+        let mut book = GearBook::default();
+        let mut batch = crate::persist::Batch::new();
+        let now = Timestamp(0);
+        book.learn_slot("head", "a Tiamat mask", now, &mut batch);
+        book.learn_slot("neck", "an amulet of Gorn", now, &mut batch);
+        book.learn_keywords("gorn amulet", "an amulet of Gorn", now, &mut batch);
+        let mut items: Versioned<ItemsState> = Versioned::default();
+        items.write(&ItemsState {
+            book: Arc::new(book),
+            worn: vec![
+                WornItem {
+                    slot: "head".to_owned(),
+                    item: "(Glowing) a Tiamat mask".to_owned(),
+                    copy: None,
+                },
+                WornItem {
+                    slot: "feet".to_owned(),
+                    ..WornItem::default()
+                },
+            ]
+            .into(),
+            ..ItemsState::default()
+        });
+        let stores = stores_at(1).with_items(items);
+
+        let found = search(&stores, "tiamat", FindFilter::Items);
+        assert_eq!(names(&found), ["(Glowing) a Tiamat mask"]);
+        assert_eq!(found.rows[0].place, FindPlace::Worn);
+        assert_eq!(found.rows[0].reach, Reach::NotARoom);
+
+        let found = search(&stores, "neck", FindFilter::Items);
+        assert_eq!(names(&found), ["an amulet of Gorn"]);
+        assert_eq!(found.rows[0].place, FindPlace::Known);
+        let found = search(&stores, "gorn", FindFilter::All);
+        assert_eq!(found.matched, 1);
     }
 
     #[test]

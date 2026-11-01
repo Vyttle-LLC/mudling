@@ -48,7 +48,7 @@ const NAV_SHARE: f32 = 0.36;
 const CONTEXT: &str = "SettingsSheet";
 const MAKER: &str = "A Vyttle app";
 /// How far an arrow key scrolls.
-const SCROLL_STEP: Pixels = px(48.);
+pub const SCROLL_STEP: Pixels = px(48.);
 
 actions!(
     settings,

@@ -44,6 +44,21 @@ or `count` key. The client answers the pager with `c` while a table is open.
 A table that ends with its pager unanswered, or with the connection, is cut
 short and sends nothing; a last page with no rows was still answered.
 
+## Quiet reads
+
+The core sends `character.toml`'s `[[command]]`s in the background and keeps
+their answers out of the chat. `crates/mudling-core/src/session/quiet.rs` has
+the rules. Two names matter to it, and neither needs anything but a rule's
+name: a rule named `<reader>.stale` asks for that reader's command again, and
+one named `<reader>.none` is a one-line answer that isn't a table. A rule of
+the Gear point's `wear` and `remove` lists asks for the Gear point's command.
+
+Only what a reader's patterns match stays out of the chat, so a line of a
+table that holds no facts is still a row: a plugin's rows cover its ruled
+lines and headings as well. Anything else shows, so a tell landing between
+pages reaches the player. `BackgroundCommand` in
+`crates/mudling-core/src/plugin/points.rs` is the reference for plugin authors.
+
 ## Events
 
 Each match is a `PluginEvent` named below, its named captures as data. Hooks
@@ -66,11 +81,12 @@ The rest are single lines:
 
 | Point | Event | Captures | Line |
 | --- | --- | --- | --- |
-| Text | `character.affects.none` † | | `You are not under the affects of any spells` |
-| Text | `character.affects_changed` | | `You feel …`, `… wears off` |
+| Text | `affects.none` † | | `You are not under the affects of any spells`: `aff`'s answer when nothing's on |
+| Text | `affects.stale` | | `You feel …`, `… wears off` |
+| Text | `score.stale`, `practice.stale`, `slist.stale` | | `You raise a level!! …` |
 | Text | `map.area` | `low`, `high`, `name` | `{10  15} Dev     Sarphyre's Court` |
 | Character | `character.skill_practiced` † | `skill`, `learned` | `You practice dodge with Ulric. Your current skill level is now 45.` |
-| Character | `character.skill_improved` | | `You have become better at …` (ROM wording) |
+| Character | `practice.stale` | | `You have become better at …` (ROM wording) |
 | Gear | `gear.wore` † | `item`; `on`, `part` for wear | `You wear …`, `You hold …`, `You light … and hold it.`, `You wield …` |
 | Gear | `gear.removed` † | `item` | `You stop using a round shield.` |
 | Gear | `gear.put` | `item`, `container` | `You put a rope belt in a satchel.` |
@@ -92,6 +108,9 @@ Hooks write booleans, numbers and strings as `StoreWrite`s. A table's
 writes arrive together, its `read` or `count` key last: a store applies the
 batch when that key arrives. An item's *plain name* is its name without
 tags such as `(Glowing)`, spaces collapsed, in lowercase.
+
+The core keeps `skills` and `affects` per character in its typed tables, and
+the rest as the character's stats (`crates/mudling-core/src/session/sheet.rs`).
 
 **`character`**, from `score`:
 
@@ -139,30 +158,46 @@ order:
 
 | Key | Value |
 | --- | --- |
+| `name.<plain name>` | the item as the game writes it, which a plain name can't say; shown wherever the item is named |
 | `slot.<plain name>` | the slot it goes in: from `equipment`, a wear message or `examine` |
 | `keyword.<plain name>` | the word a command names it by: the noun ending its first phrase, never a possessive while there's another word (the game refuses `remove captain's`) |
 | `keywords.<plain name>` | the game's own keywords for it, from a shop's identify |
+| `holds.<slot>` | how many items a slot holds, where it's more than one: `holds.neck` = 2 |
+| `verb.<slot>` | the `[verbs]` verb that fills a slot, where it isn't `wear`: `verb.held` = `hold` |
 
-**`identify`**, by the item's keywords (`black bear bracelet`):
+The last two are what a gear set's wear plan needs to know of the game. They
+aren't about items, and they're said once a connection, at the first gear table
+or wear message.
+
+While a gear set goes on the core reads the Gear point's `put` rules. A rule
+with an `item` capture means it went in; otherwise a name ending `.did_not_fit`
+means the container refused it, and one ending `.not_carried` that it hadn't
+come off yet.
+
+**`identify`**, one batch per reading. The core files each as a reading of
+its own, so two copies with the same words keep theirs, and it's the core that
+ties a reading to the one copy at hand. With no `name` nothing says which item
+it was, and it's dropped:
 
 | Key | Value |
 | --- | --- |
-| `<keywords>.name` | the item's name, when a shop gave it |
-| `<keywords>.type`, `.flags` | `armor`; `glow magic` (empty for none) |
-| `<keywords>.level`, `.quality` | `8`; `100 / 100 hps` |
-| `<keywords>.base.<stat>` | what every copy does, by GMCP stat key; armor as AC (armor 2 is `ac` −2) |
-| `<keywords>.added.<spell>.<stat>` | what a spell added to this copy: `added.enchant armor.ac` = −4 |
+| `name` | the item's name: a shop's, or the one at hand with the most of the game's words |
+| `keywords` | the game's words for it: `black bear bracelet` |
+| `type`, `flags` | `armor`; `glow magic` (empty for none) |
+| `level`, `quality` | `8`; `100 / 100 hps` |
+| `base.<stat>` | what every copy does, by GMCP stat key; armor as AC (armor 2 is `ac` −2) |
+| `added.<spell>.<stat>` | what a spell added to this copy: `added.enchant armor.ac` = −4 |
+| `detail.<n>` | each other line, from 1: `Weight 3, value 40, level 8.` |
 | `read` | the keywords; last |
+
+What's measured, from the character's stats around a wear or remove message,
+is the core's: hooks don't see `Char.Status`. It uses each rule's `item`
+capture, so a game's wear and remove rules need one.
 
 ## Not covered, and why
 
 - **`worth`**: neither the prototype nor the session logs have a `worth`
   table, so there's nothing to port.
-- **Which copy a spell's identify was about**: hooks can read the inventory
-  (`inventory.count`, `inventory.<n>.name`), with `read_state`, but working
-  out the copy isn't written yet. Avatar sends no `Char.Items` when gear goes
-  on or comes off, so the wear and remove hooks call
-  `mud.refresh_inventory()`.
 - **Locked doors**: `Room.Info` gives an exit as open or closed, never locked,
   so the Room panel can't offer `doors.unlock`. The only sign is a line after
   an `open`, such as "The door to the east is locked." Reading that needs a

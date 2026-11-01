@@ -276,7 +276,7 @@ fn compare_gear(prototype: &World, mudling: &World, out: &mut Differences) {
                 for reading in theirs {
                     if !ours.contains(reading) {
                         out.add(
-                            "gear.identify-reading",
+                            "gear.identify-more-readings",
                             words.clone(),
                             format!("{ours:?} / {reading:?}"),
                         );
@@ -287,9 +287,9 @@ fn compare_gear(prototype: &World, mudling: &World, out: &mut Differences) {
                     if !theirs.contains(reading) && !seen.contains(&reading) {
                         seen.push(reading);
                         out.add(
-                            "gear.identify-earlier-reading",
+                            "gear.identify-reading-missing",
                             words.clone(),
-                            format!("{reading:?} / only the latest is kept"),
+                            format!("{reading:?} / none"),
                         );
                     }
                 }
@@ -309,8 +309,19 @@ fn compare_gear(prototype: &World, mudling: &World, out: &mut Differences) {
     }
     for item in &prototype.measured {
         if !mudling.measured.contains(item) {
-            out.add("gear.measured", item.clone(), "only the prototype measures");
+            out.add(
+                "gear.measured-only-in-prototype",
+                item.clone(),
+                "measured / none",
+            );
         }
+    }
+    for item in mudling.measured.difference(&prototype.measured) {
+        out.add(
+            "gear.measured-only-in-mudling",
+            item.clone(),
+            "none / measured",
+        );
     }
     if prototype.copies != mudling.copies {
         out.add(

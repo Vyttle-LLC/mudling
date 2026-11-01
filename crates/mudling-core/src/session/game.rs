@@ -27,6 +27,29 @@ const ARTICLES: [&str; 4] = ["a", "an", "the", "some"];
 const PHRASE_ENDS: [&str; 7] = ["is", "are", "of", "here", "who", "that", "with"];
 /// Words that follow the noun in an item's name.
 const ITEM_NOUN_ENDS: [&str; 3] = ["of", "that", "with"];
+/// What Char.Status says for the character sheet, under the same names.
+const SHEET_FIELDS: [&str; 20] = [
+    "race",
+    "class",
+    "str",
+    "int",
+    "wis",
+    "dex",
+    "con",
+    "str_perm",
+    "int_perm",
+    "wis_perm",
+    "dex_perm",
+    "con_perm",
+    "gold",
+    "practice",
+    "hitroll",
+    "damroll",
+    "ac",
+    "saves",
+    "alignment",
+    "wimpy",
+];
 
 #[derive(Deserialize)]
 struct RoomPlayer {
@@ -110,6 +133,15 @@ pub(super) struct GameFeed {
 }
 
 impl GameFeed {
+    /// What the character is doing as the game words it, once it's said.
+    pub(super) fn position(&self) -> Option<&str> {
+        self.position.as_deref()
+    }
+
+    pub(super) fn in_fight(&self) -> bool {
+        self.target.is_some()
+    }
+
     pub(super) fn read(&mut self, package: &str, json: &str) -> Heard {
         let is = |name: &str| package.eq_ignore_ascii_case(name);
         let mut heard = Heard::default();
@@ -214,6 +246,13 @@ impl GameFeed {
         let Some(status) = gmcp::from_json::<Status>(json) else {
             return;
         };
+        if let Some(fields) = gmcp::from_json::<BTreeMap<String, Json>>(json) {
+            for field in SHEET_FIELDS {
+                if let Some(value) = fields.get(field).and_then(sheet_value) {
+                    heard.character.insert(format!("character.{field}"), value);
+                }
+            }
+        }
         if let Some(name) = status.character_name.as_deref().map(ansi::plain)
             && !name.is_empty()
         {
@@ -251,6 +290,15 @@ impl GameFeed {
 
 fn room_change(json: &str) -> Option<Change> {
     gmcp::from_json::<Change>(json).filter(|change| change.location == ROOM)
+}
+
+/// A Char.Status field as the sheet keeps it: a number if it is one.
+fn sheet_value(value: &Json) -> Option<Value> {
+    if let Some(number) = number(Some(value)) {
+        return Some(Value::Number(number as f64));
+    }
+    let text = ansi::plain(value.as_str()?);
+    (!text.is_empty()).then_some(Value::Text(text))
 }
 
 /// Games send numbers as numbers or as text.
@@ -528,6 +576,22 @@ mod tests {
             Value::Text("Stand".to_owned())
         );
         assert!(feed.read("Char.Vitals", stand).character.is_empty());
+    }
+
+    #[test]
+    fn status_fields_for_the_sheet_keep_their_type() {
+        let mut feed = GameFeed::default();
+        let heard = feed.read(
+            "Char.Status",
+            r#"{"hitroll": "12", "ac": -4, "race": "Harpy", "gold": null, "room_name": "A hall"}"#,
+        );
+        assert_eq!(heard.character["character.hitroll"], Value::Number(12.));
+        assert_eq!(heard.character["character.ac"], Value::Number(-4.));
+        assert_eq!(
+            heard.character["character.race"],
+            Value::Text("Harpy".to_owned())
+        );
+        assert_eq!(heard.character.len(), 3);
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
 //!                            [--settings-section data|vault]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
-//!                            [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]]
+//!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
+//!                            [--skills-open] [--sample-map <rooms>]]
 //!                 [--ax-check]
 //! ```
 //!
@@ -26,7 +27,10 @@
 //! sheet open, `--settings-section` with that section open and filled with
 //! made-up rows, `--hud` with the HUD in that place, `--find-open` with the find
 //! bar open and results showing, `--find-panel` with the Find panel showing and
-//! being typed in, `--notes-open` with a note being typed in the Notes tab, and
+//! being typed in, `--notes-open` with a note being typed in the Notes tab,
+//! `--gear-open` with the Gear tab open on a full gear database,
+//! `--gear-sets-open` with that tab listing gear sets above Worn,
+//! `--character-open` and `--skills-open` with that tab showing a sample, and
 //! `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
@@ -44,11 +48,13 @@ macro_rules! secondary {
 }
 
 mod assets;
+mod character_panel;
 mod chat;
 mod dock;
 mod dpad;
 mod empty_state;
 mod find_panel;
+mod gear_panel;
 mod hotbar;
 mod hud;
 mod input;
@@ -64,6 +70,7 @@ mod room_panel;
 mod session_bar;
 mod settings;
 mod shell;
+mod skills_panel;
 mod sound;
 mod status;
 mod stream;
@@ -72,6 +79,7 @@ mod title_bar;
 #[cfg(all(test, target_os = "macos"))]
 mod window_images;
 
+use dock::Slot;
 use futures::channel::mpsc;
 use futures::future::{self, Either};
 use gpui::{
@@ -104,7 +112,9 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--settings-section data|vault] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
-                     [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]] [--ax-check]";
+                     [--find-open] [--find-panel] [--notes-open] [--gear-open] \
+                     [--gear-sets-open] [--character-open] [--skills-open] \
+                     [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -128,6 +138,9 @@ struct Options {
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
+    gear_open: bool,
+    gear_sets_open: bool,
+    sheet_tab: Option<Slot>,
     sample_map: Option<i64>,
     ax_check: bool,
 }
@@ -311,6 +324,16 @@ fn main() -> ExitCode {
                         .update(cx, measure::open_notes)
                         .expect("the measured window is open");
                 }
+                if options.gear_open {
+                    window
+                        .update(cx, |shell, _, cx| measure::fill_full_gear(shell, cx))
+                        .expect("the measured window is open");
+                }
+                if options.gear_sets_open {
+                    window
+                        .update(cx, |shell, _, cx| measure::fill_full_gear_sets(shell, cx))
+                        .expect("the measured window is open");
+                }
                 measure::drive(
                     window.into(),
                     shell,
@@ -323,6 +346,7 @@ fn main() -> ExitCode {
                         find_open: options.find_open,
                         find_panel: options.find_panel,
                         notes_open: options.notes_open,
+                        sheet_tab: options.sheet_tab,
                     },
                     cx,
                 );
@@ -347,6 +371,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
     empty_state::bind_keys(cx);
     session_bar::bind_keys(cx);
     settings::bind_keys(cx);
+    character_panel::bind_keys(cx);
     cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
 }
 
@@ -507,6 +532,9 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         find_open: false,
         find_panel: false,
         notes_open: false,
+        gear_open: false,
+        gear_sets_open: false,
+        sheet_tab: None,
         sample_map: None,
         ax_check: false,
     };
@@ -557,6 +585,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--find-open" => options.find_open = true,
             "--find-panel" => options.find_panel = true,
             "--notes-open" => options.notes_open = true,
+            "--gear-open" => options.gear_open = true,
+            "--gear-sets-open" => options.gear_sets_open = true,
+            "--character-open" => options.sheet_tab = Some(Slot::Character),
+            "--skills-open" => options.sheet_tab = Some(Slot::Skills),
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

@@ -174,6 +174,20 @@ impl Transcript {
             .collect()
     }
 
+    /// Each `identify` batch's keys, in order: every reading is its own.
+    pub fn readings(&self) -> Vec<HashMap<String, Value>> {
+        let mut readings = Vec::new();
+        let mut reading = HashMap::new();
+        for write in self.writes().filter(|write| write.store == "identify") {
+            if write.key == "read" {
+                readings.push(std::mem::take(&mut reading));
+            } else {
+                reading.insert(write.key.clone(), write.value.clone());
+            }
+        }
+        readings
+    }
+
     /// Every output the plugin shouldn't produce, such as a failed hook.
     pub fn problems(&self) -> Vec<&HookOutput> {
         self.outputs
