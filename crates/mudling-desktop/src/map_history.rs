@@ -12,8 +12,8 @@ use crate::theme::Theme;
 use crate::title_bar::FocusNextControl;
 use chrono::{DateTime, Datelike, Local};
 use gpui::{
-    App, Context, FocusHandle, KeyBinding, KeyDownEvent, Pixels, Role, ScrollHandle, SharedString,
-    Task, Window, div, prelude::*, px,
+    App, Context, FocusHandle, KeyBinding, Pixels, Role, ScrollHandle, SharedString, Task, Window,
+    actions, div, prelude::*, px,
 };
 use mudling_core::persist::{MapVersion, Timestamp};
 use mudling_core::session::MapHistory;
@@ -22,6 +22,8 @@ use std::collections::HashMap;
 
 /// The key context while focus is in the section.
 const CONTEXT: &str = "MapHistory";
+/// While the question is up, deeper than the dock's own Escape.
+const QUESTION_CONTEXT: &str = "MapHistoryQuestion";
 /// The whole section's height, which never changes: the list scrolls.
 pub const HEIGHT: Pixels = px(164.);
 const NOTHING_SAVED: &str =
@@ -30,8 +32,13 @@ const NOT_READ: &str = "Couldn't read map history.";
 const NOT_RESTORED: &str = "Couldn't restore that version. Your map is as it was.";
 const RESTORING: &str = "Restoring…";
 
+actions!(map_history, [KeepTheMap]);
+
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("tab", FocusNextControl, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("tab", FocusNextControl, Some(CONTEXT)),
+        KeyBinding::new("escape", KeepTheMap, Some(QUESTION_CONTEXT)),
+    ]);
 }
 
 /// A version as the list shows it.
@@ -232,11 +239,9 @@ impl MapHistoryView {
              go, but the map as it is now stays in this list."
         );
         div()
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    view.keep_the_map(window, cx);
-                    cx.stop_propagation();
-                }
+            .key_context(QUESTION_CONTEXT)
+            .on_action(cx.listener(|view, _: &KeepTheMap, window, cx| {
+                view.keep_the_map(window, cx);
             }))
             .child(
                 div()
@@ -436,7 +441,9 @@ fn rooms(count: i64) -> String {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use gpui::{KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, WindowAppearance};
+    use gpui::{
+        Entity, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, WindowAppearance,
+    };
     use mudling_core::map::LiveMap;
     use mudling_core::persist::{Batch, Database, Room, SERVERS_FOLDER};
     use mudling_core::session::{Session, SessionConfig};
@@ -565,6 +572,45 @@ mod tests {
         view.update_in(cx, |view, window, _| {
             assert_eq!(view.rows[2].id, 1);
             assert!(view.rows[2].restore.is_focused(window));
+        });
+    }
+
+    /// The history as the dock holds it: Escape there goes to the command bar,
+    /// as the shell's handler sends it.
+    struct InDock(Entity<MapHistoryView>);
+
+    impl Render for InDock {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .key_context(crate::dock::CONTEXT)
+                .on_action(|_: &crate::shell::FocusCommandBar, _, _| {})
+                .child(self.0.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn escape_on_the_question_keeps_the_map_even_in_the_dock(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::for_appearance(WindowAppearance::Dark));
+            crate::bind_keys(cx);
+        });
+        let (dock, cx) = cx.add_window_view(|_, cx| {
+            InDock(cx.new(|cx| MapHistoryView::new(None, &SettingsState::default(), cx)))
+        });
+        let view = dock.read_with(cx, |dock, _| dock.0.clone());
+        view.update(cx, |view, cx| view.show_sample(cx));
+        view.update_in(cx, |view, window, cx| view.ask_about_sample(window, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| assert!(view.asking.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert_eq!(view.asking, None, "the question is gone");
+            assert!(
+                view.rows[0].restore.is_focused(window),
+                "back on its Restore"
+            );
         });
     }
 
