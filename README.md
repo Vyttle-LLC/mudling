@@ -13,10 +13,12 @@ instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
 > Early days. The headless core is here: the connection layer (telnet, GMCP,
 > MCCP2), line pipeline, plugin host with Luau hooks, versioned stores, map,
 > persistence and completion, with the Avatar game plugin on top. The desktop
-> shell is still the Phase 0 spike and doesn't use most of the core yet: a gpui
-> window with a virtualized chat, a command input with IME, and a first
-> accessibility pass. See [docs/phase-0-spike.md](docs/phase-0-spike.md) for
-> what the spike proved.
+> shell plays on it: a gpui window that opens saved servers, with a chat you
+> can search and read back through, a Room panel with a D-pad, a hotbar of
+> commands, the character's HUD, and settings for plugins, triggers, aliases
+> and shortcuts. It is built for the keyboard and screen readers as well as
+> the mouse. [docs/phase-0-spike.md](docs/phase-0-spike.md) records the spike
+> it grew from. The iOS app is still to come.
 
 ## Building
 
