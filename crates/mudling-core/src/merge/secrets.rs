@@ -27,7 +27,9 @@
 //! A field named for a password that holds a number trips it too, such as
 //! `password_length`, which would need renaming before it could be pushed.
 
-use crate::repo::format::{CHARACTERS_FOLDER, GEAR_FOLDER, MAP_FOLDER, MOBS, NOTES, SETTINGS};
+use crate::repo::format::{
+    CHARACTERS_FOLDER, GEAR_FOLDER, MAP_FOLDER, MOBS, NOTES, SETTINGS, is_game_words,
+};
 use crate::vault;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -126,6 +128,10 @@ impl Scan {
     }
 
     fn object(self, object: &Map<String, Value>, field: &str) -> Option<String> {
+        // An item's name is the game's text, though `servers.json` carries it.
+        if text_field(object, "key").is_some_and(is_game_words) {
+            return None;
+        }
         if self.authored && (is_named_password(object) || answers_a_prompt(object)) {
             return Some(field.to_owned());
         }
@@ -212,6 +218,24 @@ mod tests {
 
         assert_eq!(field, "servers[0].settings.login.password");
         assert!(!field.contains("hunter2"));
+    }
+
+    #[test]
+    fn an_items_name_in_server_meta_is_game_text_even_if_it_says_password() {
+        let row = |key: &str, value: &str| {
+            let meta = format!(r#"{{"key":"{key}","value":"{value}","updated":1}}"#);
+            format!(r#"{{"servers":[{{"id":"a","meta":[{meta}]}}]}}"#)
+        };
+        for key in [
+            "plugin.gear.name.a password scroll",
+            "plugin.gear.keyword.pwd",
+        ] {
+            let list = row(key, "a password scroll");
+            assert_eq!(found("servers.json", &list), None, "{key}");
+        }
+        // A player's own setting still counts.
+        let list = row("login.password", "hunter2");
+        assert!(found("servers.json", &list).is_some());
     }
 
     #[test]

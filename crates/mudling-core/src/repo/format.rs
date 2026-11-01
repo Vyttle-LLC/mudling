@@ -93,6 +93,12 @@ const SYNCED_META: [&str; 6] = [
 const GEAR_NAME: &str = "plugin.gear.name.";
 const GEAR_KEYWORD: &str = "plugin.gear.keyword.";
 
+/// Whether a [`Meta`] row's key says it holds the game's words for an item,
+/// which can say anything, such as `a password scroll`.
+pub(crate) fn is_game_words(key: &str) -> bool {
+    key.starts_with(GEAR_NAME) || key.starts_with(GEAR_KEYWORD)
+}
+
 fn is_synced_meta(key: &str) -> bool {
     SYNCED_META
         .iter()
