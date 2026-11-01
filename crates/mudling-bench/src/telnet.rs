@@ -11,7 +11,7 @@
 //! about 50 lines, within 100 µs at p99. An MCCP2 chunk inflates to more than
 //! 4 KB, so its time counts per 4 KB of what it inflates to.
 
-use crate::verdict;
+use crate::{BudgetScale, verdict};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use mudling_core::stats::Summary;
@@ -53,7 +53,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run() -> Report {
+pub fn run(scale: BudgetScale) -> Report {
     let bursts: Vec<Vec<u8>> = (0..BURSTS).map(burst).collect();
     let plain: Vec<u8> = negotiation(false)
         .into_iter()
@@ -64,14 +64,15 @@ pub fn run() -> Report {
     let mccp2 = measure(&compressed(&bursts), telnet_bytes);
     let gmcp_32kb_ns_per_byte = gmcp_ns_per_byte(32 * 1024);
     let gmcp_1mb_ns_per_byte = gmcp_ns_per_byte(1024 * 1024);
-    let within_budget = plain.p99_per_telnet_chunk_us() <= CHUNK_BUDGET_US
-        && mccp2.p99_per_telnet_chunk_us() <= CHUNK_BUDGET_US;
+    let chunk_budget_us = scale.time_us(CHUNK_BUDGET_US);
+    let within_budget = plain.p99_per_telnet_chunk_us() <= chunk_budget_us
+        && mccp2.p99_per_telnet_chunk_us() <= chunk_budget_us;
     Report {
         plain,
         mccp2,
         gmcp_32kb_ns_per_byte,
         gmcp_1mb_ns_per_byte,
-        chunk_budget_us: CHUNK_BUDGET_US,
+        chunk_budget_us,
         within_budget,
     }
 }

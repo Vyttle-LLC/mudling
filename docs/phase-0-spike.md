@@ -133,6 +133,9 @@ made-up lines and runs anywhere.
 cargo build --release
 
 # Append and find, headless. --check exits non-zero when a budget is missed.
+# --budget-scale <n> multiplies every time budget by n (memory is not scaled).
+# CI holds GitHub's macOS and Windows runners to ×4, which read slower than
+# the machines §6 was set on, and everything else to §6 as written (×1).
 ./target/release/mudling-bench --json reports/bench.json ~/dev/vyttle/mud-client-spike/logs/session-*.log
 ./target/release/mudling-bench --check --json reports/bench-synthetic.json
 

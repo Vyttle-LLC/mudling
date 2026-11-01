@@ -17,7 +17,7 @@
 //!
 //! Each log is a session: the defaults start over with each one.
 
-use crate::verdict;
+use crate::{BudgetScale, verdict};
 use mudling_core::defaults::{self, Defaults, PendingAction, hud};
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::PluginHost;
@@ -27,7 +27,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-pub const BUDGET_US: f64 = 5.0;
+const BUDGET_US: f64 = 5.0;
 /// Reads in the split runs are 1 to this many bytes.
 const LONGEST_SPLIT_READ: usize = 48;
 const SPLIT_RUNS: u64 = 3;
@@ -53,7 +53,7 @@ pub struct Report {
     pub within_budget: bool,
 }
 
-pub fn run(source: &str, logs: &[Vec<Event>]) -> Report {
+pub fn run(source: &str, logs: &[Vec<Event>], scale: BudgetScale) -> Report {
     let whole = Replay::run(logs, None);
     let mut ever_learned_split = BTreeSet::new();
     for seed in 1..=SPLIT_RUNS {
@@ -78,6 +78,7 @@ pub fn run(source: &str, logs: &[Vec<Event>]) -> Report {
     };
     let per_pending = or_zero(&whole.pending_samples);
     let per_gmcp = or_zero(&whole.gmcp_samples);
+    let budget_us = scale.time_us(BUDGET_US);
     Report {
         source: source.to_owned(),
         lines: whole.line_samples.len(),
@@ -88,11 +89,11 @@ pub fn run(source: &str, logs: &[Vec<Event>]) -> Report {
         shapes_learned: whole.ever_learned.len(),
         split_runs: SPLIT_RUNS,
         half_shapes,
-        within_budget: per_line.p99_us + per_pending.p99_us <= BUDGET_US && half_shapes == 0,
+        within_budget: per_line.p99_us + per_pending.p99_us <= budget_us && half_shapes == 0,
         per_line,
         per_pending,
         per_gmcp,
-        budget_us: BUDGET_US,
+        budget_us,
     }
 }
 
