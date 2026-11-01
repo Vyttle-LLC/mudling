@@ -914,7 +914,7 @@ mod tests {
         let hub = Arc::new(StoreHub::new(|| {}));
         let mut engine = engine(folder.path(), &hub);
         let named = StoreWrite {
-            plugin: PluginId::try_from("avatar".to_owned()).unwrap(),
+            plugin: PluginId::try_from("sample-game".to_owned()).unwrap(),
             store: "character".to_owned(),
             key: "name".to_owned(),
             value: Value::Text("Alda".to_owned()),

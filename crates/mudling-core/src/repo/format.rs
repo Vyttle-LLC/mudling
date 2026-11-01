@@ -74,7 +74,7 @@ pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 /// [`NOT_SAME`] travels because the player's answer holds for the map, and no
 /// device should ask it again.
 ///
-/// What the Avatar plugin learns about an item travels as its name and its
+/// What a game's plugin learns about an item travels as its name and its
 /// keyword (`plugin.gear.name.` and `plugin.gear.keyword.`), since a device
 /// that hasn't met the item can use them. Its slots and the plugin's other
 /// words are rows (`item_facts`) or aren't the player's. `plugin.gear.holds.`
