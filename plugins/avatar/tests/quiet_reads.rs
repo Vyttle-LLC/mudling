@@ -397,6 +397,31 @@ fn every_line_of_the_games_own_tables_is_a_row_and_a_tell_inside_one_shows() {
 }
 
 #[test]
+fn a_character_wearing_nothing_hears_nothing_of_the_read() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    let shown = game.chat().len();
+    game.read_up_to("equipment");
+    game.say("You are using:\nNothing.");
+    assert_eq!(game.chat()[shown..], [""; 0]);
+}
+
+#[test]
+fn two_late_answers_glued_at_a_prompt_both_stay_hidden() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    let shown = game.chat().len();
+    game.read_up_to("aff");
+    game.expect_read("equipment");
+    game.say(&format!(
+        "You are affected by:\nSpell: 'armor'.\n{PROMPT}You are using:\n\
+         <worn on finger>    a pink ice ring\n<worn on body>      a robe"
+    ));
+    game.wait_until("the first answer", |sheet| !sheet.affects.is_empty());
+    assert_eq!(game.chat()[shown..], [""; 0]);
+}
+
+#[test]
 fn a_late_answer_stays_out_of_the_chat_and_fires_no_trigger() {
     let folder = tempfile::tempdir().unwrap();
     let mut game = Game::enter_as(folder.path(), "Tamsin");

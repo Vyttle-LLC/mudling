@@ -294,48 +294,58 @@ impl QuietReads {
     }
 
     fn hides(&mut self, seen: Seen<'_>) -> bool {
-        let named = |read: usize, part: &str| {
-            let reader = &self.reads[read].reader;
-            seen.events.iter().any(|event| {
-                event
-                    .name
-                    .rsplit_once('.')
-                    .is_some_and(|(name, ending)| name == reader && ending == part)
-            })
-        };
         match self.answer {
-            Some(Answer::Arriving { read }) if named(read, ENDED) || named(read, CUT) => {
+            Some(Answer::Arriving { read }) if self.ended(read, seen) => {
                 self.answer = None;
-                !(seen.prompt && seen.glued)
+                self.claim(seen) || !(seen.prompt && seen.glued)
             }
             Some(Answer::Arriving { read }) => {
-                named(read, ROW) || named(read, STARTED) || seen.blank || seen.pager
+                self.named(read, ROW, seen)
+                    || self.named(read, STARTED, seen)
+                    || seen.blank
+                    || seen.pager
             }
             Some(Answer::Closing) => {
                 self.answer = None;
-                seen.blank || (seen.prompt && !seen.glued)
+                self.claim(seen) || seen.blank || (seen.prompt && !seen.glued)
             }
-            None => {
-                let owed = (0..self.reads.len()).filter(|&read| self.reads[read].owed > 0);
-                let answered = owed
-                    .clone()
-                    .find(|&read| named(read, STARTED) || named(read, NO_TABLE));
-                let Some(read) = answered else {
-                    return seen.blank && self.waiting_since.is_some();
-                };
-                let answer = if !named(read, STARTED) {
-                    Some(Answer::Closing)
-                } else if named(read, ENDED) || named(read, CUT) {
-                    None
-                } else {
-                    Some(Answer::Arriving { read })
-                };
-                self.answer = answer;
-                self.reads[read].owed -= 1;
-                self.waiting_since = None;
-                true
-            }
+            None => self.claim(seen) || (seen.blank && self.waiting_since.is_some()),
         }
+    }
+
+    /// Takes the line as the start of an answer owed, if it is. It can be the
+    /// line that closes the last answer: the game glues a table to a prompt.
+    fn claim(&mut self, seen: Seen<'_>) -> bool {
+        let answers = |read: &usize| {
+            self.reads[*read].owed > 0
+                && (self.named(*read, STARTED, seen) || self.named(*read, NO_TABLE, seen))
+        };
+        let Some(read) = (0..self.reads.len()).find(answers) else {
+            return false;
+        };
+        self.answer = Some(if self.named(read, STARTED, seen) {
+            Answer::Arriving { read }
+        } else {
+            Answer::Closing
+        });
+        self.reads[read].owed -= 1;
+        self.waiting_since = None;
+        true
+    }
+
+    fn ended(&self, read: usize, seen: Seen<'_>) -> bool {
+        self.named(read, ENDED, seen) || self.named(read, CUT, seen)
+    }
+
+    /// Whether the line brought `read`'s reader the event ending in `part`.
+    fn named(&self, read: usize, part: &str, seen: Seen<'_>) -> bool {
+        let reader = &self.reads[read].reader;
+        seen.events.iter().any(|event| {
+            event
+                .name
+                .rsplit_once('.')
+                .is_some_and(|(name, ending)| name == reader && ending == part)
+        })
     }
 }
 
@@ -679,6 +689,58 @@ mod tests {
             !reads.read_line(line(&[event("stats.start")]), later),
             "theirs"
         );
+    }
+
+    #[test]
+    fn an_answer_glued_to_the_prompt_closing_the_last_is_claimed() {
+        let mut reads = reads();
+        let at = Timestamp(30_000);
+        reads.next(AT_EASE, Timestamp(0));
+        reads.next(AT_EASE, at);
+        reads.read_line(line(&[event("stats.start")]), at);
+        let events = [event("stats.end"), event("spells.start")];
+        let glued = Seen {
+            glued: true,
+            ..prompt(&events)
+        };
+        assert!(reads.read_line(glued, at));
+        assert!(
+            reads.read_line(line(&[event("spells.row")]), at),
+            "its rows"
+        );
+        assert_eq!(reads.reads[1].owed, 0);
+    }
+
+    #[test]
+    fn an_answer_glued_after_a_one_line_answer_is_claimed() {
+        let mut reads = reads();
+        let at = Timestamp(30_000);
+        reads.next(AT_EASE, Timestamp(0));
+        reads.next(AT_EASE, at);
+        reads.read_line(line(&[event("stats.none")]), at);
+        let start = [event("spells.start")];
+        let glued = Seen {
+            glued: true,
+            ..prompt(&start)
+        };
+        assert!(reads.read_line(glued, at));
+        assert!(reads.read_line(line(&[event("spells.row")]), at));
+    }
+
+    #[test]
+    fn a_table_opening_again_on_its_own_closing_line_is_claimed_when_owed() {
+        let mut reads = reads();
+        reads.reads.iter_mut().for_each(|read| read.due = false);
+        reads.reads[0].due = true;
+        reads.next(AT_EASE, Timestamp(0));
+        reads.reads[0].due = true;
+        reads.next(AT_EASE, Timestamp(40_000));
+        let at = Timestamp(40_000);
+        reads.read_line(line(&[event("stats.start")]), at);
+        let events = [event("stats.end"), event("stats.start")];
+        assert!(reads.read_line(prompt(&events), at));
+        assert!(reads.read_line(line(&[event("stats.row")]), at));
+        assert_eq!(reads.reads[0].owed, 0);
     }
 
     #[test]
