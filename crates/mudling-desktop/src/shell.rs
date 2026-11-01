@@ -227,6 +227,9 @@ struct SyncLink {
     /// Stop syncing was pressed, and sync hasn't let go of the repo yet. It
     /// can refuse, so the saved choice waits for it.
     clearing: bool,
+    /// The sync the saved servers were last listed after: one that finishes
+    /// later may have brought servers in.
+    listed_after: Option<Timestamp>,
 }
 
 /// A server to open once the vault has had its say.
@@ -246,6 +249,8 @@ enum Request {
     ChooseServer,
     Save(Target),
     Remove(String),
+    /// Read the saved servers again, as a sync may have changed them.
+    ListServers,
 }
 
 impl Request {
@@ -735,6 +740,7 @@ impl Shell {
             key_store,
             vault_file: PathBuf::new(),
             clearing: false,
+            listed_after: None,
         });
         self.show_sync(window, cx);
     }
@@ -781,8 +787,15 @@ impl Shell {
         self.settings
             .update(cx, |sheet, cx| sheet.show_sync(state, repo, cx));
         let theirs = state.settings.clone();
+        let synced = state.last_sync;
         self.adopt_settings(theirs, window, cx);
         self.show_problems(self.copies.settings.value(), cx);
+        let Some(link) = &mut self.sync else { return };
+        if synced.is_some() && synced != link.listed_after {
+            link.listed_after = synced;
+            // On the job path the launcher's reads always take: never here.
+            self.ask(Request::ListServers, window, cx);
+        }
     }
 
     /// Wears settings a merge brought in, if they're newer than what's worn.
@@ -1005,6 +1018,14 @@ impl Shell {
             Request::ChooseServer => self.choose_server(window, cx),
             Request::Save(target) => self.add_server(target, window, cx),
             Request::Remove(host) => self.remove_server(host, window, cx),
+            Request::ListServers => self.off_the_ui_thread(
+                |launcher| Outcome {
+                    saved: launcher.saved(),
+                    ..Outcome::default()
+                },
+                window,
+                cx,
+            ),
         }
     }
 
@@ -4988,6 +5009,46 @@ pub mod tests {
         assert_eq!(kept.as_deref(), Some(beside.as_path()));
         let said = shell.read_with(cx, |shell, cx| shell.settings.read(cx).repo_refusal());
         assert_eq!(said, None, "a good choice clears the refusal");
+        syncer.quit().wait();
+    }
+
+    #[gpui::test]
+    fn a_server_a_sync_brings_in_is_listed_without_a_relaunch(cx: &mut TestAppContext) {
+        let folder = TempDir::new().unwrap();
+        let (shell, cx, syncer) = synced_window(cx, folder.path(), None);
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        shell.update_in(cx, |shell, window, cx| {
+            shell.use_launcher(launcher, window, cx);
+        });
+        let hosts = |shell: &Entity<Shell>, cx: &mut VisualTestContext| -> Vec<String> {
+            shell.read_with(cx, |shell, cx| {
+                let cards = shell.empty_state.read(cx).cards().to_vec();
+                cards.into_iter().map(|card| card.target.host).collect()
+            })
+        };
+        applied_until(&shell, cx, "the first listing", |shell, _| {
+            shell.job.is_none()
+        });
+        assert!(hosts(&shell, cx).is_empty());
+
+        // What a merge does to this device: another's server arrives.
+        persist::save_server(folder.path(), "brought.example.org", 4000).unwrap();
+        shell.update_in(cx, |shell, window, cx| {
+            let landed = SyncState {
+                last_sync: Some(Timestamp::now()),
+                ..SyncState::default()
+            };
+            shell.sync.as_mut().unwrap().copy.write(&landed);
+            shell.show_sync(window, cx);
+        });
+
+        applied_until(&shell, cx, "the server listed", |shell, cx| {
+            shell.job.is_none()
+                && (shell.empty_state.read(cx).cards().iter())
+                    .any(|card| card.target.host == "brought.example.org")
+        });
+        let listed = shell.read_with(cx, |shell, cx| shell.settings.read(cx).server_hosts());
+        assert_eq!(listed, ["brought.example.org"], "Settings lists it too");
         syncer.quit().wait();
     }
 

@@ -436,6 +436,13 @@ impl SettingsSheet {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn server_hosts(&self) -> Vec<String> {
+        (self.servers.iter())
+            .map(|server| server.host.to_string())
+            .collect()
+    }
+
     pub fn show_playing(&mut self, host: Option<&str>, cx: &mut Context<SettingsSheet>) {
         if self.playing.as_deref() != host {
             self.playing = host.map(|host| host.to_owned().into());
