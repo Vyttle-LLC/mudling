@@ -1676,7 +1676,8 @@ pub mod tests {
     use crate::settings::Section;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
-        Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, px, size,
+        Modifiers, MouseButton, Pixels, ScrollDelta, ScrollEvent, TestAppContext,
+        VisualTestContext, point, px, size,
     };
     use mudling_core::defaults::aliases::AliasRule;
     use mudling_core::defaults::hud::Vital;
@@ -2582,6 +2583,39 @@ pub mod tests {
         cx.simulate_resize(size(px(1400.), px(800.)));
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("left-dock").unwrap().size.width, dragged);
+    }
+
+    #[gpui::test]
+    fn a_room_card_and_map_history_stay_reachable_in_a_short_window(cx: &mut TestAppContext) {
+        let (shell, cx) = empty_window(cx);
+        cx.simulate_resize(size(px(1400.), px(420.)));
+        shell.update(cx, |shell, cx| {
+            shell.open_panels(cx);
+            shell.show_sample_map(&crate::map_view::harness::noted_map(10), 24, cx);
+        });
+        cx.run_until_parked();
+
+        let dock = cx.debug_bounds("left-dock").unwrap();
+        let map = cx.debug_bounds("map-surface").unwrap();
+        let below = cx.debug_bounds("map-below").unwrap();
+        assert!(
+            map.size.height >= px(120.),
+            "the map keeps its share: {map:?}"
+        );
+        assert!(below.bottom() <= dock.bottom(), "{below:?} in {dock:?}");
+
+        cx.simulate_event(ScrollEvent {
+            position: below.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-1000.))),
+            ..ScrollEvent::default()
+        });
+        cx.run_until_parked();
+        let history = cx.debug_bounds("map-history").unwrap();
+        assert_eq!(
+            history.bottom(),
+            below.bottom(),
+            "scrolled to the end, the history's last row is in view"
+        );
     }
 
     #[gpui::test]

@@ -383,6 +383,7 @@ impl Render for MapHistoryView {
         });
         div()
             .id("map-history")
+            .debug_selector(|| "map-history".to_owned())
             .key_context(CONTEXT)
             .on_action(|_: &FocusNextControl, window, cx| window.focus_next(cx))
             .role(Role::Group)

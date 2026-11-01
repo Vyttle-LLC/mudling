@@ -33,6 +33,8 @@ use std::rc::Rc;
 const CLICK_SLOP: f32 = 4.;
 const WHEEL_ZOOM_PER_LINE: f32 = 1.1;
 const WHEEL_ZOOM_PER_PIXEL: f32 = 1.005;
+/// The least height the map keeps in the panel, whatever sits under it.
+const MIN_SURFACE: Pixels = px(120.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapLayout {
@@ -443,23 +445,37 @@ impl Render for MapView {
                 .flex()
                 .flex_col()
                 .child(self.header(colors, cx))
-                .child(div().flex_1().min_h_0().child(self.map_surface(colors, cx)))
-                .when(self.model.selection().is_some(), |view| {
-                    view.children(
-                        self.card
-                            .clone()
-                            .map(|card| div().flex_none().pt_3().child(card)),
-                    )
-                })
-                // Cached: a pan redraws the map, not the list.
-                .children(self.below.clone().map(|view| {
-                    view.cached(
-                        StyleRefinement::default()
-                            .flex_none()
-                            .w_full()
-                            .h(map_history::HEIGHT),
-                    )
-                })),
+                .child(
+                    div()
+                        .debug_selector(|| "map-surface".to_owned())
+                        .flex_1()
+                        .min_h(MIN_SURFACE)
+                        .child(self.map_surface(colors, cx)),
+                )
+                // In a short window this scrolls, and the map keeps its share.
+                .child(
+                    div()
+                        .id("map-below")
+                        .debug_selector(|| "map-below".to_owned())
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .when(self.model.selection().is_some(), |below| {
+                            below.children(
+                                self.card
+                                    .clone()
+                                    .map(|card| div().flex_none().pt_3().child(card)),
+                            )
+                        })
+                        // Cached: a pan redraws the map, not the list.
+                        .children(self.below.clone().map(|view| {
+                            view.cached(
+                                StyleRefinement::default()
+                                    .flex_none()
+                                    .w_full()
+                                    .h(map_history::HEIGHT),
+                            )
+                        })),
+                ),
         }
     }
 }
