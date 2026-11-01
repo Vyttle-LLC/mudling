@@ -15,9 +15,10 @@ pub use hub::StoreHub;
 pub use memo::Memo;
 pub use payload::{
     Affect, CHARACTER_AFFECTS, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME,
-    CHARACTER_POSITION, CharactersState, ConnectionStatus, CuesState, GearState, Item, MapRestore,
-    MapState, MobsState, Occupant, RoomContents, RoomState, RulesState, SettingsState,
-    TERMINAL_CAPACITY, Target, TargetState, TerminalChange, TerminalState, VitalsState,
+    CHARACTER_POSITION, CarriedItem, CharactersState, ConnectionStatus, CuesState, GearState, Item,
+    ItemsState, MapRestore, MapState, MobsState, Occupant, RoomContents, RoomState, RulesState,
+    SettingsState, TERMINAL_CAPACITY, Target, TargetState, TerminalChange, TerminalState,
+    VitalsState, WornItem,
 };
 
 /// How many real changes a store has seen. A shell compares revisions to
@@ -174,6 +175,7 @@ store_set! {
     characters: CharactersState => Characters,
     target: TargetState => Target,
     gear: GearState => Gear,
+    items: ItemsState => Items,
     settings: SettingsState => Settings,
     rules: RulesState => Rules,
     cues: CuesState => Cues,

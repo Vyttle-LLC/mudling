@@ -2,9 +2,9 @@
 //! the database.
 //!
 //! A hook names its own stores and keys: their meaning is the plugin's, and
-//! the core only keeps them. Gear's stores are shared by a server's
-//! characters, so they're saved in its `meta` table; the rest are the
-//! character's own, saved as its stats.
+//! the core only keeps them, but for gear's, which it files. What's shared
+//! by a server's characters and isn't filed is saved in its `meta` table; the
+//! rest are the character's own, saved as its stats.
 
 use crate::defaults::hud::Vital;
 use crate::plugin::luau::{StateView, Value};

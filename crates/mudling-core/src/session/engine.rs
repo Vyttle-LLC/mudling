@@ -3,6 +3,7 @@
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
 use super::game::GameFeed;
+use super::gear::{Filing, GearKeeper, GearWatch, Saving};
 use super::inventory::{self, Inventory};
 use super::latency::Latency;
 use super::login::Login;
@@ -72,6 +73,7 @@ struct Link {
     defaults: Defaults,
     inventory: Inventory,
     inventory_asked: bool,
+    gear: GearWatch,
     game: GameFeed,
     latency: Latency,
     login: Option<Login>,
@@ -169,6 +171,8 @@ pub struct Engine {
     terminal: Vec<Line>,
     /// The last line shown was a blank one from the server, or none has been.
     blank_shown: bool,
+    /// What's known about items, and what the character has on them.
+    gear: GearKeeper,
     /// Plugin writes for the database, at the next settle.
     batch: Batch,
     /// Rooms changed since the last version of the map was saved. A new
@@ -258,6 +262,7 @@ impl Engine {
             added_names: AddedNames::default(),
             terminal: Vec::new(),
             blank_shown: true,
+            gear: GearKeeper::default(),
             batch: Batch::new(),
             map_changed: true,
             version_saved: now,
@@ -308,6 +313,7 @@ impl Engine {
             defaults: Defaults::default(),
             inventory: Inventory::default(),
             inventory_asked: false,
+            gear: GearWatch::default(),
             game: GameFeed::default(),
             latency: Latency::default(),
             login: self.new_login(),
@@ -514,6 +520,7 @@ impl Engine {
             let sounds = std::mem::take(&mut self.sounds);
             self.hub.write::<CuesState>(sounds);
         }
+        self.gear.publish(&self.plugins, &self.hub);
         if !self.terminal.is_empty() {
             let lines = std::mem::take(&mut self.terminal);
             self.hub
@@ -682,6 +689,13 @@ impl Engine {
             link.hooks.wait_until_idle();
         }
         self.settle(now);
+        if let Some(link) = &mut self.link {
+            let mut saving = Saving {
+                now,
+                batch: &mut self.batch,
+            };
+            self.gear.finish_change(&mut link.gear, &mut saving);
+        }
         self.link = None;
         self.map.connection_lost();
         self.settings.connection = ConnectionStatus::Closed(reason);
@@ -786,6 +800,7 @@ impl Engine {
                 link.defaults.read_line(&line)
             };
             if prompt.is_some() {
+                link.gear.prompt_seen();
                 self.plugins.end_tables(&line, &mut self.events);
             }
             let output_at = prompt.filter(|&at| at < text.len()).unwrap_or(0);
@@ -868,6 +883,19 @@ impl Engine {
                 }
                 None => {}
             }
+            let mut saving = Saving {
+                now,
+                batch: &mut self.batch,
+            };
+            let (inventory, watch) = (&mut link.inventory, &mut link.gear);
+            (self.gear).event(
+                &event,
+                &self.plugins,
+                inventory,
+                watch,
+                &self.hub,
+                &mut saving,
+            );
             link.hooks.event(event);
         }
     }
@@ -905,6 +933,7 @@ impl Engine {
         link.defaults.gmcp_arrived(package, json);
         if let Some(entries) = link.inventory.read(package, json) {
             self.hub.write::<CharactersState>(CharactersState(entries));
+            self.gear.carried_changed(&link.inventory, &mut link.gear);
         }
         let heard = link.game.read(package, json);
         self.contents_changed |= heard.contents;
@@ -967,6 +996,13 @@ impl Engine {
                 .write::<CharactersState>(CharactersState::listing(&affects));
         }
         self.map.gmcp(package, json, now);
+        if let Some(link) = &mut self.link {
+            let mut saving = Saving {
+                now,
+                batch: &mut self.batch,
+            };
+            (self.gear).gmcp(package, json, &mut link.gear, &self.hub, &mut saving);
+        }
         if !heard.mobs.is_empty() {
             self.map.note_sightings(&heard.mobs, now);
         }
@@ -1222,7 +1258,8 @@ impl Engine {
     fn load_saved(&mut self) -> Result<(), SessionError> {
         let reader = self.database.reader()?;
         let (rows, marks, meta) = (reader.map()?, reader.mob_marks()?, reader.meta()?);
-        let stats = reader.characters()?.stats;
+        let characters = reader.characters()?;
+        let stats = characters.stats;
         let rules = Box::new(PluginRules::of(&self.plugins));
         self.map = LiveMap::load(rules, &rows, &marks, &meta);
 
@@ -1252,14 +1289,13 @@ impl Engine {
             self.hub
                 .write::<CharactersState>(CharactersState::no_affects());
         }
-        let gear = meta
-            .iter()
-            .filter_map(|entry| {
-                let key = entry.key.strip_prefix(values::GEAR_META_PREFIX)?;
-                Some((key.to_owned(), values::from_row(&entry.value)?))
-            })
-            .collect();
-        self.hub.write::<GearState>(GearState(gear));
+        let mut saving = Saving {
+            now: Timestamp::now(),
+            batch: &mut self.batch,
+        };
+        let worn = characters.worn;
+        let owner = &self.character_id;
+        (self.gear).load(reader.gear()?, worn, owner, &meta, &self.hub, &mut saving);
         Ok(())
     }
 
@@ -1359,6 +1395,16 @@ impl Engine {
         let StoreWrite {
             store, key, value, ..
         } = write;
+        let watch = self.link.as_ref().map(|link| &link.gear);
+        let mut saving = Saving {
+            now,
+            batch: &mut self.batch,
+        };
+        let owner = &self.character_id;
+        let filing = (self.gear).hook_wrote(&store, &key, &value, owner, watch, &mut saving);
+        if filing == Filing::Draft {
+            return;
+        }
         let key = format!("{store}.{key}");
         self.contents_changed |= key == CHARACTER_NAME;
         if key == CHARACTER_NAME
@@ -1371,11 +1417,13 @@ impl Engine {
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
             self.hub.write::<GearState>(GearState(change));
-            self.batch.upsert(persist::Meta {
-                key: format!("{}{key}", values::GEAR_META_PREFIX),
-                value: row,
-                updated: now,
-            });
+            if filing == Filing::Plain {
+                self.batch.upsert(persist::Meta {
+                    key: format!("{}{key}", values::GEAR_META_PREFIX),
+                    value: row,
+                    updated: now,
+                });
+            }
         } else {
             self.hub.write::<CharactersState>(CharactersState(change));
             self.batch.upsert(persist::CharacterStat {
@@ -1394,10 +1442,12 @@ impl Engine {
         self.playing.clone()
     }
 
-    /// The character's name changed, so which rules apply to them did too.
+    /// The character's name changed, so which rules apply to them did too,
+    /// and whose gear it is.
     fn rules_follow_the_character(&mut self) {
         let character = self.playing_as();
         if self.rules.character != character {
+            self.gear.follow(&character);
             self.rules.character = character;
             self.run_triggers();
             self.run_aliases();

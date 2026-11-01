@@ -54,6 +54,8 @@ row = [
     # What was added to this copy, by the spell that added it:
     # "'enchant armor  '  modifies armor class by  -4 continuous".
     '''^'(?<spell>.+?)'\s+modifies (?<stat>.+?) by\s+(?<amount>-?\d+)''',
+    # Whatever else it says, until the blank line: damage, weapon type.
+    '''^(?<detail>\S.*)$''',
 ]
 
 # "You look at an amulet of Gorn in your inventory...", then "This item

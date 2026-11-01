@@ -24,7 +24,8 @@
 //! report (see `measure`); `--settings-open` measures it with the settings
 //! sheet open, `--hud` with the HUD in that place, `--find-open` with the find
 //! bar open and results showing, `--find-panel` with the Find panel showing and
-//! being typed in, `--notes-open` with a note being typed in the Notes tab, and
+//! being typed in, `--notes-open` with a note being typed in the Notes tab,
+//! `--gear-open` with the Gear tab open on a full gear database, and
 //! `--sample-map` with a made-up map.
 //! `--ax-check` (macOS) checks the
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
@@ -47,6 +48,7 @@ mod dock;
 mod dpad;
 mod empty_state;
 mod find_panel;
+mod gear_panel;
 mod hotbar;
 mod hud;
 mod input;
@@ -97,7 +99,8 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] [--hud attached|open|floating|dragged|strip|hidden] \
-                     [--find-open] [--find-panel] [--notes-open] [--sample-map <rooms>]] [--ax-check]";
+                     [--find-open] [--find-panel] [--notes-open] [--gear-open] \
+                     [--sample-map <rooms>]] [--ax-check]";
 
 actions!(mudling, [Quit]);
 
@@ -120,6 +123,7 @@ struct Options {
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
+    gear_open: bool,
     sample_map: Option<i64>,
     ax_check: bool,
 }
@@ -291,6 +295,11 @@ fn main() -> ExitCode {
                 if options.notes_open {
                     window
                         .update(cx, measure::open_notes)
+                        .expect("the measured window is open");
+                }
+                if options.gear_open {
+                    window
+                        .update(cx, |shell, _, cx| measure::fill_full_gear(shell, cx))
                         .expect("the measured window is open");
                 }
                 measure::drive(
@@ -467,6 +476,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         find_open: false,
         find_panel: false,
         notes_open: false,
+        gear_open: false,
         sample_map: None,
         ax_check: false,
     };
@@ -509,6 +519,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--find-open" => options.find_open = true,
             "--find-panel" => options.find_panel = true,
             "--notes-open" => options.notes_open = true,
+            "--gear-open" => options.gear_open = true,
             "--measure" => options.measure = true,
             "--measured-run" => options.measured_run = true,
             "--ax-check" if cfg!(target_os = "macos") => options.ax_check = true,

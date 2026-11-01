@@ -27,6 +27,7 @@
 
 mod engine;
 mod game;
+mod gear;
 mod inventory;
 mod latency;
 mod login;

@@ -68,16 +68,19 @@ use gpui::{
     ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, Window, point, px,
 };
 use mudling_core::defaults::hud::Vital;
+use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
 use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
-use mudling_core::persist::{self, Batch, Database, Exit, Link, Meta, Room, Sighting, Timestamp};
+use mudling_core::persist::{
+    self, Batch, Database, Exit, Link, Meta, Room, Sighting, StatMap, Timestamp,
+};
 use mudling_core::plugin::luau::Value;
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION,
-    CharactersState, Item, MapState, MobsState, Occupant, RoomContents, RoomState, StoreHub,
-    Target, TargetState, Versioned, VitalsState,
+    Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CarriedItem,
+    CharactersState, Item, ItemsState, MapState, MobsState, Occupant, RoomContents, RoomState,
+    StoreHub, Target, TargetState, Versioned, VitalsState, WornItem,
 };
 use mudling_core::telnet::gmcp;
 use serde::Serialize;
@@ -229,6 +232,136 @@ pub fn sample_find() -> FindStores {
         ),
     ])));
     FindStores::of(map, mobs, room, characters)
+}
+
+/// The canvas's character's level, under the sample's level lock.
+const SAMPLE_LEVEL: f64 = 2.;
+/// How many items a measured run's full gear database knows.
+const FULL_GEAR_NAMES: usize = 5_000;
+
+/// The canvas's character: some gear worn, ten things carried, and what an
+/// identify taught. Made up, as all of this module's are.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn sample_items() -> ItemsState {
+    let now = Timestamp(0);
+    let mut batch = Batch::new();
+    let mut book = GearBook::default();
+    let carried = [
+        ("1", "(Glowing) (Humming) a copper bracelet"),
+        ("2", "(Glowing) a small necklace"),
+        ("3", "(Glowing) an alligator tooth"),
+        ("4", "(Glowing) orb of knowledge"),
+        ("5", "a small boat"),
+        ("6", "a bright ball of light"),
+        ("7", "a bright ball of light"),
+        ("8", "a bright ball of light"),
+        ("9", "a bright ball of light"),
+        ("10", "a bright ball of light"),
+    ];
+    let stats = |pairs: &[(&str, i64)]| -> StatMap {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
+    };
+    let reading = |keywords: &str, level, pairs: &[(&str, i64)]| Reading {
+        keywords: keywords.to_owned(),
+        item_type: "armor".to_owned(),
+        level: Some(level),
+        quality: Some("100 / 100 hps".to_owned()),
+        base: stats(pairs),
+        ..Reading::default()
+    };
+    for (slot, word, name, level, effects) in [
+        ("wrist", "bracelet", carried[0].1, 7, &[("ac", -2)][..]),
+        (
+            "neck",
+            "necklace",
+            carried[1].1,
+            1,
+            &[("ac", -1), ("wis", 1)],
+        ),
+        ("held", "tooth", carried[2].1, 1, &[("hitroll", 1)]),
+        ("held", "orb", carried[3].1, 2, &[("int", 2)]),
+        ("neck", "amulet", "an amulet of the moon", 1, &[("ac", -1)]),
+    ] {
+        let item = ItemRef { name, copy: None };
+        book.learn(reading(word, level, effects), item, now, &mut batch);
+        book.learn_slot(slot, name, now, &mut batch);
+    }
+    book.note_word("ball", "a bright ball of light");
+    book.note_word("robe", "a linen robe");
+    let worn = |slot: &str, item: &str| WornItem {
+        slot: slot.to_owned(),
+        item: item.to_owned(),
+        copy: None,
+    };
+    let names = book.names().map(str::to_owned).collect::<Vec<_>>();
+    ItemsState {
+        matcher: Arc::new(ItemMatcher::new(names.iter().map(String::as_str))),
+        book: Arc::new(book),
+        worn: vec![
+            worn("light", "a bright ball of light"),
+            worn("neck", "(Glowing) an amulet of the moon"),
+            worn("body", "a linen robe"),
+        ]
+        .into(),
+        carried: carried
+            .map(|(id, name)| CarriedItem {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            })
+            .to_vec()
+            .into(),
+        slots: ["light", "finger", "neck", "body", "head", "legs", "feet"]
+            .map(str::to_owned)
+            .to_vec()
+            .into(),
+    }
+}
+
+/// A line the sample's tooltips find an item in.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const SAMPLE_ITEM_LINE: &str = "You see an amulet of the moon here.";
+
+/// Puts `items` in the Gear panel and the chat's tooltips, on the tab.
+fn show_gear(shell: &Shell, items: ItemsState, cx: &mut App) {
+    shell
+        .chat()
+        .update(cx, |chat, cx| chat.show_items(items.clone(), cx));
+    let (level, number) = (CHARACTER_LEVEL.to_owned(), Value::Number(SAMPLE_LEVEL));
+    let character = CharactersState(BTreeMap::from([(level, number)]));
+    shell.gear_panel().update(cx, |panel, cx| {
+        panel.show_items(items, cx);
+        panel.show_character(&character, cx);
+        panel.hear(SAMPLE_ITEM_LINE, cx);
+        panel.show_carrying(cx);
+    });
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.select(Slot::Gear, cx));
+}
+
+/// The sample gear, on the Gear tab.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn fill_gear(shell: &Shell, cx: &mut App) {
+    show_gear(shell, sample_items(), cx);
+}
+
+/// The Gear tab on the sample, with a database of [`FULL_GEAR_NAMES`] items
+/// behind the panel and the tooltips.
+pub fn fill_full_gear(shell: &Shell, cx: &mut App) {
+    let mut items = sample_items();
+    let mut book = (*items.book).clone();
+    let mut batch = Batch::new();
+    for number in 0..FULL_GEAR_NAMES {
+        book.learn_slot(
+            "neck",
+            &format!("a charm of {number}"),
+            Timestamp(0),
+            &mut batch,
+        );
+    }
+    items.matcher = Arc::new(ItemMatcher::new(book.names()));
+    items.book = Arc::new(book);
+    show_gear(shell, items, cx);
 }
 
 /// The room with the most in it across `logs`, their GMCP read through an

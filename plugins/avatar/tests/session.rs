@@ -2,12 +2,14 @@
 //! once turned on, its hooks' writes reaching the stores.
 
 use mudling_core::defaults::detect::Source;
+use mudling_core::gear::{GearBook, ItemRef};
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{Database, Timestamp};
 use mudling_core::plugin::luau::Value;
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, GearState, RoomState, SettingsState, StoreHub, Versioned,
+    CharactersState, ConnectionStatus, GearState, ItemsState, RoomState, SettingsState, StoreHub,
+    Versioned,
 };
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, SB, SE};
@@ -151,6 +153,169 @@ fn a_spell_identify_is_filed_under_the_one_item_at_hand_it_fits() {
             .cloned()
     });
     assert_eq!(keywords, Some(Value::Text("gorn amulet newbie".to_owned())));
+}
+
+fn items(hub: &StoreHub) -> ItemsState {
+    hub.read(|items: &Versioned<ItemsState>| items.value().clone())
+}
+
+/// Settles until `done` says the hooks' writes have landed.
+fn settle_until(engine: &mut Engine, hub: &StoreHub, done: impl Fn(&ItemsState) -> bool) {
+    let started = Instant::now();
+    while !done(&items(hub)) {
+        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        engine.settle(Timestamp(0));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn carrying(engine: &mut Engine, id: &str, name: &str) {
+    let list = format!(r#"{{"location":"inv","items":[{{"id":"{id}","name":"{name}"}}]}}"#);
+    let now = Timestamp(0);
+    engine.receive(gmcp("Char.Items.List", &list), now).unwrap();
+    engine.settle(now);
+}
+
+const SHOP_MASK: &str = "Ulric looks closely at your a Tiamat mask.\r\n\
+    Object 'mask Tiamat' type armor, extra flags evil.\r\n\
+    Weight 3, value 40, level 2.\r\n\
+    Armor class is {armor}.\r\n\r\n";
+
+#[test]
+fn two_copies_with_one_name_keep_a_reading_each_and_come_back_saved() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    for (id, armor, known) in [("1", "1", 1), ("2", "3", 2)] {
+        carrying(&mut engine, id, "a Tiamat mask");
+        let identify = SHOP_MASK.replace("{armor}", armor);
+        engine.receive(Bytes::from(identify), now).unwrap();
+        engine.receive(Bytes::from_static(PROMPT), now).unwrap();
+        engine.quiet(now);
+        settle_until(&mut engine, &hub, |items| {
+            let mask = items.book.item("a tiamat mask");
+            mask.is_some_and(|mask| mask.readings.len() == known)
+        });
+    }
+    let check = |book: &GearBook| {
+        let mask = book.item("a tiamat mask").unwrap();
+        assert_eq!(mask.facts.keywords.as_deref(), Some("mask Tiamat"));
+        let armor = |copy| {
+            let item = ItemRef {
+                name: "a Tiamat mask",
+                copy: Some(copy),
+            };
+            book.stats(item).unwrap().effects()["ac"]
+        };
+        assert_eq!((armor("1"), armor("2")), (-1, -3));
+    };
+    check(&items(&hub).book);
+    engine.finish().unwrap();
+
+    let database = Database::open(&folder.path().join("servers"), HOST).unwrap();
+    check(&GearBook::from_rows(
+        database.reader().unwrap().gear().unwrap(),
+    ));
+}
+
+#[test]
+fn wearing_one_item_measures_it_and_moves_it_to_the_worn_list() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    engine
+        .receive(gmcp("Char.Status", r#"{"str":"15","hitroll":"2"}"#), now)
+        .unwrap();
+    carrying(&mut engine, "7", "(Glowing) a pink ice ring");
+    assert_eq!(items(&hub).carried.len(), 1);
+
+    let wore = b"You wear a pink ice ring on your left finger.\r\n";
+    engine.receive(Bytes::from_static(wore), now).unwrap();
+    engine
+        .receive(gmcp("Char.Status", r#"{"str":"16"}"#), now)
+        .unwrap();
+    settle_until(&mut engine, &hub, |items| {
+        items.worn.iter().any(|worn| worn.item.contains("pink ice"))
+    });
+
+    let state = items(&hub);
+    assert!(state.carried.is_empty(), "it isn't carried now");
+    assert_eq!(state.worn[0].slot, "finger");
+    assert_eq!(state.worn[0].copy.as_deref(), Some("7"));
+    let ring = ItemRef {
+        name: "a pink ice ring",
+        copy: Some("7"),
+    };
+    assert_eq!(state.book.stats(ring).unwrap().effects()["str"], 1);
+
+    let removed = b"(1h-1m-1v-1)(-/-)\r\nYou stop using a pink ice ring.\r\n";
+    engine.receive(Bytes::from_static(removed), now).unwrap();
+    engine.settle(now);
+    let state = items(&hub);
+    assert_eq!(state.worn[0].item, "", "the slot stays, empty");
+    assert_eq!(state.carried[0].id, "7");
+}
+
+#[test]
+fn the_matcher_learns_a_new_name_and_keeps_itself_for_anything_else() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let wore = b"You wear a red hat on your head.\r\n";
+    engine.receive(Bytes::from_static(wore), now).unwrap();
+    settle_until(&mut engine, &hub, |items| !items.matcher.is_empty());
+    let line = "You see a red hat.";
+    let matcher = items(&hub).matcher;
+    assert_eq!(matcher.find(line)[0].item, "a red hat");
+
+    // The same fact again, then what's carried: no new names, no new matcher.
+    engine.receive(Bytes::from_static(wore), now).unwrap();
+    carrying(&mut engine, "1", "a tin cup");
+    settle_until(&mut engine, &hub, |items| !items.carried.is_empty());
+    assert!(Arc::ptr_eq(&matcher, &items(&hub).matcher));
+}
+
+#[test]
+fn a_swap_measures_nothing() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    engine
+        .receive(gmcp("Char.Status", r#"{"str":"15"}"#), now)
+        .unwrap();
+    let swap = b"You stop using a tin hat.\r\nYou wear a red hat on your head.\r\n";
+    engine.receive(Bytes::from_static(swap), now).unwrap();
+    engine
+        .receive(gmcp("Char.Status", r#"{"str":"16"}"#), now)
+        .unwrap();
+    settle_until(&mut engine, &hub, |items| {
+        items.book.item("a red hat").is_some()
+    });
+    assert_eq!(
+        items(&hub).book.stats(ItemRef {
+            name: "a red hat",
+            copy: None
+        }),
+        None
+    );
+}
+
+#[test]
+fn another_character_on_the_session_sees_no_one_elses_gear() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    let now = Timestamp(0);
+    let name = |who: &str| gmcp("Char.Status", &format!(r#"{{"character_name":"{who}"}}"#));
+    engine.receive(name("Fen"), now).unwrap();
+    engine.settle(now);
+    let eq = b"You are using:\r\n<worn on head>      a red hat\r\n(1h-1m-1v-1)(-/-)\r\n";
+    engine.receive(Bytes::from_static(eq), now).unwrap();
+    engine.quiet(now);
+    settle_until(&mut engine, &hub, |items| !items.worn.is_empty());
+
+    engine.receive(name("Ash"), now).unwrap();
+    engine.settle(now);
+    assert!(items(&hub).worn.is_empty());
 }
 
 #[test]

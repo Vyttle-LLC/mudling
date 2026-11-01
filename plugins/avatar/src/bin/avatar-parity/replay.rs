@@ -4,7 +4,7 @@
 use crate::log::{self, Happened};
 use crate::model::{Room, World, plain_item};
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::{Database, MapRows, Timestamp};
+use mudling_core::persist::{Database, Identification, MapRows, Timestamp};
 use mudling_core::plugin::luau::HookLimits;
 use mudling_core::session::{Credentials, Engine, SessionConfig, Typing};
 use mudling_core::store::StoreHub;
@@ -30,8 +30,6 @@ const HOOK_QUEUE: usize = 1 << 22;
 const IDENTIFY: &[u8] = b"Object '";
 const PACED_EVENTS: usize = 4;
 const HOOK_CATCH_UP: Duration = Duration::from_millis(10);
-const GEAR_META: &str = "plugin.gear.";
-const IDENTIFY_META: &str = "plugin.identify.";
 
 /// A log's text as the telnet layer would receive it.
 fn wire_text(text: &[u8]) -> Vec<u8> {
@@ -292,41 +290,55 @@ pub fn run(logs: &[PathBuf], folder: &Path) -> Result<Replay, String> {
         flat.extend(flat_worn(&stats));
         world.characters.insert(character, flat);
     }
-    let mut readings: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for row in reader.meta().map_err(|error| error.to_string())? {
-        if let Some(key) = row.key.strip_prefix(GEAR_META) {
-            if key.starts_with("slot.") || key.starts_with("keywords.") {
-                world.gear.insert(key.to_owned(), row_text(&row.value));
-            }
-        } else if let Some(key) = row.key.strip_prefix(IDENTIFY_META)
-            && key != "read"
-        {
-            identify_field(&mut readings, key, row_text(&row.value));
+    let gear = reader.gear().map_err(|error| error.to_string())?;
+    for facts in gear.facts {
+        if let Some(slot) = facts.slot {
+            world.gear.insert(format!("slot.{}", facts.name), slot);
+        }
+        if let Some(keywords) = facts.keywords {
+            world
+                .gear
+                .insert(format!("keywords.{}", facts.name), keywords);
+        }
+        if facts.measured.is_some() {
+            world.measured.insert(facts.name);
         }
     }
-    for (words, reading) in readings {
-        world.identifies.insert(words, vec![reading]);
+    world.copies = gear.copies.len();
+    for copy in gear.copies {
+        if copy.measured.is_some() {
+            world.measured.insert(plain_item(&copy.name));
+        }
+    }
+    for reading in gear.identifications {
+        world
+            .identifies
+            .entry(reading.keywords.clone())
+            .or_default()
+            .push(flat_reading(reading));
     }
     Ok(Replay { world, notices })
 }
 
-/// Files `<keywords>.<field>`. Keywords can hold anything but the field names.
-fn identify_field(
-    readings: &mut BTreeMap<String, BTreeMap<String, String>>,
-    key: &str,
-    value: String,
-) {
-    const FIELDS: [&str; 7] = [
-        ".name", ".type", ".flags", ".level", ".quality", ".base.", ".added.",
-    ];
-    let Some(at) = FIELDS.iter().filter_map(|field| key.rfind(field)).min() else {
-        return;
-    };
-    let (words, field) = key.split_at(at);
-    if field != ".name" {
-        readings
-            .entry(words.to_owned())
-            .or_default()
-            .insert(field[1..].to_owned(), value);
+/// A reading as the checker compares them.
+fn flat_reading(reading: Identification) -> BTreeMap<String, String> {
+    let mut flat = BTreeMap::from([
+        ("type".to_owned(), reading.item_type),
+        ("flags".to_owned(), reading.flags.join(" ")),
+    ]);
+    if let Some(level) = reading.level {
+        flat.insert("level".to_owned(), level.to_string());
     }
+    if let Some(quality) = reading.quality {
+        flat.insert("quality".to_owned(), quality);
+    }
+    for (stat, amount) in reading.base {
+        flat.insert(format!("base.{stat}"), amount.to_string());
+    }
+    for (spell, totals) in reading.added {
+        for (stat, amount) in totals {
+            flat.insert(format!("added.{spell}.{stat}"), amount.to_string());
+        }
+    }
+    flat
 }

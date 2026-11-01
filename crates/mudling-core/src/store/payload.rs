@@ -10,6 +10,7 @@ use crate::defaults::aliases::AliasRule;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
+use crate::gear::{GearBook, ItemMatcher};
 use crate::line::Line;
 use crate::map::{
     Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
@@ -203,6 +204,53 @@ named_value_stores! {
     CharactersState(String => Value),
     /// What plugins read about gear, keyed like [`CharactersState`].
     GearState(String => Value),
+}
+
+/// What's known about items on this server, and what the character has on
+/// them now. Whole on each change, which its shared parts keep cheap.
+#[derive(Clone, Debug, Default)]
+pub struct ItemsState {
+    pub book: Arc<GearBook>,
+    /// Finds the book's names in a line. Rebuilt only when they change.
+    pub matcher: Arc<ItemMatcher>,
+    /// Every row of the game's list, empty slots too.
+    pub worn: Arc<[WornItem]>,
+    pub carried: Arc<[CarriedItem]>,
+    /// The plugin's wear slots, in the game's order.
+    pub slots: Arc<[String]>,
+}
+
+impl StoreState for ItemsState {
+    type Change = ItemsState;
+
+    /// The core writes one only when something changed.
+    fn apply(&mut self, change: &ItemsState) -> bool {
+        *self = change.clone();
+        true
+    }
+
+    fn coalesce(earlier: &mut ItemsState, later: ItemsState) {
+        *earlier = later;
+    }
+}
+
+/// A row of what the character wears.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WornItem {
+    pub slot: String,
+    /// As the game shows it, tags included; empty for an empty slot.
+    pub item: String,
+    /// The game's id for the copy, when it was seen going on.
+    pub copy: Option<String>,
+}
+
+/// One copy the character carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedItem {
+    /// The game's id for it.
+    pub id: String,
+    /// As the game shows it, tags included.
+    pub name: String,
 }
 
 /// The character's name, in [`CharactersState`].

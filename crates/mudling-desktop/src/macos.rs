@@ -31,6 +31,7 @@ pub struct AxElement {
     pub subrole: Option<String>,
     pub title: Option<String>,
     pub value: Option<String>,
+    pub help: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<AxElement>,
 }
@@ -44,6 +45,7 @@ impl AxElement {
             let subrole: Option<Retained<NSString>> = getter(element, sel!(accessibilitySubrole));
             let title: Option<Retained<NSString>> = getter(element, sel!(accessibilityTitle));
             let value: Option<Retained<AnyObject>> = getter(element, sel!(accessibilityValue));
+            let help: Option<Retained<NSString>> = getter(element, sel!(accessibilityHelp));
             let children: Option<Retained<NSArray<AnyObject>>> =
                 getter(element, sel!(accessibilityChildren));
             AxElement {
@@ -51,6 +53,7 @@ impl AxElement {
                 subrole: subrole.map(|s| s.to_string()),
                 title: title.map(|s| s.to_string()),
                 value: value.map(|v| describe(&v)),
+                help: help.map(|s| s.to_string()),
                 children: children
                     .map(|c| c.iter().map(|child| AxElement::read(&child)).collect())
                     .unwrap_or_default(),
@@ -260,6 +263,18 @@ const FIND_PANEL_NOTHING: &str = "zzz";
 /// What a screen reader must find around the command bar. `look` is one of
 /// the chips [`crate::measure::fill_hotbar`] puts there.
 const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to the hotbar"];
+/// The Gear tab on its sample: the views, a carried item's actions, the lists.
+const GEAR_CONTROLS: [&str; 5] = [
+    "Worn",
+    "Carrying",
+    "Wear a small necklace",
+    "More about a small necklace",
+    "Items named in chat",
+];
+/// What the sample's level lock says, on the row, to a screen reader.
+const GEAR_LOCKED_ROW: &str = "a copper bracelet, Glowing, Humming, Needs level 7";
+/// What the tooltip over the sample's item says.
+const GEAR_TIP: &str = "AC −1 (better) (estimate from 1 copy)";
 
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
@@ -394,8 +409,58 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
         });
         shell.update(cx, |shell, cx| {
+            crate::measure::fill_gear(shell, cx);
+            shell.open_panels(cx);
+            shell.replay(stream::reads(&[crate::measure::SAMPLE_ITEM_LINE]));
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed: Vec<_> = GEAR_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the Gear tab names its views, actions and lists",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let locked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.title.as_deref() == Some(GEAR_LOCKED_ROW))
+        });
+        checks.push(Check {
+            name: "a carried row reads its flags and level lock",
+            passed: !locked.is_empty(),
+            detail: format!("{} matching element(s)", locked.len()),
+        });
+        let says_the_tip =
+            |text: &Option<String>| text.as_deref().is_some_and(|text| text.contains(GEAR_TIP));
+        let in_list = tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| tree.find(|e| says_the_tip(&e.title)));
+        checks.push(Check {
+            name: "what a tooltip shows reaches the keyboard's list by name",
+            passed: !in_list.is_empty(),
+            detail: format!("{} matching element(s)", in_list.len()),
+        });
+        let line = tree.as_ref().map_or_else(Vec::new, |tree| {
+            let probe = Some(crate::measure::SAMPLE_ITEM_LINE);
+            tree.find(|e| e.value.as_deref() == probe && says_the_tip(&e.help))
+        });
+        checks.push(Check {
+            name: "a chat line naming an item describes it to a screen reader",
+            passed: !line.is_empty(),
+            detail: format!("{} matching element(s)", line.len()),
+        });
+
+        shell.update(cx, |shell, cx| {
             crate::measure::fill_room_panel(shell, None, cx);
             crate::measure::fill_hotbar(shell, cx);
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
             shell.open_panels(cx);
         });
         cx.background_executor().timer(pause).await;

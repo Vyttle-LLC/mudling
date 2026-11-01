@@ -14,6 +14,7 @@ use crate::chat::{self, Chat, CloseFind, column_width};
 use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::find_panel::{self, FindPanel};
+use crate::gear_panel::GearPanel;
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
@@ -48,8 +49,8 @@ use mudling_core::persist::SavedServers;
 use mudling_core::plugin::PluginId;
 use mudling_core::session::{MapEdit, RuleEdit, Session};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, CuesState, MapState, MobsState, RoomState, RulesState,
-    SettingsState, StoreHub, TargetState, Versioned, VitalsState,
+    CharactersState, ConnectionStatus, CuesState, ItemsState, MapState, MobsState, RoomState,
+    RulesState, SettingsState, StoreHub, TargetState, TerminalChange, Versioned, VitalsState,
 };
 use mudling_core::telnet::Bytes;
 use std::collections::VecDeque;
@@ -166,6 +167,7 @@ struct Copies {
     room: Versioned<RoomState>,
     mobs: Versioned<MobsState>,
     rules: Versioned<RulesState>,
+    items: Versioned<ItemsState>,
 }
 
 impl Copies {
@@ -182,6 +184,7 @@ impl Copies {
             room: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             mobs: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
             rules: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
+            items: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
         }
     }
 }
@@ -244,6 +247,7 @@ pub struct Shell {
     map: Entity<MapView>,
     map_inset: Entity<MapView>,
     find_panel: Entity<FindPanel>,
+    gear_panel: Entity<GearPanel>,
     map_history: Entity<MapHistoryView>,
     notes: Entity<Notes>,
     notes_panel: Entity<NotesPanel>,
@@ -261,7 +265,7 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
-    _subscriptions: [Subscription; 15],
+    _subscriptions: [Subscription; 16],
     _woken: Task<()>,
 }
 
@@ -289,8 +293,13 @@ impl Shell {
             shell.on_hotbar(event, window, cx);
         });
         let verbs = game.as_ref().map(|game| game.verbs.clone());
+        let gear_verbs = verbs.clone().unwrap_or_default();
         let room_panel = cx.new(|cx| RoomPanel::new(verbs.unwrap_or_default(), cx));
         let verb_sent = cx.subscribe_in(&room_panel, window, |shell, _, sent, window, cx| {
+            shell.on_panel_command(sent, window, cx);
+        });
+        let gear_panel = cx.new(|cx| GearPanel::new(gear_verbs, cx));
+        let gear_sent = cx.subscribe_in(&gear_panel, window, |shell, _, sent, window, cx| {
             shell.on_panel_command(sent, window, cx);
         });
         let find_stores = stores.map(FindStores::subscribed).unwrap_or_default();
@@ -429,6 +438,7 @@ impl Shell {
             map,
             map_inset,
             find_panel,
+            gear_panel,
             map_history,
             notes,
             notes_panel,
@@ -454,6 +464,7 @@ impl Shell {
                 sheet_events,
                 card_moves,
                 walked,
+                gear_sent,
                 mob_marked,
                 note_events,
             ],
@@ -462,8 +473,10 @@ impl Shell {
         shell.show_status(cx);
         shell.show_room(cx);
         shell.show_rules(cx);
+        shell.show_gear(cx);
         shell.mount(Slot::Room, shell.room_panel.clone(), cx);
         shell.mount(Slot::Find, shell.find_panel.clone(), cx);
+        shell.mount(Slot::Gear, shell.gear_panel.clone(), cx);
         shell.mount(Slot::Notes, shell.notes_panel.clone(), cx);
         shell.mount_maps(cx);
         shell
@@ -683,10 +696,13 @@ impl Shell {
         self.chat = cx.new(|_| Chat::new(terminal));
         self.room_panel
             .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
+        self.gear_panel
+            .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
         self.settings
             .update(cx, |sheet, cx| sheet.show_plugins(game.plugins.clone(), cx));
         self.show_room(cx);
         self.show_rules(cx);
+        self.show_gear(cx);
         game.session.connect();
         self.game = Some(game);
         self.input.update(cx, |input, cx| {
@@ -892,6 +908,10 @@ impl Shell {
         };
         if let Some(lines) = &batch.terminal {
             self.chat.update(cx, |chat, cx| chat.apply(lines, cx));
+            let TerminalChange::Append(lines) = &lines.change;
+            self.gear_panel.update(cx, |panel, cx| {
+                lines.iter().for_each(|line| panel.hear(line.plain(), cx));
+            });
         }
         if let Some(vitals) = &batch.vitals {
             self.copies.vitals.apply_diff(vitals);
@@ -908,6 +928,8 @@ impl Shell {
                 .update(cx, |hotbar, cx| hotbar.set_locked(masked, cx));
             self.find_panel
                 .update(cx, |panel, cx| panel.set_locked(masked, cx));
+            self.gear_panel
+                .update(cx, |panel, cx| panel.set_locked(masked, cx));
         }
         if let Some(rules) = &batch.rules {
             self.copies.rules.apply_diff(rules);
@@ -918,6 +940,13 @@ impl Shell {
         }
         if let Some(characters) = &batch.characters {
             self.copies.characters.apply_diff(characters);
+            let character = self.copies.characters.value();
+            self.gear_panel
+                .update(cx, |panel, cx| panel.show_character(character, cx));
+        }
+        if let Some(items) = &batch.items {
+            self.copies.items.apply_diff(items);
+            self.show_gear(cx);
         }
         if let Some(target) = &batch.target {
             self.copies.target.apply_diff(target);
@@ -1041,6 +1070,14 @@ impl Shell {
             panel.show_room(room, mobs, cx);
             panel.show_contents(room.contents.clone(), cx);
         });
+    }
+
+    fn show_gear(&mut self, cx: &mut Context<Shell>) {
+        let items = self.copies.items.value().clone();
+        let chat = items.clone();
+        self.gear_panel
+            .update(cx, |panel, cx| panel.show_items(items, cx));
+        self.chat.update(cx, |view, cx| view.show_items(chat, cx));
     }
 
     fn show_status(&mut self, cx: &mut Context<Shell>) {
@@ -1492,6 +1529,10 @@ impl Shell {
 
     pub fn room_panel(&self) -> Entity<RoomPanel> {
         self.room_panel.clone()
+    }
+
+    pub fn gear_panel(&self) -> Entity<GearPanel> {
+        self.gear_panel.clone()
     }
 
     pub fn find_panel(&self) -> Entity<FindPanel> {

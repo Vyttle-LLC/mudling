@@ -173,7 +173,7 @@ fn wearing_or_removing_asks_for_the_inventory_again() {
 #[test]
 fn identify_splits_base_from_enchant() {
     let transcript = read(include_str!("fixtures/identify.txt"));
-    let identify = transcript.store("identify");
+    let readings = transcript.readings();
     let reads: Vec<&str> = transcript
         .writes()
         .filter(|write| write.store == "identify" && write.key == "read")
@@ -185,8 +185,10 @@ fn identify_splits_base_from_enchant() {
     assert_eq!(reads, ["black bear bracelet", "gorn amulet newbie"]);
 
     // A shop's identify names the item.
-    let bracelet = |key: &str| get(&identify, &format!("black bear bracelet.{key}")).clone();
+    let bracelet = |key: &str| get(&readings[0], key).clone();
     assert_eq!(bracelet("name"), text("bear skin bracelet"));
+    assert_eq!(bracelet("keywords"), text("black bear bracelet"));
+    assert_eq!(bracelet("detail.1"), text("Weight 3, value 40, level 8."));
     assert_eq!(bracelet("type"), text("armor"));
     assert_eq!(bracelet("flags"), text(""), "\"none\" is no flags");
     assert_eq!(bracelet("level"), Value::Number(8.0));
@@ -200,8 +202,9 @@ fn identify_splits_base_from_enchant() {
     );
 
     // The spell's, glued to a prompt, doesn't; its enchant is apart.
-    let amulet = |key: &str| identify.get(&format!("gorn amulet newbie.{key}")).cloned();
+    let amulet = |key: &str| readings[1].get(key).cloned();
     assert_eq!(amulet("name"), None);
+    assert_eq!(amulet("keywords"), Some(text("gorn amulet newbie")));
     assert_eq!(amulet("flags"), Some(text("magic anti-evil")));
     assert_eq!(amulet("level"), Some(Value::Number(2.0)));
     assert_eq!(amulet("base.ac"), Some(Value::Number(-1.0)));

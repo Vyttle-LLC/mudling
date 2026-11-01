@@ -143,26 +143,30 @@ order:
 | `keyword.<plain name>` | the word a command names it by: the noun ending its first phrase, never a possessive while there's another word (the game refuses `remove captain's`) |
 | `keywords.<plain name>` | the game's own keywords for it, from a shop's identify |
 
-**`identify`**, by the item's keywords (`black bear bracelet`):
+**`identify`**, one batch per reading. The core files each as a reading of
+its own, so two copies with the same words keep theirs, and it's the core that
+ties a reading to the one copy at hand. With no `name` nothing says which item
+it was, and it's dropped:
 
 | Key | Value |
 | --- | --- |
-| `<keywords>.name` | the item's name, when a shop gave it |
-| `<keywords>.type`, `.flags` | `armor`; `glow magic` (empty for none) |
-| `<keywords>.level`, `.quality` | `8`; `100 / 100 hps` |
-| `<keywords>.base.<stat>` | what every copy does, by GMCP stat key; armor as AC (armor 2 is `ac` −2) |
-| `<keywords>.added.<spell>.<stat>` | what a spell added to this copy: `added.enchant armor.ac` = −4 |
+| `name` | the item's name: a shop's, or the one at hand with the most of the game's words |
+| `keywords` | the game's words for it: `black bear bracelet` |
+| `type`, `flags` | `armor`; `glow magic` (empty for none) |
+| `level`, `quality` | `8`; `100 / 100 hps` |
+| `base.<stat>` | what every copy does, by GMCP stat key; armor as AC (armor 2 is `ac` −2) |
+| `added.<spell>.<stat>` | what a spell added to this copy: `added.enchant armor.ac` = −4 |
+| `detail.<n>` | each other line, from 1: `Weight 3, value 40, level 8.` |
 | `read` | the keywords; last |
+
+What's measured, from the character's stats around a wear or remove message,
+is the core's: hooks don't see `Char.Status`. It uses each rule's `item`
+capture, so a game's wear and remove rules need one.
 
 ## Not covered, and why
 
 - **`worth`**: neither the prototype nor the session logs have a `worth`
   table, so there's nothing to port.
-- **Which copy a spell's identify was about**: hooks can read the inventory
-  (`inventory.count`, `inventory.<n>.name`), with `read_state`, but working
-  out the copy isn't written yet. Avatar sends no `Char.Items` when gear goes
-  on or comes off, so the wear and remove hooks call
-  `mud.refresh_inventory()`.
 - **Locked doors**: `Room.Info` gives an exit as open or closed, never locked,
   so the Room panel can't offer `doors.unlock`. The only sign is a line after
   an `open`, such as "The door to the east is locked." Reading that needs a

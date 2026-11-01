@@ -4,6 +4,7 @@
 //! entering the game, so it's kept for the connection and never saved.
 
 use crate::ansi;
+use crate::gear::plain_name;
 use crate::plugin::luau::Value;
 use crate::store::CHARACTER_INVENTORY;
 use crate::telnet::gmcp;
@@ -72,7 +73,24 @@ impl Inventory {
         Some(self.entries())
     }
 
-    fn entries(&self) -> BTreeMap<String, Value> {
+    pub(super) fn items(&self) -> impl Iterator<Item = &Item> {
+        self.items.iter()
+    }
+
+    /// The game says nothing here when gear goes on, so its message moves the
+    /// copy. Takes the copy of the plain name `key`, returning its id.
+    pub(super) fn wore(&mut self, key: &str) -> Option<String> {
+        let at = (self.items.iter()).position(|item| plain_name(&item.name) == key)?;
+        Some(self.items.remove(at).id)
+    }
+
+    /// Puts a copy back that came off.
+    pub(super) fn took_off(&mut self, id: String, name: String) {
+        self.items.retain(|item| item.id != id);
+        self.items.push(Item { id, name });
+    }
+
+    pub(super) fn entries(&self) -> BTreeMap<String, Value> {
         let mut entries = BTreeMap::new();
         let count = Value::Number(self.items.len() as f64);
         entries.insert(format!("{CHARACTER_INVENTORY}.count"), count);

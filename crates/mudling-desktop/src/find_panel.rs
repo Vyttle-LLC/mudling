@@ -40,11 +40,11 @@ const FILTER_HEIGHT: Pixels = px(30.);
 const ROW_HEIGHT: Pixels = px(56.);
 const LOCKED_NOTE: &str = "Walk is off while the game asks for a password.";
 const LOST_NOTE: &str = "Walk needs the map to know where you are.";
-/// What the Items filter can't see yet: nothing in the core lists worn gear,
-/// and rooms keep no memory of what lies in them.
-const ITEMS_NOTE: &str = "Items lists what you carry, what's on the ground here, and rooms noted \
-                          for gear or a fountain. Worn gear and items left in other rooms aren't \
-                          tracked yet.";
+/// What the Items filter can't see yet: rooms keep no memory of what lies in
+/// them.
+const ITEMS_NOTE: &str = "Items lists what you wear and carry, gear you've learned about, what's \
+                          on the ground here, and rooms noted for gear or a fountain. Items left \
+                          in other rooms aren't tracked yet.";
 
 /// The key context of the panel's field.
 pub fn field_context() -> String {
@@ -96,6 +96,8 @@ fn where_line(row: &FindRow) -> String {
         FindPlace::Room { name, area, .. } if area.is_empty() => name.clone(),
         FindPlace::Room { name, area, .. } => format!("{name} · {area}"),
         FindPlace::Carried => "Carried".to_owned(),
+        FindPlace::Worn => "Worn".to_owned(),
+        FindPlace::Known => "Known gear, not with you".to_owned(),
         FindPlace::Unseen => "Not seen on your map yet".to_owned(),
     };
     match reach_words(row.reach) {

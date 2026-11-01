@@ -201,7 +201,7 @@ fn play(bench: &mut Bench, reads: &[Read], pause: Option<Duration>) -> Result<Sa
     Ok(samples)
 }
 
-/// What the plugins' hooks left in the stores.
+/// What the plugins' hooks left in the stores, beyond the saved gear.
 fn hook_writes(bench: &Bench) -> usize {
     let characters = bench
         .hub
@@ -209,7 +209,7 @@ fn hook_writes(bench: &Bench) -> usize {
     let gear = bench
         .hub
         .read(|gear: &Versioned<GearState>| gear.value().0.len());
-    characters + gear
+    characters + gear - crate::gear::SAVED_STORE_KEYS
 }
 
 /// The logs in order, each with its connection, over and over until they

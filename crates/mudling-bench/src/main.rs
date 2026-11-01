@@ -30,6 +30,7 @@ mod compare;
 mod completion;
 mod defaults;
 mod game_plugin;
+mod gear;
 mod line_pipeline;
 mod log_replay;
 mod luau_hooks;
@@ -131,6 +132,7 @@ struct Report {
     completion: completion::Report,
     persist: persist::Report,
     map: map::Report,
+    gear: gear::Report,
 }
 
 impl Report {
@@ -148,6 +150,7 @@ impl Report {
             && self.telnet.within_budget
             && self.completion.within_budget
             && self.persist.within_budget()
+            && self.gear.within_budget
     }
 }
 
@@ -255,6 +258,7 @@ fn run(options: &Options) -> Result<bool, String> {
     let completion = completion::run();
     let persist = persist::run();
     let map = map::run(&logs, options.world.as_deref().map(Path::new))?;
+    let gear = gear::run(&lines);
     let measured = Measured {
         line_pipeline,
         plugin_host,
@@ -268,6 +272,7 @@ fn run(options: &Options) -> Result<bool, String> {
         completion,
         persist,
         map,
+        gear,
     };
     let report = measure_scrollback(source, ReplayFeed::new(lines), measured);
 
@@ -284,6 +289,7 @@ fn run(options: &Options) -> Result<bool, String> {
     completion::print(&report.completion);
     persist::print(&report.persist);
     map::print(&report.map);
+    gear::print(&report.gear);
     if let Some(path) = &options.json {
         write_report(path, &report)?;
     }
@@ -357,6 +363,7 @@ struct Measured {
     completion: completion::Report,
     persist: persist::Report,
     map: map::Report,
+    gear: gear::Report,
 }
 
 fn measure_scrollback(source: String, mut feed: ReplayFeed, measured: Measured) -> Report {
@@ -373,6 +380,7 @@ fn measure_scrollback(source: String, mut feed: ReplayFeed, measured: Measured) 
         completion,
         persist,
         map,
+        gear,
     } = measured;
     let mut pipeline = LinePipeline::default();
     let mut parsed: Vec<Line> = Vec::with_capacity(1);
@@ -442,6 +450,7 @@ fn measure_scrollback(source: String, mut feed: ReplayFeed, measured: Measured) 
         completion,
         persist,
         map,
+        gear,
     }
 }
 

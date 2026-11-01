@@ -178,15 +178,15 @@ local function finish_identify(reader)
         -- Named, but no object followed.
         return
     end
-    local prefix = reader.keywords .. "."
     local write = function(key, value)
-        Readers.write(reader, "identify", prefix .. key, value)
+        Readers.write(reader, "identify", key, value)
     end
     local item = reader.item or item_answering(reader.keywords)
     if item then
         write("name", item)
         Readers.write(reader, "gear", "keywords." .. Readers.plain(item), reader.keywords)
     end
+    write("keywords", reader.keywords)
     write("type", reader.type)
     write("flags", reader.flags)
     if reader.level then
@@ -203,7 +203,10 @@ local function finish_identify(reader)
             write("added." .. spell .. "." .. stat, amount)
         end
     end
-    Readers.write(reader, "identify", "read", reader.keywords)
+    for index, detail in reader.details do
+        write("detail." .. index, detail)
+    end
+    write("read", reader.keywords)
 end
 
 function read_identify(event)
@@ -225,15 +228,23 @@ function read_identify(event)
             end
         end
         reader.flags = table.concat(flags, " ")
-        reader.base, reader.added = {}, {}
+        reader.base, reader.added, reader.details = {}, {}, {}
         return
     end
-    if kind ~= "row" or not reader.keywords then
+    if kind == "gap" then
+        -- The blank line after an object: what follows is something else.
+        reader.ended = true
+        return
+    end
+    if kind ~= "row" or not reader.keywords or reader.ended then
         return
     end
     Readers.row(reader)
     if captures.level then
         reader.level = tonumber(captures.level)
+        table.insert(reader.details, Readers.body(event))
+    elseif captures.detail then
+        table.insert(reader.details, captures.detail)
     elseif captures.quality then
         reader.quality = captures.quality
     elseif captures.armor then
@@ -250,6 +261,8 @@ function read_identify(event)
         local stat = STATS[string.lower(captures.stat)]
         if stat then
             add(reader.base, stat, tonumber(captures.amount))
+        else
+            table.insert(reader.details, Readers.body(event))
         end
     end
 end

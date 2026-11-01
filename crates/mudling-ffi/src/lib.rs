@@ -7,9 +7,9 @@
 use mudling_core::Line;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
-    CharactersState, CuesState, Diff, GearState, MapState, MobsState, RoomState, RulesState,
-    SettingsState, Store, StoreHub, StoreKind, TargetState, TerminalChange, TerminalState,
-    Versioned, VitalsState,
+    CharactersState, CuesState, Diff, GearState, ItemsState, MapState, MobsState, RoomState,
+    RulesState, SettingsState, Store, StoreHub, StoreKind, TargetState, TerminalChange,
+    TerminalState, Versioned, VitalsState,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -28,6 +28,7 @@ pub enum StoreKind {
     Characters,
     Target,
     Gear,
+    Items,
     Settings,
     Rules,
     Cues,
@@ -110,6 +111,7 @@ impl Session {
             characters,
             target,
             gear,
+            items,
             settings,
             rules,
             cues,
@@ -123,6 +125,7 @@ impl Session {
             characters.map(CharactersState::diff),
             target.map(TargetState::diff),
             gear.map(GearState::diff),
+            items.map(ItemsState::diff),
             settings.map(SettingsState::diff),
             rules.map(RulesState::diff),
             cues.map(CuesState::diff),
@@ -174,6 +177,10 @@ macro_rules! with_store {
             }
             StoreKind::Gear => {
                 type $S = GearState;
+                $body
+            }
+            StoreKind::Items => {
+                type $S = ItemsState;
                 $body
             }
             StoreKind::Settings => {
@@ -285,6 +292,17 @@ impl FieldStore for CharactersState {
 impl FieldStore for GearState {
     fn fields(&self) -> HashMap<String, String> {
         value_fields(&self.0)
+    }
+}
+
+impl FieldStore for ItemsState {
+    fn fields(&self) -> HashMap<String, String> {
+        [
+            ("known".to_owned(), self.book.len().to_string()),
+            ("worn".to_owned(), self.worn.len().to_string()),
+            ("carried".to_owned(), self.carried.len().to_string()),
+        ]
+        .into()
     }
 }
 
