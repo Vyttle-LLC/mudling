@@ -1424,6 +1424,35 @@ fn the_merge_stops_before_it_writes_over_an_unsaved_vault() {
 }
 
 #[test]
+fn a_password_saved_while_the_merge_waited_is_not_written_over() {
+    let world = two_devices();
+    world.mac.apply(|batch| {
+        batch.upsert(room(2, "Mac's hill", T2));
+    });
+    world.mac.sync();
+    let theirs = world.ipad.fetch().unwrap();
+    // Worked out while the vault matches the branch, as it did.
+    let merging = prepare(&world.ipad.git, &world.ipad.repo, theirs)
+        .unwrap()
+        .unwrap();
+    // The player saves a password as the sessions are waited for.
+    let vault_path = world.ipad.folder.join(vault::FILE_NAME);
+    fs::write(&vault_path, "saved just now").unwrap();
+
+    let error = land(
+        &world.ipad.git,
+        &world.ipad.repo,
+        &merging,
+        &world.ipad.stores(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, Error::VaultNotCommitted));
+    assert_eq!(fs::read(vault_path).unwrap(), b"saved just now");
+    assert_eq!(world.ipad.rooms().len(), 1, "nothing landed");
+}
+
+#[test]
 fn two_devices_that_each_started_a_repo_merge_by_record() {
     let folder = TempDir::new().unwrap();
     Repository::init_bare(folder.path().join("remote.git")).unwrap();

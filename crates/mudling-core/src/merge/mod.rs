@@ -153,6 +153,7 @@ pub fn land(
     merge: &Prepared,
     stores: &[Store<'_>],
 ) -> Result<(), Error> {
+    refuse_unsaved_vault(repo, merge.vault.as_ref())?;
     forget_seen(stores)?;
     kill::point("land: databases forgot what they saw");
     kill::arm_after_one_file("land: halfway through the files");
@@ -308,6 +309,9 @@ pub struct Prepared {
     /// Files on the branch now that the merged commit doesn't hold.
     gone: Vec<PathBuf>,
     retired: Retired,
+    /// The vault as the branch holds it, which the folder matched when the
+    /// merge was worked out.
+    vault: Option<Vec<u8>>,
 }
 
 impl Prepared {
@@ -333,7 +337,8 @@ pub fn prepare(git: &git::Repo, repo: &Repo, theirs: Oid) -> Result<Option<Prepa
         Some(ours) => git.files_at(ours)?,
         None => git::Files::new(),
     };
-    refuse_unsaved_vault(repo, &our_files)?;
+    let vault = our_files.get(Path::new(vault::FILE_NAME)).cloned();
+    refuse_unsaved_vault(repo, vault.as_ref())?;
     let (files, commit) = match ours {
         Some(ours) if !git.is_ancestor(ours, theirs)? => {
             let base = match git.merge_base(ours, theirs)? {
@@ -360,14 +365,18 @@ pub fn prepare(git: &git::Repo, repo: &Repo, theirs: Oid) -> Result<Option<Prepa
         files,
         gone,
         retired,
+        vault,
     }))
 }
 
 /// The vault saves straight to the folder, so its file can be ahead of the
-/// branch. Writing the merge over that would lose a password.
-fn refuse_unsaved_vault(repo: &Repo, ours: &git::Files) -> Result<(), Error> {
+/// branch. Writing the merge over that would lose a password. This runs when
+/// the merge is worked out and again as it lands, since a session's rows are
+/// waited for in between, and a password can be saved meanwhile. A save in the
+/// instant between that second look and the write can still be lost.
+fn refuse_unsaved_vault(repo: &Repo, committed: Option<&Vec<u8>>) -> Result<(), Error> {
     let path = Path::new(vault::FILE_NAME);
-    if repo.read_if_present(path)?.as_ref() == ours.get(path) {
+    if repo.read_if_present(path)?.as_ref() == committed {
         Ok(())
     } else {
         Err(Error::VaultNotCommitted)
