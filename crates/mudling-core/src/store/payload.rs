@@ -10,11 +10,14 @@ use crate::defaults::aliases::AliasRule;
 use crate::defaults::detect::Suggestion;
 use crate::defaults::hud::Vital;
 use crate::defaults::triggers::TriggerRule;
+use crate::gear::sets::{self, GearNow, GearRules, WearPlan};
+use crate::gear::{GearBook, ItemMatcher};
 use crate::line::Line;
 use crate::map::{
     Derived, MapChange, MapRoom, Mark, MarkChange, MobNamer, RoomId, WalkStep, Whereabouts,
 };
 use crate::net::DisconnectReason;
+use crate::persist::{GearSet, Timestamp};
 use crate::plugin::PluginCost;
 use crate::plugin::luau::{PluginDisabled, Value};
 use crate::scrollback::Scrollback;
@@ -205,6 +208,84 @@ named_value_stores! {
     GearState(String => Value),
 }
 
+/// What's known about items on this server, and what the character has on
+/// them now. Whole on each change, which its shared parts keep cheap.
+#[derive(Clone, Debug, Default)]
+pub struct ItemsState {
+    pub book: Arc<GearBook>,
+    /// Finds the book's names in a line. Rebuilt only when they change.
+    pub matcher: Arc<ItemMatcher>,
+    /// Every row of the game's list, empty slots too.
+    pub worn: Arc<[WornItem]>,
+    pub carried: Arc<[CarriedItem]>,
+    /// The bags among `carried`, and what the game last said is in them.
+    pub bags: Arc<[CarriedBag]>,
+    /// The plugin's wear slots, in the game's order.
+    pub slots: Arc<[String]>,
+    /// Who `sets` are the sets of: empty until this connection names them.
+    pub character: Arc<str>,
+    pub sets: Arc<[GearSet]>,
+    pub rules: Arc<GearRules>,
+}
+
+impl ItemsState {
+    pub fn gear_now(&self) -> GearNow<'_> {
+        GearNow {
+            worn: &self.worn,
+            carried: &self.carried,
+            bags: &self.bags,
+        }
+    }
+
+    /// What putting `set` on takes right now, as Wear would send it.
+    pub fn plan(&self, set: &GearSet) -> WearPlan {
+        sets::plan(set, self.gear_now(), &self.book, &self.rules)
+    }
+}
+
+impl StoreState for ItemsState {
+    type Change = ItemsState;
+
+    /// The core writes one only when something changed.
+    fn apply(&mut self, change: &ItemsState) -> bool {
+        *self = change.clone();
+        true
+    }
+
+    fn coalesce(earlier: &mut ItemsState, later: ItemsState) {
+        *earlier = later;
+    }
+}
+
+/// A row of what the character wears.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WornItem {
+    pub slot: String,
+    /// As the game shows it, tags included; empty for an empty slot.
+    pub item: String,
+    /// The game's id for the copy, when it was seen going on.
+    pub copy: Option<String>,
+}
+
+/// One copy the character carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedItem {
+    /// The game's id for it.
+    pub id: String,
+    /// As the game shows it, tags included.
+    pub name: String,
+}
+
+/// A bag the character carries, and what's in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarriedBag {
+    /// The game's id for it.
+    pub id: String,
+    /// As the game shows it, tags included.
+    pub name: String,
+    pub items: Vec<CarriedItem>,
+}
+
 /// The character's name, in [`CharactersState`].
 pub const CHARACTER_NAME: &str = "character.name";
 /// The character's level, as a number.
@@ -308,6 +389,62 @@ impl CharactersState {
         let list = list.to_owned();
         (1..=count).map(move |row| format!("{list}.{row}"))
     }
+}
+
+/// One skill or spell on the sheet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkillRow {
+    pub name: String,
+    /// The level the character can learn it at.
+    pub level: Option<i64>,
+    /// How well it's learned, 0–100.
+    pub learned: Option<i64>,
+    /// Above 0 it's a spell.
+    pub mana: Option<i64>,
+}
+
+impl SkillRow {
+    pub fn named(name: &str) -> SkillRow {
+        SkillRow {
+            name: name.to_owned(),
+            ..SkillRow::default()
+        }
+    }
+}
+
+/// A skill that just got better.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Improved {
+    pub skill: String,
+    pub learned: i64,
+    pub at: Timestamp,
+}
+
+/// What this connection's character looks like: their saved rows, then what
+/// the game says as it plays. Empty until the connection names them, and
+/// never another character's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SheetState {
+    /// By id; empty until this connection names them.
+    pub character: String,
+    /// By the key after `character.`: `str`, `str_perm`, `gold`.
+    pub stats: BTreeMap<String, Value>,
+    /// By name.
+    pub skills: Vec<SkillRow>,
+    /// Sessions left to spend.
+    pub practices: Option<i64>,
+    /// As last read and saved. On a connection, [`CharactersState::affects`]
+    /// is the live list.
+    pub affects: Vec<Affect>,
+    /// The commands behind the stats and affects.
+    pub sources: Vec<String>,
+    /// When a table last updated the stats or affects.
+    pub character_read: Option<Timestamp>,
+    /// When a table last updated the skills.
+    pub skills_read: Option<Timestamp>,
+    pub improved: Option<Improved>,
+    /// A quiet read is on its way or waiting for its moment.
+    pub reading: bool,
 }
 
 /// The player's room, as the map last placed them.
@@ -506,7 +643,14 @@ macro_rules! whole_value_stores {
     };
 }
 
-whole_value_stores!(RoomState, MobsState, TargetState, SettingsState, RulesState);
+whole_value_stores!(
+    RoomState,
+    MobsState,
+    TargetState,
+    SettingsState,
+    RulesState,
+    SheetState,
+);
 
 #[cfg(test)]
 mod tests {

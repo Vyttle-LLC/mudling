@@ -23,14 +23,15 @@ const MOST_LOST: f64 = 1.10;
 const ROUNDS_PER_BLOCK: usize = 3;
 const BLOCKS: usize = 3;
 
-/// What the budgets are measured by. Differences of two p99s (the "one more
-/// plugin" budgets) aren't here: they're mostly noise, and both sides of the
-/// difference are. Nor are two p99s that one build can't hold steady, which
-/// `--check` still gates: a move's enqueue times the writer thread being
-/// woken (9 to 35 µs), and a store frame's apply is too short to time (0.7
-/// to 1.7 µs). Work too short for a clock tick to time per sample is compared
-/// by its mean, which many samples resolve where a percentile can't.
-const METRICS: [&str; 20] = [
+/// What the budgets are measured by. The difference of two p99s (the "one
+/// more plugin" budget) isn't here: it's mostly noise, and both sides of it
+/// are. The session with that plugin on stands for it. Nor are two p99s that
+/// one build can't hold steady, which `--check` still gates: a move's enqueue
+/// times the writer thread being woken (9 to 35 µs), and a store frame's apply
+/// is too short to time (0.7 to 1.7 µs). Work too short for a clock tick to
+/// time per sample is compared by its mean, which many samples resolve where a
+/// percentile can't.
+const METRICS: [&str; 23] = [
     "/append/mean_us",
     "/find/p99_us",
     "/line_pipeline/per_line/mean_us",
@@ -41,8 +42,11 @@ const METRICS: [&str; 20] = [
     "/luau_hooks/columns/p99_us",
     "/session/whole_line/p99_us",
     "/session/whole_line/mean_us",
+    "/session/whole_line_200_triggers/p99_us",
+    "/session/with_game_plugin/p99_us",
     "/session/mapping/p99_us",
     "/session/wandering/p99_us",
+    "/session/sighting/p99_us",
     "/session/memory_mb",
     "/session/cold_start/p50_us",
     "/replay/by_event/line/p99_us",

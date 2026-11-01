@@ -59,9 +59,9 @@ pub struct World {
     pub item_slots: BTreeMap<String, BTreeMap<String, String>>,
     /// Every reading known, by the game's words for the item.
     pub identifies: BTreeMap<String, Vec<BTreeMap<String, String>>>,
-    /// Items with a measured effect; only the prototype has these.
+    /// Items with a measured effect.
     pub measured: BTreeSet<String>,
-    /// Copies known by the game's id; only the prototype has these.
+    /// Copies known by the game's id.
     pub copies: usize,
 }
 

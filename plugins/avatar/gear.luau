@@ -20,8 +20,29 @@ local SLOTS = {
     ["held"] = "held",
 }
 
+-- What a set's wear plan needs from the game, said once a connection: how many
+-- items a slot holds where that's more than one, and the verb that fills a slot
+-- where `wear` isn't the word. Keys of the `gear` store; see README.md.
+local HOLDS = { finger = 2, neck = 2, wrist = 2 }
+local SLOT_VERBS = { wield = "wield", held = "hold", offhand = "hold" }
+local slots_said = false
+
+local function say_slots(write)
+    if slots_said then
+        return
+    end
+    slots_said = true
+    for slot, holds in HOLDS do
+        write("gear", "holds." .. slot, holds)
+    end
+    for slot, verb in SLOT_VERBS do
+        write("gear", "verb." .. slot, verb)
+    end
+end
+
 local function note_item(write, item, slot)
     local plain = Readers.plain(item)
+    write("gear", "name." .. plain, item)
     if slot then
         write("gear", "slot." .. plain, slot)
     end
@@ -39,6 +60,12 @@ local finish_equipment = Readers.count_rows("worn", "count")
 
 function read_equipment(event)
     local kind, reader = Readers.step(event, "equipment", finish_equipment)
+    say_slots(mud.store)
+    if kind == "row" and not event.captures.slot then
+        -- "Nothing.": no row will end the table with a count, so say it now.
+        mud.store("worn", "count", 0)
+        return
+    end
     local slot = SLOTS[event.captures.slot]
     if kind ~= "row" or not slot then
         return
@@ -81,6 +108,7 @@ end
 
 -- Avatar sends no Char.Items when gear goes on or comes off, so ask again.
 function on_wore(event)
+    say_slots(mud.store)
     note_item(mud.store, event.captures.item, slot_worn(event))
     mud.refresh_inventory()
 end
@@ -178,15 +206,17 @@ local function finish_identify(reader)
         -- Named, but no object followed.
         return
     end
-    local prefix = reader.keywords .. "."
     local write = function(key, value)
-        Readers.write(reader, "identify", prefix .. key, value)
+        Readers.write(reader, "identify", key, value)
     end
     local item = reader.item or item_answering(reader.keywords)
     if item then
         write("name", item)
-        Readers.write(reader, "gear", "keywords." .. Readers.plain(item), reader.keywords)
+        local plain = Readers.plain(item)
+        Readers.write(reader, "gear", "name." .. plain, item)
+        Readers.write(reader, "gear", "keywords." .. plain, reader.keywords)
     end
+    write("keywords", reader.keywords)
     write("type", reader.type)
     write("flags", reader.flags)
     if reader.level then
@@ -203,7 +233,10 @@ local function finish_identify(reader)
             write("added." .. spell .. "." .. stat, amount)
         end
     end
-    Readers.write(reader, "identify", "read", reader.keywords)
+    for index, detail in reader.details do
+        write("detail." .. index, detail)
+    end
+    write("read", reader.keywords)
 end
 
 function read_identify(event)
@@ -225,15 +258,23 @@ function read_identify(event)
             end
         end
         reader.flags = table.concat(flags, " ")
-        reader.base, reader.added = {}, {}
+        reader.base, reader.added, reader.details = {}, {}, {}
         return
     end
-    if kind ~= "row" or not reader.keywords then
+    if kind == "gap" then
+        -- The blank line after an object: what follows is something else.
+        reader.ended = true
+        return
+    end
+    if kind ~= "row" or not reader.keywords or reader.ended then
         return
     end
     Readers.row(reader)
     if captures.level then
         reader.level = tonumber(captures.level)
+        table.insert(reader.details, Readers.body(event))
+    elseif captures.detail then
+        table.insert(reader.details, captures.detail)
     elseif captures.quality then
         reader.quality = captures.quality
     elseif captures.armor then
@@ -250,6 +291,8 @@ function read_identify(event)
         local stat = STATS[string.lower(captures.stat)]
         if stat then
             add(reader.base, stat, tonumber(captures.amount))
+        else
+            table.insert(reader.details, Readers.body(event))
         end
     end
 end
@@ -286,6 +329,8 @@ function read_examine(event)
     local slot = slot_meant(event.captures.meant)
     if slot then
         Readers.row(reader)
-        Readers.write(reader, "gear", "slot." .. Readers.plain(reader.item), slot)
+        local plain = Readers.plain(reader.item)
+        Readers.write(reader, "gear", "name." .. plain, reader.item)
+        Readers.write(reader, "gear", "slot." .. plain, slot)
     end
 end

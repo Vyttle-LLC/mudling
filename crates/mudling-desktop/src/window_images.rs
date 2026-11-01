@@ -10,7 +10,7 @@
 //! The chat text is made up for this file: it comes from no real session.
 
 use crate::assets::{Assets, load_fonts};
-use crate::dock::{DockState, Side};
+use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::sample_map;
 use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
@@ -19,7 +19,8 @@ use crate::theme::Theme;
 use crate::title_bar::SessionLabel;
 use futures::channel::mpsc::unbounded;
 use gpui::{
-    AppContext, Context, HeadlessAppContext, Pixels, Size, Window, WindowAppearance, px, size,
+    AppContext, Context, HeadlessAppContext, Modifiers, MouseMoveEvent, Pixels, PlatformInput,
+    Point, Size, Window, WindowAppearance, point, px, size,
 };
 use mudling_core::LinePipeline;
 use mudling_core::defaults::aliases::AliasRule;
@@ -38,6 +39,7 @@ use mudling_core::store::{
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 const WIDE: Size<Pixels> = size(px(1434.), px(897.));
 const DEFAULT: Size<Pixels> = size(px(1300.), px(800.));
@@ -232,6 +234,43 @@ fn sample_rules() -> RulesState {
     }
 }
 
+fn open_gear_tab(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::fill_gear(shell, cx);
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+fn open_gear_worn(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_gear_tab(shell, window, cx);
+    shell
+        .gear_panel()
+        .update(cx, |panel, cx| panel.show_worn(cx));
+}
+
+fn open_gear_sets(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
+    crate::measure::fill_gear_sets(shell, cx);
+    shell
+        .dock(Side::Right)
+        .update(cx, |dock, cx| dock.move_to(DockState::Open, cx));
+}
+
+fn edit_gear_set(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_gear_sets(shell, window, cx);
+    shell
+        .gear_panel()
+        .update(cx, |panel, cx| panel.edit_first_set(window, cx));
+}
+
+/// The sample's chat, with a line naming an item for the pointer to rest on.
+fn name_an_item(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_gear_tab(shell, window, cx);
+    let line = [crate::measure::SAMPLE_ITEM_LINE];
+    shell
+        .chat()
+        .update(cx, |chat, cx| chat.apply(&server_lines(&line), cx));
+}
+
 fn open_room_panel(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
     crate::measure::fill_room_panel(shell, None, cx);
     shell
@@ -320,6 +359,18 @@ fn render(
     window_size: Size<Pixels>,
     arrange: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
 ) {
+    render_hovering(name, appearance, window_size, None, arrange);
+}
+
+/// [`render`], with the pointer resting on `hover` for as long as a tooltip
+/// takes to come up.
+fn render_hovering(
+    name: &str,
+    appearance: WindowAppearance,
+    window_size: Size<Pixels>,
+    hover: Option<Point<Pixels>>,
+    arrange: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>) + 'static,
+) {
     let mut cx = HeadlessAppContext::with_platform(
         Arc::new(gpui_apple::AppleTextSystem::new()),
         Arc::new(Assets),
@@ -348,6 +399,21 @@ fn render(
         })
         .expect("the window is open");
     cx.run_until_parked();
+    if let Some(position) = hover {
+        let _ = cx.capture_screenshot(window.into());
+        window
+            .update(&mut cx, |_, window, cx| {
+                let moved = MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
+                };
+                window.dispatch_event(PlatformInput::MouseMove(moved), cx);
+            })
+            .expect("the window is open");
+        cx.advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+    }
 
     let image = cx
         .capture_screenshot(window.into())
@@ -519,6 +585,18 @@ fn window_images() {
     });
     render("room-panel-dark", Dark, WIDE, open_room_panel);
     render("room-panel-light", Light, WIDE, open_room_panel);
+    for (name, tab) in [("character", Slot::Character), ("skills", Slot::Skills)] {
+        for (mode, appearance) in [("dark", Dark), ("light", Light)] {
+            render(
+                &format!("{name}-tab-{mode}"),
+                appearance,
+                WIDE,
+                move |shell, _, cx| {
+                    crate::measure::open_sheet_tab(shell, tab, cx);
+                },
+            );
+        }
+    }
     render("find-panel-dark", Dark, WIDE, |shell, window, cx| {
         open_find_panel(shell, None, window, cx);
     });
@@ -546,6 +624,20 @@ fn window_images() {
         |shell, window, cx| {
             shell.focus_find_panel(window, cx);
         },
+    );
+    render("gear-tab-dark", Dark, WIDE, open_gear_tab);
+    render("gear-tab-light", Light, WIDE, open_gear_tab);
+    render("gear-tab-worn-dark", Dark, WIDE, open_gear_worn);
+    render("gear-sets-dark", Dark, WIDE, open_gear_sets);
+    render("gear-sets-light", Light, WIDE, open_gear_sets);
+    render("gear-set-editor-dark", Dark, WIDE, edit_gear_set);
+    render("gear-set-editor-light", Light, WIDE, edit_gear_set);
+    render_hovering(
+        "gear-tooltip-dark",
+        Dark,
+        WIDE,
+        Some(point(px(320.), px(310.))),
+        name_an_item,
     );
     render("notes-tab-dark", Dark, WIDE, open_notes_tab);
     render("notes-tab-light", Light, WIDE, open_notes_tab);

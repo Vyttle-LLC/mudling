@@ -31,6 +31,7 @@ pub struct AxElement {
     pub subrole: Option<String>,
     pub title: Option<String>,
     pub value: Option<String>,
+    pub help: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<AxElement>,
 }
@@ -44,6 +45,7 @@ impl AxElement {
             let subrole: Option<Retained<NSString>> = getter(element, sel!(accessibilitySubrole));
             let title: Option<Retained<NSString>> = getter(element, sel!(accessibilityTitle));
             let value: Option<Retained<AnyObject>> = getter(element, sel!(accessibilityValue));
+            let help: Option<Retained<NSString>> = getter(element, sel!(accessibilityHelp));
             let children: Option<Retained<NSArray<AnyObject>>> =
                 getter(element, sel!(accessibilityChildren));
             AxElement {
@@ -51,6 +53,7 @@ impl AxElement {
                 subrole: subrole.map(|s| s.to_string()),
                 title: title.map(|s| s.to_string()),
                 value: value.map(|v| describe(&v)),
+                help: help.map(|s| s.to_string()),
                 children: children
                     .map(|c| c.iter().map(|child| AxElement::read(&child)).collect())
                     .unwrap_or_default(),
@@ -260,6 +263,43 @@ const FIND_PANEL_NOTHING: &str = "zzz";
 /// What a screen reader must find around the command bar. `look` is one of
 /// the chips [`crate::measure::fill_hotbar`] puts there.
 const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to the hotbar"];
+/// The Gear tab on its sample: the views, a carried item's actions, the lists.
+const GEAR_CONTROLS: [&str; 5] = [
+    "Worn",
+    "Carrying",
+    "Wear a small necklace",
+    "More about a small necklace",
+    "Items named in chat",
+];
+/// The Gear tab with sets listed: the section, a set's actions and what a row
+/// reads.
+const GEAR_SET_CONTROLS: [&str; 5] = [
+    "Gear sets",
+    "New set",
+    "Edit Levelling",
+    "Wear Levelling",
+    "Levelling: 4 pieces · what comes off goes in a canvas backpack",
+];
+/// The set editor: every control, and a piece not seen with its Drop.
+const GEAR_EDITOR_CONTROLS: [&str; 11] = [
+    "Set name",
+    "What comes off goes in: a canvas backpack",
+    "Pieces in this set",
+    "Exact copy of a black hematite ring",
+    "Words for a black hematite ring",
+    "Drop a black hematite ring",
+    "Use what I'm wearing now",
+    "Delete set",
+    "Cancel",
+    "Save",
+    "Also at hand",
+];
+/// What the editor's preview reads as one stop.
+const GEAR_PREVIEW_START: &str = "Wearing it now would send: remove 1204883";
+/// What the sample's level lock says, on the row, to a screen reader.
+const GEAR_LOCKED_ROW: &str = "a copper bracelet, Glowing, Humming, Needs level 7";
+/// What the tooltip over the sample's item says.
+const GEAR_TIP: &str = "AC −1 (better) (estimate from 1 copy)";
 
 const TITLE_BAR_CONTROLS: [&str; 5] = [
     "Left panel",
@@ -307,6 +347,17 @@ const MAP_HISTORY_CONTROLS: [&str; 3] = [
 ];
 const KEEP_THE_MAP: &str = "Keep this map";
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
+/// The Character tab on its sample, by accessibility role and name.
+const CHARACTER_CONTROLS: [(&str, &str); 2] = [
+    ("AXButton", "Refresh the character"),
+    ("AXGroup", "Character"),
+];
+/// The Skills tab on its sample: a row's button and the two lists' tabs.
+const SKILLS_CONTROLS: [(&str, &str); 3] = [
+    ("AXButton", "Practice magic missile"),
+    ("AXRadioButton", "Spells"),
+    ("AXRadioButton", "Skills"),
+];
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
@@ -394,8 +445,113 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
         });
         shell.update(cx, |shell, cx| {
+            crate::measure::fill_gear(shell, cx);
+            shell.open_panels(cx);
+            shell.replay(stream::reads(&[crate::measure::SAMPLE_ITEM_LINE]));
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed: Vec<_> = GEAR_CONTROLS
+            .into_iter()
+            .filter(|name| {
+                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the Gear tab names its views, actions and lists",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        shell.update(cx, |shell, cx| crate::measure::fill_gear_sets(shell, cx));
+        cx.background_executor().timer(pause).await;
+        let set_tree = window_tree();
+        let not_found = |tree: &Option<AxElement>, names: &[&'static str]| {
+            let missing = names.iter().filter(|name| {
+                let named = |e: &AxElement| {
+                    e.title.as_deref() == Some(**name) || e.value.as_deref() == Some(**name)
+                };
+                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
+            });
+            missing.copied().collect::<Vec<_>>()
+        };
+        let unnamed = not_found(&set_tree, &GEAR_SET_CONTROLS);
+        checks.push(Check {
+            name: "the Gear tab lists its sets above Worn, each with its actions",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let window = cx.update(|cx| cx.windows().first().copied());
+        if let Some(window) = window.and_then(|window| window.downcast::<Shell>()) {
+            window
+                .update(cx, |shell, window, cx| {
+                    let panel = shell.gear_panel();
+                    panel.update(cx, |panel, cx| panel.edit_first_set(window, cx));
+                })
+                .expect("the window is open");
+        }
+        cx.background_executor().timer(pause).await;
+        let editor_tree = window_tree();
+        let unnamed = not_found(&editor_tree, &GEAR_EDITOR_CONTROLS);
+        checks.push(Check {
+            name: "the set editor names its fields, pieces and actions",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let preview = editor_tree.as_ref().map_or_else(Vec::new, |tree| {
+            let reads = |e: &AxElement| {
+                let starts = |text: &Option<String>| {
+                    (text.as_deref()).is_some_and(|text| text.starts_with(GEAR_PREVIEW_START))
+                };
+                starts(&e.title) || starts(&e.help)
+            };
+            tree.find(reads)
+        });
+        checks.push(Check {
+            name: "the set editor reads what Wear would send as one stop",
+            passed: !preview.is_empty(),
+            detail: format!("{} matching element(s)", preview.len()),
+        });
+        shell.update(cx, |shell, cx| {
+            shell
+                .gear_panel()
+                .update(cx, |panel, cx| panel.close_sample_editor(cx));
+            crate::measure::fill_gear(shell, cx);
+        });
+        let locked = tree.as_ref().map_or_else(Vec::new, |tree| {
+            tree.find(|e| e.title.as_deref() == Some(GEAR_LOCKED_ROW))
+        });
+        checks.push(Check {
+            name: "a carried row reads its flags and level lock",
+            passed: !locked.is_empty(),
+            detail: format!("{} matching element(s)", locked.len()),
+        });
+        let says_the_tip =
+            |text: &Option<String>| text.as_deref().is_some_and(|text| text.contains(GEAR_TIP));
+        let in_list = tree
+            .as_ref()
+            .map_or_else(Vec::new, |tree| tree.find(|e| says_the_tip(&e.title)));
+        checks.push(Check {
+            name: "what a tooltip shows reaches the keyboard's list by name",
+            passed: !in_list.is_empty(),
+            detail: format!("{} matching element(s)", in_list.len()),
+        });
+        let line = tree.as_ref().map_or_else(Vec::new, |tree| {
+            let probe = Some(crate::measure::SAMPLE_ITEM_LINE);
+            tree.find(|e| e.value.as_deref() == probe && says_the_tip(&e.help))
+        });
+        checks.push(Check {
+            name: "a chat line naming an item describes it to a screen reader",
+            passed: !line.is_empty(),
+            detail: format!("{} matching element(s)", line.len()),
+        });
+
+        shell.update(cx, |shell, cx| {
             crate::measure::fill_room_panel(shell, None, cx);
             crate::measure::fill_hotbar(shell, cx);
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
             shell.open_panels(cx);
         });
         cx.background_executor().timer(pause).await;
@@ -482,6 +638,38 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         shell.update(cx, |shell, cx| {
             shell.notes().update(cx, |notes, cx| notes.finish(cx));
+            shell
+                .dock(Side::Right)
+                .update(cx, |dock, cx| dock.select(Slot::Room, cx));
+        });
+        // A read of a tab on its sample: what's named, by role and name.
+        for (tab, expected) in [
+            (Slot::Character, CHARACTER_CONTROLS.as_slice()),
+            (Slot::Skills, SKILLS_CONTROLS.as_slice()),
+        ] {
+            shell.update(cx, |shell, cx| {
+                crate::measure::open_sheet_tab(shell, tab, cx);
+            });
+            cx.background_executor().timer(pause).await;
+            let tree = window_tree();
+            let missing: Vec<&str> = expected
+                .iter()
+                .filter(|(role, name)| {
+                    !tree.as_ref().is_some_and(|tree| {
+                        !tree
+                            .find(|e| e.is(role, None) && e.title.as_deref() == Some(*name))
+                            .is_empty()
+                    })
+                })
+                .map(|(_, name)| *name)
+                .collect();
+            checks.push(Check {
+                name: "the Character and Skills tabs name their controls",
+                passed: missing.is_empty(),
+                detail: format!("missing {missing:?}"),
+            });
+        }
+        shell.update(cx, |shell, cx| {
             shell
                 .dock(Side::Right)
                 .update(cx, |dock, cx| dock.select(Slot::Room, cx));

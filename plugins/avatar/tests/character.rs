@@ -362,6 +362,6 @@ fn messages_about_skills_and_affects_are_events() {
     let transcript = read(
         "You have become better at kick!\n(1h-1m-1v-1)(-/-)You feel more frail.\nYour armor spell wears off.",
     );
-    assert_eq!(transcript.events("character.skill_improved", &[]).len(), 1);
-    assert_eq!(transcript.events("character.affects_changed", &[]).len(), 2);
+    assert_eq!(transcript.events("practice.stale", &[]).len(), 1);
+    assert_eq!(transcript.events("affects.stale", &[]).len(), 2);
 }

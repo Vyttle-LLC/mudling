@@ -27,10 +27,13 @@
 
 mod engine;
 mod game;
+mod gear;
 mod inventory;
 mod latency;
 mod login;
 mod map_rules;
+mod quiet;
+mod sheet;
 mod values;
 
 pub use engine::Engine;
@@ -42,7 +45,7 @@ use crate::defaults::triggers::TriggerRule;
 use crate::line::{Line, Link};
 use crate::map::{Mark, RoomId};
 use crate::net::{self, ConnectOptions, Connection, DEFAULT_CONNECT_TIMEOUT, DisconnectReason};
-use crate::persist::{self, Database, MapVersion, SERVERS_FOLDER, Timestamp};
+use crate::persist::{self, Database, GearSet, MapVersion, SERVERS_FOLDER, Timestamp};
 use crate::plugin::luau::HookLimits;
 use crate::plugin::points::LinkRule;
 use crate::plugin::{Plugin, PluginError, PluginId};
@@ -58,6 +61,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// How long a clean quit waits for the socket to close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often a connection looks for a quiet read to send.
+const QUIET_READ_CHECK: Duration = Duration::from_secs(1);
 
 /// What a session is for. Plain data, so it can cross into a session from
 /// any shell.
@@ -172,6 +177,23 @@ pub enum RuleEdit {
     SetNotepad(String),
 }
 
+/// A change the player made to their gear. None of it ever goes to the server.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GearEdit {
+    /// A set, for its `character_id`, who must still be playing. A set with no
+    /// id is new.
+    SaveSet(GearSet),
+    RemoveSet {
+        character: String,
+        id: String,
+    },
+    /// The words the game knows an item by; none leaves commands to guess.
+    SetKeywords {
+        item: String,
+        words: String,
+    },
+}
+
 /// A change the player made to the map. None of it ever goes to the server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MapEdit {
@@ -195,8 +217,12 @@ enum Input {
     Send(String),
     SendAction(String),
     Press(String),
+    Typing(bool),
+    RefreshCharacter,
     Edit(RuleEdit),
     EditMap(MapEdit),
+    EditGear(GearEdit),
+    WearSet { character: String, id: String },
     Cancel,
     Replay(Vec<Bytes>),
     TurnPluginOn(PluginId),
@@ -312,6 +338,18 @@ impl Session {
         self.queue(Input::Press(command.into()));
     }
 
+    /// Says whether the command field holds text the player hasn't sent:
+    /// quiet reads wait while it does.
+    pub fn set_typing(&self, typing: bool) {
+        self.queue(Input::Typing(typing));
+    }
+
+    /// Reads the character's tables again, quietly, once the game can spare
+    /// it. [`crate::store::SheetState::reading`] shows it's under way.
+    pub fn refresh_character(&self) {
+        self.queue(Input::RefreshCharacter);
+    }
+
     /// Saves a change the player made; the rules store shows it.
     pub fn edit(&self, edit: RuleEdit) {
         self.queue(Input::Edit(edit));
@@ -320,6 +358,20 @@ impl Session {
     /// Saves a change the player made to the map; the map store shows it.
     pub fn edit_map(&self, edit: MapEdit) {
         self.queue(Input::EditMap(edit));
+    }
+
+    /// Applies a change to the player's gear and saves it.
+    pub fn edit_gear(&self, edit: GearEdit) {
+        self.queue(Input::EditGear(edit));
+    }
+
+    /// Puts on `character`'s gear set `id`. While the server asks for a
+    /// password it does nothing, and nor does it if they aren't playing now.
+    pub fn wear_set(&self, character: impl Into<String>, id: impl Into<String>) {
+        self.queue(Input::WearSet {
+            character: character.into(),
+            id: id.into(),
+        });
     }
 
     /// See [`Typing::alias_preview`].
@@ -447,6 +499,8 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
     let host = engine.host().to_owned();
     let port = engine.port();
     let timeout = engine.connect_timeout();
+    let mut quiet_reads = tokio::time::interval(QUIET_READ_CHECK);
+    quiet_reads.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             input = inputs.recv() => match input {
@@ -470,8 +524,14 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                     engine.send_action(&command, Timestamp::now());
                 }
                 Some(Input::Press(command)) => engine.press(&command, Timestamp::now()),
+                Some(Input::Typing(typing)) => engine.set_typing(typing),
+                Some(Input::RefreshCharacter) => engine.refresh_character(),
                 Some(Input::Edit(edit)) => engine.edit(edit, Timestamp::now()),
                 Some(Input::EditMap(edit)) => engine.edit_map(edit, Timestamp::now()),
+                Some(Input::EditGear(edit)) => engine.edit_gear(edit, Timestamp::now()),
+                Some(Input::WearSet { character, id }) => {
+                    engine.wear_set(&character, &id, Timestamp::now());
+                }
                 Some(Input::Cancel) => {
                     if let Some(socket) = &socket {
                         socket.connection.close();
@@ -503,6 +563,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 }
             }
             output = engine.next_hook_output() => engine.hook_output(output, Timestamp::now()),
+            _ = quiet_reads.tick(), if socket.is_some() => engine.tick(Timestamp::now()),
         }
         engine.settle(Timestamp::now());
         let output = engine.take_output();

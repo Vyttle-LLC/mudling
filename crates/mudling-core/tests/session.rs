@@ -270,7 +270,11 @@ fn what_was_saved_comes_back_in_the_next_session() {
     });
     let stores = session.stores();
     let character = stores.read(|c: &Versioned<CharactersState>| c.value().0.clone());
-    assert_eq!(character.get("skills.dodge"), Some(&Value::Number(45.0)));
+    assert_eq!(
+        character.get("skills.dodge"),
+        None,
+        "a character's values wait for this connection to name them"
+    );
     let gear = stores.read(|g: &Versioned<GearState>| g.value().0.clone());
     assert_eq!(gear.get("gear.worn.a pink ring"), Some(&Value::Bool(true)));
     stores.read(|room: &Versioned<RoomState>| {
