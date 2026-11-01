@@ -3295,6 +3295,19 @@ pub mod tests {
         assert_eq!(saved, ["loopback"]);
     }
 
+    #[gpui::test]
+    fn the_character_the_game_names_is_who_the_rules_are_for(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.settings.read(cx).rules().character, "");
+        });
+        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.frames_until("the rules to know who plays", |shell, cx| {
+            shell.settings.read(cx).rules().character == "bren"
+        });
+    }
+
     /// A game plugin whose `go` hook never ends.
     fn slow_plugin() -> Plugin {
         Plugin::from_files(|file| {

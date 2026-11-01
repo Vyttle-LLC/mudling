@@ -124,6 +124,8 @@ pub struct Engine {
     affects_field: Memo<u64, Option<Field>>,
     /// The room's contents changed since the last settle.
     contents_changed: bool,
+    /// The game or a plugin named the character, at the next settle.
+    character_renamed: bool,
     /// When plugin costs were last published.
     costs_published: Option<Timestamp>,
     /// The plugin set the shared link rules came from.
@@ -206,6 +208,7 @@ impl Engine {
             hud_fields: Memo::default(),
             affects_field: Memo::default(),
             contents_changed: false,
+            character_renamed: false,
             costs_published: None,
             link_rules_of: 0,
             terminal: Vec::new(),
@@ -278,6 +281,7 @@ impl Engine {
             let change = [(CHARACTER_NAME.to_owned(), name)];
             self.hub
                 .write::<CharactersState>(CharactersState(change.into()));
+            self.rules_follow_the_character();
         }
         Ok(())
     }
@@ -419,6 +423,9 @@ impl Engine {
         }
         if std::mem::take(&mut self.contents_changed) {
             self.publish_room();
+        }
+        if std::mem::take(&mut self.character_renamed) {
+            self.rules_follow_the_character();
         }
         self.publish_plugin_costs(now);
         self.share_link_rules();
@@ -756,6 +763,7 @@ impl Engine {
         }
         let heard = link.game.read(package, json);
         self.contents_changed |= heard.contents;
+        self.character_renamed |= heard.character.contains_key(CHARACTER_NAME);
         if !heard.character.is_empty() {
             let lasting = heard
                 .character
@@ -937,7 +945,7 @@ impl Engine {
         }
         self.rules = RulesState {
             server: host,
-            character: self.character_id.clone(),
+            character: self.playing_as(),
             separator: self.plugins.settings().separator.clone(),
             triggers,
             aliases,
@@ -951,11 +959,12 @@ impl Engine {
 
     /// Hands the matcher the triggers that apply to this character.
     fn run_triggers(&mut self) {
+        let character = self.playing_as();
         let mut running = Vec::new();
         let mut patterns = Vec::new();
         for rule in &self.rules.triggers {
             if rule.enabled
-                && rule.scope.covers(&self.character_id)
+                && rule.scope.covers(&character)
                 && let Some(pattern) = rule.compiled()
             {
                 running.push(rule.clone());
@@ -971,9 +980,10 @@ impl Engine {
     /// Hands the command path the aliases that apply to this character: the
     /// player's, then the plugins', the highest layer first.
     fn run_aliases(&self) {
+        let character = self.playing_as();
         let players = (self.rules.aliases.iter())
             .filter(|rule| rule.enabled && rule.problem().is_none())
-            .filter(|rule| rule.scope.covers(&self.character_id))
+            .filter(|rule| rule.scope.covers(&character))
             .map(|rule| (rule.name.as_str(), rule.expansion.as_str()));
         let layers: Vec<_> = self
             .plugins
@@ -1197,6 +1207,7 @@ impl Engine {
         } = write;
         let key = format!("{store}.{key}");
         self.contents_changed |= key == CHARACTER_NAME;
+        self.character_renamed |= key == CHARACTER_NAME;
         let row = values::to_row(&value);
         let change = BTreeMap::from([(key.clone(), value)]);
         if values::is_gear_store(&store) {
@@ -1214,6 +1225,23 @@ impl Engine {
                 value: row,
                 updated: now,
             });
+        }
+    }
+
+    /// Who is playing, by id: the name the game gave, lowercased, which is
+    /// what a rule for one character names. Empty until anything has said.
+    fn playing_as(&self) -> String {
+        self.character_name().unwrap_or_default().to_lowercase()
+    }
+
+    /// The character's name changed, so which rules apply to them did too.
+    fn rules_follow_the_character(&mut self) {
+        let character = self.playing_as();
+        if self.rules.character != character {
+            self.rules.character = character;
+            self.run_triggers();
+            self.run_aliases();
+            self.publish_rules();
         }
     }
 

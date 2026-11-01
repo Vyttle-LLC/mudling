@@ -9,6 +9,7 @@ use mudling_core::session::{Credentials, Engine, RuleEdit, SessionConfig, Typing
 use mudling_core::store::{CuesState, RulesState, StoreHub, TerminalState, Versioned};
 use mudling_core::telnet::Bytes;
 use mudling_core::telnet::command::{IAC, WILL, WONT};
+use mudling_core::telnet::gmcp;
 use mudling_core::telnet::option::ECHO;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -64,6 +65,14 @@ impl Played {
             .receive(Bytes::copy_from_slice(bytes), NOW)
             .unwrap();
         self.engine.settle(NOW);
+    }
+
+    /// The game says who is playing, as Char.Status does.
+    fn named(&mut self, name: &str) {
+        let mut frame = Vec::new();
+        let status = format!(r#"{{"character_name": "{name}"}}"#);
+        gmcp::encode("Char.Status", &status, &mut frame);
+        self.say(&frame);
     }
 
     fn echo_off(&mut self) {
@@ -236,6 +245,43 @@ fn a_trigger_applies_from_the_next_line_and_stops_when_removed() {
     played.edit(RuleEdit::RemoveTrigger(id));
     played.say(b"three bat\r\n");
     assert_eq!(played.chat(), ["one bat", "three bat"]);
+}
+
+/// The desktop opens a session with no credentials, so who is playing is only
+/// what the game says. A rule for one character applies to that one, from the
+/// moment the game names them, and to nobody before.
+#[test]
+fn a_rule_for_one_character_follows_the_name_the_game_gives() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut played = Played::plain(folder.path());
+    assert_eq!(played.rules().character, "", "nobody is named yet");
+    played.trigger(TriggerRule {
+        scope: Scope::Character("bren".to_owned()),
+        ..hiding("bat")
+    });
+    played.edit(RuleEdit::SaveAlias(AliasRule {
+        scope: Scope::Character("bren".to_owned()),
+        ..AliasRule::new("gb", "get bread")
+    }));
+    played.say(b"before: a bat\r\n");
+    assert_eq!(played.sent_for("gb"), ["gb"], "an alias nobody can use yet");
+
+    played.named("Bren");
+    assert_eq!(played.rules().character, "bren");
+    played.say(b"as Bren: a bat\r\n");
+    assert_eq!(played.sent_for("gb"), ["get bread"]);
+
+    played.named("Ana");
+    assert_eq!(played.rules().character, "ana");
+    played.say(b"as Ana: a bat\r\n");
+    assert_eq!(played.sent_for("gb"), ["gb"]);
+
+    // The three typed `gb` echo as typed; Bren's trigger hid only the line
+    // Bren saw.
+    assert_eq!(
+        played.chat(),
+        ["before: a bat", "gb", "gb", "as Ana: a bat", "gb"]
+    );
 }
 
 #[test]

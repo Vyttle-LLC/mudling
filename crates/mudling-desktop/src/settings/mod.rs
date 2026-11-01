@@ -1033,6 +1033,26 @@ mod tests {
         assert!(cx.debug_bounds("form-save").is_none(), "the form closes");
     }
 
+    /// A session on the desktop has no say in who is playing until the game
+    /// names them, so a rule can't be for "this character" before that.
+    #[gpui::test]
+    fn this_character_is_offered_once_the_game_has_named_them(cx: &mut TestAppContext) {
+        let (shell, cx, _edits) = open_rules(cx);
+        let unnamed = RulesState {
+            character: String::new(),
+            ..rules()
+        };
+        shell.update(cx, |shell, cx| shell.show_sample_rules(unnamed, cx));
+        click("new-trigger", cx);
+        assert!(cx.debug_bounds("Applies to-All characters").is_some());
+        assert!(cx.debug_bounds("Applies to-This server").is_some());
+        assert!(cx.debug_bounds("Applies to-This character").is_none());
+
+        shell.update(cx, |shell, cx| shell.show_sample_rules(rules(), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Applies to-This character").is_some());
+    }
+
     #[gpui::test]
     fn a_bad_regular_expression_stays_in_the_form_and_says_why(cx: &mut TestAppContext) {
         let (_shell, cx, edits) = open_rules(cx);

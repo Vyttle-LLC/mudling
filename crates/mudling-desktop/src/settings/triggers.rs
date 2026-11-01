@@ -423,14 +423,21 @@ impl SettingsSheet {
         theme: &Theme,
         cx: &mut Context<SettingsSheet>,
     ) {
-        let this_character = Scope::Character(self.rules.character.clone());
-        let options = [
-            (ALL_CHARACTERS, Scope::All),
-            (THIS_SERVER, Scope::Server),
-            (THIS_CHARACTER, this_character),
-        ]
-        .map(|(name, option)| (name.into(), *scope == option, Choice::Scope(option)));
-        self.fill_choices(pane, "Applies to", options.into(), theme, cx);
+        // Who is playing is what the game says, so until it has said, there is
+        // nobody to make a rule for. The rules already for one character wait
+        // for the name too.
+        let named = (!self.rules.character.is_empty()).then(|| {
+            (
+                THIS_CHARACTER,
+                Scope::Character(self.rules.character.clone()),
+            )
+        });
+        let options: Vec<_> = [(ALL_CHARACTERS, Scope::All), (THIS_SERVER, Scope::Server)]
+            .into_iter()
+            .chain(named)
+            .map(|(name, option)| (name.into(), *scope == option, Choice::Scope(option)))
+            .collect();
+        self.fill_choices(pane, "Applies to", options, theme, cx);
     }
 
     fn fill_form_buttons(
