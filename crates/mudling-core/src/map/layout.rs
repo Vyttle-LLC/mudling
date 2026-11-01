@@ -502,6 +502,14 @@ impl Layout {
                         maze.links.insert(direction, *to);
                     }
                 }
+                // What the player said of a room outlasts it.
+                maze.features.extend(room.features.iter().cloned());
+                if !room.notes.is_empty() && !maze.notes.contains(&room.notes) {
+                    if !maze.notes.is_empty() {
+                        maze.notes.push_str("\n\n");
+                    }
+                    maze.notes.push_str(&room.notes);
+                }
             });
         }
         // Moves within the maze lead nowhere the map can draw.

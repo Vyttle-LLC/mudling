@@ -164,6 +164,39 @@ fn an_unsaved_note_stays_with_its_room_when_the_room_changes(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn reopening_a_note_elsewhere_keeps_the_words_just_typed(cx: &mut TestAppContext) {
+    let mut window = open(cx);
+    window.edit(NoteTarget::Room(0));
+    window.type_text("first");
+    window.notes.update_in(window.cx, |notes, window, cx| {
+        notes.edit(NoteTarget::Room(0), Host::RoomPanel, window, cx);
+    });
+    window.cx.run_until_parked();
+    assert_eq!(window.content(), "first", "the stores don't show it yet");
+
+    window.notes.update(window.cx, |notes, cx| notes.finish(cx));
+    window.edit(NoteTarget::Room(0));
+    assert_eq!(window.content(), "first", "nor after closing it");
+    window.type_text(" and second");
+    window.wait_out_the_typing();
+    assert_eq!(window.heard().last(), Some(&note_on(0, "first and second")));
+}
+
+#[gpui::test]
+fn a_long_note_scrolls_and_leaves_the_list_its_room(cx: &mut TestAppContext) {
+    let mut window = open(cx);
+    let long = vec!["a line of a long note"; 200].join("\n");
+    window.apply(MapChange {
+        rooms: vec![noted(0, 0, &long)],
+        ..MapChange::default()
+    });
+    let words = window.cx.debug_bounds("note-text").expect("the note shows");
+    assert!(words.size.height <= NOTE_MOST_HEIGHT, "{words:?}");
+    assert!(window.cx.debug_bounds("Go to Square 0, 0").is_some());
+    assert!(window.cx.debug_bounds("Edit the notepad").is_some());
+}
+
+#[gpui::test]
 fn the_store_catching_up_leaves_what_is_typed_alone(cx: &mut TestAppContext) {
     let mut window = open(cx);
     window.edit(NoteTarget::Room(0));

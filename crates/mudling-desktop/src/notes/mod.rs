@@ -25,8 +25,9 @@ use book::NoteBook;
 pub use book::NoteRow;
 use gpui::{
     AnyView, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, Role, ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, uniform_list,
+    KeyBinding, MouseButton, Role, ScrollStrategy, SharedString, Stateful, StyleRefinement,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 use mudling_core::map::{MapRoom, RoomId, WalkStep, feature, walk_command};
 use mudling_core::session::{MapEdit, RuleEdit};
@@ -41,7 +42,8 @@ const NOTE_ROW_HEIGHT: gpui::Pixels = px(62.);
 /// How long the typing has to stop before what's typed is saved.
 const SAVE_AFTER: Duration = Duration::from_millis(400);
 const BUTTON_HEIGHT: gpui::Pixels = px(28.);
-const NOTEPAD_MOST_HEIGHT: gpui::Pixels = px(132.);
+/// A long note scrolls, so it can't push the rest of a panel out of it.
+const NOTE_MOST_HEIGHT: gpui::Pixels = px(132.);
 const NOTE_PLACEHOLDER: &str = "What's worth remembering?";
 const FOOTER: &str = "Plain text, saved as you type. Never sent to the game.";
 /// What a note says of a room that left the map under it.
@@ -125,6 +127,8 @@ pub struct Notes {
     editor: Entity<CommandInput>,
     list: Entity<NoteList>,
     draft: Option<Draft>,
+    /// Words handed to the core that the stores don't show yet.
+    handed: Vec<(NoteTarget, String)>,
     /// Waits out the typing, then saves.
     saving: Option<Task<()>>,
     walking: Option<Task<()>>,
@@ -151,6 +155,7 @@ impl Notes {
             }),
             editor,
             draft: None,
+            handed: Vec::new(),
             saving: None,
             walking: None,
             message: None,
@@ -163,6 +168,7 @@ impl Notes {
     pub fn use_map(&mut self, snapshot: Versioned<MapState>, cx: &mut Context<Notes>) {
         self.book = NoteBook::new(snapshot);
         self.draft = None;
+        self.handed.clear();
         self.saving = None;
         self.walking = None;
         self.message = None;
@@ -175,6 +181,7 @@ impl Notes {
         if self.book.apply(diff) {
             self.show_rows(cx);
         }
+        self.forget_what_the_stores_show();
         self.rescue_draft(window, cx);
         cx.notify();
     }
@@ -184,8 +191,15 @@ impl Notes {
         if self.server != server || self.notepad != notepad {
             self.server = server.to_owned().into();
             notepad.clone_into(&mut self.notepad);
+            self.forget_what_the_stores_show();
             cx.notify();
         }
+    }
+
+    fn forget_what_the_stores_show(&mut self) {
+        let mut handed = std::mem::take(&mut self.handed);
+        handed.retain(|(target, text)| self.stored(*target) != text);
+        self.handed = handed;
     }
 
     fn show_rows(&self, cx: &mut Context<Notes>) {
@@ -197,6 +211,7 @@ impl Notes {
     /// the same as another or goes back to a saved version. The words move to
     /// the notepad, where they overwrite nothing.
     fn rescue_draft(&mut self, window: &mut Window, cx: &mut Context<Notes>) {
+        let notepad = self.newest(NoteTarget::Notepad).to_owned();
         let gone = |room| self.book.room(room).is_none();
         let Some(draft) = self.draft.as_mut().filter(|draft| match draft.target {
             NoteTarget::Room(room) => gone(room),
@@ -209,12 +224,12 @@ impl Notes {
             return;
         }
         let rescued = format!("{}: {}", draft.heading, draft.text);
-        let text = match self.notepad.is_empty() {
+        let text = match notepad.is_empty() {
             true => rescued,
-            false => format!("{}\n\n{rescued}", self.notepad),
+            false => format!("{notepad}\n\n{rescued}"),
         };
         draft.target = NoteTarget::Notepad;
-        draft.sent = self.notepad.clone();
+        draft.sent = notepad;
         draft.text = text.clone();
         self.message = Some(MOVED_TO_NOTEPAD.into());
         self.editor.update(cx, |editor, cx| {
@@ -235,15 +250,16 @@ impl Notes {
         cx: &mut Context<Notes>,
     ) {
         self.save(cx);
-        let (heading, text) = match target {
+        let heading = match target {
             NoteTarget::Room(room) => {
                 let Some(room) = self.book.room(room) else {
                     return;
                 };
-                (room.name.clone(), room.notes.clone())
+                room.name.clone()
             }
-            NoteTarget::Notepad => (String::new(), self.notepad.clone()),
+            NoteTarget::Notepad => String::new(),
         };
+        let text = self.newest(target).to_owned();
         self.message = None;
         self.draft = Some(Draft {
             target,
@@ -306,12 +322,12 @@ impl Notes {
             return None;
         }
         text.clone_into(&mut draft.sent);
-        Some(match draft.target {
-            NoteTarget::Room(room) => NoteEdit::Map(MapEdit::Note {
-                room,
-                text: text.to_owned(),
-            }),
-            NoteTarget::Notepad => NoteEdit::Rules(RuleEdit::SetNotepad(text.to_owned())),
+        let (target, text) = (draft.target, text.to_owned());
+        self.handed.retain(|(handed, _)| *handed != target);
+        self.handed.push((target, text.clone()));
+        Some(match target {
+            NoteTarget::Room(room) => NoteEdit::Map(MapEdit::Note { room, text }),
+            NoteTarget::Notepad => NoteEdit::Rules(RuleEdit::SetNotepad(text)),
         })
     }
 
@@ -321,6 +337,13 @@ impl Notes {
             NoteTarget::Room(room) => self.book.room(room).map_or("", |room| &room.notes),
             NoteTarget::Notepad => &self.notepad,
         }
+    }
+
+    /// The newest words for `target`: the stores lag a save by a frame or
+    /// more, and a note opened from them then would lose what was just typed.
+    fn newest(&self, target: NoteTarget) -> &str {
+        let handed = self.handed.iter().find(|(handed, _)| *handed == target);
+        handed.map_or_else(|| self.stored(target), |(_, text)| text)
     }
 
     /// Whether the stores show what's typed: the core has it, and its writer
@@ -475,10 +498,16 @@ fn render_note(
 ) -> Div {
     if notes.draft_in(host, target).is_some() {
         let finish = entity.clone();
+        let editor = notes.editor.clone();
         return note_box(theme)
             .child(
                 div()
                     .key_context(EDITOR_CONTEXT)
+                    // The panels keep the mouse from moving focus, for their
+                    // buttons' sake. A click on the words is a way back in.
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        window.focus(&editor.focus_handle(cx), cx);
+                    })
                     .on_action(move |_: &FinishNote, _, cx| {
                         finish.update(cx, |notes, cx| notes.finish(cx));
                     })
@@ -509,7 +538,7 @@ fn render_note(
     }
     let text = match notes.draft.as_ref().filter(|draft| draft.target == target) {
         Some(draft) => draft.text.clone(),
-        None => notes.stored(target).to_owned(),
+        None => notes.newest(target).to_owned(),
     };
     let (label, name) = match (target, text.is_empty()) {
         (NoteTarget::Notepad, _) => ("Edit", "Edit the notepad"),
@@ -528,16 +557,15 @@ fn render_note(
         let shown = SharedString::from(text);
         let words = div()
             .id(("note-text", id.len()))
+            .debug_selector(|| "note-text".to_owned())
             .role(Role::Label)
             .aria_value(shown.clone())
+            .max_h(NOTE_MOST_HEIGHT)
+            .overflow_y_scroll()
             .text_size(px(14.))
             .text_color(theme.text)
             .child(shown);
-        body = body.child(if target == NoteTarget::Notepad {
-            words.max_h(NOTEPAD_MOST_HEIGHT).overflow_y_scroll()
-        } else {
-            words
-        });
+        body = body.child(words);
     }
     body.child(
         div()

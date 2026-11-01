@@ -517,11 +517,14 @@ impl Shell {
         }
     }
 
-    /// Lets go of the game, with what's typed in the notes saved first.
+    /// Lets go of the game, with what's typed in the notes saved first. The
+    /// editor closes with it: words typed with no session to save them, while
+    /// the next one opens, would be lost.
     fn take_game(&mut self, cx: &mut Context<Shell>) -> Option<Game> {
         if let Some(edit) = self.notes.update(cx, |notes, _| notes.unsaved()) {
             self.save_note(&edit);
         }
+        self.notes.update(cx, |notes, cx| notes.finish(cx));
         self.game.take()
     }
 
@@ -2727,6 +2730,95 @@ pub mod tests {
     #[gpui::test]
     fn typing_stays_in_a_map_note_when_its_room_leaves_the_map(cx: &mut TestAppContext) {
         typing_stays_in_a_note_when_its_room_leaves_the_map(Host::Map, cx);
+    }
+
+    fn a_click_on_the_editor_takes_typing_back_from_the_bar(host: Host, cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        let notes = played.shell.read_with(played.cx, |shell, _| shell.notes());
+        played.shell.update(played.cx, |shell, cx| {
+            shell.map.update(cx, |map, cx| map.go_to(1, cx));
+            if host == Host::NotesTab {
+                shell
+                    .dock(Side::Right)
+                    .update(cx, |dock, cx| dock.select(Slot::Notes, cx));
+            }
+        });
+        played.cx.run_until_parked();
+        notes.update_in(played.cx, |notes, window, cx| {
+            notes.edit(NoteTarget::Room(1), host, window, cx);
+        });
+        played.cx.run_until_parked();
+        played.cx.simulate_input("one");
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            window.focus(&shell.input.focus_handle(cx), cx);
+        });
+        played.cx.run_until_parked();
+
+        played.click("Note");
+        played.cx.run_until_parked();
+        played.cx.simulate_input(" two");
+        played.cx.simulate_keystrokes("enter");
+
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(
+                shell.input.read(cx).content(),
+                "",
+                "nothing went to the bar"
+            );
+            let typed = shell.notes.read(cx).editor().read(cx).content().to_owned();
+            assert_eq!(typed, "one two\n");
+        });
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_editor_in_the_room_panel_takes_typing_back(cx: &mut TestAppContext) {
+        a_click_on_the_editor_takes_typing_back_from_the_bar(Host::RoomPanel, cx);
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_editor_in_the_notes_tab_takes_typing_back(cx: &mut TestAppContext) {
+        a_click_on_the_editor_takes_typing_back_from_the_bar(Host::NotesTab, cx);
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_editor_on_the_map_card_takes_typing_back(cx: &mut TestAppContext) {
+        a_click_on_the_editor_takes_typing_back_from_the_bar(Host::Map, cx);
+    }
+
+    #[gpui::test]
+    fn leaving_a_game_saves_an_open_note_and_closes_it(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.enter_room();
+        let notes = played.shell.read_with(played.cx, |shell, _| shell.notes());
+        notes.update_in(played.cx, |notes, window, cx| {
+            notes.edit(NoteTarget::Room(1), Host::RoomPanel, window, cx);
+        });
+        played.cx.run_until_parked();
+        played.cx.simulate_input("herbs");
+
+        let game = played
+            .shell
+            .update(played.cx, |shell, cx| shell.take_game(cx));
+        let game = game.expect("a game was running");
+
+        let open = notes.read_with(played.cx, |notes, _| notes.draft_target());
+        assert_eq!(
+            open, None,
+            "nothing can be typed with no session to save it"
+        );
+        let saved = || {
+            game.session.stores().read(|map: &Versioned<MapState>| {
+                map.value()
+                    .room(1)
+                    .is_some_and(|room| room.notes == "herbs")
+            })
+        };
+        let started = Instant::now();
+        while !saved() {
+            assert!(started.elapsed() < WAIT, "timed out waiting for the note");
+            sleep(Duration::from_millis(1));
+        }
     }
 
     #[gpui::test]
