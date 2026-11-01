@@ -52,7 +52,7 @@ impl MapView {
         cx.notify();
     }
 
-    #[cfg(any(test, target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub fn review_sample(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.find_duplicates_now(cx);
         self.open_review(window, cx);

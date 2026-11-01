@@ -1789,7 +1789,7 @@ impl Shell {
     }
 
     /// The left panel's map.
-    #[cfg(any(test, target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub fn map(&self) -> Entity<MapView> {
         self.map.clone()
     }
