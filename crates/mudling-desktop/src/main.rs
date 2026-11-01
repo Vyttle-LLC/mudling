@@ -5,7 +5,7 @@
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
-//!                            [--settings-section data|vault|logs]
+//!                            [--settings-section plugins|data|vault|logs]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -110,7 +110,7 @@ const REPLAY_HOST: &str = "replay";
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open] [--settings-section data|vault|logs] \
+                     [--settings-open] [--settings-section plugins|data|vault|logs] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
@@ -574,10 +574,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--settings-section" => {
                 options.settings_open = true;
                 options.settings_section = Some(match value()?.as_str() {
+                    "plugins" => Section::Plugins,
                     "data" => Section::Data,
                     "vault" => Section::Vault,
                     "logs" => Section::Logs,
-                    _ => return Err("--settings-section needs data, vault or logs".into()),
+                    _ => {
+                        return Err("--settings-section needs plugins, data, vault or logs".into());
+                    }
                 });
             }
             "--hud" => {

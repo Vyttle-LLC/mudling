@@ -233,6 +233,10 @@ const SETTINGS_CONTROLS: [&str; 14] = [
     "Show prompt lines",
 ];
 
+/// What a screen reader must hear in the Plugins section: a plugin with its
+/// layer, and the costs, or that there are none yet.
+const PLUGINS_TEXT: [&str; 2] = ["MUDling defaults, Built in: On", "a line"];
+
 /// The server the Logs section's sample log is for.
 const LOG_SERVER: &str = "mud.example";
 /// What a screen reader must find in the Logs section with one chat log kept.
@@ -1286,6 +1290,25 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             };
             names.iter().copied().filter(unnamed).collect()
         };
+        let opened = in_window(
+            &|shell, window, cx| measure::open_sample_section(shell, Section::Plugins, window, cx),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unread: Vec<_> = PLUGINS_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "Plugins reads out its layers and what they cost",
+            passed: opened.is_some() && unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
+        });
+
         let opened = in_window(
             &|shell, window, cx| measure::open_sample_section(shell, Section::Data, window, cx),
             cx,

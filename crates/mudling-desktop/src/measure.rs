@@ -20,7 +20,8 @@
 //! `--long-lines` measures all of this with lines that wrap.
 //!
 //! `--settings-open` runs all of this with the settings sheet open, and
-//! `--settings-section` with Data & sync, Vault or Logs open and filled.
+//! `--settings-section` with Plugins, Data & sync, Vault or Logs open and
+//! filled.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -63,7 +64,7 @@ use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
-use crate::settings::Section;
+use crate::settings::{PluginRow, Section};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{
@@ -79,6 +80,7 @@ use mudling_core::persist::{
 };
 use mudling_core::plugin::luau::Value;
 use mudling_core::plugin::points::Keywords;
+use mudling_core::plugin::{Layer, PluginId};
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
@@ -1189,7 +1191,35 @@ pub fn open_sample_section(
             .to_vec();
         sheet.show_sample_vault(entries, 1, cx);
         sheet.show_logs(LogSettings::default(), sample_logs(), cx);
+        sheet.show_plugins(sample_plugins(), cx);
     });
+}
+
+/// A full list of made-up plugins, and the real defaults, whose cost the
+/// session goes on publishing.
+pub fn sample_plugins() -> Vec<PluginRow> {
+    let row = |name: &str, layer| PluginRow {
+        id: PluginId::try_from(name.to_lowercase().replace(' ', "-")).expect("the id is valid"),
+        name: name.to_owned().into(),
+        layer,
+        detail: "Version 1.0.0 · MIT".into(),
+        on: true,
+    };
+    let mut rows = vec![
+        row("Sample tweaks", Layer::Override),
+        row("Sample game", Layer::Game),
+        row("Sample helper", Layer::Game),
+        row("Sample maps", Layer::Game),
+        row("Sample colors", Layer::Game),
+        row("Sample chat", Layer::Game),
+        row("Sample vitals", Layer::Game),
+    ];
+    let defaults = mudling_core::defaults::plugin();
+    rows.push(PluginRow {
+        id: defaults.id().clone(),
+        ..row("MUDling defaults", Layer::Default)
+    });
+    rows
 }
 
 /// Made-up logs with no files behind them.

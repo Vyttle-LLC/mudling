@@ -2,7 +2,8 @@
 //! session's notices.
 //!
 //! It shows what the core publishes today, and that's less than the canvas:
-//! no description or source for a plugin, and the switches only report. A
+//! no description or source for a plugin, and the switches only report. Each
+//! plugin's cost per line is sampled, so it shows after a few hundred lines. A
 //! plugin the core turned off has a banner that can turn it on again.
 
 use super::{Pane, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
@@ -15,12 +16,19 @@ use gpui::{
 use mudling_core::defaults;
 use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDisabled};
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
+use mudling_core::stats::Summary;
 
 const SWITCH_WIDTH: Pixels = px(40.);
 const SWITCH_HEIGHT: Pixels = px(22.);
 const SWITCH_KNOB: Pixels = px(16.);
 const SWITCH_NOTE: &str = "The switches show what's running. Changing them isn't here yet.";
 const NO_SESSION: &str = "Connect to a server to see its plugins.";
+const NOT_MEASURED: &str = "Costs show here once a few hundred lines have been read.";
+/// PRD §6: one line with all its plugins, and what any one of them may add.
+const LINE_BUDGET_US: f64 = 20.;
+const PLUGIN_BUDGET_US: f64 = 5.;
+/// Room for a cost like "12.3 µs".
+const COST_WIDTH: Pixels = px(64.);
 const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins over the defaults.";
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
 /// Under this, a banner's buttons wrap below its text.
@@ -83,14 +91,42 @@ impl PluginRow {
         running && !turned_off.iter().any(|off| off.plugin == self.id)
     }
 
-    /// What it costs a line, once sampled, after its version and license.
-    fn detail_with(&self, costs: &[PluginCost]) -> SharedString {
-        let sampled = costs.iter().find(|cost| cost.plugin == self.id);
-        match sampled.and_then(|cost| cost.per_line.as_ref()) {
-            Some(cost) => format!("{} · {:.1} µs a line", self.detail, cost.p99_us).into(),
-            None => self.detail.clone(),
-        }
+    /// What it costs a line in µs at p99, once sampled.
+    fn cost(&self, costs: &[PluginCost]) -> Option<f64> {
+        let sampled = costs.iter().find(|cost| cost.plugin == self.id)?;
+        sampled.per_line.as_ref().map(|cost| cost.p99_us)
     }
+}
+
+fn micros(cost: f64) -> String {
+    format!("{cost:.1} µs")
+}
+
+/// What each layer's plugins that run cost a line, top layer first, and what
+/// they cost together against the budget. The whole comes from the one pass,
+/// so it's not the layers added up: each of those times its rules alone.
+fn cost_lines(
+    rows: &[PluginRow],
+    costs: &[PluginCost],
+    turned_off: &[PluginDisabled],
+    whole: &Summary,
+) -> (String, String) {
+    let layers = [Layer::Override, Layer::Game, Layer::Default].map(|layer| {
+        let running = rows.iter().filter(|row| row.layer == layer);
+        let cost = running
+            .filter(|row| row.switched_on(costs, turned_off))
+            .filter_map(|row| row.cost(costs))
+            .fold(0., |total, cost| total + cost);
+        format!("{} {}", layer_name(layer), micros(cost))
+    });
+    (
+        layers.join(" · "),
+        format!(
+            "All plugins {} of {LINE_BUDGET_US} µs a line. One plugin may add \
+             {PLUGIN_BUDGET_US} µs.",
+            micros(whole.p99_us),
+        ),
+    )
 }
 
 fn layer_heading(layer: Layer) -> &'static str {
@@ -98,6 +134,14 @@ fn layer_heading(layer: Layer) -> &'static str {
         Layer::Override => "Your overrides",
         Layer::Game => "Game",
         Layer::Default => "Defaults · work on any GMCP server",
+    }
+}
+
+fn layer_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Override => "Overrides",
+        Layer::Game => "Game",
+        Layer::Default => "Defaults",
     }
 }
 
@@ -132,7 +176,7 @@ fn plugin_row(
     row: &PluginRow,
     switched_on: bool,
     overran: bool,
-    detail: SharedString,
+    cost: Option<f64>,
     theme: &Theme,
 ) -> impl IntoElement + use<> {
     let state = match (switched_on, overran) {
@@ -140,15 +184,25 @@ fn plugin_row(
         (false, true) => "Turned off · over budget",
         (false, false) => "Off",
     };
+    let over_limit = cost.is_some_and(|cost| cost > PLUGIN_BUDGET_US);
+    let cost_said = match cost {
+        Some(cost) if over_limit => format!(
+            " {} a line, over the {PLUGIN_BUDGET_US} µs limit.",
+            micros(cost)
+        ),
+        Some(cost) => format!(" {} a line.", micros(cost)),
+        None => String::new(),
+    };
     let id = row.id.clone();
     div()
         .id(SharedString::from(format!("plugin-{}", row.id)))
         .debug_selector(move || format!("plugin-{id}"))
         .role(Role::Label)
         .aria_value(format!(
-            "{}, {}: {state}. {detail}",
+            "{}, {}: {state}. {}.{cost_said}",
             row.name,
             layer_badge(row.layer),
+            row.detail,
         ))
         .flex()
         .items_center()
@@ -185,7 +239,7 @@ fn plugin_row(
                     div()
                         .text_size(px(13.))
                         .text_color(theme.text_muted)
-                        .child(detail),
+                        .child(row.detail.clone()),
                 ),
         )
         .child(
@@ -199,7 +253,42 @@ fn plugin_row(
                 .text_color(theme.text_muted)
                 .child(layer_badge(row.layer)),
         )
+        .child(
+            div()
+                .flex_none()
+                .w(COST_WIDTH)
+                .flex()
+                .justify_end()
+                .text_size(px(14.))
+                .text_color(if over_limit {
+                    theme.warning
+                } else {
+                    theme.text_muted
+                })
+                .child(cost.map_or_else(String::new, micros)),
+        )
         .child(switch(switched_on, theme))
+}
+
+/// A layer's heading. The first has the costs' column heading too.
+fn layer_heading_row(layer: Layer, first: bool, theme: &Theme) -> impl IntoElement + use<> {
+    div()
+        .px_5()
+        .flex()
+        .items_end()
+        .justify_between()
+        .child(section_heading(layer_heading(layer), theme))
+        .when(first, |row| {
+            row.child(
+                div()
+                    .pb_2()
+                    .mr(SWITCH_WIDTH + px(12.))
+                    .font_family(UI_FONT)
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child("per line"),
+            )
+        })
 }
 
 impl SettingsSheet {
@@ -339,6 +428,7 @@ impl SettingsSheet {
             .rounded_lg()
             .border_1()
             .border_color(theme.border);
+        let mut first = true;
         for layer in [Layer::Override, Layer::Game, Layer::Default] {
             let in_layer: Vec<&PluginRow> =
                 self.plugins.iter().filter(|p| p.layer == layer).collect();
@@ -350,19 +440,48 @@ impl SettingsSheet {
                     row,
                     row.switched_on(&self.costs, &self.turned_off),
                     self.turned_off.iter().any(|off| off.plugin == row.id),
-                    row.detail_with(&self.costs),
+                    row.cost(&self.costs),
                     theme,
                 )
             });
             card = card
-                .child(
-                    div()
-                        .px_5()
-                        .child(section_heading(layer_heading(layer), theme)),
-                )
+                .child(layer_heading_row(layer, first, theme))
                 .children(rows);
+            first = false;
         }
-        pane.row(card);
+        pane.row(card.child(self.cost_footer(theme)));
+    }
+
+    /// The layers' costs and the total against the budgets, closing the card.
+    fn cost_footer(&self, theme: &Theme) -> Stateful<Div> {
+        let (layers, total) = match &self.line_cost {
+            Some(whole) => cost_lines(&self.plugins, &self.costs, &self.turned_off, whole),
+            None => (String::new(), NOT_MEASURED.to_owned()),
+        };
+        let over_budget = (self.line_cost.as_ref()).is_some_and(|w| w.p99_us > LINE_BUDGET_US);
+        div()
+            .id("plugin-costs")
+            .debug_selector(|| "plugin-costs".to_owned())
+            .role(Role::Label)
+            .aria_value(format!("{layers}. {total}"))
+            .px_5()
+            .py_3()
+            .border_t_1()
+            .border_color(theme.divider)
+            .font_family(UI_FONT)
+            .text_size(px(13.))
+            .text_color(theme.text_muted)
+            .when(!layers.is_empty(), |footer| footer.child(layers))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if over_budget {
+                        theme.warning
+                    } else {
+                        theme.text
+                    })
+                    .child(total),
+            )
     }
 }
 
@@ -424,9 +543,40 @@ mod tests {
         };
         assert!(!row.switched_on(&[cost(None)], &[off]));
 
-        assert_eq!(row.detail_with(&[cost(None)]), row.detail);
+        assert_eq!(row.cost(&[cost(None)]), None);
         let summary = Summary::of(&[Duration::from_micros(2)]);
-        let shown = row.detail_with(&[cost(summary)]);
-        assert!(shown.ends_with("· 2.0 µs a line"), "{shown}");
+        assert_eq!(row.cost(&[cost(summary)]), Some(2.));
+    }
+
+    #[test]
+    fn layers_count_what_runs_and_the_total_is_the_whole_read() {
+        let game = plugin(A_GAME);
+        let id = game.id().clone();
+        let rows = PluginRow::for_session(
+            std::slice::from_ref(&game),
+            std::slice::from_ref(&id),
+            "a.example",
+        );
+        let of = |plugin: &PluginId, micros| PluginCost {
+            plugin: plugin.clone(),
+            sampled_lines: 1,
+            per_line: Summary::of(&[Duration::from_micros(micros)]),
+        };
+        let costs = [of(&rows[0].id, 1), of(&id, 9)];
+        let whole = Summary::of(&[Duration::from_micros(7)]).unwrap();
+
+        let (layers, total) = cost_lines(&rows, &costs, &[], &whole);
+        assert_eq!(layers, "Overrides 0.0 µs · Game 9.0 µs · Defaults 1.0 µs");
+        assert_eq!(
+            total,
+            "All plugins 7.0 µs of 20 µs a line. One plugin may add 5 µs."
+        );
+
+        let off = PluginDisabled {
+            plugin: id.clone(),
+            reason: DisabledReason::Overran(3),
+        };
+        let (layers, _) = cost_lines(&rows, &costs, &[off], &whole);
+        assert!(layers.contains("Game 0.0 µs"), "{layers}");
     }
 }

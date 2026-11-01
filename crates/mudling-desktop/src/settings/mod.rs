@@ -34,6 +34,7 @@ use gpui::{
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
 use mudling_core::session::RuleEdit;
+use mudling_core::stats::Summary;
 use mudling_core::store::RulesState;
 use mudling_core::store::SettingsState;
 use std::path::PathBuf;
@@ -314,6 +315,8 @@ pub struct SettingsSheet {
     notices: Vec<String>,
     turned_off: Vec<PluginDisabled>,
     costs: Vec<PluginCost>,
+    /// What all the plugins cost a line together.
+    line_cost: Option<Summary>,
     /// The notice whose details are showing.
     details: Option<String>,
     /// The chat faces this machine has.
@@ -358,6 +361,7 @@ impl SettingsSheet {
             notices: Vec::new(),
             turned_off: Vec::new(),
             costs: Vec::new(),
+            line_cost: None,
             details: None,
             fonts: vec![CHAT_FONTS[0]],
             data: data::DataPane::default(),
@@ -481,12 +485,14 @@ impl SettingsSheet {
         let changed = self.server.as_deref() != server
             || self.notices != settings.notices
             || self.turned_off != settings.turned_off
-            || self.costs != settings.plugin_costs;
+            || self.costs != settings.plugin_costs
+            || self.line_cost != settings.plugin_line_cost;
         if changed {
             self.server = server.map(|server| server.to_owned().into());
             self.notices.clone_from(&settings.notices);
             self.turned_off.clone_from(&settings.turned_off);
             self.costs.clone_from(&settings.plugin_costs);
+            self.line_cost = settings.plugin_line_cost;
             cx.notify();
         }
     }
