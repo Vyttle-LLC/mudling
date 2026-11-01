@@ -163,6 +163,7 @@ pub fn sample_room() -> (RoomState, MobsState, RoomContents) {
 
 /// A small made-up world for the Find panel: rooms with a walk between them,
 /// one out of reach, mobs seen and marked, and items at hand.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn sample_find() -> FindStores {
     let now = Timestamp(0);
     let mut live = LiveMap::new(Box::new(PlainRules));

@@ -112,6 +112,14 @@ fn shown_name(row: &FindRow) -> SharedString {
     }
 }
 
+/// What a screen reader reads for a row. The marks' own text is out of its
+/// reach.
+fn row_label(name: &str, marks: &[Mark], place: &str) -> String {
+    let marks = marks.iter().map(|mark| mark.name());
+    let parts: Vec<&str> = [name].into_iter().chain(marks).chain([place]).collect();
+    parts.join(", ")
+}
+
 /// The room Walk goes to, unless there's nothing to walk.
 fn goal(row: &FindRow) -> Option<RoomId> {
     match (&row.place, row.reach) {
@@ -428,9 +436,10 @@ impl FindPanel {
             .id(("find-row", index))
             .debug_selector(move || format!("find-row-{index}"))
             .role(Role::ListItem)
-            .aria_label(format!("{name}, {place}"))
+            .aria_label(row_label(&name, &row.marks, &place))
             .flex()
             .flex_none()
+            .w_full()
             .h(ROW_HEIGHT)
             .items_center()
             .gap_2()
@@ -655,6 +664,28 @@ mod tests {
         assert_eq!(line, "The North Gate · The Old Town · 2 steps away");
         assert!(cx.debug_bounds("find-row-0").is_some());
         assert!(cx.debug_bounds("find-row-1").is_none());
+    }
+
+    #[gpui::test]
+    fn walk_lines_up_however_long_the_row_is(cx: &mut TestAppContext) {
+        let (_, cx, _) = panel_window(sample_find(), cx);
+        click("Rooms", cx);
+        let right = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name).expect("it's drawn").right()
+        };
+        assert_eq!(
+            right("Walk to A Stone Hall", cx),
+            right("Walk to The Market Square", cx)
+        );
+    }
+
+    #[test]
+    fn a_rows_marks_are_read_with_it() {
+        assert_eq!(
+            row_label("A wolf", &[Mark::Aggressive, Mark::Gear], "A gate"),
+            "A wolf, aggressive, gear, A gate"
+        );
+        assert_eq!(row_label("A road", &[], "Fields"), "A road, Fields");
     }
 
     #[gpui::test]

@@ -249,6 +249,10 @@ const FIND_PANEL_FIELD: &str = "Find on the map";
 const FIND_PANEL_CONTROLS: [&str; 5] =
     ["All", "Rooms", "Mobs", "Items", "Walk to The Market Square"];
 const FIND_PANEL_RESULT: &str = "The Market Square, The Old Town · 1 step away";
+/// Finds the sample's marked mob, which reads with its mark.
+const FIND_PANEL_MARKED_QUERY: &str = "wolf";
+const FIND_PANEL_MARKED: &str =
+    "A grey wolf is here, howling., aggressive, The North Gate · The Old Town · 2 steps away";
 /// In nothing on the sample.
 const FIND_PANEL_NOTHING: &str = "zzz";
 
@@ -468,6 +472,28 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .as_ref()
                 .is_some_and(|tree| !tree.find(says_where).is_empty()),
             detail: format!("looked for {FIND_PANEL_RESULT:?}"),
+        });
+        in_shell(
+            &|_, window, cx| {
+                find_panel.update(cx, |panel, cx| {
+                    panel.type_text(FIND_PANEL_MARKED_QUERY, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let reads_its_mark = |e: &AxElement| {
+            [&e.title, &e.value]
+                .into_iter()
+                .any(|text| text.as_deref() == Some(FIND_PANEL_MARKED))
+        };
+        checks.push(Check {
+            name: "a marked Find result reads its mark",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(reads_its_mark).is_empty()),
+            detail: format!("looked for {FIND_PANEL_MARKED:?}"),
         });
         in_shell(
             &|_, window, cx| {
