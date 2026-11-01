@@ -523,7 +523,12 @@ impl Engine {
                 "{name}: couldn't find {item}. It isn't worn, carried or in a bag."
             ));
         }
-        if plan.commands.is_empty() && plan.missing.is_empty() {
+        for item in &plan.stand_ins {
+            self.notice(format!(
+                "{name}: the copy chosen of {item} isn't seen, so another stays on."
+            ));
+        }
+        if plan.commands.is_empty() && plan.missing.is_empty() && plan.stand_ins.is_empty() {
             self.notice(format!("{name} is already on."));
         }
         for command in &plan.commands {

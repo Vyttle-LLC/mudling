@@ -502,6 +502,34 @@ fn a_piece_not_seen_is_said_and_the_rest_still_go_on() {
     );
 }
 
+/// Copy 3 goes on and stays out of the set's sight: copy 2 is what was chosen.
+#[test]
+fn another_copy_on_is_said_and_the_set_isnt_called_on() {
+    let folder = tempfile::tempdir().unwrap();
+    let (mut engine, hub) = engine(folder.path());
+    ready(&mut engine, &hub);
+    let wearing = vec![piece("an amulet of Gorn", "neck", Some("3"))];
+    let id = saved(&mut engine, &hub, set("fen", "On", wearing, None));
+    engine.wear_set("fen", &id, NOW);
+    say(
+        &mut engine,
+        "You wear an amulet of Gorn around your neck.\r\n",
+        NOW,
+    );
+    settle_until(&mut engine, &hub, |items| {
+        items.worn.iter().any(|worn| worn.slot == "neck")
+    });
+    let gone = vec![piece("an amulet of Gorn", "neck", Some("9"))];
+    let id = saved(&mut engine, &hub, set("fen", "Gone", gone, None));
+    engine.take_output();
+    engine.wear_set("fen", &id, NOW);
+    assert_eq!(sent(&mut engine), "");
+    let said = notices(&hub);
+    let told = "Gone: the copy chosen of an amulet of Gorn isn't seen, so another stays on.";
+    assert!(said.iter().any(|notice| notice == told), "{said:?}");
+    assert!(!said.iter().any(|notice| notice == "Gone is already on."));
+}
+
 #[test]
 fn a_set_all_on_says_so_and_sends_nothing() {
     let folder = tempfile::tempdir().unwrap();

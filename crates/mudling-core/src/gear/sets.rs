@@ -299,12 +299,17 @@ impl<'a> AtHand<'a> {
             || self.bagged.iter().any(|(item, _)| item.id == copy)
     }
 
-    /// Takes out a pinned piece's own copy, or any of an unpinned piece's name.
-    fn take(&mut self, piece: &GearPiece) -> Option<(&'a CarriedItem, Option<&'a CarriedBag>)> {
+    /// Takes out a pinned piece's own copy, or any of an unpinned piece's name
+    /// that isn't a copy `chosen` for another piece.
+    fn take(
+        &mut self,
+        piece: &GearPiece,
+        chosen: &BTreeSet<&str>,
+    ) -> Option<(&'a CarriedItem, Option<&'a CarriedBag>)> {
         let key = plain_name(&piece.item);
         let matches = |item: &CarriedItem| match &piece.copy_id {
             Some(copy) => item.id == *copy && is_id(copy),
-            None => plain_name(&item.name) == key,
+            None => plain_name(&item.name) == key && !chosen.contains(item.id.as_str()),
         };
         if let Some(at) = self.loose.iter().position(|item| matches(item)) {
             return Some((self.loose.remove(at), None));
@@ -317,6 +322,8 @@ impl<'a> AtHand<'a> {
 
 /// A piece on its way on.
 struct Going<'a> {
+    /// Where it is in the set: commands follow that.
+    order: usize,
     item: &'a CarriedItem,
     bag: Option<&'a CarriedBag>,
     slot: Option<String>,
@@ -374,7 +381,9 @@ pub fn plan(set: &GearSet, now: GearNow<'_>, book: &GearBook, rules: &GearRules)
 /// Sorts a set's pieces into what stays on and what goes on, and says which
 /// worn items a chosen copy replaces. A worn copy stays when it's the chosen
 /// one, or may be; another of the name stays too unless the chosen copy is at
-/// hand to change into.
+/// hand to change into. Pieces already on claim their copies first, wherever
+/// they are in the set, then unpinned pieces, which can stay on as any copy
+/// and leave the rest for the pieces pinned to them.
 fn sort_out<'a>(
     set: &GearSet,
     now: GearNow<'a>,
@@ -391,20 +400,34 @@ fn sort_out<'a>(
     };
     let (mut staying, mut replaced) = (BTreeSet::new(), BTreeSet::new());
     let mut going = Vec::new();
-    for piece in fitting(&set.pieces, book, rules) {
+    let pieces = fitting(&set.pieces, book, rules);
+    let copies = pieces.iter().filter_map(|piece| piece.copy_id.as_deref());
+    let chosen_copies: BTreeSet<&str> = copies.collect();
+    let mut waiting = Vec::new();
+    for (order, piece) in pieces.into_iter().enumerate() {
+        let key = plain_name(&piece.item);
+        let own = (0..worn.len()).find(|at| {
+            piece.copy_id.is_some()
+                && worn[*at].copy == piece.copy_id
+                && plain_name(&worn[*at].item) == key
+                && !staying.contains(at)
+        });
+        match own {
+            Some(own) => {
+                staying.insert(own);
+                plan.left_alone += 1;
+            }
+            None => waiting.push((order, piece)),
+        }
+    }
+    waiting.sort_by_key(|(_, piece)| piece.copy_id.is_some());
+    for (order, piece) in waiting {
         let key = plain_name(&piece.item);
         let same_name = (0..worn.len()).filter(|at| {
             !staying.contains(at) && !replaced.contains(at) && plain_name(&worn[*at].item) == key
         });
         let same_name: Vec<usize> = same_name.collect();
         let chosen = piece.copy_id.as_deref();
-        let exact =
-            (same_name.iter()).find(|at| chosen.is_some() && worn[**at].copy.as_deref() == chosen);
-        if let Some(&exact) = exact {
-            staying.insert(exact);
-            plan.left_alone += 1;
-            continue;
-        }
         if let Some(&other) = same_name.first() {
             if !chosen.is_some_and(|copy| at_hand.has(copy)) {
                 staying.insert(other);
@@ -416,8 +439,9 @@ fn sort_out<'a>(
             }
             replaced.insert(other);
         }
-        match at_hand.take(piece) {
+        match at_hand.take(piece, &chosen_copies) {
             Some((item, bag)) => going.push(Going {
+                order,
                 item,
                 bag,
                 slot: slot_of(piece, book),
@@ -425,6 +449,7 @@ fn sort_out<'a>(
             None => plan.missing.push(piece.item.clone()),
         }
     }
+    going.sort_by_key(|piece| piece.order);
     (going, staying, replaced)
 }
 

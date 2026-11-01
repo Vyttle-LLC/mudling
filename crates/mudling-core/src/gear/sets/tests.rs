@@ -523,6 +523,79 @@ fn another_of_the_name_already_on_stays_on_and_says_so() {
     assert_eq!(plan.left_alone, 1);
 }
 
+const RING: &str = "a pink ring";
+
+fn pinned_ring(id: &str) -> GearPiece {
+    pinned(RING, "finger", id)
+}
+
+fn any_ring() -> GearPiece {
+    in_slot(RING, "finger")
+}
+
+fn plan_rings(worn_ids: &[&str], carried: &[&str], pieces: Vec<GearPiece>) -> WearPlan {
+    let gear = Gear {
+        worn: (worn_ids.iter())
+            .map(|id| worn_copy("finger", RING, id))
+            .collect(),
+        carried: carried.iter().map(|id| copy(RING, id)).collect(),
+        ..Gear::default()
+    };
+    gear.plan_with(&set("Rings", pieces, None), &GearBook::default())
+}
+
+/// The order a set lists its pieces in decides nothing.
+#[test]
+fn a_piece_already_on_stays_on_wherever_the_set_lists_it() {
+    for pieces in [
+        vec![pinned_ring("1"), pinned_ring("2")],
+        vec![pinned_ring("2"), pinned_ring("1")],
+    ] {
+        let plan = plan_rings(&["2"], &["1"], pieces);
+        assert_eq!(plan.commands, ["wear 1"]);
+        assert_eq!(plan.left_alone, 1);
+        assert!(plan.missing.is_empty() && plan.stand_ins.is_empty());
+    }
+}
+
+#[test]
+fn a_chosen_copy_stays_on_and_the_unchosen_one_comes_off() {
+    let plan = plan_rings(
+        &["2", "3"],
+        &["1"],
+        vec![pinned_ring("1"), pinned_ring("2")],
+    );
+    assert_eq!(plan.commands, ["remove 3", "wear 1"]);
+    assert!(plan.stand_ins.is_empty());
+}
+
+/// One ring can't be two pieces, but the chosen one is the one that's on.
+#[test]
+fn a_chosen_copy_on_is_never_claimed_by_a_piece_of_any_copy() {
+    let plan = plan_rings(&["2"], &[], vec![any_ring(), pinned_ring("2")]);
+    assert_eq!(plan.left_alone, 1);
+    assert_eq!(plan.missing, [RING], "the piece of any copy");
+    assert!(plan.commands.is_empty());
+}
+
+#[test]
+fn a_piece_of_any_copy_stays_on_while_the_chosen_copy_joins_it() {
+    let plan = plan_rings(&["2"], &["1"], vec![any_ring(), pinned_ring("1")]);
+    assert_eq!(plan.commands, ["wear 1"]);
+    assert_eq!(plan.left_alone, 1);
+    assert!(plan.missing.is_empty());
+}
+
+#[test]
+fn a_piece_of_any_copy_leaves_the_chosen_copy_for_its_own_piece() {
+    let plan = plan_rings(&[], &["1", "3"], vec![any_ring(), pinned_ring("3")]);
+    assert_eq!(plan.commands, ["wear 1", "wear 3"]);
+
+    let plan = plan_rings(&[], &["3"], vec![any_ring(), pinned_ring("3")]);
+    assert_eq!(plan.commands, ["wear 3"]);
+    assert_eq!(plan.missing, [RING], "the piece of any copy");
+}
+
 /// A worn copy whose id isn't known may well be the chosen one.
 #[test]
 fn a_worn_copy_of_unknown_id_may_be_the_chosen_one() {

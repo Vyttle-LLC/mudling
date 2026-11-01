@@ -74,7 +74,8 @@ fn set_row(items: &ItemsState, set: &GearSet) -> SetRow {
         Some(container) => format!("what comes off goes in {}", shown_name(container)),
         None => "what comes off stays carried".to_owned(),
     });
-    let unseen = items.plan(set).missing.len();
+    let plan = items.plan(set);
+    let unseen = plan.missing.len() + plan.stand_ins.len();
     if unseen > 0 {
         parts.push(format!("{unseen} {NOT_SEEN}"));
     }
@@ -1090,6 +1091,20 @@ mod tests {
             rows[1].summary,
             "3 pieces · what comes off stays carried · 1 not seen right now"
         );
+    }
+
+    #[test]
+    fn a_chosen_copy_not_seen_counts_while_another_of_its_name_is_on() {
+        let mut items = sample_items_with_sets();
+        let mut sets = items.sets.to_vec();
+        sets[0].pieces = vec![GearPiece {
+            item: "a linen robe".to_owned(),
+            slot: Some("body".to_owned()),
+            copy_id: Some("777".to_owned()),
+        }];
+        items.sets = sets.into();
+        let summary = &set_rows(&items)[0].summary;
+        assert!(summary.ends_with("1 not seen right now"), "{summary}");
     }
 
     #[test]
