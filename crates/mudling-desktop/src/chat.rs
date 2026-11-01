@@ -21,7 +21,7 @@ mod lines;
 
 use crate::assets::Icon;
 use crate::gear_panel::{item_tip, tip};
-use crate::theme::Theme;
+use crate::theme::{Appearance, Theme};
 pub use find::CloseFind;
 use find::{Find, Results};
 use gpui::{
@@ -47,6 +47,8 @@ pub const COLUMN_PADDING: Pixels = px(32.);
 const MIN_COLUMNS: f32 = 80.;
 /// The live pane's share of the chat's height, until its divider is dragged.
 const LIVE_SHARE: f32 = 1. / 3.;
+/// Far more than two panes show, so lines that scrolled away don't pile up.
+const MOST_KNOWN_HEIGHTS: usize = 4_096;
 /// How far the divider drags: neither pane closes.
 const LIVE_SHARES: std::ops::RangeInclusive<f32> = 0.15..=0.85;
 const DIVIDER_GRIP_HEIGHT: Pixels = px(9.);
@@ -138,6 +140,18 @@ pub struct Chat {
     announcement: Option<(u64, SharedString)>,
     find: Option<Find>,
     items: ItemsState,
+    /// Where something opaque lies over the chat, as of this frame. Lines
+    /// wholly under it aren't drawn.
+    covered: Option<Bounds<Pixels>>,
+    /// Heights by line number while the chat is covered, so a frame measures
+    /// only new lines and those it draws. They hold for the width, appearance
+    /// and showing of prompts in `heights_for`.
+    known_heights: HashMap<u64, Pixels>,
+    heights_for: Option<(Pixels, Appearance, bool)>,
+    #[cfg(test)]
+    lines_drawn: usize,
+    #[cfg(test)]
+    lines_measured: std::cell::Cell<usize>,
 }
 
 /// What of `line` the chat draws, if anything.
@@ -161,7 +175,29 @@ impl Chat {
             announcement: None,
             find: None,
             items: ItemsState::default(),
+            covered: None,
+            known_heights: HashMap::new(),
+            heights_for: None,
+            #[cfg(test)]
+            lines_drawn: 0,
+            #[cfg(test)]
+            lines_measured: std::cell::Cell::new(0),
         }
+    }
+
+    /// Says what's over the chat. The window draws it this frame either way.
+    pub fn set_covered(&mut self, covered: Option<Bounds<Pixels>>) {
+        self.covered = covered;
+    }
+
+    #[cfg(test)]
+    pub fn lines_drawn(&self) -> usize {
+        self.lines_drawn
+    }
+
+    #[cfg(test)]
+    pub fn lines_measured(&self) -> usize {
+        self.lines_measured.get()
     }
 
     /// Takes what's known about gear, for the lines' tooltips.
@@ -368,6 +404,29 @@ impl Chat {
             AvailableSpace::Definite(bounds.size.width),
             AvailableSpace::MinContent,
         );
+        let heights_for = self
+            .covered
+            .map(|_| (bounds.size.width, theme.choice, prompts_shown));
+        if self.heights_for != heights_for || self.known_heights.len() > MOST_KNOWN_HEIGHTS {
+            self.known_heights.clear();
+            self.heights_for = heights_for;
+        }
+        let known_heights = &mut self.known_heights;
+        #[cfg(test)]
+        let lines_measured = &self.lines_measured;
+        let measure = |index: usize, window: &mut Window, cx: &mut Context<Chat>| {
+            #[cfg(test)]
+            lines_measured.set(lines_measured.get() + 1);
+            let line = lines
+                .get(index)
+                .expect("placed lines are in the scrollback");
+            let line = shown(line, prompts_shown).expect("it isn't only a prompt");
+            let number = evicted + index as u64;
+            let mut element =
+                render_line(&line, number, found, items, reader_listens, &theme).into_any_element();
+            let line_size = element.layout_as_root(space, window, cx);
+            (element, line_size)
+        };
         // Placing a line can ask for its height more than once.
         let mut measured = HashMap::new();
         let placement = position.place(evicted, lines.len(), bounds.size, |index| {
@@ -377,30 +436,53 @@ impl Chat {
             if !prompts_shown && line.is_only_prompt() {
                 return px(0.);
             }
-            let (_, line_size) = measured.entry(index).or_insert_with(|| {
-                let line = shown(line, prompts_shown).expect("it isn't only a prompt");
-                let number = evicted + index as u64;
-                let mut element = render_line(&line, number, found, items, reader_listens, &theme)
-                    .into_any_element();
-                let line_size = element.layout_as_root(space, window, cx);
-                (element, line_size)
-            });
+            let number = evicted + index as u64;
+            if let Some(height) = known_heights.get(&number) {
+                return *height;
+            }
+            let (_, line_size) = measured
+                .entry(index)
+                .or_insert_with(|| measure(index, window, cx));
+            if heights_for.is_some() {
+                known_heights.insert(number, line_size.height);
+            }
             line_size.height
         });
         if pane == Pane::History && position.is_following() {
             // This frame is already laid out, and a notify would be lost in it.
             cx.defer_in(window, |chat, _, cx| chat.back_to_live(cx));
         }
+        let covered = self.covered;
+        let is_covered = |line: Bounds<Pixels>| {
+            covered.is_some_and(|over| {
+                over.contains(&line.origin) && over.contains(&line.bottom_right())
+            })
+        };
         let mut y = bounds.top() + placement.top;
-        placement
+        let drawn: Vec<AnyElement> = placement
             .lines
             .filter_map(|index| {
-                let (mut element, line_size) = measured.remove(&index)?;
-                element.prepaint_at(point(bounds.left(), y), window, cx);
-                y += line_size.height;
+                let height = match measured.get(&index) {
+                    Some((_, line_size)) => line_size.height,
+                    None => *known_heights.get(&(evicted + index as u64))?,
+                };
+                let origin = point(bounds.left(), y);
+                y += height;
+                if is_covered(Bounds::new(origin, size(bounds.size.width, height))) {
+                    return None;
+                }
+                let (mut element, _) = measured
+                    .remove(&index)
+                    .unwrap_or_else(|| measure(index, window, cx));
+                element.prepaint_at(origin, window, cx);
                 Some(element)
             })
-            .collect()
+            .collect();
+        #[cfg(test)]
+        {
+            self.lines_drawn = drawn.len();
+        }
+        drawn
     }
 
     /// One pane of the capped, centered column.

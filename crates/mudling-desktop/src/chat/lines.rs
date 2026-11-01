@@ -1,11 +1,12 @@
 //! The chat's virtualized lines, which wrap and so differ in height.
 //!
-//! No height is kept for the scrollback. A view is the line at its top, by
-//! absolute number, and how far past that line's top it sits; each frame walks
-//! outward from there, measuring only the lines it passes. So a new column
-//! width costs what any frame costs, and trimming the oldest lines moves
-//! nothing. The price is that nothing here knows the scrollback's total
-//! height, which a scrollbar would have to estimate from line numbers.
+//! No height is kept for the scrollback, only for lines in view while the chat
+//! is covered. A view is the line at its top, by absolute number, and how far
+//! past that line's top it sits; each frame walks outward from there, measuring
+//! only the lines it passes. So a new column width costs what any frame costs,
+//! and trimming the oldest lines moves nothing. The price is that nothing here
+//! knows the scrollback's total height, which a scrollbar would have to
+//! estimate from line numbers.
 
 use super::Chat;
 use gpui::{
