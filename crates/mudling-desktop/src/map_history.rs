@@ -18,6 +18,7 @@ use gpui::{
 use mudling_core::persist::{MapVersion, Timestamp};
 use mudling_core::session::MapHistory;
 use mudling_core::store::SettingsState;
+use std::collections::HashMap;
 
 /// The key context while focus is in the section.
 const CONTEXT: &str = "MapHistory";
@@ -42,12 +43,18 @@ struct Row {
 }
 
 impl Row {
-    fn new(version: &MapVersion, now: DateTime<Local>, cx: &mut Context<MapHistoryView>) -> Row {
+    /// A row for `version`, on `restore` if the list had one for it already.
+    fn new(
+        version: &MapVersion,
+        now: DateTime<Local>,
+        restore: Option<FocusHandle>,
+        cx: &mut Context<MapHistoryView>,
+    ) -> Row {
         Row {
             id: version.id,
             when: when(version.created, now).into(),
             rooms: rooms(version.room_count).into(),
-            restore: cx.focus_handle().tab_stop(true),
+            restore: restore.unwrap_or_else(|| cx.focus_handle().tab_stop(true)),
         }
     }
 
@@ -145,8 +152,12 @@ impl MapHistoryView {
     ) {
         self.unread = versions.is_none();
         let now = Local::now();
+        // A list again must not take the keyboard from a Restore it's on.
+        let mut handles: HashMap<i64, FocusHandle> = (self.rows.drain(..))
+            .map(|row| (row.id, row.restore))
+            .collect();
         self.rows = (versions.iter().flatten())
-            .map(|version| Row::new(version, now, cx))
+            .map(|version| Row::new(version, now, handles.remove(&version.id), cx))
             .collect();
         self.in_view = None;
         if self.asking.is_some_and(|id| self.row(id).is_none()) {
@@ -520,6 +531,40 @@ mod tests {
             .read(|map: &Versioned<MapState>| map.value().rooms().len());
         assert_eq!(rooms, 1);
         session.quit().wait().unwrap();
+    }
+
+    #[gpui::test]
+    fn a_new_list_leaves_the_keyboard_on_the_restore_it_was_on(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
+        let (view, cx) =
+            cx.add_window_view(|_, cx| MapHistoryView::new(None, &SettingsState::default(), cx));
+        let version = |id| MapVersion {
+            id,
+            created: Timestamp(id),
+            kind: "autosave".into(),
+            label: String::new(),
+            room_count: id,
+            areas: Default::default(),
+            updated: Timestamp(id),
+        };
+        view.update(cx, |view, cx| {
+            view.take_versions(Some(vec![version(2), version(1)]), cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.rows[1].restore, cx)
+        });
+        cx.run_until_parked();
+
+        // An autosave lists a newer version in front of both.
+        view.update(cx, |view, cx| {
+            view.take_versions(Some(vec![version(3), version(2), version(1)]), cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, _| {
+            assert_eq!(view.rows[2].id, 1);
+            assert!(view.rows[2].restore.is_focused(window));
+        });
     }
 
     /// Enter activates a focused control when it's let go.
