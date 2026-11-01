@@ -461,7 +461,7 @@ fn small_button(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {
         .text_color(theme.text)
 }
 
-/// One copy, as the mockup's card lists it.
+/// One copy of a room, as a card in Review lists it.
 fn copy_card(copy: &RoomCopy, side: &'static str, theme: &Theme) -> impl IntoElement + use<> {
     let line = |text: String| div().child(text);
     let name = format!("{side}: {}", copy.name);

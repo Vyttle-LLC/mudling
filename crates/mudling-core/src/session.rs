@@ -201,7 +201,8 @@ pub enum MapEdit {
     Join { first: RoomId, second: RoomId },
     /// Two rooms that look alike aren't one: stop suggesting them.
     NotSame { first: RoomId, second: RoomId },
-    /// Puts back the join saved at `created`, on the device that made it.
+    /// Undoes the join whose version was saved at `created`, on the device
+    /// that made it.
     /// `MapState::last_join` says how it went.
     UndoJoin { created: Timestamp },
 }

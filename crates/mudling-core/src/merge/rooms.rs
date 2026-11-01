@@ -32,8 +32,9 @@
 //! such a duplicate stays until the player joins the two rooms by hand.
 //!
 //! A join by hand takes the same path, with the player's word in place of the
-//! rules: `map/join.rs` says what its record is. The record stands for good,
-//! so anything that turns up for the retired room moves whenever it arrives.
+//! rules: `map/join.rs` says what its record is. The record stands until the
+//! join is undone, so anything that turns up for the retired room moves
+//! whenever it arrives.
 
 use super::records::outranks;
 use crate::map::{CURRENT_ROOM, RoomId, UNNUMBERED_IDS, follow_joins, join_record, joins_in};

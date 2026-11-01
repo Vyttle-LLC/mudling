@@ -302,7 +302,7 @@ fn paint_you(frame: &Frame, square: (i32, i32), guess: bool, window: &mut Window
     window.paint_quad(framed(you, inside, colors.you, 1.5, radius / 2.));
 }
 
-/// A room picked to join: the mockup's moss ring.
+/// A room picked to join: a moss ring around it.
 fn paint_pick(frame: &Frame, square: (i32, i32), window: &mut Window) {
     let ring = frame.around(frame.at(square), frame.room + 4.);
     let radius = corner(frame.room) + 1.;
