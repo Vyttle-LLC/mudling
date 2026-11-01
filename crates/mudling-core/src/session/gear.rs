@@ -1095,6 +1095,14 @@ mod tests {
     }
 
     #[test]
+    fn a_stat_with_no_value_before_is_not_guessed() {
+        let mut unknown = change(1, 0, 15, 16);
+        unknown.before.clear();
+        let (_, effects) = unknown.measured().unwrap();
+        assert!(effects.is_empty(), "{effects:?}");
+    }
+
+    #[test]
     fn a_reading_keeps_a_spell_with_a_dot_in_its_name_and_details_in_order() {
         let draft = BTreeMap::from([
             ("keywords".to_owned(), value("black bear bracelet")),

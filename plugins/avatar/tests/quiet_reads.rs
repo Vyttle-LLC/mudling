@@ -194,6 +194,32 @@ fn entering_the_game_reads_the_tables_in_order_and_hides_their_answers() {
 }
 
 #[test]
+fn a_level_up_reads_the_score_and_both_skill_tables_again() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut game = Game::enter_as(folder.path(), "Tamsin");
+    game.expect_read("score");
+    game.say(include_str!("fixtures/score.txt"));
+    game.expect_read("practice");
+    game.say(PRACTICE);
+    game.expect_read("slist");
+    game.say(
+        "Spells and skills learnable by your class at the lower levels.\n  3:       fast healing",
+    );
+    game.expect_read("aff");
+    game.say("You are not under the affects of any spells.");
+    game.expect_read("equipment");
+    game.say("You are using:\nNothing.");
+    assert_eq!(game.tick(LATER), "", "nothing's left");
+
+    game.say("You raise a level!! Your gain is: 13/86 hp, 2/122 m, 10/150 mv 5/16 prac.");
+    game.expect_read("score");
+    game.say(include_str!("fixtures/score.txt"));
+    game.expect_read("practice");
+    game.say(PRACTICE);
+    game.expect_read("slist");
+}
+
+#[test]
 fn a_table_the_player_asks_for_shows_and_counts_as_read() {
     let folder = tempfile::tempdir().unwrap();
     let mut game = Game::enter_as(folder.path(), "Tamsin");
