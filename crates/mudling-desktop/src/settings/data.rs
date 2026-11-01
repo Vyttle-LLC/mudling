@@ -121,6 +121,9 @@ impl SettingsSheet {
     ) {
         let data = &mut self.data;
         let moved = data.repo.as_deref() != repo;
+        // A sync that landed may have brought passwords, or ones that no key
+        // here opens.
+        let landed = sync.last_sync.is_some() && sync.last_sync != data.sync.last_sync;
         data.running = true;
         data.repo = repo.map(Path::to_owned);
         data.sync = sync.clone();
@@ -132,6 +135,9 @@ impl SettingsSheet {
             self.read_sign_in(cx);
         }
         self.look_for_vault_file(cx);
+        if landed {
+            self.list_vault(cx);
+        }
         cx.notify();
     }
 

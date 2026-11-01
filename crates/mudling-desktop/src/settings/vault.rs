@@ -1415,6 +1415,7 @@ mod tests {
     use crate::shell::Shell;
     use crate::shell::tests::window_with_keys;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use mudling_core::persist::Timestamp;
     use mudling_core::store::SyncState;
     use mudling_core::vault::{FILE_NAME, MemoryKeyStore};
     use std::sync::Arc;
@@ -1821,6 +1822,30 @@ mod tests {
         assert!(open.pane(comparing));
         open.cx.executor().advance_clock(REVEAL_FOR);
         open.until("them hiding", |pane| !comparing(pane));
+    }
+
+    #[gpui::test]
+    fn a_sync_landing_refreshes_the_list_of_passwords(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        open.unlock();
+        let before = open.pane(|pane| pane.entries.len());
+        // What a merge does to the file: another device's password arrives.
+        let arrived = EntryKey::new("mud.example.org", "Nilo");
+        futures::executor::block_on(open.vault.set_password(arrived.clone(), "other".into()))
+            .unwrap();
+        open.cx.run_until_parked();
+        assert_eq!(open.pane(|pane| pane.entries.len()), before, "not told yet");
+
+        let landed = SyncState {
+            last_sync: Some(Timestamp::now()),
+            ..SyncState::default()
+        };
+        open.sheet().update(open.cx, |sheet, cx| {
+            sheet.show_sync(&landed, None, cx);
+        });
+        open.until("the new password listed", |pane| {
+            pane.entries.contains(&arrived)
+        });
     }
 
     #[gpui::test]
