@@ -270,6 +270,9 @@ struct Outcome {
     unsaved: Option<Target>,
     /// A server that can't log in until the player unlocks the vault.
     locked_out: Option<WaitingForVault>,
+    /// Only the saved servers were read again: no game opened or ended, so
+    /// nothing else on show changes.
+    only_listing: bool,
 }
 
 pub struct Shell {
@@ -942,6 +945,11 @@ impl Shell {
 
     fn job_done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Shell>) {
         self.job = None;
+        if outcome.only_listing {
+            self.show_listing(&outcome.saved, cx);
+            self.start_waiting(window, cx);
+            return;
+        }
         self.switching = false;
         // A game opened as the window left goes unused: dropping it ends it.
         if self.left {
@@ -980,6 +988,28 @@ impl Shell {
             self.empty_state
                 .update(cx, |empty_state, cx| empty_state.focus(window, cx));
         }
+        self.start_waiting(window, cx);
+    }
+
+    /// Shows what the saved servers are now and nothing else: a problem on
+    /// show stays, and so does the keyboard, which a sync running behind the
+    /// player's back must not move.
+    fn show_listing(&mut self, saved: &SavedServers, cx: &mut Context<Shell>) {
+        let trouble = self.trouble.clone();
+        self.empty_state.update(cx, |empty_state, cx| {
+            empty_state.show(saved, cx);
+            if let Some(problem) = trouble.clone() {
+                empty_state.show_problem(problem, cx);
+            }
+        });
+        self.settings.update(cx, |sheet, cx| {
+            let servers = saved.servers.iter().map(SavedServer::from);
+            sheet.show_servers(servers.collect(), trouble, cx);
+        });
+        self.show_where_things_stand(cx);
+    }
+
+    fn start_waiting(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         while self.job.is_none()
             && let Some(request) = self.waiting.pop_front()
         {
@@ -1021,6 +1051,7 @@ impl Shell {
             Request::ListServers => self.off_the_ui_thread(
                 |launcher| Outcome {
                     saved: launcher.saved(),
+                    only_listing: true,
                     ..Outcome::default()
                 },
                 window,
@@ -4306,6 +4337,43 @@ pub mod tests {
         });
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.status.read(cx).lines(), [STUCK_SESSION]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_sync_relisting_the_servers_keeps_the_trouble_and_where_the_keyboard_goes_back_to(
+        cx: &mut TestAppContext,
+    ) {
+        let played = play(cx);
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            let problem = Some(STUCK_SESSION.to_owned());
+            shell.job_done(
+                Outcome {
+                    problem,
+                    ..Outcome::default()
+                },
+                window,
+                cx,
+            );
+            shell.open_settings(window, cx);
+        });
+        let kept = played
+            .shell
+            .read_with(played.cx, |shell, _| shell.focus_before_settings.is_some());
+        assert!(kept, "the sheet has somewhere to give the keyboard back");
+
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            let listing = Outcome {
+                only_listing: true,
+                ..Outcome::default()
+            };
+            shell.job_done(listing, window, cx);
+        });
+
+        played.shell.read_with(played.cx, |shell, cx| {
+            assert_eq!(shell.status.read(cx).lines(), [STUCK_SESSION]);
+            assert_eq!(shell.trouble.as_deref(), Some(STUCK_SESSION));
+            assert!(shell.focus_before_settings.is_some(), "still remembered");
         });
     }
 
