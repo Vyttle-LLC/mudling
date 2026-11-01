@@ -1834,21 +1834,24 @@ impl Engine {
             name: self.playing.clone(),
             updated: now,
         });
-        self.load_character();
+        self.load_character(true);
     }
 
     /// After a merge: whoever plays has what the merge brought, and nobody
-    /// has anything another's rows could have left.
+    /// has anything another's rows could have left. They are still playing,
+    /// so what the game last said of their level and affects stays.
     fn reload_character(&mut self) {
         if !self.playing.is_empty() {
-            self.load_character();
+            self.load_character(false);
         }
     }
 
     /// Takes what the database holds of whoever plays: their sheet, worn gear
     /// and sets, and the values hooks read back. Another character's rows,
-    /// which the database holds too, don't come into it.
-    fn load_character(&mut self) {
+    /// which the database holds too, don't come into it. `replacing` is whether
+    /// this is a new character or game, whose level and affects aren't known
+    /// yet, and not the same one reloaded, whose live ones stay.
+    fn load_character(&mut self, replacing: bool) {
         let saved = (self.database.reader())
             .and_then(|reader| reader.characters())
             .unwrap_or_else(|error| {
@@ -1862,8 +1865,10 @@ impl Engine {
         self.gear.sets_of(&self.playing, &saved.gear_sets);
         // What hooks read back, and the HUD's level: whoever played before
         // has theirs replaced, or blanked.
-        let mut values: BTreeMap<String, HookValue> =
-            BTreeMap::from([(CHARACTER_LEVEL.to_owned(), HookValue::Text(String::new()))]);
+        let mut values: BTreeMap<String, HookValue> = BTreeMap::new();
+        if replacing {
+            values.insert(CHARACTER_LEVEL.to_owned(), HookValue::Text(String::new()));
+        }
         let mine = saved
             .stats
             .iter()
@@ -1872,8 +1877,10 @@ impl Engine {
             mine.filter_map(|stat| Some((stat.key.clone(), values::from_row(&stat.value)?))),
         );
         self.hub.write::<CharactersState>(CharactersState(values));
-        self.hub
-            .write::<CharactersState>(CharactersState::no_affects());
+        if replacing {
+            self.hub
+                .write::<CharactersState>(CharactersState::no_affects());
+        }
         self.publish_sheet();
     }
 

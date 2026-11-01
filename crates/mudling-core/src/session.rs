@@ -732,7 +732,10 @@ mod tests {
         Batch, Character, CharacterStat, Database, GearSet, Key, Meta, NOTEPAD, Room,
     };
     use crate::plugin::luau::{HookOutput, StoreWrite, Value};
-    use crate::store::{ItemsState, MapState, RulesState, SheetState, Versioned};
+    use crate::store::{
+        Affect, CHARACTER_LEVEL, CharactersState, ItemsState, MapState, RulesState, SheetState,
+        Versioned,
+    };
     use std::sync::mpsc::sync_channel;
     use std::time::Instant;
 
@@ -941,6 +944,44 @@ mod tests {
                 .map(|set| set.id.as_str())
                 .collect();
             assert_eq!(sets, ["alda-set"]);
+        });
+        engine.finish().unwrap();
+    }
+
+    #[test]
+    fn a_merge_landing_leaves_the_affects_and_level_of_whoever_still_plays() {
+        let folder = tempfile::tempdir().unwrap();
+        let hub = Arc::new(StoreHub::new(|| {}));
+        let mut engine = engine(folder.path(), &hub);
+        let named = StoreWrite {
+            plugin: PluginId::try_from("sample-game".to_owned()).unwrap(),
+            store: "character".to_owned(),
+            key: "name".to_owned(),
+            value: Value::Text("Alda".to_owned()),
+        };
+        engine.hook_output(HookOutput::StoreWrite(named), Timestamp::now());
+        engine.settle(Timestamp::now());
+        let affect = Affect {
+            name: "bless".to_owned(),
+            detail: "12 hours".to_owned(),
+        };
+        hub.write::<CharactersState>(CharactersState::listing(std::slice::from_ref(&affect)));
+        hub.write::<CharactersState>(CharactersState(
+            [(CHARACTER_LEVEL.to_owned(), Value::Number(12.))].into(),
+        ));
+        let (drained, queue_empty) = sync_channel(1);
+        engine.hold_writes(drained);
+        queue_empty.recv().unwrap();
+
+        merge_brings_two_characters(folder.path());
+        engine.release_writes(&RoomMoves::new());
+
+        hub.read(|characters: &Versioned<CharactersState>| {
+            assert_eq!(characters.value().affects(), [affect]);
+            assert_eq!(
+                characters.value().0.get(CHARACTER_LEVEL),
+                Some(&Value::Number(12.))
+            );
         });
         engine.finish().unwrap();
     }
