@@ -3,7 +3,7 @@
 
 use mudling_core::ansi::{Color, Span, Style};
 use mudling_core::line::{Encoding, Line, LinePipeline};
-use mudling_core::plugin::inspect::Clocked;
+use mudling_core::plugin::inspect::Claiming;
 use mudling_core::plugin::points::{Keywords, LoginReply, RoomIdentity};
 use mudling_core::plugin::{
     Layer, MapSignal, PendingKind, Plugin, PluginError, PluginEvent, PluginHost, PluginId, Point,
@@ -650,7 +650,7 @@ fn the_whole_read_of_a_sampled_line_is_timed_with_every_plugin_at_once() {
 }
 
 #[test]
-fn the_inspector_s_clock_names_who_claimed_a_line_and_how() {
+fn claiming_names_who_claimed_a_line_and_how() {
     let text = "[[pattern]]\nname = \"said\"\npattern = '''says'''\n\n\
         [[color]]\npattern = '''glows'''\nfg = 1\n";
     let tiny = plugin(&[
@@ -661,9 +661,9 @@ fn the_inspector_s_clock_names_who_claimed_a_line_and_how() {
     let mut host = PluginHost::new([tiny]).unwrap();
     let mut read = |text: &str| {
         let mut sent = Vec::new();
-        let mut clocked = Clocked::new(&mut sent);
-        host.read_line(&line(text), &mut clocked);
-        (clocked.into_claims(), sent.len())
+        let mut claiming = Claiming::new(&mut sent);
+        host.read_line(&line(text), &mut claiming);
+        (claiming.into_claims(), sent.len())
     };
 
     let (claims, sent) = read("Ana says hello");

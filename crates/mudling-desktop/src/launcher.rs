@@ -3,13 +3,14 @@
 //! the disk, so the shell calls it off the UI thread.
 
 use crate::room_panel::Verbs;
-use crate::settings::PluginRow;
+use crate::settings::{PluginRow, ServerPlugins, SuggestedPlugin};
 use crate::shell::Game;
 use futures::executor::block_on;
 use futures::future::{Either, select};
+use mudling_core::defaults::detect::{ServerSignals, Suggestion, suggest};
 use mudling_core::logs::Logs;
 use mudling_core::persist;
-use mudling_core::plugin::{Plugin, PluginId};
+use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
 use mudling_core::session::{Credentials, Session, SessionConfig};
 use mudling_core::sync::Syncer;
 use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
@@ -148,9 +149,13 @@ impl Launcher {
             })
             .cloned()
             .collect();
+        let overrides_off = self
+            .overrides_off(&target.host)
+            .map_err(|error| format!("couldn't open {target}: {error}"))?;
         let config = SessionConfig {
             plugins: self.plugins.clone(),
             enabled: enabled.clone(),
+            overrides_off: overrides_off.clone(),
             approved: self.command_line.clone(),
             credentials,
             sync: self.sync.clone(),
@@ -163,10 +168,95 @@ impl Launcher {
             session,
             replay_folder: None,
             verbs: Verbs::of(&self.plugins, &enabled),
-            plugins: PluginRow::for_session(&self.plugins, &enabled, &target.host),
+            plugins: PluginRow::for_session(&self.plugins, &enabled, &overrides_off, &target.host),
             enabled,
             target: target.clone(),
         })
+    }
+
+    fn overrides_off(&self, host: &str) -> Result<Vec<PluginId>, persist::Error> {
+        let off = persist::overrides_off(&self.data_folder, host)?;
+        let turned_off = |plugin: &&PluginId| off.iter().any(|id| id == plugin.as_str());
+        let ids = self.plugins.iter().map(Plugin::id).filter(turned_off);
+        Ok(ids.cloned().collect())
+    }
+
+    /// What Settings shows of `host`'s plugins. `suggested` is what a session
+    /// there learned; without one, its host is all there is to go on.
+    pub fn server_plugins(
+        &self,
+        host: &str,
+        suggested: Option<Suggestion>,
+    ) -> Result<ServerPlugins, String> {
+        let could_not = |error: persist::Error| format!("couldn't read {host}: {error}");
+        let saved = persist::enabled_plugins(&self.data_folder, host).map_err(could_not)?;
+        let enabled: Vec<PluginId> = (self.plugins.iter().map(Plugin::id))
+            .filter(|plugin| saved.iter().any(|id| id == plugin.as_str()))
+            .cloned()
+            .collect();
+        let overrides_off = self.overrides_off(host).map_err(could_not)?;
+        let (triggers, aliases) =
+            persist::rule_counts(&self.data_folder, host).map_err(could_not)?;
+        let server = ServerInfo {
+            host,
+            mssp_name: None,
+        };
+        let not_for_here = |row: &PluginRow| {
+            let plugin = self.plugins.iter().find(|plugin| *plugin.id() == row.id);
+            row.layer == Layer::Override
+                && !plugin.is_some_and(|plugin| plugin.manifest.matches_server(server))
+        };
+        let mut plugins = PluginRow::for_session(&self.plugins, &enabled, &overrides_off, host);
+        plugins.retain(|row| !not_for_here(row));
+        let signals = ServerSignals {
+            host,
+            ..ServerSignals::default()
+        };
+        let suggested = suggested.or_else(|| suggest(&self.plugins, signals));
+        Ok(ServerPlugins {
+            host: host.to_owned().into(),
+            plugins,
+            suggested: suggested.map(|suggestion| SuggestedPlugin {
+                name: self
+                    .plugin_name(&suggestion.plugin)
+                    .unwrap_or(suggestion.plugin.as_str())
+                    .to_owned()
+                    .into(),
+                plugin: suggestion.plugin,
+                source: suggestion.source,
+            }),
+            triggers,
+            aliases,
+        })
+    }
+
+    /// Saves the player's switch for `plugin` on `host`, for the next session
+    /// there: game plugins are off until turned on, overrides on until off.
+    pub fn set_plugin(&self, host: &str, plugin: &PluginId, on: bool) -> Result<(), String> {
+        let could_not = |error: persist::Error| format!("couldn't save {host}: {error}");
+        let folder = &self.data_folder;
+        let is_override = (self.plugins.iter())
+            .any(|other| other.id() == plugin && other.layer() == Layer::Override);
+        let listed = |mut list: Vec<String>, wanted: bool| {
+            list.retain(|id| id != plugin.as_str());
+            if wanted {
+                list.push(plugin.as_str().to_owned());
+            }
+            list
+        };
+        if is_override {
+            let off = listed(
+                persist::overrides_off(folder, host).map_err(could_not)?,
+                !on,
+            );
+            persist::save_overrides_off(folder, host, &off).map_err(could_not)
+        } else {
+            let enabled = listed(
+                persist::enabled_plugins(folder, host).map_err(could_not)?,
+                on,
+            );
+            persist::save_enabled_plugins(folder, host, &enabled).map_err(could_not)
+        }
     }
 
     /// The name the plugin gives itself.
@@ -280,6 +370,61 @@ mod tests {
         let game = launcher.open(&target, None, None).unwrap();
         assert_eq!(game.enabled, [id]);
         game.session.quit().wait().unwrap();
+    }
+
+    #[test]
+    fn switches_are_kept_for_one_server_and_the_next_session_follows() {
+        let folder = TempDir::new().unwrap();
+        let plugins = bundled_plugins();
+        let game = plugins[0].id().clone();
+        let launcher = Launcher::new(folder.path().to_owned(), plugins, Vec::new(), || {});
+        let target = Target {
+            host: "mud.example".to_owned(),
+            port: 4000,
+        };
+
+        launcher.set_plugin("mud.example", &game, true).unwrap();
+        let on = |launcher: &Launcher, host| {
+            let page = launcher.server_plugins(host, None).unwrap();
+            page.plugins.iter().find(|row| row.id == game).unwrap().on
+        };
+        assert!(on(&launcher, "mud.example"));
+        assert!(!on(&launcher, "other.example"), "this server only");
+        let opened = launcher.open(&target, None, None).unwrap();
+        assert_eq!(opened.enabled, std::slice::from_ref(&game));
+        opened.session.quit().wait().unwrap();
+
+        launcher.set_plugin("mud.example", &game, false).unwrap();
+        assert!(!on(&launcher, "mud.example"));
+        let opened = launcher.open(&target, None, None).unwrap();
+        assert!(opened.enabled.is_empty());
+        opened.session.quit().wait().unwrap();
+    }
+
+    #[test]
+    fn an_override_stays_off_for_the_server_it_was_turned_off_on() {
+        let folder = TempDir::new().unwrap();
+        let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                        license = \"MIT\"\nlayer = \"override\"\n[servers]\n\
+                        hosts = [\"mud.example\"]\n";
+        let mine = Plugin::from_files(|file| match file {
+            "plugin.toml" => Ok(manifest.to_owned()),
+            _ => Err(std::io::Error::other(file.to_owned())),
+        })
+        .unwrap();
+        let id = mine.id().clone();
+        let launcher = Launcher::new(folder.path().to_owned(), vec![mine], Vec::new(), || {});
+        let row = |host| {
+            let page = launcher.server_plugins(host, None).unwrap();
+            page.plugins.into_iter().find(|row| row.id == id)
+        };
+        assert!(row("mud.example").unwrap().on);
+        assert!(row("other.example").is_none(), "it's not for that server");
+
+        launcher.set_plugin("mud.example", &id, false).unwrap();
+        assert!(!row("mud.example").unwrap().on);
+        launcher.set_plugin("mud.example", &id, true).unwrap();
+        assert!(row("mud.example").unwrap().on);
     }
 
     const HOST: &str = "mud.example.org";

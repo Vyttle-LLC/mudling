@@ -9,9 +9,11 @@
 
 mod appearance;
 mod data;
+mod inspector;
 mod logs;
 mod plugins;
 mod saved;
+mod server_plugins;
 mod servers;
 mod shortcuts;
 mod triggers;
@@ -19,6 +21,7 @@ mod vault;
 
 pub use plugins::PluginRow;
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
+pub use server_plugins::{ServerPlugins, SuggestedPlugin};
 pub use servers::SavedServer;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
@@ -35,8 +38,7 @@ use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
 use mudling_core::session::RuleEdit;
 use mudling_core::stats::Summary;
-use mudling_core::store::RulesState;
-use mudling_core::store::SettingsState;
+use mudling_core::store::{InspectorState, RulesState, SettingsState};
 use std::path::PathBuf;
 
 const WIDTH: Pixels = px(1000.);
@@ -123,6 +125,18 @@ pub enum SheetEvent {
     /// The player confirmed taking this host off their list.
     RemoveServer(String),
     TurnOn(PluginId),
+    /// The Inspector page opened or closed: the session records only between.
+    Inspect(bool),
+    /// Forget what the inspector recorded, and carry on recording.
+    ClearInspector,
+    /// The player asked to see this server's plugins.
+    ServerPlugins(String),
+    /// The player's switch for `plugin` on `host`, to save.
+    SetPlugin {
+        host: SharedString,
+        plugin: PluginId,
+        on: bool,
+    },
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -136,6 +150,14 @@ pub enum SheetEvent {
     SyncNow,
     LockAfter(LockAfter),
     VaultUnlocked,
+}
+
+/// What the pane shows: its section, or a page opened from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Page {
+    Section,
+    Inspector,
+    Server(ServerPlugins),
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -167,6 +189,9 @@ impl Stops {
 pub(crate) struct Pane {
     rows: Vec<AnyElement>,
     stops: Stops,
+    /// What a page puts beside its title: Back, then any action.
+    leading: Option<AnyElement>,
+    trailing: Option<AnyElement>,
 }
 
 impl Pane {
@@ -300,6 +325,7 @@ fn count_badge(count: usize, theme: &Theme) -> Div {
 
 pub struct SettingsSheet {
     section: Section,
+    page: Page,
     server: Option<SharedString>,
     servers: Vec<SavedServer>,
     /// What the last thing done to the saved servers ran into.
@@ -317,6 +343,10 @@ pub struct SettingsSheet {
     costs: Vec<PluginCost>,
     /// What all the plugins cost a line together.
     line_cost: Option<Summary>,
+    /// The inspector's lines, while its page is open.
+    inspector: InspectorState,
+    /// A switch changed for the session running, which won't follow it.
+    reconnect_to_apply: bool,
     /// The notice whose details are showing.
     details: Option<String>,
     /// The chat faces this machine has.
@@ -349,6 +379,7 @@ impl SettingsSheet {
         .detach();
         SettingsSheet {
             section: Section::Appearance,
+            page: Page::Section,
             server: None,
             servers: Vec::new(),
             servers_problem: None,
@@ -362,6 +393,8 @@ impl SettingsSheet {
             turned_off: Vec::new(),
             costs: Vec::new(),
             line_cost: None,
+            inspector: InspectorState::default(),
+            reconnect_to_apply: false,
             details: None,
             fonts: vec![CHAT_FONTS[0]],
             data: data::DataPane::default(),
@@ -407,6 +440,7 @@ impl SettingsSheet {
     }
 
     pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
+        self.leave_page(cx);
         if self.section == Section::Vault && section != Section::Vault {
             self.forget_typed(cx);
         }
@@ -422,6 +456,51 @@ impl SettingsSheet {
             self.refresh_logs(cx);
         }
         cx.notify();
+    }
+
+    /// Back to the section. Leaving the inspector ends its recording, and
+    /// forgets what it held.
+    pub fn leave_page(&mut self, cx: &mut Context<SettingsSheet>) {
+        if self.page == Page::Inspector {
+            self.inspector = InspectorState::default();
+            cx.emit(SheetEvent::Inspect(false));
+        }
+        self.page = Page::Section;
+        cx.notify();
+    }
+
+    fn go_to_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        self.page = page;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        // The first stop of any page is its Back.
+        if let Some(back) = self.stops.handles.first() {
+            window.focus(back, cx);
+        }
+        cx.notify();
+    }
+
+    /// The button that leaves a page for `section`.
+    fn back_button(
+        &self,
+        section: Section,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> Stateful<Div> {
+        text_button("page-back", "Back", &pane.stop(cx), theme).on_click(cx.listener(
+            move |sheet, _, window, cx| {
+                sheet.leave_page(cx);
+                window.focus(&sheet.tabs[section as usize], cx);
+            },
+        ))
+    }
+
+    fn page_title(&self) -> SharedString {
+        match &self.page {
+            Page::Section => self.section.title().into(),
+            Page::Inspector => "Inspector".into(),
+            Page::Server(page) => format!("Plugins for {}", page.host).into(),
+        }
     }
 
     /// What Data & sync adds to the sprocket's count.
@@ -440,6 +519,21 @@ impl SettingsSheet {
         cx.notify();
     }
 
+    pub fn show_servers_problem(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
+        self.servers_problem = Some(problem.into());
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn on_a_page(&self) -> bool {
+        self.page != Page::Section
+    }
+
+    #[cfg(test)]
+    pub fn inspected_lines(&self) -> usize {
+        self.inspector.lines.len()
+    }
+
     #[cfg(test)]
     pub fn server_hosts(&self) -> Vec<String> {
         (self.servers.iter())
@@ -456,6 +550,7 @@ impl SettingsSheet {
 
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
         self.plugins = plugins;
+        self.reconnect_to_apply = false;
         cx.notify();
     }
 
@@ -643,24 +738,23 @@ impl SettingsSheet {
         let mut pane = Pane {
             rows: Vec::new(),
             stops,
+            leading: None,
+            trailing: None,
         };
-        match self.section {
-            Section::Servers => self.fill_servers(&mut pane, theme, cx),
-            Section::Plugins => self.fill_plugins(&mut pane, theme, cx),
-            Section::Triggers => self.fill_triggers_section(&mut pane, theme, cx),
-            Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
-            Section::Shortcuts => shortcuts::fill(&mut pane, theme),
-            Section::Logs => self.fill_logs(&mut pane, theme, cx),
-            Section::Data => self.fill_data(&mut pane, theme, cx),
-            Section::Vault => self.fill_vault(&mut pane, theme, cx),
+        let page = self.page.clone();
+        match (&page, self.section) {
+            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
+            (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
+            (Page::Section, section) => self.fill_section(section, &mut pane, theme, cx),
         }
+
         if let Some(wanted) = self.reveal.take()
             && let Some(at) = pane.stops.in_use().iter().position(|stop| *stop == wanted)
         {
             self.scroll.scroll_to_item(pane.stops.rows[at]);
         }
         self.stops = pane.stops;
-        let title = self.section.title();
+        let title = self.page_title();
         let header = div()
             .flex_none()
             .h(px(84.))
@@ -672,21 +766,40 @@ impl SettingsSheet {
             .border_color(theme.divider)
             .child(
                 div()
-                    .id("settings-title")
-                    .role(Role::Heading)
-                    .aria_label(title)
-                    .aria_level(2)
-                    .font_family(HEADING_FONT)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(19.))
-                    .text_color(theme.text)
-                    .child(title),
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(pane.leading)
+                    .child(
+                        div()
+                            .id("settings-title")
+                            .role(Role::Heading)
+                            .aria_label(title.clone())
+                            .aria_level(2)
+                            .min_w_0()
+                            .truncate()
+                            .font_family(HEADING_FONT)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(19.))
+                            .text_color(theme.text)
+                            .child(title.clone()),
+                    ),
             )
             .child(
-                control("settings-close", "Close settings", &self.close, theme)
-                    .size(px(32.))
-                    .on_click(cx.listener(|sheet, _, _, cx| sheet.close(cx)))
-                    .child(Icon::WindowClose.svg().size(px(16.)).text_color(theme.text)),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(pane.trailing)
+                    .child(
+                        control("settings-close", "Close settings", &self.close, theme)
+                            .size(px(32.))
+                            .on_click(cx.listener(|sheet, _, _, cx| sheet.close(cx)))
+                            .child(Icon::WindowClose.svg().size(px(16.)).text_color(theme.text)),
+                    ),
             );
         div()
             .id("settings-pane")
@@ -709,6 +822,27 @@ impl SettingsSheet {
                     .track_scroll(&self.scroll)
                     .children(pane.rows),
             )
+    }
+}
+
+impl SettingsSheet {
+    fn fill_section(
+        &mut self,
+        section: Section,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        match section {
+            Section::Servers => self.fill_servers(pane, theme, cx),
+            Section::Plugins => self.fill_plugins(pane, theme, cx),
+            Section::Triggers => self.fill_triggers_section(pane, theme, cx),
+            Section::Appearance => self.fill_appearance(pane, theme, cx),
+            Section::Shortcuts => shortcuts::fill(pane, theme),
+            Section::Logs => self.fill_logs(pane, theme, cx),
+            Section::Data => self.fill_data(pane, theme, cx),
+            Section::Vault => self.fill_vault(pane, theme, cx),
+        }
     }
 }
 

@@ -1043,6 +1043,32 @@ fn a_plugin_turned_off_says_why_and_can_come_back() {
     });
 }
 
+#[test]
+fn an_override_the_player_turned_off_stays_out_of_the_session() {
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+        license = \"MIT\"\nlayer = \"override\"\n[servers]\nhosts = [\"mud.example\"]\n\
+        [points]\ntext = \"text.toml\"\n";
+    let mine = Plugin::from_files(|file| match file {
+        "plugin.toml" => Ok(manifest.to_owned()),
+        "text.toml" => Ok("[[pattern]]\nname = \"go\"\npattern = '''^go$'''\n".to_owned()),
+        _ => Err(std::io::Error::other(file.to_owned())),
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    let claimed = |off: Vec<PluginId>| {
+        let mine = mine.clone();
+        let mut driven = Driven::configured("mud.example", move |config| {
+            config.plugins = vec![mine];
+            config.overrides_off = off;
+        });
+        driven.engine.start_connection().unwrap();
+        driven.engine.inspect(true);
+        driven.say(b"go\r\n");
+        inspected(&driven)[0].1.clone()
+    };
+    assert_eq!(claimed(Vec::new()), ["mine"]);
+    assert!(claimed(vec![mine.id().clone()]).is_empty());
+}
+
 fn inspected(driven: &Driven) -> Vec<(String, Vec<String>)> {
     driven.hub.read(|state: &Versioned<InspectorState>| {
         let lines = state.value().lines.iter();

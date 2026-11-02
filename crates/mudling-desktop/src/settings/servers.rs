@@ -126,6 +126,15 @@ impl SettingsSheet {
                     cx.notify();
                 }))
         });
+        let plugins = {
+            let id = SharedString::from(format!("server-plugins-{number}"));
+            let host = server.host.to_string();
+            text_button(id, "Plugins", &pane.stop(cx), theme)
+                .aria_label(format!("Plugins for {}", server.name))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(SheetEvent::ServerPlugins(host.clone()));
+                }))
+        };
         let in_play = playing.then(|| {
             div()
                 .flex_none()
@@ -179,6 +188,7 @@ impl SettingsSheet {
                     .items_center()
                     .gap_4()
                     .child(about)
+                    .child(plugins)
                     .children(remove)
                     .children(in_play),
             )

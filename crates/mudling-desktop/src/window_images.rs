@@ -85,7 +85,9 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         id: PluginId::try_from(id.to_owned()).expect("the id is valid"),
         name: name.to_owned().into(),
         layer,
-        detail: "Version 1.0.0 · MIT".into(),
+        version: "1.0.0 · MIT".into(),
+        holds: "".into(),
+        always_on: false,
         on,
     }
 }
@@ -742,6 +744,24 @@ fn window_images() {
         };
         shell.show_sample_offers(&settings, cx);
     });
+    for (name, appearance) in [
+        ("settings-inspector-dark", Dark),
+        ("settings-inspector-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            open_sheet(shell, Section::Plugins, window, cx);
+            measure::open_sample_inspector(shell, &measure::sample_inspected(), window, cx);
+        });
+    }
+    for (name, appearance) in [
+        ("settings-server-plugins-dark", Dark),
+        ("settings-server-plugins-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            open_sheet(shell, Section::Servers, window, cx);
+            measure::open_sample_server_plugins(shell, window, cx);
+        });
+    }
     for (name, appearance, section) in [
         ("settings-plugins-dark", Dark, Section::Plugins),
         ("settings-plugins-light", Light, Section::Plugins),

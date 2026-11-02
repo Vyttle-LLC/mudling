@@ -84,6 +84,8 @@ pub struct SessionConfig {
     pub plugins: Vec<Plugin>,
     /// The game plugins the player turned on for this server.
     pub enabled: Vec<PluginId>,
+    /// The overrides the player turned off for this server.
+    pub overrides_off: Vec<PluginId>,
     /// Plugins the player allowed to send commands.
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
@@ -105,6 +107,7 @@ impl SessionConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             plugins: Vec::new(),
             enabled: Vec::new(),
+            overrides_off: Vec::new(),
             approved: Vec::new(),
             credentials: None,
             sync: None,

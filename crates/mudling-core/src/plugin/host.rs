@@ -84,9 +84,6 @@ impl PluginEvent {
 pub trait PluginSink {
     fn event(&mut self, event: PluginEvent);
 
-    /// The one pass over the line is done: what follows is each plugin's own.
-    fn passed(&mut self) {}
-
     /// One of `plugin`'s rules colored the line, which sends no event.
     fn colored(&mut self, _plugin: &PluginId) {}
 }
@@ -364,7 +361,6 @@ impl PluginHost {
             .lines
             .matcher
             .matching(text, &mut self.matched);
-        sink.passed();
         let lines = &self.compiled.lines;
         let at_prompt = !self.open.is_empty()
             && self

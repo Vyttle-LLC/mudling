@@ -33,7 +33,7 @@ use crate::persist::{
     self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
     Timestamp, UNNAMED_CHARACTER, Writer,
 };
-use crate::plugin::inspect::{Clocked, InspectedLine};
+use crate::plugin::inspect::{Claiming, InspectedLine};
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
 };
@@ -318,9 +318,14 @@ impl Engine {
         let state = Arc::new(HubView(Arc::clone(&self.hub)));
         // A hook file's top level runs when it loads, so a game plugin that's
         // off gets no VM. An override can still come on with the server's name.
-        let may_run = self.config.plugins.iter().filter(|plugin| {
-            plugin.layer() == Layer::Override || self.config.enabled.contains(plugin.id())
-        });
+        let may_run = self
+            .config
+            .plugins
+            .iter()
+            .filter(|plugin| match plugin.layer() {
+                Layer::Override => !self.config.overrides_off.contains(plugin.id()),
+                _ => self.config.enabled.contains(plugin.id()),
+            });
         let mut hooks = LuauHooks::start(
             may_run,
             self.config.hook_limits,
@@ -1178,9 +1183,9 @@ impl Engine {
             let output_at = prompt.filter(|&at| at < text.len()).unwrap_or(0);
             let started = self.inspecting.then(Instant::now);
             let (coloring, claims) = if self.inspecting {
-                let mut clocked = Clocked::new(&mut self.events);
-                let coloring = self.plugins.read_line_from(&line, output_at, &mut clocked);
-                (coloring, clocked.into_claims())
+                let mut claiming = Claiming::new(&mut self.events);
+                let coloring = self.plugins.read_line_from(&line, output_at, &mut claiming);
+                (coloring, claiming.into_claims())
             } else {
                 let coloring = self
                     .plugins
@@ -1483,7 +1488,10 @@ impl Engine {
             .plugins
             .iter()
             .filter(|plugin| match plugin.layer() {
-                Layer::Override => plugin.manifest.matches_server(server),
+                Layer::Override => {
+                    plugin.manifest.matches_server(server)
+                        && !self.config.overrides_off.contains(plugin.id())
+                }
                 _ => self.config.enabled.contains(plugin.id()),
             })
             .filter(|plugin| self.plugins.is_enabled(plugin.id()).is_none())

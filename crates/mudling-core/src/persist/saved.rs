@@ -18,6 +18,8 @@ const EXTENSION: &str = "sqlite";
 /// The `meta` key the game plugins the player turned on are kept under, as a
 /// JSON list of plugin ids.
 const ENABLED_PLUGINS: &str = "session.enabled-plugins";
+/// The same for the overrides the player turned off.
+const OVERRIDES_OFF: &str = "session.overrides-off";
 /// The `meta` key that hides a server the player removed from their list.
 pub(crate) const REMOVED: &str = "server.removed";
 /// Who a session plays when no credentials name a character.
@@ -214,10 +216,26 @@ pub fn remove_server(data_folder: &Path, host: &str) -> Result<(), Error> {
 
 /// The game plugins the player turned on for `host`.
 pub fn enabled_plugins(data_folder: &Path, host: &str) -> Result<Vec<String>, Error> {
+    plugin_list(data_folder, host, ENABLED_PLUGINS)
+}
+
+/// The overrides the player turned off for `host`.
+pub fn overrides_off(data_folder: &Path, host: &str) -> Result<Vec<String>, Error> {
+    plugin_list(data_folder, host, OVERRIDES_OFF)
+}
+
+/// How many triggers and aliases `host` keeps, whoever they're for.
+pub fn rule_counts(data_folder: &Path, host: &str) -> Result<(usize, usize), Error> {
+    let folder = data_folder.join(SERVERS_FOLDER);
+    let reader = Database::open(&folder, host)?.reader()?;
+    Ok((reader.triggers()?.len(), reader.aliases()?.len()))
+}
+
+fn plugin_list(data_folder: &Path, host: &str, key: &str) -> Result<Vec<String>, Error> {
     let folder = data_folder.join(SERVERS_FOLDER);
     let meta = Database::open(&folder, host)?.reader()?.meta()?;
-    let enabled = meta.iter().find(|meta| meta.key == ENABLED_PLUGINS);
-    Ok(enabled
+    let list = meta.iter().find(|meta| meta.key == key);
+    Ok(list
         .and_then(|meta| serde_json::from_str(&meta.value).ok())
         .unwrap_or_default())
 }
@@ -229,10 +247,25 @@ pub fn save_enabled_plugins(
     host: &str,
     plugins: &[String],
 ) -> Result<(), Error> {
+    save_plugin_list(data_folder, host, ENABLED_PLUGINS, plugins)
+}
+
+/// Saves which overrides the player turned off for `host`. It blocks until
+/// they're on the disk.
+pub fn save_overrides_off(data_folder: &Path, host: &str, plugins: &[String]) -> Result<(), Error> {
+    save_plugin_list(data_folder, host, OVERRIDES_OFF, plugins)
+}
+
+fn save_plugin_list(
+    data_folder: &Path,
+    host: &str,
+    key: &str,
+    plugins: &[String],
+) -> Result<(), Error> {
     let folder = data_folder.join(SERVERS_FOLDER);
     let mut batch = Batch::new();
     batch.upsert(Meta {
-        key: ENABLED_PLUGINS.to_owned(),
+        key: key.to_owned(),
         value: serde_json::Value::from(plugins).to_string(),
         updated: Timestamp::now(),
     });
