@@ -7,6 +7,7 @@
 //! off has a banner that can turn it on again. The Inspector opens from here.
 
 use super::appearance::toggled;
+use super::directory::{Approval, InCard, Purpose, card_row};
 use super::{
     Page, Pane, SettingsSheet, SheetEvent, control, muted_line, section_heading, text_button,
 };
@@ -14,11 +15,13 @@ use crate::assets::{Icon, UI_FONT};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Context, Div, FontWeight, HighlightStyle, Pixels, Role, SharedString, Stateful,
-    StyledText, div, prelude::*, px,
+    StyledText, Window, div, prelude::*, px,
 };
 use mudling_core::defaults;
 use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDisabled};
+use mudling_core::plugin::manifest::Permission;
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
+use mudling_core::registry::{self, Refused};
 use mudling_core::stats::Summary;
 
 const SWITCH_WIDTH: Pixels = px(40.);
@@ -34,6 +37,12 @@ const PLUGIN_BUDGET_US: f64 = 5.;
 const COST_WIDTH: Pixels = px(64.);
 const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins over the defaults.";
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
+const SENDS_COMMANDS: &str = "Sends commands";
+const NEEDS_APPROVAL: &str = "Needs your approval to send commands";
+const ARRIVED: &str = "Arrived from another device";
+const SENDS_ASK: &str =
+    "send commands to the game, which show in the chat like yours and are rate-limited";
+const READS_ASK: &str = "read your character's state";
 /// Under this, a banner's buttons wrap below its text.
 const BANNER_TEXT_WIDTH: Pixels = px(220.);
 
@@ -60,10 +69,53 @@ pub struct PluginRow {
     pub flips: u32,
     /// Where an override meant for another server is meant to run.
     pub elsewhere: Option<SharedString>,
+    pub sending: Sending,
+    /// What its hooks ask to do, as the approval says it.
+    pub asks: Vec<SharedString>,
+    /// Its folder in the data folder, for one the player can take out. A
+    /// folder needn't be named for the plugin it holds.
+    pub folder: Option<SharedString>,
+    /// The content hash of a copy this device doesn't trust, as shown: it
+    /// isn't loaded until the player trusts exactly that copy.
+    pub held_back: Option<SharedString>,
+}
+
+/// Whether a plugin's hooks send commands, and whether the player let them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sending {
+    No,
+    Approved,
+    /// Its hooks stay off until the player approves.
+    Waiting,
+}
+
+/// What `plugin`'s permissions let its hooks do, in the approval's words.
+pub fn asks_of(plugin: &Plugin) -> Vec<SharedString> {
+    let mut asks: Vec<SharedString> = Vec::new();
+    for permission in &plugin.manifest.permissions {
+        let said = match permission {
+            Permission::SendCommands => SENDS_ASK.into(),
+            Permission::ReadState => READS_ASK.into(),
+            Permission::WriteStore(store) => format!("keep its own notes in the store \"{store}\""),
+        };
+        asks.push(said.into());
+    }
+    // Sending first, as it's what the player is asked about.
+    asks.sort_by_key(|ask| ask != SENDS_ASK);
+    asks
 }
 
 impl PluginRow {
-    fn of(plugin: &Plugin, on: bool) -> PluginRow {
+    /// Marks those of `rows` in `approved` as let to send.
+    pub fn approve(rows: &mut [PluginRow], approved: &[PluginId]) {
+        for row in rows.iter_mut().filter(|row| approved.contains(&row.id)) {
+            if row.sending == Sending::Waiting {
+                row.sending = Sending::Approved;
+            }
+        }
+    }
+
+    pub fn of(plugin: &Plugin, on: bool) -> PluginRow {
         let manifest = &plugin.manifest;
         let triggers = plugin.points.text.as_ref().map_or(0, |t| t.patterns.len());
         let aliases = plugin
@@ -81,6 +133,13 @@ impl PluginRow {
             on,
             flips: 0,
             elsewhere: None,
+            sending: match registry::sends_commands(plugin) {
+                true => Sending::Waiting,
+                false => Sending::No,
+            },
+            asks: asks_of(plugin),
+            folder: None,
+            held_back: None,
         }
     }
 
@@ -254,6 +313,39 @@ fn switch(on: bool, theme: &Theme) -> Div {
         .child(knob)
 }
 
+/// A row of the Plugins card.
+enum CardItem<'a> {
+    /// A layer, and whether it's the first.
+    Heading(Layer, bool),
+    Plugin(&'a PluginRow),
+    Footer,
+}
+
+/// What a row's status button does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// Its copy arrived and waits to be trusted.
+    Arrived,
+    Approved,
+    Waiting,
+}
+
+/// A plugin's status, as words and the button that changes it. A copy that
+/// arrived says so first: until it's trusted, nothing else about it counts.
+fn status_words(row: &PluginRow) -> Option<(Status, &'static str, &'static str)> {
+    if row.held_back.is_some() {
+        return Some((Status::Arrived, ARRIVED, "Review"));
+    }
+    match row.sending {
+        Sending::No => None,
+        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, "Take back")),
+        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, "Review")),
+    }
+}
+
+/// A plugin's row. `approval` is the line saying whether it may send
+/// commands, with its button.
+#[allow(clippy::too_many_arguments)]
 fn plugin_row(
     row: &PluginRow,
     switched_on: bool,
@@ -261,13 +353,18 @@ fn plugin_row(
     cost: Option<f64>,
     elsewhere: Option<&SharedString>,
     control: AnyElement,
+    approval: Option<AnyElement>,
     theme: &Theme,
-) -> impl IntoElement + use<> {
+) -> Div {
     let about = match elsewhere {
         Some(servers) => format!("For {servers} · Version {}", row.version),
         None => format!("Version {}", row.version),
     };
+    let sending_said = status_words(row)
+        .map(|(_, words, _)| format!(" {words}."))
+        .unwrap_or_default();
     let state = match (switched_on, overran) {
+        _ if row.held_back.is_some() => "Not loaded",
         (true, _) => "On",
         (false, true) => "Turned off · over budget",
         (false, false) => "Off",
@@ -288,45 +385,47 @@ fn plugin_row(
         .gap_3()
         .px_5()
         .py_3()
-        .border_t_1()
-        .border_color(theme.divider)
         .font_family(UI_FONT)
         .child(
             div()
-                .id(SharedString::from(format!("plugin-{}", row.id)))
-                .role(Role::Label)
-                .aria_value(format!(
-                    "{}, {}: {state}. {about}.{cost_said}",
-                    row.name,
-                    layer_badge(row.layer),
-                ))
                 .flex_1()
                 .min_w_0()
                 .child(
                     div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_x_2()
-                        .text_size(px(15.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(row.name.clone())
-                        .when(overran, |name| {
-                            name.child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.warning)
-                                    .child("Turned off · over budget"),
-                            )
-                        }),
+                        .id(SharedString::from(format!("plugin-{}", row.id)))
+                        .role(Role::Label)
+                        .aria_value(format!(
+                            "{}, {}: {state}. {about}.{cost_said}{sending_said}",
+                            row.name,
+                            layer_badge(row.layer),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_x_2()
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(row.name.clone())
+                                .when(overran, |name| {
+                                    name.child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(theme.warning)
+                                            .child("Turned off · over budget"),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme.text_muted)
+                                .child(about),
+                        ),
                 )
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme.text_muted)
-                        .child(about),
-                ),
+                .children(approval),
         )
         .child(
             div()
@@ -375,7 +474,7 @@ impl SettingsSheet {
         theme: &Theme,
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
-        let plugin = row.id.clone();
+        let plugin = row.clone();
         // The core's list is of the session running, not of any other server.
         let overran = self.page_host() == self.server
             && self.turned_off.iter().any(|off| off.plugin == row.id);
@@ -386,13 +485,151 @@ impl SettingsSheet {
             .role(Role::Switch)
             .aria_toggled(toggled(on))
             .child(switch(on, theme))
-            .on_click(cx.listener(move |sheet, _, _, cx| {
+            .on_click(cx.listener(move |sheet, _, window, cx| {
                 if overran {
-                    cx.emit(SheetEvent::TurnOn(plugin.clone()));
+                    cx.emit(SheetEvent::TurnOn(plugin.id.clone()));
                 } else if let Some(host) = sheet.page_host() {
-                    sheet.set_plugin(host, plugin.clone(), !on, cx);
+                    sheet.flip(&plugin, host, !on, window, cx);
                 }
             }))
+    }
+
+    /// Turns a plugin on or off for `host`. Turning on one whose hooks wait
+    /// for approval asks first.
+    fn flip(
+        &mut self,
+        row: &PluginRow,
+        host: SharedString,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        let sending = self.sending_of(&row.id).unwrap_or(row.sending);
+        if on && sending == Sending::Waiting {
+            let approval = Approval::for_row(row, Purpose::TurnOn(host), window, cx);
+            self.ask(approval, window, cx);
+        } else {
+            self.set_plugin(host, row.id.clone(), on, cx);
+        }
+    }
+
+    /// Whether `plugin` may send, as the session's rows say now.
+    fn sending_of(&self, plugin: &PluginId) -> Option<Sending> {
+        let row = self.plugins.iter().find(|row| row.id == *plugin);
+        row.map(|row| row.sending)
+    }
+
+    /// The line saying whether a plugin's copy is trusted and whether it may
+    /// send commands, with their buttons, and Remove for one the player
+    /// installed.
+    fn actions_line(
+        &self,
+        row: &PluginRow,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> Option<AnyElement> {
+        let small = |button: Stateful<Div>| button.h(px(26.)).px_2().text_size(px(13.));
+        let status = status_words(row).map(|(status, words, action)| {
+            let plugin = row.clone();
+            let id = match status {
+                Status::Arrived => format!("arrival-{}", row.id),
+                _ => format!("approval-{}", row.id),
+            };
+            let button = small(text_button(
+                SharedString::from(id),
+                action,
+                &pane.stop(cx),
+                theme,
+            ))
+            .aria_label(format!("{action}: {words}, {}", row.name))
+            .on_click(cx.listener(move |sheet, _, window, cx| match status {
+                Status::Arrived => {
+                    let (Some(folder), Some(hash)) = (&plugin.folder, &plugin.held_back) else {
+                        return;
+                    };
+                    cx.emit(SheetEvent::ReviewArrival {
+                        folder: folder.clone(),
+                        hash: hash.clone(),
+                    });
+                }
+                Status::Approved => sheet.set_approved(plugin.id.clone(), false, cx),
+                Status::Waiting => {
+                    let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
+                    sheet.ask(approval, window, cx);
+                }
+            }));
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_color(match status {
+                    Status::Approved => theme.text_muted,
+                    _ => theme.warning,
+                })
+                .child(words)
+                .child(button)
+        });
+        let remove = row.folder.as_ref().map(|folder| {
+            let (plugin, folder) = (row.clone(), folder.clone());
+            small(text_button(
+                SharedString::from(format!("remove-{}", row.id)),
+                "Remove",
+                &pane.stop(cx),
+                theme,
+            ))
+            .aria_label(format!("Remove {}", row.name))
+            .on_click(cx.listener(move |sheet, _, window, cx| {
+                let purpose = Purpose::Remove(folder.clone());
+                let confirm = Approval::for_row(&plugin, purpose, window, cx);
+                sheet.ask(confirm, window, cx);
+            }))
+        });
+        let approval = status;
+        if approval.is_none() && remove.is_none() {
+            return None;
+        }
+        let line = div()
+            .pt_1()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_3()
+            .text_size(px(13.))
+            .children(approval)
+            .children(remove);
+        Some(line.into_any_element())
+    }
+
+    /// Rows read again, as an install, a removal or a sync changed what's
+    /// installed. The player's flips since the session opened still count,
+    /// and so does a change the player made, which `by_player` says this is.
+    pub fn refresh_plugins(
+        &mut self,
+        mut rows: Vec<PluginRow>,
+        by_player: bool,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        for row in &mut rows {
+            let shown = self.plugins.iter().find(|shown| shown.id == row.id);
+            row.flips = shown.map_or(0, |shown| shown.flips);
+        }
+        self.plugins = rows;
+        self.installs_changed |= by_player;
+        cx.notify();
+    }
+
+    /// Installed plugins that weren't loaded, and why.
+    pub fn show_refused(&mut self, refused: Vec<Refused>, cx: &mut Context<SettingsSheet>) {
+        if self.refused != refused {
+            self.refused = refused;
+            cx.notify();
+        }
+    }
+
+    pub fn show_switch_problem(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
+        self.switch_problem = Some(problem.into());
+        cx.notify();
     }
 
     /// The server a switch on this page is for.
@@ -595,8 +832,31 @@ impl SettingsSheet {
             let banner = self.notice_banner(first + number, notice, None, pane, theme, cx);
             pane.row(banner);
         }
+        for refused in &self.refused {
+            let said = format!("{} wasn't loaded: {}.", refused.id, refused.why);
+            pane.row(
+                muted_line(said, theme)
+                    .debug_selector(|| "plugin-refused".to_owned())
+                    .role(Role::Alert)
+                    .text_color(theme.warning),
+            );
+        }
+        let browse = text_button(
+            "browse-directory",
+            "Browse directory",
+            &pane.stop(cx),
+            theme,
+        )
+        .on_click(cx.listener(|sheet, _, window, cx| sheet.open_directory(window, cx)));
         if self.plugins.is_empty() {
-            pane.row(muted_line(NO_SESSION, theme));
+            pane.row(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(muted_line(NO_SESSION, theme).flex_1().min_w_0().pb_0())
+                    .child(browse),
+            );
             return;
         }
         let scope = match &self.server {
@@ -611,6 +871,7 @@ impl SettingsSheet {
                 .items_center()
                 .gap_3()
                 .child(muted_line(scope, theme).flex_1().min_w_0().pb_0())
+                .child(browse)
                 .child(inspector),
         );
         if let Some(problem) = self.switch_problem_line(theme) {
@@ -619,43 +880,61 @@ impl SettingsSheet {
         if self.reconnect_to_apply() {
             pane.row(self.reconnect_note(theme));
         }
-        let mut card = div()
-            .id("plugin-layers")
-            .mt_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border);
-        let mut first = true;
+        // Each heading and plugin is a row of its own, so Tab can bring any
+        // switch into view however many there are.
+        let mut card: Vec<CardItem<'_>> = Vec::new();
         for layer in [Layer::Override, Layer::Game, Layer::Default] {
-            let in_layer: Vec<&PluginRow> =
-                self.plugins.iter().filter(|p| p.layer == layer).collect();
-            if in_layer.is_empty() {
-                continue;
-            }
-            card = card.child(layer_heading_row(layer, first, theme));
-            first = false;
-            for row in in_layer {
-                let switched_on = row.switched_on(&self.costs, &self.turned_off);
-                let elsewhere = row.meant_elsewhere(&self.costs);
-                let control = match (row.always_on, elsewhere) {
-                    (true, _) => switch(true, theme).into_any_element(),
-                    (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
-                    (false, None) => self
-                        .plugin_switch(row, switched_on, pane, theme, cx)
-                        .into_any_element(),
-                };
-                card = card.child(plugin_row(
-                    row,
-                    switched_on,
-                    self.turned_off.iter().any(|off| off.plugin == row.id),
-                    row.cost(&self.costs),
-                    elsewhere,
-                    control,
-                    theme,
-                ));
+            let in_layer = self.plugins.iter().filter(|p| p.layer == layer);
+            let mut in_layer = in_layer.map(CardItem::Plugin).peekable();
+            if in_layer.peek().is_some() {
+                card.push(CardItem::Heading(layer, card.is_empty()));
+                card.extend(in_layer);
             }
         }
-        pane.row(card.child(self.cost_footer(theme)));
+        card.push(CardItem::Footer);
+        let count = card.len();
+        for (number, item) in card.into_iter().enumerate() {
+            let content = match item {
+                CardItem::Heading(layer, first) => {
+                    layer_heading_row(layer, first, theme).into_any_element()
+                }
+                CardItem::Plugin(row) => self.plugin_card_row(row, pane, theme, cx),
+                CardItem::Footer => self.cost_footer(theme).into_any_element(),
+            };
+            pane.row(card_row(InCard::of(number, count), theme).child(content));
+        }
+    }
+
+    fn plugin_card_row(
+        &self,
+        row: &PluginRow,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> AnyElement {
+        let switched_on = row.switched_on(&self.costs, &self.turned_off);
+        let elsewhere = row.meant_elsewhere(&self.costs);
+        let approval = self.actions_line(row, pane, theme, cx);
+        let control = match (row.always_on, elsewhere) {
+            (true, _) => switch(true, theme).into_any_element(),
+            // Not loaded, so there's nothing to switch until it's trusted.
+            _ if row.held_back.is_some() => div().w(SWITCH_WIDTH).into_any_element(),
+            (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
+            (false, None) => self
+                .plugin_switch(row, switched_on, pane, theme, cx)
+                .into_any_element(),
+        };
+        plugin_row(
+            row,
+            switched_on,
+            self.turned_off.iter().any(|off| off.plugin == row.id),
+            row.cost(&self.costs),
+            elsewhere,
+            control,
+            approval,
+            theme,
+        )
+        .into_any_element()
     }
 
     /// The layers' costs and the total against the budgets, closing the card.
@@ -672,8 +951,6 @@ impl SettingsSheet {
             .aria_value(format!("{layers}. {total}"))
             .px_5()
             .py_3()
-            .border_t_1()
-            .border_color(theme.divider)
             .font_family(UI_FONT)
             .text_size(px(13.))
             .text_color(theme.text_muted)

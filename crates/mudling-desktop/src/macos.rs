@@ -251,6 +251,40 @@ const SERVER_PLUGINS_TEXT: [&str; 2] = [
     "2 triggers, 1 alias. Edit them in Triggers and aliases.",
 ];
 
+/// What a screen reader must find on the Plugins page about approvals.
+const PLUGINS_APPROVAL_CONTROLS: [&str; 4] = [
+    "Browse directory",
+    "Review: Needs your approval to send commands, Sample chat",
+    "Review: Arrived from another device, Sample notes",
+    "Remove Sample helper",
+];
+const PLUGINS_APPROVAL_TEXT: [&str; 3] = [
+    "Sends commands.",
+    "Needs your approval to send commands.",
+    "Sample notes, Game plugin: Not loaded.",
+];
+/// What a screen reader must find in the directory, filled with a made-up
+/// index.
+const DIRECTORY_CONTROLS: [&str; 6] = [
+    "Back",
+    "Search plugins",
+    "All games",
+    "Updates (1)",
+    "Install Aardwolf",
+    "Update Avatar extras",
+];
+const DIRECTORY_TEXT: [&str; 3] = [
+    "Avatar extras, Avatar · 0.4.1 · Apache-2.0 · sends commands",
+    "Tell highlighter, Any game · 1.0.0 · MIT",
+    "Updated 4 minutes ago from the community registry.",
+];
+const APPROVAL_CONTROLS: [&str; 4] = [
+    "Cancel",
+    "Allow",
+    "send commands to the game, which show in the chat like yours and are rate-limited",
+    "Let Sample chat send commands?",
+];
+
 /// The server the Logs section's sample log is for.
 const LOG_SERVER: &str = "mud.example";
 /// What a screen reader must find in the Logs section with one chat log kept.
@@ -1372,6 +1406,54 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "a server's plugins name their switches and read their overrides",
             passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
             detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let reads_all = |tree: &Option<AxElement>, texts: &[&'static str]| -> Vec<&'static str> {
+            let unread = |text: &&'static str| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            };
+            texts.iter().copied().filter(unread).collect()
+        };
+        let opened = in_window(
+            &|shell, window, cx| measure::open_sample_section(shell, Section::Plugins, window, cx),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &PLUGINS_APPROVAL_CONTROLS);
+        let unread = reads_all(&tree, &PLUGINS_APPROVAL_TEXT);
+        checks.push(Check {
+            name: "Plugins says which plugins send commands and which wait, with their buttons",
+            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let opened = in_window(&measure::open_sample_directory, cx);
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &DIRECTORY_CONTROLS);
+        let unread = reads_all(&tree, &DIRECTORY_TEXT);
+        checks.push(Check {
+            name: "the directory names its search, filters and buttons and reads each plugin",
+            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let opened = in_window(&measure::open_sample_approval, cx);
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &APPROVAL_CONTROLS);
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the approval names what the plugin asks and its buttons",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        checks.push(Check {
+            name: "focus lands on Cancel when the approval opens",
+            passed: focused.as_ref().is_some_and(|(_, label)| label == "Cancel"),
+            detail: format!("{focused:?}"),
         });
 
         let opened = in_window(

@@ -66,6 +66,7 @@
 //! player waits for the next sync.
 
 mod pass;
+mod plugins;
 mod run;
 mod summary;
 mod vault;

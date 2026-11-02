@@ -942,6 +942,19 @@ impl Engine {
         self.publish_settings();
     }
 
+    /// Approves `plugin` to send commands, or takes that back, for this
+    /// connection and any after it in the session.
+    pub fn set_approved(&mut self, plugin: PluginId, approved: bool) {
+        if let Some(link) = &mut self.link {
+            link.hooks.set_approved(&plugin, approved);
+        }
+        let list = &mut self.config.approved;
+        list.retain(|other| *other != plugin);
+        if approved {
+            list.push(plugin);
+        }
+    }
+
     /// Opens or closes the inspector. Closing it forgets what it recorded.
     pub fn inspect(&mut self, open: bool) {
         self.inspecting = open;
