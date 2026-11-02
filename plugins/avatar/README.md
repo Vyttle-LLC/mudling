@@ -213,6 +213,10 @@ the plugin host and the Luau hooks. Fixtures are the game's own tables and
 messages with player-specific values changed; never add session logs, other
 players' names, or channel text.
 
+`mudling plugin test plugins/avatar` replays `tests/sample.txt`, made-up text,
+and compares what it produces with `tests/sample.expected`. See the
+[reference](../../docs/plugins/reference.md#commands).
+
 `cargo run --release -p mudling-plugin-avatar --bin avatar-replay -- <logs…>`
 replays local session logs and counts the reads each table completed, and
 the tables left at their pager. It reads logs at runtime only.

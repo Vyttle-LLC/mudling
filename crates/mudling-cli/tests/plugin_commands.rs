@@ -227,6 +227,14 @@ fn a_plugin_with_no_tests_fails() {
 }
 
 #[test]
+fn the_avatar_plugin_passes_the_command_registry_ci_runs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = test_plugin(&root.join("plugins/avatar"));
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.ends_with("passed\n"), "{}", run.stdout);
+}
+
+#[test]
 fn the_avatar_plugin_reads_its_own_fixture() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let avatar = root.join("plugins/avatar");

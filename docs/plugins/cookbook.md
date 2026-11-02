@@ -270,9 +270,9 @@ a line of the table that no row caught.
 Then turn a log into a test. Write a few lines of made-up text in
 `tests/mytable.txt`, run `mudling plugin test --update`, read the
 `tests/mytable.expected` it wrote, and commit both. `mudling plugin test` then
-checks them, which is what registry CI will run. Avatar goes further, with
-scrubbed fixtures and Rust tests in `plugins/avatar/tests`, but your plugin
-doesn't need Rust.
+checks them, which is what registry CI will run. Avatar's own is
+`plugins/avatar/tests/sample.txt`. Avatar goes further, with scrubbed fixtures
+and Rust tests in `plugins/avatar/tests`, but your plugin doesn't need Rust.
 
 Fixtures are made up, or the game's own tables with the player's details
 changed. Real session logs hold other players' chat, so they stay on your

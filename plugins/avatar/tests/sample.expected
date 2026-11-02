@@ -1,0 +1,11 @@
+event text character.welcome name="Wren"
+store character name "Wren"
+event character affects.start
+event character affects.row name="bless" detail="modifies hit roll by 3 for 6 hours"
+event character affects.end
+store affects 1.name "bless"
+store affects 1.detail "modifies hit roll by 3 for 6 hours"
+store affects count 1
+event mobs mobs.aggro name="The ugly bear" noun="bear"
+event map map.flee dir="north"
+event map map.exits
