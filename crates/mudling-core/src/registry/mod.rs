@@ -189,6 +189,17 @@ impl fmt::Display for InstallError {
     }
 }
 
+/// A folder too large to be a plugin isn't one; anything else kept it from
+/// being downloaded.
+impl From<GitError> for InstallError {
+    fn from(error: GitError) -> Self {
+        match error {
+            GitError::TooLarge(why) => Self::NotAPlugin(format!("it's too large: {why}")),
+            error => Self::Unreachable(error),
+        }
+    }
+}
+
 impl From<PluginError> for InstallError {
     fn from(error: PluginError) -> Self {
         Self::NotAPlugin(error.to_string())
@@ -280,13 +291,9 @@ impl Registry {
         entry: &Entry,
         limit: &Limit,
     ) -> Result<Fetched, InstallError> {
-        let mirror = self.mirror().map_err(InstallError::Unreachable)?;
-        mirror
-            .fetch_commit(index.commit, limit)
-            .map_err(InstallError::Unreachable)?;
-        let files = mirror
-            .folder_files(index.commit, &entry.source)
-            .map_err(InstallError::Unreachable)?;
+        let mirror = self.mirror()?;
+        mirror.fetch_commit(index.commit, limit)?;
+        let files = mirror.folder_files(index.commit, &entry.source)?;
         let found = content_hash(&files);
         if found != entry.hash {
             return Err(InstallError::HashMismatch {

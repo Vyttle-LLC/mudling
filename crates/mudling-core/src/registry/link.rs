@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 const LINKS_FOLDER: &str = "links";
 /// Enough of a link's hash to name its mirror.
 const NAME_LENGTH: usize = 16;
+/// The most a link's fetch may download. A plugin is a few small text
+/// files; its folder is held to [`crate::git::FOLDER_LIMITS`] too.
+const MOST_DOWNLOAD: u64 = 16 * 1024 * 1024;
 
 /// Fetches the plugin `url` points to and checks it: its manifest and
 /// patterns load, its own tests replay to what they expect, its hooks don't
@@ -27,10 +30,9 @@ pub fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetche
             "there's no link".to_owned(),
         )));
     }
-    let mirror =
-        Mirror::open(&mirror_folder(data_folder, url), url).map_err(InstallError::Unreachable)?;
-    let commit = (mirror.fetch_default_branch(limit)).map_err(InstallError::Unreachable)?;
-    let files = (mirror.folder_files(commit, "")).map_err(InstallError::Unreachable)?;
+    let mirror = Mirror::open(&mirror_folder(data_folder, url), url)?.capped(MOST_DOWNLOAD);
+    let commit = mirror.fetch_default_branch(limit)?;
+    let files = mirror.folder_files(commit, "")?;
     let plugin = load_files(&files)?;
     check::own_tests(&plugin, &files).map_err(InstallError::Failed)?;
     Ok(Fetched {

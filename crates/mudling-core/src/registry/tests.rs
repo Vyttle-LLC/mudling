@@ -712,6 +712,67 @@ fn a_plugin_from_a_link_that_fails_a_check_is_not_installed() {
     assert!(installed.plugin_folders().is_empty());
 }
 
+/// Bytes that don't compress, so a pack can't shrink them.
+fn noise(length: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+#[test]
+fn a_link_to_a_repo_too_large_for_a_plugin_is_refused_before_it_is_read() {
+    let mut files = new_plugin_files();
+    files.push(("sounds/huge.bin", noise(3 * 1024 * 1024)));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 2 MB")),
+        "{refused:?}"
+    );
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    assert!(installed.plugin_folders().is_empty());
+}
+
+#[test]
+fn a_fetch_past_its_cap_is_stopped() {
+    let mut files = new_plugin_files();
+    files.push(("big.bin", noise(256 * 1024)));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+    let mirror = Mirror::open(&data.path().join("mirror.git"), &link_of(&upstream))
+        .unwrap()
+        .capped(64 * 1024);
+
+    let stopped = mirror.fetch_default_branch(&limit());
+
+    assert!(matches!(stopped, Err(GitError::TooLarge(_))), "{stopped:?}");
+}
+
+#[test]
+fn a_link_whose_folders_go_too_deep_is_refused_without_a_crash() {
+    let mut files = new_plugin_files();
+    let deep = format!("{}deep.txt", "a/".repeat(1_000));
+    files.push((deep.leak(), b"bottom\n".to_vec()));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 16 deep")),
+        "{refused:?}"
+    );
+}
+
 #[test]
 fn a_folder_the_player_added_is_kept_until_forgotten_and_its_files_stay() {
     let data = TempDir::new().unwrap();
