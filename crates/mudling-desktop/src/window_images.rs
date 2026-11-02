@@ -89,6 +89,7 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         holds: "".into(),
         always_on: false,
         on,
+        flipped: false,
     }
 }
 

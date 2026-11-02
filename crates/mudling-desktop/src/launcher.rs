@@ -181,12 +181,15 @@ impl Launcher {
         Ok(ids.cloned().collect())
     }
 
-    /// What Settings shows of `host`'s plugins. `suggested` is what a session
-    /// there learned; without one, its host is all there is to go on.
+    /// What Settings shows of `host`'s plugins. `suggested` and `running` are
+    /// what a session there learned; without one, its host is all there is to
+    /// go on, so an override that names only the game's MSSP name isn't listed
+    /// until the server has said it, or the player has turned it off.
     pub fn server_plugins(
         &self,
         host: &str,
         suggested: Option<Suggestion>,
+        running: &[PluginId],
     ) -> Result<ServerPlugins, String> {
         let could_not = |error: persist::Error| format!("couldn't read {host}: {error}");
         let saved = persist::enabled_plugins(&self.data_folder, host).map_err(could_not)?;
@@ -201,13 +204,23 @@ impl Launcher {
             host,
             mssp_name: None,
         };
-        let not_for_here = |row: &PluginRow| {
+        let matches_host = |row: &PluginRow| {
             let plugin = self.plugins.iter().find(|plugin| *plugin.id() == row.id);
-            row.layer == Layer::Override
-                && !plugin.is_some_and(|plugin| plugin.manifest.matches_server(server))
+            plugin.is_some_and(|plugin| plugin.manifest.matches_server(server))
         };
         let mut plugins = PluginRow::for_session(&self.plugins, &enabled, &overrides_off, host);
-        plugins.retain(|row| !not_for_here(row));
+        for row in plugins
+            .iter_mut()
+            .filter(|row| row.layer == Layer::Override)
+        {
+            row.on |= running.contains(&row.id) && !overrides_off.contains(&row.id);
+        }
+        plugins.retain(|row| {
+            row.layer != Layer::Override
+                || matches_host(row)
+                || running.contains(&row.id)
+                || overrides_off.contains(&row.id)
+        });
         let signals = ServerSignals {
             host,
             ..ServerSignals::default()
@@ -385,7 +398,7 @@ mod tests {
 
         launcher.set_plugin("mud.example", &game, true).unwrap();
         let on = |launcher: &Launcher, host| {
-            let page = launcher.server_plugins(host, None).unwrap();
+            let page = launcher.server_plugins(host, None, &[]).unwrap();
             page.plugins.iter().find(|row| row.id == game).unwrap().on
         };
         assert!(on(&launcher, "mud.example"));
@@ -414,17 +427,23 @@ mod tests {
         .unwrap();
         let id = mine.id().clone();
         let launcher = Launcher::new(folder.path().to_owned(), vec![mine], Vec::new(), || {});
-        let row = |host| {
-            let page = launcher.server_plugins(host, None).unwrap();
+        let row = |host, running: &[PluginId]| {
+            let page = launcher.server_plugins(host, None, running).unwrap();
             page.plugins.into_iter().find(|row| row.id == id)
         };
-        assert!(row("mud.example").unwrap().on);
-        assert!(row("other.example").is_none(), "it's not for that server");
+        assert!(row("mud.example", &[]).unwrap().on);
+        assert!(row("other.example", &[]).is_none(), "it's not for there");
 
         launcher.set_plugin("mud.example", &id, false).unwrap();
-        assert!(!row("mud.example").unwrap().on);
+        assert!(!row("mud.example", &[]).unwrap().on);
         launcher.set_plugin("mud.example", &id, true).unwrap();
-        assert!(row("mud.example").unwrap().on);
+        assert!(row("mud.example", &[]).unwrap().on);
+
+        let by_its_name = row("other.example", std::slice::from_ref(&id));
+        assert!(by_its_name.unwrap().on, "the game's name brought it on");
+        launcher.set_plugin("other.example", &id, false).unwrap();
+        let off = row("other.example", &[]).expect("still there to turn back on");
+        assert!(!off.on);
     }
 
     const HOST: &str = "mud.example.org";

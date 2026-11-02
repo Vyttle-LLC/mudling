@@ -524,6 +524,11 @@ impl SettingsSheet {
         cx.notify();
     }
 
+    /// Whether the player changed a switch for the session running.
+    pub fn reconnect_to_apply(&self) -> bool {
+        self.reconnect_to_apply
+    }
+
     #[cfg(test)]
     pub fn on_a_page(&self) -> bool {
         self.page != Page::Section

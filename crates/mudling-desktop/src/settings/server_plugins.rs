@@ -170,7 +170,7 @@ impl SettingsSheet {
                     .text_color(theme.error),
             );
         }
-        if self.reconnect_to_apply {
+        if self.reconnect_to_apply && self.server.as_ref() == Some(&page.host) {
             pane.row(self.reconnect_note(theme));
         }
         if let Some(offer) = page.offer() {
@@ -242,6 +242,7 @@ mod tests {
             holds: "".into(),
             always_on: false,
             on,
+            flipped: false,
         }
     }
 

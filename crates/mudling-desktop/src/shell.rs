@@ -1108,13 +1108,16 @@ impl Shell {
                 cx,
             ),
             Request::ServerPlugins(host) => {
-                let suggested = self.game.as_ref().and_then(|game| {
-                    let here = game.target.host == host;
-                    here.then(|| self.copies.settings.value().suggestion.clone())?
-                });
+                let playing = self.game.as_ref().is_some_and(|g| g.target.host == host);
+                let session = playing.then(|| self.copies.settings.value());
+                let suggested = session.and_then(|settings| settings.suggestion.clone());
+                let running: Vec<PluginId> = (session.iter())
+                    .flat_map(|settings| &settings.plugin_costs)
+                    .map(|cost| cost.plugin.clone())
+                    .collect();
                 self.off_the_ui_thread(
                     move |launcher| {
-                        let read = launcher.server_plugins(&host, suggested);
+                        let read = launcher.server_plugins(&host, suggested, &running);
                         let (server_plugins, problem) = match read {
                             Ok(plugins) => (Some(plugins), None),
                             Err(problem) => (None, Some(problem)),
@@ -1200,6 +1203,7 @@ impl Shell {
         let running = self.game.as_ref().is_some_and(|game| {
             game.target == target
                 && !game.session.has_stopped()
+                && !self.plugins_changed_since_it_closed(cx)
                 && turn_on
                     .as_ref()
                     .is_none_or(|plugin| game.enabled.contains(plugin))
@@ -1302,17 +1306,26 @@ impl Shell {
     }
 
     /// Connects again on the same session, keeping the chat. A session whose
-    /// core thread stopped can't, so that one is opened anew. The Reconnect
-    /// button goes as the connection starts, so focus moves off it first.
+    /// core thread stopped can't, and one whose plugins the player changed
+    /// mustn't, as a session reads them when it opens: those are opened anew.
+    /// The Reconnect button goes as the connection starts, so focus moves off
+    /// it first.
     fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
-        if game.session.has_stopped() {
+        if game.session.has_stopped() || self.plugins_changed_since_it_closed(cx) {
             let target = game.target.clone();
             self.ask_to_open(&target, window, cx);
         } else {
             game.session.connect();
             window.focus(&self.input.focus_handle(cx), cx);
         }
+    }
+
+    /// The connection is closed, and the next one has to read new plugins.
+    fn plugins_changed_since_it_closed(&self, cx: &App) -> bool {
+        let connection = &self.copies.settings.value().connection;
+        matches!(connection, ConnectionStatus::Closed(_))
+            && self.settings.read(cx).reconnect_to_apply()
     }
 
     fn turn_on(&mut self, plugin: PluginId, window: &mut Window, cx: &mut Context<Shell>) {
@@ -4693,7 +4706,7 @@ pub mod tests {
         let (server, port) = fake_server();
         let mut launched = launch(&[("127.0.0.1", port)], cx);
         press_enter(launched.cx);
-        let _socket = server.accept().unwrap();
+        let socket = server.accept().unwrap();
         launched.wait_for_connection(ConnectionStatus::Connected);
         open_servers(&mut launched);
         launched.click("server-plugins-0");
@@ -4714,10 +4727,65 @@ pub mod tests {
         );
         assert!(launched.is_drawn("reconnect-note"));
 
-        let enabled = launched.shell.read_with(launched.cx, |shell, _| {
-            shell.game.as_ref().map_or(0, |game| game.enabled.len())
+        let enabled = |launched: &mut Launched<'_>| {
+            launched.shell.read_with(launched.cx, |shell, _| {
+                shell.game.as_ref().map_or(0, |game| game.enabled.len())
+            })
+        };
+        assert_eq!(
+            enabled(&mut launched),
+            0,
+            "the running session reads its plugins once"
+        );
+
+        drop(socket);
+        launched.frames_until("the connection to end", |shell, _| {
+            let connection = &shell.copies.settings.value().connection;
+            matches!(connection, ConnectionStatus::Closed(_))
         });
-        assert_eq!(enabled, 0, "the running session reads its plugins once");
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.reconnect(window, cx);
+        });
+        launched.cx.run_until_parked();
+        let _next = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert_eq!(enabled(&mut launched), 1, "Reconnect brings it in");
+        assert!(!launched.is_drawn("reconnect-note"));
+    }
+
+    #[gpui::test]
+    fn a_plugin_the_core_turned_off_here_is_a_plain_switch_on_another_server(
+        cx: &mut TestAppContext,
+    ) {
+        let mut launched = launch(&[("other.example", 4000)], cx);
+        let folder = launched.folder.path().to_owned();
+        let plugin = loopback_plugin().id().clone();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let page = shell.launcher.as_ref().unwrap();
+            let page = page.server_plugins("other.example", None, &[]).unwrap();
+            shell.show_problems(
+                &SettingsState {
+                    server: Some("127.0.0.1".to_owned()),
+                    turned_off: vec![PluginDisabled {
+                        plugin: plugin.clone(),
+                        reason: DisabledReason::Overran(3),
+                    }],
+                    ..SettingsState::default()
+                },
+                cx,
+            );
+            shell.settings.update(cx, |sheet, cx| {
+                sheet.select(Section::Servers, cx);
+                sheet.show_server_plugins(page, window, cx);
+            });
+        });
+        launched.cx.run_until_parked();
+
+        launched.click("switch-loopback");
+        launched.frames_until("the switch to be saved", |shell, _| shell.job.is_none());
+        let saved = persist::enabled_plugins(&folder, "other.example").unwrap();
+        assert_eq!(saved, ["loopback"]);
     }
 
     #[gpui::test]
