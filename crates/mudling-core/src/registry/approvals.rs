@@ -5,7 +5,8 @@
 //! grant one. Each is for one copy of the plugin, by its folder's content
 //! hash: its patterns decide when its hooks run and what text they get, so
 //! a change to any file of it asks again, unless it's an update the player
-//! chose here.
+//! chose here. A folder the player added from this device is theirs, and
+//! changes with every save, so it's approved by where it is instead.
 
 use crate::plugin::Plugin;
 use crate::plugin::manifest::Permission;
@@ -28,7 +29,8 @@ impl Approvals {
         }
     }
 
-    /// Each approved plugin's id, with the content hash it was approved at.
+    /// Each approved plugin's id, with the content hash it was approved at,
+    /// or [`super::AddedFolder::approval_key`] for a folder the player added.
     fn all(&self) -> BTreeMap<String, String> {
         fs::read(&self.path)
             .ok()

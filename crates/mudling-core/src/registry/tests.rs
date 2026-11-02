@@ -303,8 +303,8 @@ fn a_plugin_installs_with_the_bytes_git_holds_whatever_its_attributes_say() {
     );
     assert_eq!(Plugin::load(&folder).unwrap().id().as_str(), "tells");
     assert_eq!(
-        installed.records().get("tells"),
-        Some(&Record::Registry {
+        installed.load().plugins[0].record,
+        Some(Record::Registry {
             version: "1.0.0".to_owned(),
             commit: upstream.main.to_string(),
             hash: index.plugins[0].hash.clone(),
@@ -613,4 +613,116 @@ fn a_copy_a_verified_index_lists_loads_wherever_it_came_from() {
         .unwrap();
 
     assert_eq!(installed.load().plugins.len(), 1);
+}
+
+/// A repo's files, by path.
+type RepoFiles = Vec<(&'static str, Vec<u8>)>;
+
+/// What `mudling plugin new linked` makes: a plugin that passes its own test.
+fn new_plugin_files() -> RepoFiles {
+    let scaffold = |file: &str| -> &'static str {
+        match file {
+            "plugin.toml" => include_str!("../../../mudling-cli/src/scaffold/plugin.toml"),
+            "text.toml" => include_str!("../../../mudling-cli/src/scaffold/text.toml"),
+            "hooks.luau" => include_str!("../../../mudling-cli/src/scaffold/hooks.luau"),
+            "sample.txt" => include_str!("../../../mudling-cli/src/scaffold/sample.txt"),
+            _ => include_str!("../../../mudling-cli/src/scaffold/sample.expected"),
+        }
+    };
+    vec![
+        (
+            "plugin.toml",
+            scaffold("plugin.toml").replace("{id}", "linked").into(),
+        ),
+        ("text.toml", scaffold("text.toml").into()),
+        ("hooks.luau", scaffold("hooks.luau").into()),
+        ("tests/sample.txt", scaffold("sample.txt").into()),
+        ("tests/sample.expected", scaffold("sample.expected").into()),
+    ]
+}
+
+/// A plugin's own repo, with `files` at its root on the branch `HEAD` names.
+fn plugin_repo(files: &[(&str, Vec<u8>)]) -> TempDir {
+    let folder = TempDir::new().unwrap();
+    let repo = Repository::init_bare(folder.path()).unwrap();
+    commit(&repo, "refs/heads/trunk", files);
+    repo.set_head("refs/heads/trunk").unwrap();
+    folder
+}
+
+fn link_of(repo: &TempDir) -> String {
+    repo.path().display().to_string()
+}
+
+#[test]
+fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let data = TempDir::new().unwrap();
+
+    let fetched = fetch_link(data.path(), &link_of(&upstream), &limit()).unwrap();
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    installed.install(&fetched).unwrap();
+
+    let loaded = installed.load();
+    assert_eq!(loaded.plugins.len(), 1, "installed here, so trusted here");
+    let copy = &loaded.plugins[0];
+    assert_eq!(copy.plugin.id().as_str(), "linked");
+    assert_eq!(copy.hash, fetched.hash);
+    assert!(matches!(&copy.record, Some(Record::Link { url, .. }) if *url == link_of(&upstream)));
+    assert!(!copy.from_directory(), "the directory offers it no updates");
+}
+
+#[test]
+fn a_plugin_from_a_link_that_fails_a_check_is_not_installed() {
+    let data = TempDir::new().unwrap();
+    let fetch = |change: &dyn Fn(&mut RepoFiles)| {
+        let mut files = new_plugin_files();
+        change(&mut files);
+        fetch_link(data.path(), &link_of(&plugin_repo(&files)), &limit())
+    };
+
+    let changed = fetch(&|files| files[4].1 = b"event text nothing\n".to_vec());
+    assert!(
+        matches!(
+            &changed,
+            Err(InstallError::Failed(Failure::Expected { line: 1, .. }))
+        ),
+        "{changed:?}"
+    );
+    let untested = fetch(&|files| files.truncate(3));
+    assert!(
+        matches!(&untested, Err(InstallError::Failed(Failure::Tests(_)))),
+        "{untested:?}"
+    );
+    let unloadable = fetch(&|files| files[1].1 = b"[[pattern]]\npattern = '''('''\n".to_vec());
+    assert!(
+        matches!(&unloadable, Err(InstallError::NotAPlugin(_))),
+        "{unloadable:?}"
+    );
+    let raising = fetch(&|files| {
+        let hooks = String::from_utf8(files[2].1.clone()).unwrap();
+        files[2].1 = format!("{hooks}\nfunction on_welcome() error('no') end\n").into();
+    });
+    assert!(
+        matches!(&raising, Err(InstallError::Failed(Failure::Hook { .. }))),
+        "{raising:?}"
+    );
+
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    assert!(installed.plugin_folders().is_empty());
+}
+
+#[test]
+fn a_folder_the_player_added_is_kept_until_forgotten_and_its_files_stay() {
+    let data = TempDir::new().unwrap();
+    let mine = TempDir::new().unwrap();
+    fs::write(mine.path().join("plugin.toml"), MANIFEST).unwrap();
+    let origins = Origins::in_data_folder(data.path());
+
+    origins.add_folder(mine.path()).unwrap();
+    assert_eq!(origins.added_folders().unwrap(), [mine.path().to_owned()]);
+
+    origins.forget_folder(mine.path()).unwrap();
+    assert!(origins.added_folders().unwrap().is_empty());
+    assert!(mine.path().join("plugin.toml").exists());
 }

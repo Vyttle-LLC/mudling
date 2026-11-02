@@ -1,5 +1,6 @@
 //! The plugin directory (PRD §11): the community registry's signed index, the
-//! plugins installed from it, and the player's approvals.
+//! plugins installed from it or from a link, the player's own plugin folders,
+//! and the player's approvals.
 //!
 //! The registry's own docs say what's read here: `docs/index-format.md` and
 //! `docs/signing.md` in `mudling-plugins`. Both the index and the plugins come
@@ -14,27 +15,36 @@
 //!   tarball or a checkout, because both apply the plugin's own
 //!   `.gitattributes` (`export-ignore`, `export-subst`, line endings). Its
 //!   content hash must equal the index's before a byte reaches the disk.
+//! - **A plugin from a git link** comes the same way, checked as registry CI
+//!   checks one rather than against an index: see [`fetch_link`].
 //! - **An installed plugin** loads only as a copy this device trusts: see
 //!   [`Trusted`]. Plugins sync through the repo, so one can arrive changed.
+//! - **A folder the player added** loads from where it is, and only on this
+//!   device: [`Origins`] keeps the list.
 //!
 //! Every call here waits on the disk or the network: run them off the UI
 //! thread.
 
 mod approvals;
+mod folders;
 mod installed;
+mod link;
 mod trust;
 
 #[cfg(test)]
 mod tests;
 
 pub use approvals::{Approvals, sends_commands};
+pub use folders::AddedFolder;
 pub(crate) use installed::plugin_of;
 pub use installed::{
     FolderCopy, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
+pub use link::fetch_link;
 pub use trust::{Origins, Trusted};
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
+use crate::plugin::check::Failure;
 use crate::plugin::{Plugin, PluginError};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
@@ -160,6 +170,8 @@ pub enum InstallError {
     },
     /// The files are the index's, but they aren't a plugin with its id.
     NotAPlugin(String),
+    /// A plugin from a link that fails a check registry CI runs.
+    Failed(Failure),
     Disk(String),
 }
 
@@ -171,6 +183,7 @@ impl fmt::Display for InstallError {
                 "what was downloaded doesn't match what the directory signed for, so it wasn't installed",
             ),
             Self::NotAPlugin(why) => write!(f, "it isn't a plugin MUDling can load: {why}"),
+            Self::Failed(failure) => write!(f, "it failed a check: {failure}"),
             Self::Disk(why) => write!(f, "couldn't save it: {why}"),
         }
     }
@@ -182,13 +195,24 @@ impl From<PluginError> for InstallError {
     }
 }
 
-/// A plugin downloaded and checked against the index, not yet on the disk.
+/// A plugin downloaded and checked, not yet on the disk.
 #[derive(Clone, Debug)]
 pub struct Fetched {
-    pub entry: Entry,
+    pub source: Source,
     pub commit: Oid,
+    /// Its files' content hash: the index's, or the one computed for a link.
+    pub hash: String,
     pub files: FolderFiles,
     pub plugin: Plugin,
+}
+
+/// Where a fetched plugin came from.
+#[derive(Clone, Debug)]
+pub enum Source {
+    /// Listed in the signed index, and checked against its hash.
+    Directory(Entry),
+    /// A git link the player gave, and checked as registry CI would.
+    Link(String),
 }
 
 /// The registry as this device reads it.
@@ -279,8 +303,9 @@ impl Registry {
             )));
         }
         Ok(Fetched {
-            entry: entry.clone(),
+            source: Source::Directory(entry.clone()),
             commit: index.commit,
+            hash: found,
             files,
             plugin,
         })

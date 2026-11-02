@@ -6,7 +6,7 @@
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
 //!                            [--settings-section plugins|inspector|server-plugins|directory|
-//!                                                approval|data|vault|logs]
+//!                                                approval|add-plugin|data|vault|logs]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -114,7 +114,7 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] \
                      [--settings-section plugins|inspector|server-plugins|directory|approval|\
-                     data|vault|logs] \
+                     add-plugin|data|vault|logs] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
@@ -325,6 +325,9 @@ fn main() -> ExitCode {
                                 (Some(SamplePage::Approval), _) => {
                                     measure::open_sample_approval(shell, window, cx);
                                 }
+                                (Some(SamplePage::AddPlugin), _) => {
+                                    measure::open_sample_add_plugin(shell, window, cx);
+                                }
                                 (None, Some(section)) => {
                                     measure::open_sample_section(shell, section, window, cx);
                                 }
@@ -495,7 +498,10 @@ fn launcher_for(
     let named = command_line_plugins(options)?;
     let enabled = enabled_plugins(&named, &options.enable)?;
     let launcher = Launcher::new(folder, bundled_plugins(), enabled, waker);
-    Ok(launcher.with_named(named).with_installed())
+    Ok(launcher
+        .with_named(named)
+        .with_installed()
+        .with_added_folders())
 }
 
 fn command_line_plugins(options: &Options) -> Result<Vec<Plugin>, String> {
@@ -602,9 +608,11 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     "server-plugins" => options.settings_page = Some(SamplePage::ServerPlugins),
                     "directory" => options.settings_page = Some(SamplePage::Directory),
                     "approval" => options.settings_page = Some(SamplePage::Approval),
+                    "add-plugin" => options.settings_page = Some(SamplePage::AddPlugin),
                     _ => {
                         return Err("--settings-section needs plugins, inspector, \
-                                    server-plugins, directory, approval, data, vault or logs"
+                                    server-plugins, directory, approval, add-plugin, data, \
+                                    vault or logs"
                             .into());
                     }
                 }

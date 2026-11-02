@@ -7,6 +7,7 @@
 //! so a line costs one pass however many plugins are on, and one more inside
 //! a table. It delivers matches to a [`PluginSink`] as [`PluginEvent`]s.
 
+pub mod check;
 mod host;
 pub mod inspect;
 pub mod luau;

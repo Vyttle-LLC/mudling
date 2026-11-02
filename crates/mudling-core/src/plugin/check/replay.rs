@@ -3,11 +3,11 @@
 //! on this thread. It has no connection, so hooks read an empty state, and
 //! the pager is taken as answered.
 
-use crate::patterns::{self, Read, Rule};
-use mudling_core::defaults;
-use mudling_core::line::{Line, LinePipeline};
-use mudling_core::plugin::luau::{HookLimits, HookOutput, HookRunner, StateView, Value};
-use mudling_core::plugin::{PendingKind, Plugin, PluginError, PluginEvent, PluginHost};
+use super::patterns::{self, Read, Rule};
+use crate::defaults;
+use crate::line::{Line, LinePipeline};
+use crate::plugin::luau::{HookLimits, HookOutput, HookRunner, StateView, Value};
+use crate::plugin::{PendingKind, Plugin, PluginError, PluginEvent, PluginHost};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::sync::Arc;
@@ -171,7 +171,7 @@ impl Reader {
 }
 
 /// The line, cut to a length, and what the pattern captured of it.
-fn example(pattern: &mudling_core::plugin::Pattern, text: &str) -> String {
+fn example(pattern: &crate::plugin::Pattern, text: &str) -> String {
     let mut example: String = text.chars().take(QUOTE_CHARS).collect();
     for capture in pattern.captures(text).unwrap_or_default() {
         let value = capture.text(text);

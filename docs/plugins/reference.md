@@ -21,6 +21,20 @@ target/release/mudling plugin test mygame
 That makes a folder that loads and passes its own test. Edit its files, then
 run `plugin test` again. See [Commands](#commands).
 
+To try it in MUDling, open Settings › Plugins › Browse directory › Add from
+a link or folder, and choose the folder. MUDling reloads it whenever a file
+in it changes, and a session runs the reloaded copy from its next connect. If
+a reload breaks the plugin, its row says why and the last working copy keeps
+running. A folder stays on its device: it never syncs, and removing it leaves
+the folder and its files where they are.
+
+Once it's in a git repo, with `plugin.toml` at the root of the default
+branch, anyone can add it from that repo's link. MUDling checks it first as
+`plugin test` does, from git's own copy of the files: it must load, pass its
+own tests, have no failing hooks and keep within its
+[budget](#the-line-budget). A plugin from a link syncs to the player's other
+devices, and each asks the player there before it loads.
+
 ## The plugin folder
 
 ```text
@@ -378,7 +392,7 @@ its top level, as it loads, goes nowhere.
 | --- | --- |
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
-| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from the directory. |
+| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from the directory or a link. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
 
 A plugin with no hooks needs no permissions.
 

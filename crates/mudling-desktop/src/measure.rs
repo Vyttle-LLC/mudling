@@ -21,7 +21,8 @@
 //!
 //! `--settings-open` runs all of this with the settings sheet open, and
 //! `--settings-section` with Plugins, Data & sync, Vault or Logs open and
-//! filled, the Inspector recording every line, or a server's plugins.
+//! filled, the Inspector recording every line, a server's plugins, the
+//! plugin directory, an approval, or the page that adds a plugin.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -1208,6 +1209,17 @@ pub enum SamplePage {
     ServerPlugins,
     Directory,
     Approval,
+    AddPlugin,
+}
+
+/// Opens the page that adds a plugin, with made-up additions: one from a
+/// link, a folder reloaded just now, and one whose last reload broke it.
+pub fn open_sample_add_plugin(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_sample_directory(shell, window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.open_add_plugin(window, cx);
+        sheet.show_sample_added(cx);
+    });
 }
 
 /// Opens the plugin directory on a made-up index, as if it had checked out.
@@ -1382,6 +1394,9 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         sending: Sending::No,
         asks: Vec::new(),
         folder: None,
+        added_from: None,
+        source: None,
+        problem: None,
         held_back: None,
     };
     let sender = |name: &str, sending| PluginRow {
@@ -1397,8 +1412,17 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         },
         row("Sample game", Layer::Game),
         sender("Sample helper", Sending::Approved),
-        row("Sample maps", Layer::Game),
-        row("Sample colors", Layer::Game),
+        PluginRow {
+            folder: Some("sample-maps".into()),
+            source: Some("From https://github.com/someone/sample-maps.git".into()),
+            ..row("Sample maps", Layer::Game)
+        },
+        PluginRow {
+            added_from: Some("/Users/sample/plugins/sample-colors".into()),
+            source: Some("From ~/plugins/sample-colors".into()),
+            problem: Some("text.toml: pattern 2 doesn't compile: unclosed group".into()),
+            ..row("Sample colors", Layer::Game)
+        },
         sender("Sample chat", Sending::Waiting),
         PluginRow {
             folder: Some("sample-notes".into()),

@@ -38,6 +38,15 @@ impl Mirror {
         Ok(repo.refname_to_id(&tracking)?)
     }
 
+    /// Fetches the tip of the branch the remote's `HEAD` names, its default,
+    /// with no history, and returns it.
+    pub fn fetch_default_branch(&self, limit: &Limit) -> Result<Oid> {
+        let tracking = format!("{FETCHED}/HEAD");
+        self.fetch(format!("+HEAD:{tracking}"), limit)?;
+        let repo = Repository::open_bare(&self.folder)?;
+        Ok(repo.refname_to_id(&tracking)?)
+    }
+
     /// Fetches `commit` alone, by its id, unless the mirror has it already.
     pub fn fetch_commit(&self, commit: Oid, limit: &Limit) -> Result<()> {
         let repo = Repository::open_bare(&self.folder)?;
@@ -73,17 +82,21 @@ impl Mirror {
         Ok(Some(repo.find_blob(entry.id())?.content().to_vec()))
     }
 
-    /// Every file under `folder` in `commit`, as git stores it. A symbolic
-    /// link or a submodule is refused, since neither is a file to hash.
+    /// Every file under `folder` in `commit`, as git stores it, or under the
+    /// repo's root for an empty `folder`. A symbolic link or a submodule is
+    /// refused, since neither is a file to hash.
     pub fn folder_files(&self, commit: Oid, folder: &str) -> Result<FolderFiles> {
         let repo = Repository::open_bare(&self.folder)?;
         let root = repo.find_commit(commit)?.tree()?;
-        let entry = root
-            .get_path(Path::new(folder))
-            .map_err(|_| GitError::Failed(format!("the registry has no folder {folder}")))?;
-        let tree = repo
-            .find_tree(entry.id())
-            .map_err(|_| GitError::Failed(format!("{folder} isn't a folder")))?;
+        let tree = if folder.is_empty() {
+            root
+        } else {
+            let entry = root
+                .get_path(Path::new(folder))
+                .map_err(|_| GitError::Failed(format!("the repo has no folder {folder}")))?;
+            repo.find_tree(entry.id())
+                .map_err(|_| GitError::Failed(format!("{folder} isn't a folder")))?
+        };
         let mut files = FolderFiles::new();
         collect(&repo, &tree, "", &mut files)?;
         Ok(files)

@@ -7,7 +7,9 @@
 //! until the player reviews it.
 //!
 //! A folder with no record is the player's own only if it began on this
-//! device: [`Origins`] remembers which did, and which sync wrote.
+//! device: [`Origins`] remembers which did, and which sync wrote. It also
+//! keeps the folders elsewhere on this device the player added as plugins,
+//! which load from where they are, so they never reach the repo.
 
 use super::Entry;
 use serde::{Deserialize, Serialize};
@@ -20,7 +22,8 @@ use std::sync::{Mutex, PoisonError};
 const TRUST_FILE: &str = "plugin-trust.json";
 const ORIGINS_FILE: &str = "plugin-origins.json";
 
-/// Where this device's plugin folders with no record began, by id.
+/// Where this device's plugin folders with no record began, by id, and the
+/// player's own plugin folders elsewhere on it.
 #[derive(Clone, Debug)]
 pub struct Origins {
     path: PathBuf,
@@ -32,6 +35,9 @@ struct Known {
     local: BTreeSet<String>,
     /// Written by sync, so from another device or the repo.
     arrived: BTreeSet<String>,
+    /// Folders the player added from this device, loaded where they are.
+    #[serde(default)]
+    added_folders: BTreeSet<PathBuf>,
 }
 
 impl Origins {
@@ -88,6 +94,20 @@ impl Origins {
 
     pub fn forget(&self, id: &str) -> io::Result<()> {
         self.change(|known| ((), known.arrived.remove(id) | known.local.remove(id)))
+    }
+
+    /// The plugin folders the player added from this device, in path order.
+    pub fn added_folders(&self) -> io::Result<Vec<PathBuf>> {
+        self.change(|known| (known.added_folders.iter().cloned().collect(), false))
+    }
+
+    pub fn add_folder(&self, folder: &Path) -> io::Result<()> {
+        self.change(|known| ((), known.added_folders.insert(folder.to_owned())))
+    }
+
+    /// Forgets `folder`, leaving it and its files where they are.
+    pub fn forget_folder(&self, folder: &Path) -> io::Result<()> {
+        self.change(|known| ((), known.added_folders.remove(folder)))
     }
 }
 
