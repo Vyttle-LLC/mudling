@@ -1,0 +1,28 @@
+[connected]
+
+[GMCP] char.base {"name": "Wren", "class": "Mage", "subclass": "Enchanter", "race": "Elf", "clan": "", "pretitle": "", "perlevel": 1500, "tier": 0, "remorts": 1, "redos": 0, "classes": "0", "level": 12, "pups": 0, "totpups": 0}
+
+[GMCP] char.maxstats {"maxhp": 420, "maxmana": 610, "maxmoves": 530, "maxstr": 20, "maxint": 25, "maxwis": 22, "maxdex": 19, "maxcon": 18, "maxluck": 17}
+
+[GMCP] char.vitals {"hp": 400, "mana": 610, "moves": 515}
+
+[GMCP] char.stats {"str": 18, "int": 24, "wis": 21, "dex": 17, "con": 16, "luck": 15, "hr": 30, "dr": 28, "saves": 2}
+
+[GMCP] char.status {"level": 12, "tnl": 980, "hunger": 80, "thirst": 80, "align": 850, "state": 3, "pos": "Standing", "enemy": "", "enemypct": 0}
+
+[GMCP] room.info {"num": 30001, "name": "A Quiet Courtyard", "zone": "hedgerow", "terrain": "city", "details": "", "exits": {"n": 30002, "e": 30003, "s": 30004}, "coord": {"id": 0, "x": 10, "y": 12, "cont": 0}}
+A Quiet Courtyard
+   Low hedges ring a dry stone fountain. A gravel path leaves to the north,
+and a gate stands shut to the south.
+[ Exits: north east (south) ]
+<400/420hp 610/610mn 515/530mv 980tnl>
+Alas, you cannot go that way.
+<400/420hp 610/610mn 515/530mv 980tnl>
+
+[GMCP] char.vitals {"hp": 400, "mana": 610, "moves": 512}
+
+[GMCP] room.info {"num": 30002, "name": "A Gravel Path", "zone": "hedgerow", "terrain": "field", "details": "", "exits": {"s": 30001}, "coord": {"id": 0, "x": 10, "y": 11, "cont": 0}}
+A Gravel Path
+   The path ends at a bank of brambles. The courtyard lies back to the south.
+[ Exits: south ]
+<400/420hp 610/610mn 512/530mv 980tnl>

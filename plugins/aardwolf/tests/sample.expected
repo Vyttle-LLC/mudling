@@ -1,0 +1,3 @@
+event map map.exits exits="north east (south)"
+event map map.failed_move
+event map map.exits exits="south"

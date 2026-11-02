@@ -1,0 +1,10 @@
+# Where Aardwolf keeps each vital. char.vitals holds only the current hp,
+# mana and moves, which MUDling learns by their common names. The maximums
+# are in char.maxstats, experience to the next level in char.status, and a
+# level's whole experience in char.base.
+[vitals]
+maxhp = "char.maxstats.maxhp"
+maxmana = "char.maxstats.maxmana"
+maxmoves = "char.maxstats.maxmoves"
+tnl = "char.status.tnl"
+maxtnl = "char.base.perlevel"

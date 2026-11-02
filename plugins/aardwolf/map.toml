@@ -1,0 +1,19 @@
+# Aardwolf's map. room.info gives every room a number, its exits the numbers
+# of the rooms they lead to, and its zone a short id such as "aylor", so the
+# map needs only the default room identity and the moves the game refuses.
+
+# "[ Exits: north east (south) ]": a closed door in parentheses. Aardwolf
+# prints the exits after the room's description, not before it as the rule
+# expects, so the map reads no description line: room numbers tell rooms
+# apart without one.
+[[exits]]
+name = "map.exits"
+pattern = '''^\s*{prompt}?\s*\[ Exits: (?<exits>[^\]]*?) ?\]'''
+
+# Moves the game refuses: "Alas, you cannot go that way.", "There is no exit
+# in that direction.", "You need to use a boat, fly, or swim underwater to
+# go there.", "You must be standing first.", "You are regaining balance and
+# are unable to move."
+[[failed_move]]
+name = "map.failed_move"
+pattern = '''^\s*{prompt}?\s*(?:Alas, you cannot go that way\.|There is no exit in that direction\.|You need to use a boat, fly, or swim underwater to go there\.|You must be standing first\.|You are regaining balance and are unable to move\.)'''

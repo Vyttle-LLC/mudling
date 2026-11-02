@@ -1,7 +1,11 @@
 # Plugin API reference
 
-This is API v1, the one MUDling implements today. The
-[cookbook](cookbook.md) works through a real plugin; this page lists what
+This is API v1, and it's stable: two games from opposite ends of the range
+are written against it alone, [Avatar](../../plugins/avatar), a Merc-derived
+game read mostly from its text, and [Aardwolf](../../plugins/aardwolf), a
+customized ROM read mostly from GMCP. What neither could say is listed in
+[Aardwolf's README](../../plugins/aardwolf/README.md#what-the-api-cant-say-yet).
+The [cookbook](cookbook.md) works through a real plugin; this page lists what
 there is. A plugin is a folder of TOML with, where patterns aren't enough, a
 few Luau hooks. Nothing here needs you to read the core.
 

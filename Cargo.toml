@@ -7,6 +7,7 @@ members = [
     "crates/mudling-bench",
     "crates/mudling-cli",
     "plugins/avatar",
+    "plugins/aardwolf",
 ]
 
 [workspace.package]
