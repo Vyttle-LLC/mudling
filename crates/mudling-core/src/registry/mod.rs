@@ -32,7 +32,7 @@ pub(crate) use installed::plugin_of;
 pub use installed::{
     Arrived, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
-pub use trust::Trusted;
+pub use trust::{Origins, Trusted};
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
 use crate::plugin::{Plugin, PluginError};

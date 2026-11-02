@@ -771,16 +771,7 @@ mod tests {
                 .collect()
         };
 
-        let held_back = launcher.clone().with_installed();
-        assert_eq!(
-            named(&held_back),
-            ["Avatar"],
-            "a copy put there by hand waits"
-        );
-
-        InstalledPlugins::in_data_folder(folder.path())
-            .trust("mine")
-            .unwrap();
+        // Made on this device, so the player's own.
         assert_eq!(named(&launcher.with_installed()), ["Mine"]);
     }
 
@@ -800,9 +791,6 @@ mod tests {
         let manifest = "id = \"good\"\nname = \"Good\"\nversion = \"1.0.0\"\napi = 1\n\
                         license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n";
         std::fs::write(good.join("plugin.toml"), manifest).unwrap();
-        InstalledPlugins::in_data_folder(folder.path())
-            .trust("good")
-            .unwrap();
 
         let launcher = installed();
         assert_eq!(launcher.plugins().len(), 1);

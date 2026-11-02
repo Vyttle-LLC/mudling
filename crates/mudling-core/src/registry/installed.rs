@@ -2,7 +2,7 @@
 //! `plugins/<id>.json` beside it saying where it came from. The folder is a
 //! plugin's files exactly as fetched, so its content hash still holds.
 
-use super::{Fetched, InstallError, Trusted, content_hash};
+use super::{Fetched, InstallError, Origins, Trusted, content_hash};
 use crate::git::FolderFiles;
 use crate::plugin::Plugin;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,7 @@ pub struct Loaded {
 pub struct InstalledPlugins {
     folder: PathBuf,
     trusted: Trusted,
+    origins: Origins,
 }
 
 impl InstalledPlugins {
@@ -64,6 +65,7 @@ impl InstalledPlugins {
         InstalledPlugins {
             folder: data_folder.join(PLUGINS_FOLDER),
             trusted: Trusted::in_data_folder(data_folder),
+            origins: Origins::in_data_folder(data_folder),
         }
     }
 
@@ -118,10 +120,11 @@ impl InstalledPlugins {
         super::save(&self.record_path(id), &record).map_err(disk)
     }
 
-    /// Loads every installed plugin whose copy this device trusts, by its
-    /// content hash. The record beside it travels in the same repo as the
-    /// files, so it vouches for nothing: a copy that arrived any other way
-    /// is read to be shown, and waits for the player.
+    /// Loads every installed plugin this device trusts: a copy whose content
+    /// hash it trusts, or a folder with no record that began here. The
+    /// record beside a plugin travels in the same repo as its files, so it
+    /// vouches for nothing. Anything else is read to be shown, and waits for
+    /// the player.
     pub fn load(&self) -> Loaded {
         let mut loaded = Loaded::default();
         for folder in self.plugin_folders() {
@@ -135,9 +138,7 @@ impl InstalledPlugins {
                     Ok((plugin, hash))
                 });
             match read {
-                Ok((plugin, hash)) if self.trusted.trusts(&id, &hash) => {
-                    loaded.plugins.push(plugin);
-                }
+                Ok((plugin, hash)) if self.is_trusted(&id, &hash) => loaded.plugins.push(plugin),
                 Ok((plugin, hash)) => loaded.arrived.push(Arrived { plugin, hash }),
                 Err(why) => loaded.refused.push(Refused { id, why }),
             }
@@ -145,10 +146,22 @@ impl InstalledPlugins {
         loaded
     }
 
-    /// Trusts the copy of `id` the data folder holds now.
+    /// Whether this device trusts the folder `id`, holding `hash`. One whose
+    /// origin can't be read or saved isn't.
+    fn is_trusted(&self, id: &str, hash: &str) -> bool {
+        self.trusted.trusts(id, hash)
+            || (!self.record_path(id).exists() && self.origins.is_local(id).unwrap_or(false))
+    }
+
+    /// Trusts the copy of `id` the data folder holds now. One with no record
+    /// becomes the player's own.
     pub fn trust(&self, id: &str) -> io::Result<()> {
         let hash = folder_hash(&self.folder.join(id))?;
-        self.trusted.trust(id, &hash)
+        self.trusted.trust(id, &hash)?;
+        if !self.record_path(id).exists() {
+            self.origins.mark_local(id)?;
+        }
+        Ok(())
     }
 
     /// Takes a plugin and its record out.
@@ -158,9 +171,10 @@ impl InstalledPlugins {
         }
         remove_folder(&self.folder.join(id))?;
         match fs::remove_file(self.record_path(id)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
         }
+        self.origins.forget(id)
     }
 
     /// Where each plugin with a record came from, by id.

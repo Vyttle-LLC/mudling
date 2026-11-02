@@ -1696,6 +1696,67 @@ fn a_plugin_from_another_device_waits_until_this_one_trusts_it() {
 }
 
 #[test]
+fn a_folder_with_no_record_is_the_player_s_own_only_where_it_was_made() {
+    let world = two_devices();
+    let made_here = world.mac.data.join("plugins/mine");
+    fs::create_dir_all(&made_here).unwrap();
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    fs::write(made_here.join("plugin.toml"), manifest).unwrap();
+    let on_mac = crate::registry::InstalledPlugins::in_data_folder(&world.mac.data);
+    assert_eq!(
+        on_mac.load().plugins.len(),
+        1,
+        "made on the Mac, so the Mac's own"
+    );
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let on_ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    let loaded = on_ipad.load();
+    assert!(
+        loaded.plugins.is_empty(),
+        "the repo brought it, with no record"
+    );
+    assert_eq!(loaded.arrived.len(), 1);
+    assert_eq!(
+        on_mac.load().plugins.len(),
+        1,
+        "the round trip left it the Mac's"
+    );
+}
+
+#[test]
+fn a_folder_that_was_the_player_s_own_and_changed_by_sync_waits_again() {
+    let world = two_devices();
+    let manifest = |version: &str| {
+        format!(
+            "id = \"mine\"\nname = \"Mine\"\nversion = \"{version}\"\napi = 1\n\
+             license = \"MIT\"\nlayer = \"default\"\n"
+        )
+    };
+    let on_ipad = world.ipad.data.join("plugins/mine");
+    fs::create_dir_all(&on_ipad).unwrap();
+    fs::write(on_ipad.join("plugin.toml"), manifest("1.0.0")).unwrap();
+    let ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    assert_eq!(ipad.load().plugins.len(), 1);
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(world.mac.sync().problem, None);
+
+    // Someone with the repo changes it under the same name.
+    fs::write(
+        world.mac.data.join("plugins/mine/plugin.toml"),
+        manifest("6.6.6"),
+    )
+    .unwrap();
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(ipad.load().plugins.is_empty());
+}
+
+#[test]
 fn approvals_never_leave_the_device() {
     let world = two_devices();
     world

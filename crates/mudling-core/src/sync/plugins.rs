@@ -1,6 +1,8 @@
 //! Installed plugins in the repo (PRD §11): its `plugins/` folder holds what
 //! the data folder's does, so a plugin installed on one device reaches the
-//! others. Approvals and folder plugins aren't in there, so they stay put.
+//! others. Approvals and trust aren't in there, so they stay put, and a
+//! plugin this writes into the data folder is marked as arrived: it loads
+//! only once this device trusts its copy.
 //!
 //! The data folder's copy leads while it has seen the branch: export makes the
 //! repo's match it, and a merge's import makes it match the repo's. Until then
@@ -9,7 +11,7 @@
 //! this device has stay, so an export deletes nothing it hasn't read.
 
 use crate::git::Oid;
-use crate::registry::{PLUGINS_FOLDER, plugin_of};
+use crate::registry::{Origins, PLUGINS_FOLDER, plugin_of};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -41,18 +43,31 @@ pub(super) fn export(data_folder: &Path, repo: &Path) -> io::Result<()> {
 /// Makes the data folder's plugins match the repo's.
 pub(super) fn import(data_folder: &Path, repo: &Path) -> io::Result<()> {
     let theirs = files_in(&repo.join(PLUGINS_FOLDER))?;
-    replace(&data_folder.join(PLUGINS_FOLDER), &theirs)
+    take_in(data_folder, &theirs)
 }
 
 /// Takes in the repo's plugins, keeping those only this device has.
 pub(super) fn join(data_folder: &Path, repo: &Path) -> io::Result<()> {
     let theirs = files_in(&repo.join(PLUGINS_FOLDER))?;
-    let folder = data_folder.join(PLUGINS_FOLDER);
-    let mut joined = files_in(&folder)?;
+    let mut joined = files_in(&data_folder.join(PLUGINS_FOLDER))?;
     let replaced: BTreeSet<String> = theirs.keys().filter_map(|path| plugin_of(path)).collect();
     joined.retain(|path, _| plugin_of(path).is_none_or(|plugin| !replaced.contains(&plugin)));
     joined.extend(theirs);
-    replace(&folder, &joined)
+    take_in(data_folder, &joined)
+}
+
+/// Leaves the data folder's plugins holding `files`. Each plugin this
+/// writes is marked as arrived first, so a folder that came from the repo
+/// is never taken for one the player made here.
+fn take_in(data_folder: &Path, files: &Files) -> io::Result<()> {
+    let folder = data_folder.join(PLUGINS_FOLDER);
+    let current = files_in(&folder)?;
+    let arriving: BTreeSet<String> = (files.iter())
+        .filter(|(path, bytes)| current.get(*path) != Some(*bytes))
+        .filter_map(|(path, _)| plugin_of(path))
+        .collect();
+    Origins::in_data_folder(data_folder).mark_arrived(arriving.iter().map(String::as_str))?;
+    replace(&folder, files)
 }
 
 /// Every file under `folder`, relative to it, but for a plugin being written.

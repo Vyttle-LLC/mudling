@@ -418,6 +418,50 @@ fn installed_tells() -> (TempDir, InstalledPlugins) {
     (data, installed)
 }
 
+/// `tells` with no record, as a folder in a fresh data folder.
+fn recordless_tells(data: &TempDir) -> InstalledPlugins {
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    let folder = installed.folder().join("tells");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("plugin.toml"), MANIFEST).unwrap();
+    fs::write(folder.join("text.toml"), PATTERNS).unwrap();
+    installed
+}
+
+#[test]
+fn a_folder_with_no_record_made_on_this_device_is_the_player_s_own() {
+    let data = TempDir::new().unwrap();
+    let installed = recordless_tells(&data);
+
+    assert_eq!(installed.load().plugins.len(), 1);
+    fs::write(installed.folder().join("tells/notes.txt"), "edited").unwrap();
+    assert_eq!(
+        installed.load().plugins.len(),
+        1,
+        "editing it keeps it the player's"
+    );
+}
+
+#[test]
+fn a_folder_with_no_record_that_sync_wrote_is_not_loaded() {
+    let data = TempDir::new().unwrap();
+    Origins::in_data_folder(data.path())
+        .mark_arrived(["tells"])
+        .unwrap();
+    let installed = recordless_tells(&data);
+
+    let loaded = installed.load();
+
+    assert!(loaded.plugins.is_empty());
+    assert_eq!(loaded.arrived.len(), 1);
+    installed.trust("tells").unwrap();
+    assert_eq!(
+        installed.load().plugins.len(),
+        1,
+        "the player took it as theirs"
+    );
+}
+
 #[test]
 fn a_copy_this_device_installed_loads() {
     let (_data, installed) = installed_tells();
@@ -466,6 +510,9 @@ fn a_copy_a_verified_index_lists_loads_wherever_it_came_from() {
     let data = TempDir::new().unwrap();
     let installed = InstalledPlugins::in_data_folder(data.path());
     // Another device installed it, and sync brought the files.
+    Origins::in_data_folder(data.path())
+        .mark_arrived(["tells"])
+        .unwrap();
     let mine = installed.folder().join("tells");
     for (path, bytes) in folder_of(&plugin_files(), "plugins/tells/") {
         fs::create_dir_all(mine.join(&path).parent().unwrap()).unwrap();
