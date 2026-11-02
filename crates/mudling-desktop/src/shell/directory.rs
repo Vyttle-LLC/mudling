@@ -85,8 +85,7 @@ impl Shell {
             let fetched = (launcher.registry())
                 .fetch(&index, &entry, &Limit::after(REGISTRY_WAIT))
                 .map_err(|error| format!("{} wasn't installed: {error}.", entry.name))?;
-            let approved = launcher.approved().contains(fetched.plugin.id());
-            Ok((Arc::new(fetched), approved))
+            Ok(launcher.downloaded(fetched))
         });
         self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
             let fetched = fetch.await;
@@ -180,8 +179,7 @@ impl Shell {
         };
         let fetch = cx.background_spawn(async move {
             let fetched = launcher.fetch_link(&url, &Limit::after(REGISTRY_WAIT))?;
-            let approved = launcher.approved().contains(fetched.plugin.id());
-            Ok((Arc::new(fetched), approved))
+            Ok(launcher.downloaded(fetched))
         });
         self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
             let fetched = fetch.await;
@@ -195,7 +193,14 @@ impl Shell {
 
     /// Loads the plugin in `folder` from now on, and watches it.
     pub(super) fn add_folder(&mut self, folder: PathBuf, cx: &mut Context<Shell>) {
-        self.change_plugins(move |launcher| launcher.add_folder(&folder), cx);
+        let repo = self
+            .sync
+            .as_ref()
+            .and_then(|link| link.choices.repo.clone());
+        self.change_plugins(
+            move |launcher| launcher.add_folder(&folder, repo.as_deref()),
+            cx,
+        );
     }
 
     /// Reads `folders` again, as a file in each changed. It has its own

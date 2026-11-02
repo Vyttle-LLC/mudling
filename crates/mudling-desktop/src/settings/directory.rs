@@ -34,6 +34,16 @@ const CANT_REACH: &str =
     "It can't read your files or reach the network. You can take this back on the Plugins page.";
 const CHIP_HEIGHT: gpui::Pixels = px(28.);
 
+/// A plugin downloaded and checked, with what installing it means here.
+pub struct Downloaded {
+    pub fetched: Arc<Fetched>,
+    /// It updates an approved copy from where that came from, so it may
+    /// send without asking again.
+    pub keeps_approval: bool,
+    /// The installed plugin from elsewhere it would replace, in words.
+    pub replaces: Option<String>,
+}
+
 /// What the directory has to show.
 #[derive(Clone, Debug, Default)]
 pub enum Listing {
@@ -155,7 +165,11 @@ pub(super) struct Approval {
 
 #[derive(Clone)]
 pub(super) enum Purpose {
-    Install(Arc<Fetched>),
+    /// Install `fetched`, saying first what it replaces, if anything.
+    Install {
+        fetched: Arc<Fetched>,
+        replaces: Option<SharedString>,
+    },
     TurnOn(SharedString),
     Review,
     /// Load a copy this device didn't install, which the directory doesn't
@@ -202,7 +216,10 @@ impl Approval {
             with,
         };
         match &self.purpose {
-            Purpose::Install(_) => approval(Some("Install without sending"), "Allow and install"),
+            Purpose::Install { replaces, .. } => Words {
+                lead: replaces.clone(),
+                ..approval(Some("Install without sending"), "Allow and install")
+            },
             Purpose::TurnOn(_) => approval(Some("Turn on without sending"), "Allow and turn on"),
             Purpose::Review => approval(None, "Allow"),
             Purpose::Trust { why, .. } => Words {
@@ -289,22 +306,30 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A plugin downloaded and checked. One that sends commands, and isn't
-    /// approved already, asks first.
+    /// A plugin downloaded and checked. One that sends commands asks first,
+    /// unless it's an update of an approved copy from where that came from.
     pub fn fetched(
         &mut self,
-        fetched: Result<(Arc<Fetched>, bool), String>,
+        downloaded: Result<Downloaded, String>,
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
-        match fetched {
+        match downloaded {
             Err(problem) => self.plugin_work_ended(Some(problem.into())),
-            Ok((fetched, approved)) if registry::sends_commands(&fetched.plugin) && !approved => {
+            Ok(Downloaded {
+                fetched,
+                keeps_approval: false,
+                replaces,
+            }) if registry::sends_commands(&fetched.plugin) => {
                 let row = PluginRow::of(&fetched.plugin, false);
-                let approval = Approval::for_row(&row, Purpose::Install(fetched), window, cx);
+                let purpose = Purpose::Install {
+                    fetched,
+                    replaces: replaces.map(Into::into),
+                };
+                let approval = Approval::for_row(&row, purpose, window, cx);
                 self.ask(approval, window, cx);
             }
-            Ok((fetched, _)) => cx.emit(SheetEvent::Install {
+            Ok(Downloaded { fetched, .. }) => cx.emit(SheetEvent::Install {
                 fetched,
                 approve: false,
             }),
@@ -648,7 +673,7 @@ impl SettingsSheet {
     /// Closes an approval left unanswered, as Cancel would.
     pub(super) fn drop_approval(&mut self) {
         if let Some(Approval {
-            purpose: Purpose::Install(_),
+            purpose: Purpose::Install { .. },
             ..
         }) = self.asking.take()
         {
@@ -670,13 +695,13 @@ impl SettingsSheet {
         };
         let plugin = approval.plugin.clone();
         match approval.purpose {
-            Purpose::Install(fetched) if go_on => {
+            Purpose::Install { fetched, .. } if go_on => {
                 cx.emit(SheetEvent::Install {
                     fetched,
                     approve: send,
                 });
             }
-            Purpose::Install(_) => self.plugin_work_ended(None),
+            Purpose::Install { .. } => self.plugin_work_ended(None),
             Purpose::TurnOn(host) if go_on => {
                 if send {
                     self.set_approved(plugin.clone(), true, cx);

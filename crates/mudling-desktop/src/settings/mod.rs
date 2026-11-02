@@ -22,7 +22,7 @@ mod triggers;
 mod vault;
 
 pub use add_plugin::{Added, AddedPlugin, shown_path};
-pub use directory::Listing;
+pub use directory::{Downloaded, Listing};
 pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};

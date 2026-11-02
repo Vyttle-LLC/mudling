@@ -14,7 +14,9 @@ use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{duplicated_map, sample_map};
 use crate::measure;
-use crate::settings::{Listing, PluginRow, SavedServer as SheetServer, Section, Sending};
+use crate::settings::{
+    Downloaded, Listing, PluginRow, SavedServer as SheetServer, Section, Sending,
+};
 use crate::shell::Shell;
 use crate::theme::Theme;
 use crate::title_bar::SessionLabel;
@@ -868,9 +870,13 @@ fn window_images() {
         WIDE,
         |shell, window, cx| {
             measure::open_sample_directory(shell, window, cx);
-            let fetched = Arc::new(sample_fetched());
+            let downloaded = Downloaded {
+                fetched: Arc::new(sample_fetched()),
+                keeps_approval: false,
+                replaces: None,
+            };
             shell.settings_sheet().update(cx, |sheet, cx| {
-                sheet.fetched(Ok((fetched, false)), window, cx);
+                sheet.fetched(Ok(downloaded), window, cx);
             });
         },
     );

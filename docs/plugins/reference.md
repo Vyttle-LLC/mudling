@@ -392,7 +392,7 @@ its top level, as it loads, goes nowhere.
 | --- | --- |
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
-| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from the directory or a link. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
+| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from where it came: the directory, or the same link. A plugin from anywhere else with the same id asks again, and says what it replaces. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
 
 A plugin with no hooks needs no permissions.
 

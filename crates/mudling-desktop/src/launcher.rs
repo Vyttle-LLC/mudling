@@ -4,7 +4,7 @@
 
 use crate::room_panel::Verbs;
 use crate::settings::{
-    Added, AddedPlugin, PluginRow, Sending, ServerPlugins, SuggestedPlugin, shown_path,
+    Added, AddedPlugin, Downloaded, PluginRow, Sending, ServerPlugins, SuggestedPlugin, shown_path,
 };
 use crate::shell::Game;
 use futures::executor::block_on;
@@ -16,10 +16,10 @@ use mudling_core::persist;
 use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
 use mudling_core::registry::{
     self, AddedFolder, Approvals, Fetched, FolderCopy, InstalledPlugins, Origins, Record, Refused,
-    Registry,
+    Registry, Source,
 };
 use mudling_core::session::{Credentials, Session, SessionConfig};
-use mudling_core::sync::Syncer;
+use mudling_core::sync::{Syncer, is_within};
 use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -137,11 +137,23 @@ impl Launcher {
     }
 
     /// Adds the plugin in `folder`, which must load, and returns the
-    /// launcher that has it.
-    pub fn add_folder(&self, folder: &Path) -> Result<Launcher, String> {
+    /// launcher that has it. A folder sync writes to, in the data folder or
+    /// in `sync_repo`, is refused: sync could put code in it that would load
+    /// with no trust check and keep the folder's approval.
+    pub fn add_folder(&self, folder: &Path, sync_repo: Option<&Path>) -> Result<Launcher, String> {
         let shown = folder.display();
         if self.added.iter().any(|added| added.path == folder) {
             return Err(format!("{shown} is added already."));
+        }
+        if is_within(folder, &self.data_folder) {
+            return Err(format!(
+                "{shown} is in MUDling's data folder. {SYNCED_FOLDER}"
+            ));
+        }
+        if sync_repo.is_some_and(|repo| is_within(folder, repo)) {
+            return Err(format!(
+                "{shown} is in the folder you sync with. {SYNCED_FOLDER}"
+            ));
         }
         let added = AddedFolder::read(folder);
         if let Some(problem) = &added.problem {
@@ -341,12 +353,63 @@ impl Launcher {
         links.chain(folders).collect()
     }
 
+    /// Whether `fetched` updates the installed copy that runs from where that
+    /// came from: the directory again, or the same link.
+    fn updates_in_place(&self, fetched: &Fetched) -> bool {
+        let Runs::Installed(copy) = self.runs_from(fetched.plugin.id()) else {
+            return false;
+        };
+        match (&copy.record, &fetched.source) {
+            (Some(Record::Registry { .. }), Source::Directory(_)) => true,
+            (Some(Record::Link { url, .. }), Source::Link(new)) => url == new,
+            _ => false,
+        }
+    }
+
+    /// Whether `fetched` may send commands as soon as it's installed: only
+    /// an update of an approved copy from where that came from. A plugin
+    /// from anywhere else with the same id is other code, and asks.
+    pub fn keeps_approval(&self, fetched: &Fetched) -> bool {
+        self.updates_in_place(fetched) && self.approved().contains(fetched.plugin.id())
+    }
+
+    /// What `fetched` would replace, in words for its approval, if that's an
+    /// installed plugin from somewhere else.
+    pub fn replaces(&self, fetched: &Fetched) -> Option<String> {
+        let Runs::Installed(copy) = self.runs_from(fetched.plugin.id()) else {
+            return None;
+        };
+        if self.updates_in_place(fetched) {
+            return None;
+        }
+        let name = &copy.plugin.manifest.name;
+        Some(match &copy.record {
+            Some(Record::Registry { .. }) => {
+                format!("It replaces the {name} you installed from the directory.")
+            }
+            Some(Record::Link { url, .. }) => {
+                format!("It replaces the {name} you installed from {url}.")
+            }
+            None => format!("It replaces the {name} in your data folder."),
+        })
+    }
+
+    /// `fetched`, with whether it keeps an approval and what it replaces,
+    /// for the sheet to ask by.
+    pub fn downloaded(&self, fetched: Fetched) -> Downloaded {
+        Downloaded {
+            keeps_approval: self.keeps_approval(&fetched),
+            replaces: self.replaces(&fetched),
+            fetched: Arc::new(fetched),
+        }
+    }
+
     /// Puts `fetched` in the data folder and returns the launcher that has
-    /// it. An update keeps the approval its old version had: the player
-    /// chose it here.
+    /// it. An update from where the old copy came from keeps its approval:
+    /// the player chose it here.
     pub fn install(&self, fetched: &Fetched, approve: bool) -> Result<Launcher, String> {
         let id = fetched.plugin.id();
-        let was_approved = self.approved().contains(id);
+        let was_approved = self.keeps_approval(fetched);
         InstalledPlugins::in_data_folder(&self.data_folder)
             .install(fetched)
             .map_err(|error| {
@@ -709,6 +772,8 @@ enum Runs<'a> {
 }
 
 const FROM_DIRECTORY: &str = "From the directory";
+const SYNCED_FOLDER: &str = "Sync writes there, so it can't be a plugin folder. Choose one \
+     of your own outside it.";
 const FROM_COMMAND_LINE: &str = "From the command line";
 
 fn folder_name(path: &Path) -> Option<String> {
@@ -1143,7 +1208,7 @@ mod tests {
         let data = TempDir::new().unwrap();
         let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
         let mine = players_folder(&fetched_sender("function on_go() end"));
-        let launcher = launcher.add_folder(mine.path()).unwrap();
+        let launcher = launcher.add_folder(mine.path(), None).unwrap();
         let id = launcher.plugins()[0].id().clone();
 
         let patterns = mine.path().join("text.toml");
@@ -1179,8 +1244,61 @@ mod tests {
         let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
         let empty = TempDir::new().unwrap();
 
-        assert!(launcher.add_folder(empty.path()).is_err());
+        assert!(launcher.add_folder(empty.path(), None).is_err());
         assert!(launcher.with_added_folders().added_folders().is_empty());
+    }
+
+    #[test]
+    fn a_folder_sync_writes_to_is_not_added() {
+        let data = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let sender = fetched_sender("function on_go() end");
+        let in_plugins = data.path().join(PLUGINS_FOLDER).join("mine");
+        let in_repo = repo.path().join("plugins/mine");
+        for folder in [&in_plugins, &in_repo] {
+            std::fs::create_dir_all(folder).unwrap();
+            for (name, bytes) in &sender.files {
+                std::fs::write(folder.join(name), bytes).unwrap();
+            }
+        }
+
+        let repo = Some(repo.path());
+        for folder in [data.path(), &in_plugins, &in_repo] {
+            let refused = launcher.add_folder(folder, repo);
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|why| why.contains("Sync writes there")),
+                "{}",
+                folder.display()
+            );
+        }
+        assert!(launcher.with_added_folders().added_folders().is_empty());
+    }
+
+    #[test]
+    fn a_link_with_an_approved_plugin_s_id_asks_and_says_what_it_replaces() {
+        let data = TempDir::new().unwrap();
+        let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let launcher = launcher
+            .install(&fetched_sender("function on_go() end"), true)
+            .unwrap();
+        let mut fork = fetched_sender("function on_go() mud.send('quit') end");
+        fork.source = Source::Link("https://example.org/fork.git".to_owned());
+
+        assert!(!launcher.keeps_approval(&fork));
+        let replaces = launcher.replaces(&fork).expect("it says so");
+        assert!(replaces.contains("from the directory"), "{replaces}");
+        let launcher = launcher.install(&fork, false).unwrap();
+        assert!(launcher.approved().is_empty(), "the fork never had it");
+
+        // The same link again is an update, and keeps what the player gave.
+        let launcher = launcher.install(&fork, true).unwrap();
+        let mut update = fetched_sender("function on_go() mud.send('wave') end");
+        update.source = fork.source.clone();
+        assert!(launcher.keeps_approval(&update));
+        assert_eq!(launcher.replaces(&update), None);
     }
 
     #[test]
@@ -1188,7 +1306,7 @@ mod tests {
         let data = TempDir::new().unwrap();
         let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
         let mine = players_folder(&fetched_sender("function on_go() end"));
-        let launcher = launcher.add_folder(mine.path()).unwrap();
+        let launcher = launcher.add_folder(mine.path(), None).unwrap();
         let id = launcher.plugins()[0].id().clone();
         launcher.set_approved(&id, true).unwrap();
         assert!(launcher.runs_from_added(&id, mine.path()));
@@ -1201,7 +1319,7 @@ mod tests {
         let fresh = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
         let fresh = fresh.with_added_folders();
         assert!(fresh.plugins().is_empty(), "forgotten for good");
-        let fresh = fresh.add_folder(mine.path()).unwrap();
+        let fresh = fresh.add_folder(mine.path(), None).unwrap();
         assert!(fresh.approved().is_empty(), "adding it again asks again");
     }
 
@@ -1210,7 +1328,7 @@ mod tests {
         let data = TempDir::new().unwrap();
         let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
         let mine = players_folder(&fetched_sender("function on_go() end"));
-        let launcher = launcher.add_folder(mine.path()).unwrap();
+        let launcher = launcher.add_folder(mine.path(), None).unwrap();
         let id = launcher.plugins()[0].id().clone();
         launcher.set_approved(&id, true).unwrap();
 
