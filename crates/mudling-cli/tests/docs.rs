@@ -54,8 +54,11 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// With `\n` line endings, so a checkout with CRLF endings reads the same.
 fn read(path: &str) -> String {
-    fs::read_to_string(repo().join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
+    fs::read_to_string(repo().join(path))
+        .unwrap_or_else(|error| panic!("{path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 fn reference() -> String {
