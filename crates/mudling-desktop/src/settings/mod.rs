@@ -345,6 +345,10 @@ pub struct SettingsSheet {
     line_cost: Option<Summary>,
     /// The inspector's lines, while its page is open.
     inspector: InspectorState,
+    /// Held while the inspector has drawn lately, so new lines wait their turn.
+    inspector_cooldown: Option<Task<()>>,
+    /// Lines arrived during the cooldown, so the page is out of date.
+    inspector_late: bool,
     /// Why the last switch couldn't be saved.
     switch_problem: Option<SharedString>,
     /// The notice whose details are showing.
@@ -394,6 +398,8 @@ impl SettingsSheet {
             costs: Vec::new(),
             line_cost: None,
             inspector: InspectorState::default(),
+            inspector_cooldown: None,
+            inspector_late: false,
             switch_problem: None,
             details: None,
             fonts: vec![CHAT_FONTS[0]],
@@ -462,7 +468,7 @@ impl SettingsSheet {
     /// forgets what it held.
     pub fn leave_page(&mut self, cx: &mut Context<SettingsSheet>) {
         if self.page == Page::Inspector {
-            self.inspector = InspectorState::default();
+            self.forget_inspected();
             cx.emit(SheetEvent::Inspect(false));
         }
         self.page = Page::Section;
@@ -951,6 +957,7 @@ fn chosen_ground(chosen: bool, theme: &Theme) -> Hsla {
 
 #[cfg(test)]
 mod tests {
+    use super::inspector::REFRESH_EVERY;
     use super::*;
     use crate::chat::{COLUMN_PADDING, min_column_width};
     use crate::hud::HudPlacement;
@@ -962,6 +969,7 @@ mod tests {
     };
     use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
     use mudling_core::plugin::luau::DisabledReason;
+    use mudling_core::store::InspectorChange;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -1034,6 +1042,74 @@ mod tests {
             cx.debug_bounds("settings-sheet").is_some(),
             "it still shows"
         );
+    }
+
+    fn inspected(lines: usize) -> InspectorChange {
+        let line = crate::measure::sample_inspected().swap_remove(0);
+        InspectorChange {
+            clear: false,
+            lines: vec![line; lines],
+        }
+    }
+
+    #[gpui::test]
+    fn the_inspector_draws_on_a_schedule_however_many_lines_arrive(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        cx.run_until_parked();
+        let before = renders(&sheet, cx);
+
+        let apart = Duration::from_millis(30);
+        for _ in 0..100 {
+            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+            cx.run_until_parked();
+            cx.executor().advance_clock(apart);
+        }
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        let drawn = renders(&sheet, cx) - before;
+        let at_most = (apart * 100).div_duration_f64(REFRESH_EVERY) as usize + 2;
+        assert!(
+            (3..=at_most).contains(&drawn),
+            "100 lines drew {drawn} times"
+        );
+        assert_eq!(sheet.read_with(cx, |sheet, _| sheet.inspected_lines()), 100);
+        assert!(cx.debug_bounds("inspected-0").is_some(), "the newest shows");
+
+        let settled = renders(&sheet, cx);
+        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            renders(&sheet, cx),
+            settled + 1,
+            "the first line draws at once"
+        );
+        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), settled + 1, "the next waits its turn");
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), settled + 2, "and draws once it's due");
+    }
+
+    #[gpui::test]
+    fn leaving_the_inspector_cancels_the_draw_it_was_waiting_for(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        (0..2).for_each(|_| {
+            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        });
+        sheet.update(cx, |sheet, cx| sheet.leave_page(cx));
+        cx.run_until_parked();
+        let left = renders(&sheet, cx);
+        cx.executor().advance_clock(REFRESH_EVERY * 2);
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), left);
+        assert_eq!(sheet.read_with(cx, |sheet, _| sheet.inspected_lines()), 0);
     }
 
     #[gpui::test]

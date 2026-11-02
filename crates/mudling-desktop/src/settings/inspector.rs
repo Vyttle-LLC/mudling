@@ -12,15 +12,20 @@ use gpui::{Context, Pixels, Role, SharedString, Window, div, prelude::*, px};
 use mudling_core::plugin::inspect::{Claim, InspectedLine};
 use mudling_core::store::{INSPECTED_LINES, InspectorChange, InspectorState, StoreState};
 use std::ops::Range;
+use std::time::Duration;
 
 const NOTHING_CLAIMED: &str = "Nothing claimed this line";
 const NOTHING_YET: &str = "Lines the game sends will show here.";
 /// What a claim says when a plugin only colored the line.
 const COLORED: &str = "coloring";
 const ROW_HEIGHT: Pixels = px(52.);
-/// More than the tallest sheet shows, past what a page key moves.
-const ROWS_DRAWN: usize = 24;
-const ROWS_BEYOND_THE_VIEW: usize = 6;
+/// How soon the page shows lines that came after it last drew. A draw of the
+/// sheet costs a frame 2 to 3 ms, and more than one frame in a hundred over
+/// the 8 ms budget misses it, so this can't be much shorter.
+pub(super) const REFRESH_EVERY: Duration = Duration::from_secs(1);
+/// The tallest sheet shows 13 rows, one of them cut off at the top.
+const ROWS_DRAWN: usize = 16;
+const ROWS_BEYOND_THE_VIEW: usize = 2;
 
 /// Which of `lines` rows to draw with the first `scrolled` above the view.
 /// Lines arrive on every frame, so the rest only hold the list's height.
@@ -48,15 +53,46 @@ impl SettingsSheet {
         self.go_to_page(Page::Inspector, window, cx);
     }
 
-    /// New lines from the session, for as long as the page is open.
+    /// New lines from the session, for as long as the page is open. The page
+    /// draws at once, then no more often than `REFRESH_EVERY`: the sheet is
+    /// laid out afresh each time, and lines arrive on every frame.
     pub fn show_inspected(&mut self, change: &InspectorChange, cx: &mut Context<SettingsSheet>) {
-        if self.inspector.apply(change) {
-            cx.notify();
+        if !self.inspector.apply(change) {
+            return;
         }
+        if self.inspector_cooldown.is_some() {
+            self.inspector_late = true;
+            return;
+        }
+        cx.notify();
+        self.inspector_cooldown = Some(cx.spawn(async move |sheet, cx| {
+            loop {
+                cx.background_executor().timer(REFRESH_EVERY).await;
+                let drawn_late = sheet.update(cx, |sheet, cx| {
+                    let late = std::mem::take(&mut sheet.inspector_late);
+                    if late {
+                        cx.notify();
+                    } else {
+                        sheet.inspector_cooldown = None;
+                    }
+                    late
+                });
+                if !matches!(drawn_late, Ok(true)) {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Drops the lines, and any draw that was waiting to show them.
+    pub(super) fn forget_inspected(&mut self) {
+        self.inspector = InspectorState::default();
+        self.inspector_cooldown = None;
+        self.inspector_late = false;
     }
 
     fn clear_inspector(&mut self, cx: &mut Context<SettingsSheet>) {
-        self.inspector = InspectorState::default();
+        self.forget_inspected();
         cx.emit(SheetEvent::ClearInspector);
         cx.notify();
     }
@@ -181,8 +217,8 @@ mod tests {
     fn only_the_rows_near_the_view_are_drawn() {
         assert_eq!(rows_in_view(0, 3), 0..3);
         assert_eq!(rows_in_view(0, 200), 0..ROWS_DRAWN);
-        assert_eq!(rows_in_view(100, 200), 94..94 + ROWS_DRAWN);
-        assert_eq!(rows_in_view(199, 200), 193..200);
+        assert_eq!(rows_in_view(100, 200), 98..98 + ROWS_DRAWN);
+        assert_eq!(rows_in_view(199, 200), 197..200);
         assert_eq!(
             rows_in_view(300, 2),
             2..2,
