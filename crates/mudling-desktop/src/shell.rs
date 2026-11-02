@@ -31,8 +31,8 @@ use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 #[cfg(target_os = "macos")]
 use crate::settings::Section;
 use crate::settings::{
-    LockAfter, PluginRow, SavedServer, SavedSettings, SettingsSheet, SheetEvent, SyncChoices,
-    app_settings, hidden_under_sheet, with_app_settings,
+    LockAfter, PluginRow, SavedServer, SavedSettings, ServerPlugins, SettingsSheet, SheetEvent,
+    SyncChoices, app_settings, hidden_under_sheet, with_app_settings,
 };
 use crate::skills_panel::{self, SkillsPanel};
 use crate::sound::Speaker;
@@ -61,9 +61,9 @@ use mudling_core::plugin::PluginId;
 use mudling_core::repo::AppSettings;
 use mudling_core::session::{MapEdit, RuleEdit, Session};
 use mudling_core::store::{
-    CharactersState, ConnectionStatus, CuesState, ItemsState, MapState, MobsState, RoomState,
-    RulesState, SettingsState, SheetState, StoreHub, SyncState, TargetState, TerminalChange,
-    Versioned, VitalsState,
+    CharactersState, ConnectionStatus, CuesState, InspectorState, ItemsState, MapState, MobsState,
+    RoomState, RulesState, SettingsState, SheetState, StoreHub, SyncState, TargetState,
+    TerminalChange, Versioned, VitalsState,
 };
 use mudling_core::sync::{RepoSettings, Syncer, repo_holds_data_folder};
 use mudling_core::telnet::Bytes;
@@ -196,9 +196,11 @@ struct Copies {
 
 impl Copies {
     fn of(stores: Option<&StoreHub>) -> Copies {
-        // Sounds are only ever read from a batch, so they need no copy.
+        // Sounds and the inspector's lines are only ever read from a batch, so
+        // they need no copy.
         if let Some(stores) = stores {
             stores.subscribe::<CuesState>();
+            stores.subscribe::<InspectorState>();
         }
         Copies {
             settings: stores.map(|stores| stores.subscribe()).unwrap_or_default(),
@@ -251,6 +253,14 @@ enum Request {
     Remove(String),
     /// Read the saved servers again, as a sync may have changed them.
     ListServers,
+    /// Read what Settings shows of this server's plugins.
+    ServerPlugins(String),
+    /// Save the player's switch for a plugin on a server.
+    SetPlugin {
+        host: String,
+        plugin: PluginId,
+        on: bool,
+    },
 }
 
 impl Request {
@@ -273,6 +283,16 @@ struct Outcome {
     /// Only the saved servers were read again: no game opened or ended, so
     /// nothing else on show changes.
     only_listing: bool,
+    /// A server's plugins, read for Settings.
+    server_plugins: Option<ServerPlugins>,
+    /// The switch this tried to save, `problem` saying if it couldn't.
+    switch: Option<SavedSwitch>,
+}
+
+struct SavedSwitch {
+    host: SharedString,
+    plugin: PluginId,
+    on: bool,
 }
 
 pub struct Shell {
@@ -433,6 +453,22 @@ impl Shell {
                         shell.ask(Request::Remove(host.clone()), window, cx);
                     }
                     SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
+                    SheetEvent::Inspect(open) => shell.inspect(*open),
+                    SheetEvent::ClearInspector => {
+                        shell.inspect(false);
+                        shell.inspect(true);
+                    }
+                    SheetEvent::ServerPlugins(host) => {
+                        shell.ask(Request::ServerPlugins(host.clone()), window, cx);
+                    }
+                    SheetEvent::SetPlugin { host, plugin, on } => {
+                        let request = Request::SetPlugin {
+                            host: host.to_string(),
+                            plugin: plugin.clone(),
+                            on: *on,
+                        };
+                        shell.ask(request, window, cx);
+                    }
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
@@ -910,6 +946,7 @@ impl Shell {
     /// still waiting on the vault connects without logging in.
     fn sheet_closed(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         self.settings.update(cx, |sheet, cx| {
+            sheet.leave_page(cx);
             sheet.forget_typed(cx);
             sheet.stop_waiting_for_unlock(cx);
         });
@@ -951,6 +988,19 @@ impl Shell {
         if outcome.only_listing {
             if !self.left {
                 self.show_listing(&outcome.saved, cx);
+                self.settings.update(cx, |sheet, cx| {
+                    if let Some(plugins) = outcome.server_plugins {
+                        sheet.show_server_plugins(plugins, window, cx);
+                    }
+                    match (outcome.switch, outcome.problem) {
+                        (Some(switch), problem) => {
+                            let SavedSwitch { host, plugin, on } = switch;
+                            sheet.plugin_saved(&host, &plugin, on, problem, cx);
+                        }
+                        (None, Some(problem)) => sheet.show_servers_problem(problem, cx),
+                        (None, None) => {}
+                    }
+                });
                 self.start_waiting(window, cx);
             }
             return;
@@ -1070,6 +1120,48 @@ impl Shell {
                 window,
                 cx,
             ),
+            Request::ServerPlugins(host) => {
+                let playing = self.game.as_ref().is_some_and(|g| g.target.host == host);
+                let session = playing.then(|| self.copies.settings.value());
+                let suggested = session.and_then(|settings| settings.suggestion.clone());
+                let running: Vec<PluginId> = (session.iter())
+                    .flat_map(|settings| &settings.plugin_costs)
+                    .map(|cost| cost.plugin.clone())
+                    .collect();
+                self.off_the_ui_thread(
+                    move |launcher| {
+                        let read = launcher.server_plugins(&host, suggested, &running);
+                        let (server_plugins, problem) = match read {
+                            Ok(plugins) => (Some(plugins), None),
+                            Err(problem) => (None, Some(problem)),
+                        };
+                        Outcome {
+                            saved: launcher.saved(),
+                            only_listing: true,
+                            server_plugins,
+                            problem,
+                            ..Outcome::default()
+                        }
+                    },
+                    window,
+                    cx,
+                );
+            }
+            Request::SetPlugin { host, plugin, on } => self.off_the_ui_thread(
+                move |launcher| Outcome {
+                    saved: launcher.saved(),
+                    only_listing: true,
+                    problem: launcher.set_plugin(&host, &plugin, on).err(),
+                    switch: Some(SavedSwitch {
+                        host: host.into(),
+                        plugin,
+                        on,
+                    }),
+                    ..Outcome::default()
+                },
+                window,
+                cx,
+            ),
         }
     }
 
@@ -1089,8 +1181,10 @@ impl Shell {
             .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
         self.skills_panel
             .update(cx, |panel, cx| panel.use_verbs(game.verbs.clone(), cx));
-        self.settings
-            .update(cx, |sheet, cx| sheet.show_plugins(game.plugins.clone(), cx));
+        self.settings.update(cx, |sheet, cx| {
+            sheet.leave_page(cx);
+            sheet.show_plugins(game.plugins.clone(), cx);
+        });
         self.show_room(cx);
         self.show_rules(cx);
         self.show_gear(cx);
@@ -1127,6 +1221,7 @@ impl Shell {
         let running = self.game.as_ref().is_some_and(|game| {
             game.target == target
                 && !game.session.has_stopped()
+                && !self.plugins_changed_since_it_closed(cx)
                 && turn_on
                     .as_ref()
                     .is_none_or(|plugin| game.enabled.contains(plugin))
@@ -1229,17 +1324,26 @@ impl Shell {
     }
 
     /// Connects again on the same session, keeping the chat. A session whose
-    /// core thread stopped can't, so that one is opened anew. The Reconnect
-    /// button goes as the connection starts, so focus moves off it first.
+    /// core thread stopped can't, and one whose plugins the player changed
+    /// mustn't, as a session reads them when it opens: those are opened anew.
+    /// The Reconnect button goes as the connection starts, so focus moves off
+    /// it first.
     fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Shell>) {
         let Some(game) = &self.game else { return };
-        if game.session.has_stopped() {
+        if game.session.has_stopped() || self.plugins_changed_since_it_closed(cx) {
             let target = game.target.clone();
             self.ask_to_open(&target, window, cx);
         } else {
             game.session.connect();
             window.focus(&self.input.focus_handle(cx), cx);
         }
+    }
+
+    /// The connection is closed, and the next one has to read new plugins.
+    fn plugins_changed_since_it_closed(&self, cx: &App) -> bool {
+        let connection = &self.copies.settings.value().connection;
+        matches!(connection, ConnectionStatus::Closed(_))
+            && self.settings.read(cx).reconnect_to_apply()
     }
 
     fn turn_on(&mut self, plugin: PluginId, window: &mut Window, cx: &mut Context<Shell>) {
@@ -1357,6 +1461,10 @@ impl Shell {
         if let Some(rules) = &batch.rules {
             self.copies.rules.apply_diff(rules);
             self.show_rules(cx);
+        }
+        if let Some(inspector) = &batch.inspector {
+            self.settings
+                .update(cx, |sheet, cx| sheet.show_inspected(&inspector.change, cx));
         }
         if let Some(cues) = batch.cues.as_ref().filter(|_| !self.is_replaying()) {
             cues.change.iter().for_each(|sound| self.play_sound(sound));
@@ -1665,6 +1773,12 @@ impl Shell {
     fn turn_plugin_on(&self, plugin: &PluginId) {
         if let Some(game) = &self.game {
             game.session.turn_plugin_on(plugin.clone());
+        }
+    }
+
+    fn inspect(&self, open: bool) {
+        if let Some(game) = &self.game {
+            game.session.inspect(open);
         }
     }
 
@@ -4603,6 +4717,242 @@ pub mod tests {
         let (_socket, _) = server.accept().unwrap();
         launched.wait_for_connection(ConnectionStatus::Connected);
         assert_eq!(saved_hosts(launched.folder.path()), ["127.0.0.1"]);
+    }
+
+    #[gpui::test]
+    fn a_switch_on_the_server_in_play_is_saved_for_the_next_connect(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        press_enter(launched.cx);
+        let socket = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        open_servers(&mut launched);
+        launched.click("server-plugins-0");
+        launched.frames_until("the server's plugins", |shell, cx| {
+            shell.settings.read(cx).on_a_page()
+        });
+        launched.cx.run_until_parked();
+        assert!(launched.is_drawn("suggested-plugin"));
+
+        launched.click("suggested-turn-on");
+        launched.frames_until("the switch to be saved", |shell, _| shell.job.is_none());
+        launched.cx.run_until_parked();
+        let saved = persist::enabled_plugins(launched.folder.path(), "127.0.0.1").unwrap();
+        assert_eq!(saved, ["loopback"]);
+        assert!(
+            !launched.is_drawn("suggested-plugin"),
+            "the suggestion goes"
+        );
+        assert!(launched.is_drawn("reconnect-note"));
+
+        let enabled = |launched: &mut Launched<'_>| {
+            launched.shell.read_with(launched.cx, |shell, _| {
+                shell.game.as_ref().map_or(0, |game| game.enabled.len())
+            })
+        };
+        assert_eq!(
+            enabled(&mut launched),
+            0,
+            "the running session reads its plugins once"
+        );
+
+        drop(socket);
+        launched.frames_until("the connection to end", |shell, _| {
+            let connection = &shell.copies.settings.value().connection;
+            matches!(connection, ConnectionStatus::Closed(_))
+        });
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.reconnect(window, cx);
+        });
+        launched.cx.run_until_parked();
+        let _next = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        assert_eq!(enabled(&mut launched), 1, "Reconnect brings it in");
+        assert!(!launched.is_drawn("reconnect-note"));
+    }
+
+    #[gpui::test]
+    fn a_switch_that_could_not_be_saved_goes_back_and_says_so_until_one_is(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut launched, _socket) = launch_playing(game_plugin(), cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let sheet = &shell.settings;
+            sheet.update(cx, |sheet, cx| sheet.select(Section::Plugins, cx));
+        });
+        launched.cx.run_until_parked();
+        let game_row_on = |launched: &mut Launched<'_>| {
+            launched.shell.read_with(launched.cx, |shell, cx| {
+                let rows = shell.settings.read(cx).plugins();
+                rows.iter()
+                    .find(|row| row.id.as_str() == "game")
+                    .unwrap()
+                    .on
+            })
+        };
+        assert!(game_row_on(&mut launched));
+
+        launched.click("switch-game");
+        launched.frames_until("the save", |shell, _| shell.job.is_none());
+        assert!(!game_row_on(&mut launched));
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            let failed = Outcome {
+                saved: shell.listed.clone(),
+                only_listing: true,
+                problem: Some("couldn't save 127.0.0.1: the disk is full".to_owned()),
+                switch: Some(SavedSwitch {
+                    host: "127.0.0.1".into(),
+                    plugin: PluginId::try_from("game".to_owned()).unwrap(),
+                    on: false,
+                }),
+                ..Outcome::default()
+            };
+            shell.job_done(failed, window, cx);
+        });
+        launched.cx.run_until_parked();
+        assert!(game_row_on(&mut launched), "the switch goes back");
+        assert!(launched.is_drawn("switch-problem"));
+        assert!(
+            !launched.is_drawn("reconnect-note"),
+            "nothing is waiting to apply"
+        );
+
+        launched.click("switch-game");
+        launched.frames_until("the save", |shell, _| shell.job.is_none());
+        launched.cx.run_until_parked();
+        assert!(
+            !launched.is_drawn("switch-problem"),
+            "a good save clears it"
+        );
+        assert!(launched.is_drawn("reconnect-note"));
+    }
+
+    #[gpui::test]
+    fn an_override_for_another_server_has_no_switch_in_plugins(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                        license = \"MIT\"\nlayer = \"override\"\n[servers]\n\
+                        hosts = [\"b.example\"]\n";
+        let mine = Plugin::from_files(|file| match file {
+            "plugin.toml" => Ok(manifest.to_owned()),
+            _ => Err(std::io::Error::other(file.to_owned())),
+        })
+        .unwrap();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let rows = PluginRow::for_session(&[mine], &[], &[], "a.example");
+            shell.settings.update(cx, |sheet, cx| {
+                sheet.show_plugins(rows, cx);
+                sheet.select(Section::Plugins, cx);
+            });
+        });
+        launched.cx.run_until_parked();
+        assert!(launched.is_drawn("plugin-mine"));
+        assert!(!launched.is_drawn("switch-mine"));
+    }
+
+    #[gpui::test]
+    fn tab_reaches_a_servers_plugins_before_remove(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        open_servers(&mut launched);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            let close = shell.settings.read(cx).close_stop();
+            window.focus(&close, cx);
+        });
+        launched.cx.simulate_keystrokes("tab");
+        press_enter(launched.cx);
+        launched.frames_until("the server's plugins", |shell, cx| {
+            let sheet = shell.settings.read(cx);
+            sheet.on_a_page() || sheet.is_asking_to_remove()
+        });
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            assert!(shell.settings.read(cx).on_a_page());
+        });
+    }
+
+    #[gpui::test]
+    fn a_plugin_the_core_turned_off_here_is_a_plain_switch_on_another_server(
+        cx: &mut TestAppContext,
+    ) {
+        let mut launched = launch(&[("other.example", 4000)], cx);
+        let folder = launched.folder.path().to_owned();
+        let plugin = loopback_plugin().id().clone();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let page = shell.launcher.as_ref().unwrap();
+            let page = page.server_plugins("other.example", None, &[]).unwrap();
+            shell.show_problems(
+                &SettingsState {
+                    server: Some("127.0.0.1".to_owned()),
+                    turned_off: vec![PluginDisabled {
+                        plugin: plugin.clone(),
+                        reason: DisabledReason::Overran(3),
+                    }],
+                    ..SettingsState::default()
+                },
+                cx,
+            );
+            shell.settings.update(cx, |sheet, cx| {
+                sheet.select(Section::Servers, cx);
+                sheet.show_server_plugins(page, window, cx);
+            });
+        });
+        launched.cx.run_until_parked();
+
+        launched.click("switch-loopback");
+        launched.frames_until("the switch to be saved", |shell, _| shell.job.is_none());
+        let saved = persist::enabled_plugins(&folder, "other.example").unwrap();
+        assert_eq!(saved, ["loopback"]);
+    }
+
+    #[gpui::test]
+    fn the_inspector_records_only_while_its_page_is_open(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        let recorded = |played: &mut Played<'_>| {
+            played.shell.read_with(played.cx, |shell, _| {
+                let stores = shell.game.as_ref().unwrap().session.stores();
+                stores.read(|state: &Versioned<InspectorState>| state.value().lines.len())
+            })
+        };
+        let open = |played: &mut Played<'_>| {
+            played.shell.update_in(played.cx, |shell, window, cx| {
+                shell.open_settings(window, cx);
+                shell.settings.update(cx, |sheet, cx| {
+                    sheet.show_plugins(crate::measure::sample_plugins(), cx);
+                    sheet.select(Section::Plugins, cx);
+                });
+            });
+            played.cx.run_until_parked();
+            played.click("open-inspector");
+            played.say(b"seen\r\n");
+            played.frames_until("a line in the inspector", |shell, cx| {
+                shell.settings.read(cx).inspected_lines() > 0
+            });
+        };
+
+        played.say(b"before\r\n");
+        played.wait_for_chat("before");
+        assert_eq!(recorded(&mut played), 0, "closed, so nothing is recorded");
+
+        open(&mut played);
+        played.click("page-back");
+        played.frames_until("the record to go", |shell, cx| {
+            shell.settings.read(cx).inspected_lines() == 0
+        });
+        played.say(b"after back\r\n");
+        played.wait_for_chat("after back");
+        assert_eq!(recorded(&mut played), 0, "Back ends the recording");
+
+        open(&mut played);
+        played.shell.update_in(played.cx, |shell, window, cx| {
+            shell.close_settings(window, cx);
+        });
+        played.say(b"after closing\r\n");
+        played.wait_for_chat("after closing");
+        assert_eq!(recorded(&mut played), 0, "closing the sheet ends it too");
     }
 
     #[gpui::test]

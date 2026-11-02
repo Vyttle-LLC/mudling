@@ -11,8 +11,8 @@ use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::session::{Credentials, Engine, Session, SessionConfig, Typing};
 use mudling_core::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
-    GearState, Item, MapState, MobsState, Occupant, RoomState, SettingsState, Store, StoreHub,
-    Target, TargetState, TerminalState, Versioned, VitalsState,
+    GearState, InspectorState, Item, MapState, MobsState, Occupant, RoomState, SettingsState,
+    Store, StoreHub, Target, TargetState, TerminalState, Versioned, VitalsState,
 };
 use mudling_core::telnet::command::{DO, GA, IAC, SB, SE, WILL};
 use mudling_core::telnet::option::{ECHO, GMCP};
@@ -1041,6 +1041,71 @@ fn a_plugin_turned_off_says_why_and_can_come_back() {
         driven.say(b"\r\n");
         !driven_settings(&driven).turned_off.is_empty()
     });
+}
+
+#[test]
+fn an_override_the_player_turned_off_stays_out_of_the_session() {
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+        license = \"MIT\"\nlayer = \"override\"\n[servers]\nhosts = [\"mud.example\"]\n\
+        [points]\ntext = \"text.toml\"\n";
+    let mine = Plugin::from_files(|file| match file {
+        "plugin.toml" => Ok(manifest.to_owned()),
+        "text.toml" => Ok("[[pattern]]\nname = \"go\"\npattern = '''^go$'''\n".to_owned()),
+        _ => Err(std::io::Error::other(file.to_owned())),
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    let claimed = |off: Vec<PluginId>| {
+        let mine = mine.clone();
+        let mut driven = Driven::configured("mud.example", move |config| {
+            config.plugins = vec![mine];
+            config.overrides_off = off;
+        });
+        driven.engine.start_connection().unwrap();
+        driven.engine.inspect(true);
+        driven.say(b"go\r\n");
+        inspected(&driven)[0].1.clone()
+    };
+    assert_eq!(claimed(Vec::new()), ["mine"]);
+    assert!(claimed(vec![mine.id().clone()]).is_empty());
+}
+
+fn inspected(driven: &Driven) -> Vec<(String, Vec<String>)> {
+    driven.hub.read(|state: &Versioned<InspectorState>| {
+        let lines = state.value().lines.iter();
+        lines
+            .map(|inspected| {
+                let claimers = inspected.claims.iter().map(|c| c.plugin.to_string());
+                (inspected.line.plain().to_owned(), claimers.collect())
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn the_inspector_records_only_while_open_and_forgets_when_closed() {
+    let id = slow_plugin().id().clone();
+    let mut driven = Driven::configured("mud.example", |config| {
+        config.plugins = vec![slow_plugin()];
+        config.enabled = vec![id.clone()];
+    });
+    driven.engine.start_connection().unwrap();
+    driven.say(b"before\r\n");
+    assert_eq!(inspected(&driven), []);
+
+    driven.engine.inspect(true);
+    driven.say(b"go\r\nnobody's\r\n");
+    assert_eq!(
+        inspected(&driven),
+        [
+            ("go".to_owned(), vec!["slow".to_owned()]),
+            ("nobody's".to_owned(), Vec::new()),
+        ]
+    );
+
+    driven.engine.inspect(false);
+    assert_eq!(inspected(&driven), []);
+    driven.say(b"go\r\n");
+    assert_eq!(inspected(&driven), [], "closed, so nothing is recorded");
 }
 
 #[test]

@@ -83,6 +83,9 @@ impl PluginEvent {
 /// implement it.
 pub trait PluginSink {
     fn event(&mut self, event: PluginEvent);
+
+    /// One of `plugin`'s rules colored the line, which sends no event.
+    fn colored(&mut self, _plugin: &PluginId) {}
 }
 
 impl PluginSink for Vec<PluginEvent> {
@@ -135,6 +138,8 @@ pub struct PluginHost {
     generation: u64,
     cost_sampling: u64,
     lines_read: u64,
+    /// The whole read of each sampled line, every plugin at once.
+    line_cost: CostLog,
     /// The pending text last read, and what it was.
     last_pending: Option<(Box<str>, Option<PendingKind>)>,
     /// At most one table per plugin.
@@ -204,6 +209,7 @@ impl PluginHost {
             generation: 1,
             cost_sampling: DEFAULT_COST_SAMPLING,
             lines_read: 0,
+            line_cost: CostLog::default(),
             last_pending: None,
             open: Vec::new(),
             cuts: Vec::new(),
@@ -345,6 +351,9 @@ impl PluginHost {
         start: usize,
         sink: &mut impl PluginSink,
     ) -> Vec<Span> {
+        let sampled =
+            self.cost_sampling != 0 && (self.lines_read + 1).is_multiple_of(self.cost_sampling);
+        let started = sampled.then(Instant::now);
         self.cuts.drain(..).for_each(|cut| sink.event(cut));
         self.triggered.clear();
         let text = &line.plain()[start..];
@@ -388,7 +397,11 @@ impl PluginHost {
                         map_signal: *map_signal,
                     });
                 }
-                Action::Color { style, group } if line.styled().is_empty() => {
+                Action::Color {
+                    plugin,
+                    style,
+                    group,
+                } if line.styled().is_empty() => {
                     for (from, to) in rule
                         .pattern
                         .spans(text, *group)
@@ -403,13 +416,15 @@ impl PluginHost {
                             },
                         );
                     }
+                    sink.colored(plugin);
                 }
                 Action::Trigger { index } => self.triggered.push(*index),
                 Action::Color { .. } | Action::Prompt | Action::TableStart { .. } => {}
             }
         }
         self.lines_read += 1;
-        if self.cost_sampling != 0 && self.lines_read.is_multiple_of(self.cost_sampling) {
+        if let Some(started) = started {
+            self.line_cost.record(started.elapsed());
             self.sample_costs(text);
         }
         coloring
@@ -507,6 +522,13 @@ impl PluginHost {
                 per_line: Summary::of(&entry.cost.recent),
             })
             .collect()
+    }
+
+    /// What a sampled line cost to read with every enabled plugin, in the
+    /// one pass: less than their [`PluginHost::costs`] added up, which each
+    /// time rules one by one. `None` before the first sample.
+    pub fn line_cost(&self) -> Option<Summary> {
+        Summary::of(&self.line_cost.recent)
     }
 
     /// What `text`, unended, is: `self.matched` is overwritten. A prompt
@@ -789,7 +811,11 @@ enum Action {
         map_signal: Option<MapSignal>,
     },
     /// Colors `group` of each match; 0 is the whole match.
-    Color { style: Style, group: usize },
+    Color {
+        plugin: PluginId,
+        style: Style,
+        group: usize,
+    },
     /// The prompt's shape: ends open tables where it starts a line.
     Prompt,
     /// Opens [`Compiled::tables`]`[table]`.
@@ -956,6 +982,7 @@ fn line_rules(plugin: &Plugin) -> Vec<LineRule> {
         rule(
             &color.pattern,
             Action::Color {
+                plugin: plugin.id().clone(),
                 style: color.style(),
                 group,
             },

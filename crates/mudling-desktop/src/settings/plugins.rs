@@ -2,25 +2,36 @@
 //! session's notices.
 //!
 //! It shows what the core publishes today, and that's less than the canvas:
-//! no description or source for a plugin, and the switches only report. A
-//! plugin the core turned off has a banner that can turn it on again.
+//! no description or source for a plugin. Each plugin's cost per line is
+//! sampled, so it shows after a few hundred lines. A plugin the core turned
+//! off has a banner that can turn it on again. The Inspector opens from here.
 
-use super::{Pane, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
+use super::appearance::toggled;
+use super::{
+    Page, Pane, SettingsSheet, SheetEvent, control, muted_line, section_heading, text_button,
+};
 use crate::assets::{Icon, UI_FONT};
 use crate::theme::Theme;
 use gpui::{
-    Context, Div, FontWeight, HighlightStyle, Pixels, Role, SharedString, Stateful, StyledText,
-    div, prelude::*, px,
+    AnyElement, Context, Div, FontWeight, HighlightStyle, Pixels, Role, SharedString, Stateful,
+    StyledText, div, prelude::*, px,
 };
 use mudling_core::defaults;
 use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDisabled};
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
+use mudling_core::stats::Summary;
 
 const SWITCH_WIDTH: Pixels = px(40.);
 const SWITCH_HEIGHT: Pixels = px(22.);
 const SWITCH_KNOB: Pixels = px(16.);
-const SWITCH_NOTE: &str = "The switches show what's running. Changing them isn't here yet.";
+const APPLIES_NEXT: &str = "Your changes take effect the next time you connect to this server.";
 const NO_SESSION: &str = "Connect to a server to see its plugins.";
+const NOT_MEASURED: &str = "Costs show here once a few hundred lines have been read.";
+/// PRD §6: one line with all its plugins, and what any one of them may add.
+const LINE_BUDGET_US: f64 = 20.;
+const PLUGIN_BUDGET_US: f64 = 5.;
+/// Room for a cost like "12.3 µs".
+const COST_WIDTH: Pixels = px(64.);
 const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins over the defaults.";
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
 /// Under this, a banner's buttons wrap below its text.
@@ -35,62 +46,169 @@ pub struct PluginRow {
     pub id: PluginId,
     pub name: SharedString,
     pub layer: Layer,
-    /// The canvas's description, until manifests carry one.
-    pub detail: SharedString,
+    /// "1.0.0 · MIT", until manifests carry a description.
+    pub version: SharedString,
+    /// The triggers and aliases it brings, as [`rule_counts`] says them.
+    pub holds: SharedString,
+    /// Built in, so there's no turning it off.
+    pub always_on: bool,
+    /// Whether the player has it on for this server. A session reads that
+    /// when it opens, so a change shows here before it runs.
     pub on: bool,
+    /// The player's changes to its switch since the session opened that were
+    /// saved or are saving.
+    pub flips: u32,
+    /// Where an override meant for another server is meant to run.
+    pub elsewhere: Option<SharedString>,
 }
 
 impl PluginRow {
     fn of(plugin: &Plugin, on: bool) -> PluginRow {
+        let manifest = &plugin.manifest;
+        let triggers = plugin.points.text.as_ref().map_or(0, |t| t.patterns.len());
+        let aliases = plugin
+            .points
+            .commands
+            .as_ref()
+            .map_or(0, |c| c.aliases.len());
         PluginRow {
             id: plugin.id().clone(),
-            name: plugin.manifest.name.clone().into(),
+            name: manifest.name.clone().into(),
             layer: plugin.layer(),
-            detail: format!(
-                "Version {} · {}",
-                plugin.manifest.version, plugin.manifest.license
-            )
-            .into(),
+            version: format!("{} · {}", manifest.version, manifest.license).into(),
+            holds: rule_counts(triggers, aliases).into(),
+            always_on: false,
             on,
+            flips: 0,
+            elsewhere: None,
         }
     }
 
-    /// The session's plugins on `host`: the built-in defaults, then what's
-    /// installed, on as the session would run them.
-    pub fn for_session(plugins: &[Plugin], enabled: &[PluginId], host: &str) -> Vec<PluginRow> {
+    /// The built-in defaults, then what's installed, on as a session on `host`
+    /// would run them.
+    pub fn for_session(
+        plugins: &[Plugin],
+        enabled: &[PluginId],
+        overrides_off: &[PluginId],
+        host: &str,
+    ) -> Vec<PluginRow> {
         let server = ServerInfo {
             host,
             mssp_name: None,
         };
         let installed = plugins.iter().map(|plugin| {
-            let on = match plugin.layer() {
-                Layer::Override => plugin.manifest.matches_server(server),
-                _ => enabled.contains(plugin.id()),
+            let is_override = plugin.layer() == Layer::Override;
+            let matches_host = plugin.manifest.matches_server(server);
+            let turned_off = overrides_off.contains(plugin.id());
+            let on = match is_override {
+                true => matches_host && !turned_off,
+                false => enabled.contains(plugin.id()),
             };
-            PluginRow::of(plugin, on)
+            // Turning it off for this server says it's meant for this server.
+            let elsewhere = (is_override && !matches_host && !turned_off).then(|| {
+                let servers = &plugin.manifest.servers;
+                let names: Vec<&str> = (servers.hosts.iter().chain(&servers.mssp_names))
+                    .map(String::as_str)
+                    .collect();
+                names.join(", ").into()
+            });
+            PluginRow {
+                elsewhere,
+                ..PluginRow::of(plugin, on)
+            }
         });
-        let built_in = PluginRow::of(&defaults::plugin(), true);
+        let built_in = PluginRow {
+            always_on: true,
+            ..PluginRow::of(&defaults::plugin(), true)
+        };
         std::iter::once(built_in).chain(installed).collect()
     }
 
-    /// Whether it's running. The core's costs list what a connection runs;
-    /// before one has, this is how the session would run it.
+    /// Whether its switch shows on: the core can turn off what the player left on.
+    /// An override a game's MSSP name brought on shows in the core's costs, as
+    /// nothing here knows that name.
     fn switched_on(&self, costs: &[PluginCost], turned_off: &[PluginDisabled]) -> bool {
-        let running = match costs {
-            [] => self.on,
-            costs => costs.iter().any(|cost| cost.plugin == self.id),
-        };
-        running && !turned_off.iter().any(|off| off.plugin == self.id)
+        let came_on = self.layer == Layer::Override && self.flips == 0 && self.is_running(costs);
+        (self.on || came_on) && !turned_off.iter().any(|off| off.plugin == self.id)
     }
 
-    /// What it costs a line, once sampled, after its version and license.
-    fn detail_with(&self, costs: &[PluginCost]) -> SharedString {
-        let sampled = costs.iter().find(|cost| cost.plugin == self.id);
-        match sampled.and_then(|cost| cost.per_line.as_ref()) {
-            Some(cost) => format!("{} · {:.1} µs a line", self.detail, cost.p99_us).into(),
-            None => self.detail.clone(),
-        }
+    fn is_running(&self, costs: &[PluginCost]) -> bool {
+        costs.iter().any(|cost| cost.plugin == self.id)
     }
+
+    /// Where it's meant to run instead. A switch here wouldn't stick: the next
+    /// session wouldn't run it, whatever was saved. One running here isn't.
+    fn meant_elsewhere(&self, costs: &[PluginCost]) -> Option<&SharedString> {
+        self.elsewhere.as_ref().filter(|_| !self.is_running(costs))
+    }
+
+    /// What it costs a line in µs at p99, once sampled.
+    pub(super) fn cost(&self, costs: &[PluginCost]) -> Option<f64> {
+        let sampled = costs.iter().find(|cost| cost.plugin == self.id)?;
+        sampled.per_line.as_ref().map(|cost| cost.p99_us)
+    }
+}
+
+pub(super) fn micros(cost: f64) -> String {
+    format!("{cost:.1} µs")
+}
+
+/// "2 triggers, 1 alias".
+pub(super) fn rule_counts(triggers: usize, aliases: usize) -> String {
+    let plural = |count: usize, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        count => format!("{count} {many}"),
+    };
+    format!(
+        "{}, {}",
+        plural(triggers, "trigger", "triggers"),
+        plural(aliases, "alias", "aliases")
+    )
+}
+
+/// A cost in the column it shares, in the warning color over the limit.
+pub(super) fn cost_label(cost: Option<f64>, theme: &Theme) -> Div {
+    let over_limit = cost.is_some_and(|cost| cost > PLUGIN_BUDGET_US);
+    div()
+        .flex_none()
+        .w(COST_WIDTH)
+        .flex()
+        .justify_end()
+        .font_family(UI_FONT)
+        .text_size(px(14.))
+        .text_color(if over_limit {
+            theme.warning
+        } else {
+            theme.text_muted
+        })
+        .child(cost.map_or_else(String::new, micros))
+}
+
+/// What each layer's plugins that run cost a line, top layer first, and what
+/// they cost together against the budget. The whole comes from the one pass,
+/// so it's not the layers added up: each of those times its rules alone.
+fn cost_lines(
+    rows: &[PluginRow],
+    costs: &[PluginCost],
+    turned_off: &[PluginDisabled],
+    whole: &Summary,
+) -> (String, String) {
+    let layers = [Layer::Override, Layer::Game, Layer::Default].map(|layer| {
+        let running = rows.iter().filter(|row| row.layer == layer);
+        let cost = running
+            .filter(|row| row.switched_on(costs, turned_off))
+            .filter_map(|row| row.cost(costs))
+            .fold(0., |total, cost| total + cost);
+        format!("{} {}", layer_name(layer), micros(cost))
+    });
+    (
+        layers.join(" · "),
+        format!(
+            "All plugins {} of {LINE_BUDGET_US} µs a line. One plugin may add \
+             {PLUGIN_BUDGET_US} µs.",
+            micros(whole.p99_us),
+        ),
+    )
 }
 
 fn layer_heading(layer: Layer) -> &'static str {
@@ -98,6 +216,14 @@ fn layer_heading(layer: Layer) -> &'static str {
         Layer::Override => "Your overrides",
         Layer::Game => "Game",
         Layer::Default => "Defaults · work on any GMCP server",
+    }
+}
+
+fn layer_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Override => "Overrides",
+        Layer::Game => "Game",
+        Layer::Default => "Defaults",
     }
 }
 
@@ -109,7 +235,7 @@ fn layer_badge(layer: Layer) -> &'static str {
     }
 }
 
-/// The switch's look. It only reports, so it's no control yet.
+/// The switch's look.
 fn switch(on: bool, theme: &Theme) -> Div {
     let knob =
         div()
@@ -132,24 +258,31 @@ fn plugin_row(
     row: &PluginRow,
     switched_on: bool,
     overran: bool,
-    detail: SharedString,
+    cost: Option<f64>,
+    elsewhere: Option<&SharedString>,
+    control: AnyElement,
     theme: &Theme,
 ) -> impl IntoElement + use<> {
+    let about = match elsewhere {
+        Some(servers) => format!("For {servers} · Version {}", row.version),
+        None => format!("Version {}", row.version),
+    };
     let state = match (switched_on, overran) {
         (true, _) => "On",
         (false, true) => "Turned off · over budget",
         (false, false) => "Off",
     };
+    let cost_said = match cost {
+        Some(cost) if cost > PLUGIN_BUDGET_US => format!(
+            " {} a line, over the {PLUGIN_BUDGET_US} µs limit.",
+            micros(cost)
+        ),
+        Some(cost) => format!(" {} a line.", micros(cost)),
+        None => String::new(),
+    };
     let id = row.id.clone();
     div()
-        .id(SharedString::from(format!("plugin-{}", row.id)))
         .debug_selector(move || format!("plugin-{id}"))
-        .role(Role::Label)
-        .aria_value(format!(
-            "{}, {}: {state}. {detail}",
-            row.name,
-            layer_badge(row.layer),
-        ))
         .flex()
         .items_center()
         .gap_3()
@@ -160,6 +293,13 @@ fn plugin_row(
         .font_family(UI_FONT)
         .child(
             div()
+                .id(SharedString::from(format!("plugin-{}", row.id)))
+                .role(Role::Label)
+                .aria_value(format!(
+                    "{}, {}: {state}. {about}.{cost_said}",
+                    row.name,
+                    layer_badge(row.layer),
+                ))
                 .flex_1()
                 .min_w_0()
                 .child(
@@ -185,7 +325,7 @@ fn plugin_row(
                     div()
                         .text_size(px(13.))
                         .text_color(theme.text_muted)
-                        .child(detail),
+                        .child(about),
                 ),
         )
         .child(
@@ -199,11 +339,143 @@ fn plugin_row(
                 .text_color(theme.text_muted)
                 .child(layer_badge(row.layer)),
         )
-        .child(switch(switched_on, theme))
+        .child(cost_label(cost, theme))
+        .child(control)
+}
+
+/// A layer's heading. The first has the costs' column heading too.
+fn layer_heading_row(layer: Layer, first: bool, theme: &Theme) -> impl IntoElement + use<> {
+    div()
+        .px_5()
+        .flex()
+        .items_end()
+        .justify_between()
+        .child(section_heading(layer_heading(layer), theme))
+        .when(first, |row| {
+            row.child(
+                div()
+                    .pb_2()
+                    .mr(SWITCH_WIDTH + px(12.))
+                    .font_family(UI_FONT)
+                    .text_size(px(13.))
+                    .text_color(theme.text_muted)
+                    .child("per line"),
+            )
+        })
 }
 
 impl SettingsSheet {
-    fn display_name(&self, id: &str) -> SharedString {
+    /// A plugin's working switch. One the core turned off comes back the way
+    /// its notice's button brings it; any other is the player's for this server.
+    pub(super) fn plugin_switch(
+        &self,
+        row: &PluginRow,
+        on: bool,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
+        let plugin = row.id.clone();
+        // The core's list is of the session running, not of any other server.
+        let overran = self.page_host() == self.server
+            && self.turned_off.iter().any(|off| off.plugin == row.id);
+        let on = on && !overran;
+        let state = if on { "on" } else { "off" };
+        let id = SharedString::from(format!("switch-{}", row.id));
+        control(id, format!("{}, {state}", row.name), &pane.stop(cx), theme)
+            .role(Role::Switch)
+            .aria_toggled(toggled(on))
+            .child(switch(on, theme))
+            .on_click(cx.listener(move |sheet, _, _, cx| {
+                if overran {
+                    cx.emit(SheetEvent::TurnOn(plugin.clone()));
+                } else if let Some(host) = sheet.page_host() {
+                    sheet.set_plugin(host, plugin.clone(), !on, cx);
+                }
+            }))
+    }
+
+    /// The server a switch on this page is for.
+    fn page_host(&self) -> Option<SharedString> {
+        match &self.page {
+            Page::Server(page) => Some(page.host.clone()),
+            _ => self.server.clone(),
+        }
+    }
+
+    /// Saves the player's choice, and shows it at once on what's on the screen.
+    pub(super) fn set_plugin(
+        &mut self,
+        host: SharedString,
+        plugin: PluginId,
+        on: bool,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        self.with_plugin_rows(&host, &plugin, |row| {
+            row.on = on;
+            row.flips += 1;
+        });
+        cx.emit(SheetEvent::SetPlugin { host, plugin, on });
+        cx.notify();
+    }
+
+    /// How a switch's save went. One that failed goes back, and says why until
+    /// the next save works.
+    pub fn plugin_saved(
+        &mut self,
+        host: &SharedString,
+        plugin: &PluginId,
+        on: bool,
+        problem: Option<String>,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        if problem.is_some() {
+            self.with_plugin_rows(host, plugin, |row| {
+                row.on = !on;
+                row.flips = row.flips.saturating_sub(1);
+            });
+        }
+        self.switch_problem = problem.map(Into::into);
+        cx.notify();
+    }
+
+    /// Runs `change` on what's on the screen of `plugin` for `host`.
+    fn with_plugin_rows(
+        &mut self,
+        host: &SharedString,
+        plugin: &PluginId,
+        change: impl Fn(&mut PluginRow),
+    ) {
+        let page = match &mut self.page {
+            Page::Server(page) if page.host == *host => Some(&mut page.plugins),
+            _ => None,
+        };
+        let playing = self.server.as_ref() == Some(host);
+        let on_session = playing.then_some(&mut self.plugins);
+        let rows = [page, on_session].into_iter().flatten().flatten();
+        rows.filter(|row| row.id == *plugin).for_each(change);
+    }
+
+    /// Why the last switch wasn't saved.
+    pub(super) fn switch_problem_line(&self, theme: &Theme) -> Option<Stateful<Div>> {
+        self.switch_problem.clone().map(|problem| {
+            muted_line(problem, theme)
+                .debug_selector(|| "switch-problem".to_owned())
+                .role(Role::Alert)
+                .mt_2()
+                .text_color(theme.error)
+        })
+    }
+
+    /// Says when a switch flipped on the server being played takes effect.
+    pub(super) fn reconnect_note(&self, theme: &Theme) -> Stateful<Div> {
+        muted_line(APPLIES_NEXT, theme)
+            .debug_selector(|| "reconnect-note".to_owned())
+            .role(Role::Status)
+            .mt_2()
+    }
+
+    pub(super) fn display_name(&self, id: &str) -> SharedString {
         let row = self.plugins.iter().find(|row| row.id.as_str() == id);
         row.map_or_else(|| id.to_owned().into(), |row| row.name.clone())
     }
@@ -331,38 +603,91 @@ impl SettingsSheet {
             Some(server) => format!("Plugins for {server}. {LAYERS_NOTE}"),
             None => LAYERS_NOTE.to_owned(),
         };
-        pane.row(muted_line(scope, theme));
-        pane.row(muted_line(SWITCH_NOTE, theme));
+        let inspector = text_button("open-inspector", "Inspector", &pane.stop(cx), theme)
+            .on_click(cx.listener(|sheet, _, window, cx| sheet.open_inspector(window, cx)));
+        pane.row(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(muted_line(scope, theme).flex_1().min_w_0().pb_0())
+                .child(inspector),
+        );
+        if let Some(problem) = self.switch_problem_line(theme) {
+            pane.row(problem);
+        }
+        if self.reconnect_to_apply() {
+            pane.row(self.reconnect_note(theme));
+        }
         let mut card = div()
             .id("plugin-layers")
             .mt_3()
             .rounded_lg()
             .border_1()
             .border_color(theme.border);
+        let mut first = true;
         for layer in [Layer::Override, Layer::Game, Layer::Default] {
             let in_layer: Vec<&PluginRow> =
                 self.plugins.iter().filter(|p| p.layer == layer).collect();
             if in_layer.is_empty() {
                 continue;
             }
-            let rows = in_layer.into_iter().map(|row| {
-                plugin_row(
+            card = card.child(layer_heading_row(layer, first, theme));
+            first = false;
+            for row in in_layer {
+                let switched_on = row.switched_on(&self.costs, &self.turned_off);
+                let elsewhere = row.meant_elsewhere(&self.costs);
+                let control = match (row.always_on, elsewhere) {
+                    (true, _) => switch(true, theme).into_any_element(),
+                    (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
+                    (false, None) => self
+                        .plugin_switch(row, switched_on, pane, theme, cx)
+                        .into_any_element(),
+                };
+                card = card.child(plugin_row(
                     row,
-                    row.switched_on(&self.costs, &self.turned_off),
+                    switched_on,
                     self.turned_off.iter().any(|off| off.plugin == row.id),
-                    row.detail_with(&self.costs),
+                    row.cost(&self.costs),
+                    elsewhere,
+                    control,
                     theme,
-                )
-            });
-            card = card
-                .child(
-                    div()
-                        .px_5()
-                        .child(section_heading(layer_heading(layer), theme)),
-                )
-                .children(rows);
+                ));
+            }
         }
-        pane.row(card);
+        pane.row(card.child(self.cost_footer(theme)));
+    }
+
+    /// The layers' costs and the total against the budgets, closing the card.
+    fn cost_footer(&self, theme: &Theme) -> Stateful<Div> {
+        let (layers, total) = match &self.line_cost {
+            Some(whole) => cost_lines(&self.plugins, &self.costs, &self.turned_off, whole),
+            None => (String::new(), NOT_MEASURED.to_owned()),
+        };
+        let over_budget = (self.line_cost.as_ref()).is_some_and(|w| w.p99_us > LINE_BUDGET_US);
+        div()
+            .id("plugin-costs")
+            .debug_selector(|| "plugin-costs".to_owned())
+            .role(Role::Label)
+            .aria_value(format!("{layers}. {total}"))
+            .px_5()
+            .py_3()
+            .border_t_1()
+            .border_color(theme.divider)
+            .font_family(UI_FONT)
+            .text_size(px(13.))
+            .text_color(theme.text_muted)
+            .when(!layers.is_empty(), |footer| footer.child(layers))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if over_budget {
+                        theme.warning
+                    } else {
+                        theme.text
+                    })
+                    .child(total),
+            )
     }
 }
 
@@ -386,47 +711,142 @@ mod tests {
     const A_GAME: &str = "id = \"a-game\"\nname = \"A game\"\nversion = \"1.0.0\"\napi = 1\n\
                           license = \"MIT\"\nlayer = \"game\"\n\n[servers]\nhosts = [\"a.example\"]\n";
 
+    const AN_OVERRIDE: &str = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                               license = \"MIT\"\nlayer = \"override\"\n\n[servers]\n\
+                               hosts = [\"a.example\"]\n";
+
     #[test]
     fn the_session_lists_the_defaults_then_what_is_installed_and_on() {
         let game = plugin(A_GAME);
-        let off = PluginRow::for_session(std::slice::from_ref(&game), &[], "a.example");
+        let off = PluginRow::for_session(std::slice::from_ref(&game), &[], &[], "a.example");
         assert_eq!(off.len(), 2);
         assert_eq!(off[0].layer, Layer::Default);
-        assert!(off[0].on);
+        assert!(off[0].on && off[0].always_on);
         assert_eq!((off[1].name.as_str(), off[1].on), ("A game", false));
+        assert!(!off[1].always_on);
 
-        let on = PluginRow::for_session(
-            std::slice::from_ref(&game),
-            &[game.id().clone()],
-            "a.example",
-        );
+        let enabled = [game.id().clone()];
+        let on = PluginRow::for_session(std::slice::from_ref(&game), &enabled, &[], "a.example");
         assert!(on[1].on);
     }
 
     #[test]
-    fn a_switch_follows_what_a_connection_runs() {
+    fn an_override_runs_on_its_server_until_the_player_turns_it_off() {
+        let mine = plugin(AN_OVERRIDE);
+        let off = [mine.id().clone()];
+        let rows = |host, off: &[PluginId]| {
+            PluginRow::for_session(std::slice::from_ref(&mine), &[], off, host)[1].on
+        };
+        assert!(rows("a.example", &[]));
+        assert!(!rows("a.example", &off));
+        assert!(!rows("b.example", &[]), "it's for another server");
+    }
+
+    #[test]
+    fn a_switch_is_the_players_choice_unless_the_core_turned_it_off() {
         let game = plugin(A_GAME);
         let id = game.id().clone();
-        let row = &PluginRow::for_session(std::slice::from_ref(&game), &[], "a.example")[1];
+        let enabled = [id.clone()];
+        let row =
+            &PluginRow::for_session(std::slice::from_ref(&game), &enabled, &[], "a.example")[1];
+        assert!(row.switched_on(&[], &[]));
+        let off = PluginDisabled {
+            plugin: id.clone(),
+            reason: DisabledReason::Overran(3),
+        };
+        assert!(!row.switched_on(&[], &[off]));
+
         let cost = |per_line| PluginCost {
             plugin: id.clone(),
             sampled_lines: 1,
             per_line,
         };
+        assert_eq!(row.cost(&[cost(None)]), None);
+        let summary = Summary::of(&[Duration::from_micros(2)]);
+        assert_eq!(row.cost(&[cost(summary)]), Some(2.));
+    }
+
+    #[test]
+    fn an_override_the_game_s_name_brought_on_shows_on_until_it_is_flipped() {
+        let mine = plugin(AN_OVERRIDE);
+        let rows = PluginRow::for_session(std::slice::from_ref(&mine), &[], &[], "b.example");
+        let mut row = rows[1].clone();
+        let in_the_host = [PluginCost {
+            plugin: mine.id().clone(),
+            sampled_lines: 1,
+            per_line: Summary::of(&[Duration::from_micros(2)]),
+        }];
+        assert!(!row.on, "its host doesn't match");
+        assert!(row.switched_on(&in_the_host, &[]));
+
+        let whole = Summary::of(&[Duration::from_micros(2)]).unwrap();
+        let (layers, _) = cost_lines(&[row.clone()], &in_the_host, &[], &whole);
+        assert!(layers.contains("Overrides 2.0 µs"), "{layers}");
+
+        row.flips = 1;
         assert!(
-            !row.switched_on(&[], &[]),
-            "before a connection, the config"
+            !row.switched_on(&in_the_host, &[]),
+            "the player's word wins"
         );
-        assert!(row.switched_on(&[cost(None)], &[]), "in the host, it runs");
+    }
+
+    #[test]
+    fn an_override_for_another_server_says_where_it_goes() {
+        let mine = plugin(AN_OVERRIDE);
+        let id = mine.id().clone();
+        let row = |host, off: &[PluginId]| {
+            PluginRow::for_session(std::slice::from_ref(&mine), &[], off, host).remove(1)
+        };
+        let there = row("b.example", &[]);
+        assert_eq!(there.meant_elsewhere(&[]).unwrap(), "a.example");
+        assert_eq!(row("a.example", &[]).meant_elsewhere(&[]), None);
+        let turned_off_here = row("b.example", std::slice::from_ref(&id));
+        assert_eq!(turned_off_here.meant_elsewhere(&[]), None);
+
+        let running = PluginCost {
+            plugin: id,
+            sampled_lines: 1,
+            per_line: None,
+        };
+        assert_eq!(there.meant_elsewhere(&[running]), None, "it runs here");
+    }
+
+    #[test]
+    fn rule_counts_read_as_words() {
+        assert_eq!(rule_counts(2, 1), "2 triggers, 1 alias");
+        assert_eq!(rule_counts(1, 0), "1 trigger, 0 aliases");
+    }
+
+    #[test]
+    fn layers_count_what_runs_and_the_total_is_the_whole_read() {
+        let game = plugin(A_GAME);
+        let id = game.id().clone();
+        let rows = PluginRow::for_session(
+            std::slice::from_ref(&game),
+            std::slice::from_ref(&id),
+            &[],
+            "a.example",
+        );
+        let of = |plugin: &PluginId, micros| PluginCost {
+            plugin: plugin.clone(),
+            sampled_lines: 1,
+            per_line: Summary::of(&[Duration::from_micros(micros)]),
+        };
+        let costs = [of(&rows[0].id, 1), of(&id, 9)];
+        let whole = Summary::of(&[Duration::from_micros(7)]).unwrap();
+
+        let (layers, total) = cost_lines(&rows, &costs, &[], &whole);
+        assert_eq!(layers, "Overrides 0.0 µs · Game 9.0 µs · Defaults 1.0 µs");
+        assert_eq!(
+            total,
+            "All plugins 7.0 µs of 20 µs a line. One plugin may add 5 µs."
+        );
+
         let off = PluginDisabled {
             plugin: id.clone(),
             reason: DisabledReason::Overran(3),
         };
-        assert!(!row.switched_on(&[cost(None)], &[off]));
-
-        assert_eq!(row.detail_with(&[cost(None)]), row.detail);
-        let summary = Summary::of(&[Duration::from_micros(2)]);
-        let shown = row.detail_with(&[cost(summary)]);
-        assert!(shown.ends_with("· 2.0 µs a line"), "{shown}");
+        let (layers, _) = cost_lines(&rows, &costs, &[off], &whole);
+        assert!(layers.contains("Game 0.0 µs"), "{layers}");
     }
 }

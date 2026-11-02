@@ -33,6 +33,7 @@ use crate::persist::{
     self, Batch, Character, Database, Key, Meta, NOTEPAD, REMOVED, SERVERS_FOLDER, Server,
     Timestamp, UNNAMED_CHARACTER, Writer,
 };
+use crate::plugin::inspect::{Claiming, InspectedLine};
 use crate::plugin::luau::{
     HookOutput, HookSink, LuauHooks, PluginDisabled, StoreWrite, Value as HookValue,
 };
@@ -43,9 +44,9 @@ use crate::plugin::{
 use crate::repo::format::ServerRows;
 use crate::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, ConnectionStatus,
-    CuesState, GearState, MapRestore, MapState, Memo, MobsState, RoomState, RulesState,
-    SettingsState, SheetState, StoreHub, TargetState, TerminalChange, TerminalState, Versioned,
-    VitalsState,
+    CuesState, GearState, InspectorChange, InspectorState, MapRestore, MapState, Memo, MobsState,
+    RoomState, RulesState, SettingsState, SheetState, StoreHub, TargetState, TerminalChange,
+    TerminalState, Versioned, VitalsState,
 };
 use crate::telnet::{self, Bytes, CompressionError, Event, gmcp};
 use serde_json::{Map, Value};
@@ -56,7 +57,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// GMCP modules every server is asked for.
@@ -185,6 +186,10 @@ pub struct Engine {
     added_names: AddedNames,
     /// Lines for the terminal store, at the next settle.
     terminal: Vec<Line>,
+    /// Whether the inspector is open, which is what pays for its record.
+    inspecting: bool,
+    /// Lines for the inspector store, at the next settle.
+    inspected: Vec<InspectedLine>,
     /// The last line shown was a blank one from the server, or none has been.
     blank_shown: bool,
     /// What's known about items, and what the character has on them.
@@ -278,6 +283,8 @@ impl Engine {
             link_rules_of: 0,
             added_names: AddedNames::default(),
             terminal: Vec::new(),
+            inspecting: false,
+            inspected: Vec::new(),
             blank_shown: true,
             gear: GearKeeper::default(),
             batch: Batch::new(),
@@ -311,9 +318,14 @@ impl Engine {
         let state = Arc::new(HubView(Arc::clone(&self.hub)));
         // A hook file's top level runs when it loads, so a game plugin that's
         // off gets no VM. An override can still come on with the server's name.
-        let may_run = self.config.plugins.iter().filter(|plugin| {
-            plugin.layer() == Layer::Override || self.config.enabled.contains(plugin.id())
-        });
+        let may_run = self
+            .config
+            .plugins
+            .iter()
+            .filter(|plugin| match plugin.layer() {
+                Layer::Override => !self.config.overrides_off.contains(plugin.id()),
+                _ => self.config.enabled.contains(plugin.id()),
+            });
         let mut hooks = LuauHooks::start(
             may_run,
             self.config.hook_limits,
@@ -746,6 +758,13 @@ impl Engine {
             self.hub
                 .write::<TerminalState>(TerminalChange::Append(lines));
         }
+        if !self.inspected.is_empty() {
+            let lines = std::mem::take(&mut self.inspected);
+            self.hub.write::<InspectorState>(InspectorChange {
+                clear: false,
+                lines,
+            });
+        }
         let batch = std::mem::take(&mut self.batch);
         self.submit(batch);
         self.autosave_map(now);
@@ -921,6 +940,18 @@ impl Engine {
         }
         self.settings.turned_off.retain(|off| off.plugin != *plugin);
         self.publish_settings();
+    }
+
+    /// Opens or closes the inspector. Closing it forgets what it recorded.
+    pub fn inspect(&mut self, open: bool) {
+        self.inspecting = open;
+        if !open {
+            self.inspected.clear();
+            self.hub.write::<InspectorState>(InspectorChange {
+                clear: true,
+                lines: Vec::new(),
+            });
+        }
     }
 
     /// The player saved new log settings.
@@ -1150,9 +1181,18 @@ impl Engine {
                 self.plugins.end_tables(&line, &mut self.events);
             }
             let output_at = prompt.filter(|&at| at < text.len()).unwrap_or(0);
-            let coloring = self
-                .plugins
-                .read_line_from(&line, output_at, &mut self.events);
+            let started = self.inspecting.then(Instant::now);
+            let (coloring, claims) = if self.inspecting {
+                let mut claiming = Claiming::new(&mut self.events);
+                let coloring = self.plugins.read_line_from(&line, output_at, &mut claiming);
+                (coloring, claiming.into_claims())
+            } else {
+                let coloring = self
+                    .plugins
+                    .read_line_from(&line, output_at, &mut self.events);
+                (coloring, Vec::new())
+            };
+            let took = started.map(|started| started.elapsed());
             let seen = Seen {
                 events: &self.events,
                 prompt: prompt.is_some(),
@@ -1192,6 +1232,7 @@ impl Engine {
                 continue;
             }
             let prompt_len = prompt.filter(|_| hud_repeats_it).unwrap_or(0);
+            let shown_before = self.terminal.len();
             if already_shown == 0 {
                 self.show(match prompt_len {
                     0 => shown,
@@ -1204,6 +1245,13 @@ impl Engine {
                 self.show(match prompt_len.saturating_sub(already_shown) {
                     0 => rest,
                     len => rest.with_prompt(len),
+                });
+            }
+            if let (Some(took), Some(line)) = (took, self.terminal.get(shown_before)) {
+                self.inspected.push(InspectedLine {
+                    line: line.clone(),
+                    claims,
+                    took,
                 });
             }
         }
@@ -1440,7 +1488,10 @@ impl Engine {
             .plugins
             .iter()
             .filter(|plugin| match plugin.layer() {
-                Layer::Override => plugin.manifest.matches_server(server),
+                Layer::Override => {
+                    plugin.manifest.matches_server(server)
+                        && !self.config.overrides_off.contains(plugin.id())
+                }
                 _ => self.config.enabled.contains(plugin.id()),
             })
             .filter(|plugin| self.plugins.is_enabled(plugin.id()).is_none())
@@ -1970,6 +2021,7 @@ impl Engine {
         if self.link.is_some() && due {
             self.costs_published = Some(now);
             self.settings.plugin_costs = self.plugins.costs();
+            self.settings.plugin_line_cost = self.plugins.line_cost();
             self.publish_settings();
         }
     }

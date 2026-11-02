@@ -5,7 +5,7 @@
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
-//!                            [--settings-section data|vault|logs]
+//!                            [--settings-section plugins|inspector|server-plugins|data|vault|logs]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -88,6 +88,7 @@ use gpui::{
 };
 use launcher::{Launcher, Target, bundled_plugins, installed_plugins, replaced};
 use measure::HudRun;
+use measure::SamplePage;
 use mudling_core::git;
 use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
@@ -110,7 +111,8 @@ const REPLAY_HOST: &str = "replay";
 const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
-                     [--settings-open] [--settings-section data|vault|logs] \
+                     [--settings-open] \
+                     [--settings-section plugins|inspector|server-plugins|data|vault|logs] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
@@ -134,6 +136,7 @@ struct Options {
     report: PathBuf,
     settings_open: bool,
     settings_section: Option<Section>,
+    settings_page: Option<SamplePage>,
     hud: Option<HudRun>,
     find_open: bool,
     find_panel: bool,
@@ -306,11 +309,19 @@ fn main() -> ExitCode {
                 });
                 if options.settings_open {
                     window
-                        .update(cx, |shell, window, cx| match options.settings_section {
-                            Some(section) => {
-                                measure::open_sample_section(shell, section, window, cx);
+                        .update(cx, |shell, window, cx| {
+                            match (options.settings_page, options.settings_section) {
+                                (Some(SamplePage::Inspector), _) => {
+                                    measure::open_sample_inspector(shell, &[], window, cx);
+                                }
+                                (Some(SamplePage::ServerPlugins), _) => {
+                                    measure::open_sample_server_plugins(shell, window, cx);
+                                }
+                                (None, Some(section)) => {
+                                    measure::open_sample_section(shell, section, window, cx);
+                                }
+                                (None, None) => shell.open_settings(window, cx),
                             }
-                            None => shell.open_settings(window, cx),
                         })
                         .expect("the measured window is open");
                 }
@@ -439,7 +450,7 @@ fn open_replay(
     let plugins = command_line_plugins(options)?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
     let verbs = Verbs::of(&plugins, &enabled);
-    let plugin_rows = PluginRow::for_session(&plugins, &enabled, REPLAY_HOST);
+    let plugin_rows = PluginRow::for_session(&plugins, &enabled, &[], REPLAY_HOST);
     if let Some(rooms) = options.sample_map {
         measure::save_sample_map(folder.path(), REPLAY_HOST, rooms)
             .map_err(|error| format!("couldn't save the sample map: {error}"))?;
@@ -528,6 +539,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         report: PathBuf::from("reports/frame-report.json"),
         settings_open: false,
         settings_section: None,
+        settings_page: None,
         hud: None,
         find_open: false,
         find_panel: false,
@@ -573,12 +585,19 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--settings-open" => options.settings_open = true,
             "--settings-section" => {
                 options.settings_open = true;
-                options.settings_section = Some(match value()?.as_str() {
-                    "data" => Section::Data,
-                    "vault" => Section::Vault,
-                    "logs" => Section::Logs,
-                    _ => return Err("--settings-section needs data, vault or logs".into()),
-                });
+                match value()?.as_str() {
+                    "plugins" => options.settings_section = Some(Section::Plugins),
+                    "data" => options.settings_section = Some(Section::Data),
+                    "vault" => options.settings_section = Some(Section::Vault),
+                    "logs" => options.settings_section = Some(Section::Logs),
+                    "inspector" => options.settings_page = Some(SamplePage::Inspector),
+                    "server-plugins" => options.settings_page = Some(SamplePage::ServerPlugins),
+                    _ => {
+                        return Err("--settings-section needs plugins, inspector, \
+                                    server-plugins, data, vault or logs"
+                            .into());
+                    }
+                }
             }
             "--hud" => {
                 options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)

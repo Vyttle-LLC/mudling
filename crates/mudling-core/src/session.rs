@@ -84,6 +84,8 @@ pub struct SessionConfig {
     pub plugins: Vec<Plugin>,
     /// The game plugins the player turned on for this server.
     pub enabled: Vec<PluginId>,
+    /// The overrides the player turned off for this server.
+    pub overrides_off: Vec<PluginId>,
     /// Plugins the player allowed to send commands.
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
@@ -105,6 +107,7 @@ impl SessionConfig {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             plugins: Vec::new(),
             enabled: Vec::new(),
+            overrides_off: Vec::new(),
             approved: Vec::new(),
             credentials: None,
             sync: None,
@@ -245,6 +248,7 @@ enum Input {
     HoldWrites(SyncSender<()>),
     ReleaseWrites(RoomMoves),
     TurnPluginOn(PluginId),
+    Inspect(bool),
     LoggingChanged,
     RestoreMap(i64),
     Quit,
@@ -483,6 +487,12 @@ impl Session {
         self.queue(Input::TurnPluginOn(plugin));
     }
 
+    /// Opens or closes the plugin inspector: lines fill `InspectorState`
+    /// only while it's open, and closing it empties that.
+    pub fn inspect(&self, open: bool) {
+        self.queue(Input::Inspect(open));
+    }
+
     /// The player saved new [`LogSettings`]: a running connection follows.
     ///
     /// [`LogSettings`]: crate::logs::LogSettings
@@ -635,6 +645,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::HoldWrites(done)) => engine.hold_writes(done),
                 Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
+                Some(Input::Inspect(open)) => engine.inspect(open),
                 Some(Input::LoggingChanged) => engine.logging_changed(),
                 Some(Input::RestoreMap(version_id)) => {
                     engine.restore_map(version_id, Timestamp::now());

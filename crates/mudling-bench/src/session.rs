@@ -9,6 +9,8 @@
 //!   prompt every few lines, as a game sends them.
 //! - **With logging:** the same lines with both logs on, as the disk's speed
 //!   mustn't reach play.
+//! - **With the inspector open:** the same lines, each one's claims recorded
+//!   and published. The whole line above is the same with it closed.
 //! - **One more plugin:** two sessions read each line in turn, one with the
 //!   last game plugin and one without; the gate is the difference in their
 //!   p99s. Its hooks run and its Map rules read every line, as in play.
@@ -32,7 +34,7 @@ use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp}
 use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, RuleEdit, SessionConfig, Typing};
 use mudling_core::stats::Summary;
-use mudling_core::store::{StoreHub, Stores};
+use mudling_core::store::{InspectorState, StoreHub, Stores};
 use mudling_core::telnet::command::{GA, IAC};
 use mudling_core::telnet::{Bytes, gmcp};
 use serde::Serialize;
@@ -75,6 +77,9 @@ pub struct Report {
     /// The same lines with the debug and chat logs both on, held to the same
     /// budget.
     pub whole_line_logging: Summary,
+    /// The same lines with the plugin inspector open, held to the same
+    /// budget. `whole_line` is the inspector closed.
+    pub whole_line_inspecting: Summary,
     pub without_game_plugin: Summary,
     pub with_game_plugin: Summary,
     pub one_more_plugin_p99_us: f64,
@@ -109,6 +114,7 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         &player_triggers(source),
     );
     let whole_line_logging = measure_lines(Bench::logging(plugins.to_vec()), &reads, &[]);
+    let whole_line_inspecting = measure_lines(Bench::inspecting(plugins.to_vec()), &reads, &[]);
     let (without_game_plugin, with_game_plugin) = measure_one_more_plugin(&reads, plugins);
     let one_more_plugin_p99_us = with_game_plugin.p99_us - without_game_plugin.p99_us;
     let Moves {
@@ -123,6 +129,7 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         within_budget: whole_line.p99_us <= LINE_BUDGET_US
             && whole_line_200_triggers.p99_us <= LINE_BUDGET_US
             && whole_line_logging.p99_us <= LINE_BUDGET_US
+            && whole_line_inspecting.p99_us <= LINE_BUDGET_US
             && one_more_plugin_p99_us <= PLUGIN_BUDGET_US
             && mapping.p99_us <= MOVE_BUDGET_US
             && wandering.p99_us <= MOVE_BUDGET_US
@@ -132,6 +139,7 @@ pub fn run(source: &[String], plugins: &[Plugin]) -> Report {
         whole_line,
         whole_line_200_triggers,
         whole_line_logging,
+        whole_line_inspecting,
         without_game_plugin,
         with_game_plugin,
         one_more_plugin_p99_us,
@@ -171,6 +179,12 @@ pub fn print(report: &Report) {
         report.whole_line_logging,
         report.line_budget_us,
         verdict(report.whole_line_logging.p99_us <= report.line_budget_us)
+    );
+    println!(
+        "  whole line, inspector open: {}; budget p99 ≤ {} µs: {}",
+        report.whole_line_inspecting,
+        report.line_budget_us,
+        verdict(report.whole_line_inspecting.p99_us <= report.line_budget_us)
     );
     println!(
         "  one more plugin: {} without, {} with; +{:.2} µs p99; budget ≤ {} µs: {}",
@@ -320,6 +334,14 @@ impl Bench {
             .save_settings(&settings)
             .expect("the settings save");
         Bench::on(folder, plugins)
+    }
+
+    /// A session with the plugin inspector open, and a shell taking its lines.
+    pub fn inspecting(plugins: Vec<Plugin>) -> Bench {
+        let mut bench = Bench::new(plugins);
+        bench.hub.subscribe::<InspectorState>();
+        bench.engine.inspect(true);
+        bench
     }
 
     /// A session on `folder`, which may hold what an earlier one saved.
