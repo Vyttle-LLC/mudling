@@ -311,6 +311,8 @@ pub struct Shell {
     directory_read: Option<Task<()>>,
     /// A plugin being fetched or installed, or the installed ones read again.
     plugin_work: Option<Task<()>>,
+    /// A link being fetched and checked.
+    link_check: Option<Task<()>>,
     /// The plugin folders the player added, watched for changes.
     folder_watch: Option<watch::FolderWatch>,
     /// Those of them a change is being read from.
@@ -598,6 +600,7 @@ impl Shell {
             job: None,
             directory_read: None,
             plugin_work: None,
+            link_check: None,
             folder_watch: None,
             folder_reload: None,
             waiting: VecDeque::new(),

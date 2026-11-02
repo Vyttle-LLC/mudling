@@ -181,12 +181,13 @@ impl Shell {
             let fetched = launcher.fetch_link(&url, &Limit::after(REGISTRY_WAIT))?;
             Ok(launcher.downloaded(fetched))
         });
-        self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
-            let fetched = fetch.await;
+        // Its own task, so other plugin work started meanwhile can't drop it.
+        self.link_check = Some(cx.spawn_in(window, async move |shell, cx| {
+            let checked = fetch.await;
             let _ = shell.update_in(cx, |shell, window, cx| {
                 shell
                     .settings
-                    .update(cx, |sheet, cx| sheet.fetched(fetched, window, cx));
+                    .update(cx, |sheet, cx| sheet.link_checked(checked, window, cx));
             });
         }));
     }

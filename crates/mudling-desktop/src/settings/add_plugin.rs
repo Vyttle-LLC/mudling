@@ -3,7 +3,7 @@
 //! reads and watches a folder, off the UI thread; this page shows what it
 //! hands over, and lists what the player added, with Remove.
 
-use super::directory::{Approval, InCard, Purpose, card_row};
+use super::directory::{Approval, Downloaded, InCard, Purpose, card_row};
 use super::plugins::broken_reload;
 use super::{Page, Pane, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
 use crate::assets::UI_FONT;
@@ -72,8 +72,8 @@ pub fn shown_path(path: &Path) -> String {
 /// The page's state, kept while the sheet lives so a typed link survives.
 pub(super) struct AddPane {
     link: Entity<CommandInput>,
-    /// A link is being checked, or a folder read.
-    pub(super) busy: bool,
+    /// A link is being fetched and checked. Only its own result ends it.
+    pub(super) checking: bool,
     pub(super) problem: Option<SharedString>,
     added: Vec<AddedPlugin>,
 }
@@ -90,7 +90,7 @@ impl AddPane {
         cx.observe(&link, |_, _, cx| cx.notify()).detach();
         AddPane {
             link,
-            busy: false,
+            checking: false,
             problem: None,
             added: Vec::new(),
         }
@@ -115,13 +115,31 @@ impl SettingsSheet {
 
     fn add_link(&mut self, cx: &mut Context<SettingsSheet>) {
         let url = self.add.link.read(cx).content().trim().to_owned();
-        if url.is_empty() || self.add.busy {
+        if url.is_empty() || self.add.checking {
             return;
         }
-        self.add.busy = true;
+        self.add.checking = true;
         self.add.problem = None;
         cx.emit(SheetEvent::AddLink(url));
         cx.notify();
+    }
+
+    /// How a link's fetch and check went. One that passed goes on as a
+    /// plugin from the directory does; one that didn't says why here.
+    pub fn link_checked(
+        &mut self,
+        checked: Result<Downloaded, String>,
+        window: &mut Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        self.add.checking = false;
+        match checked {
+            Ok(downloaded) => self.fetched(Ok(downloaded), window, cx),
+            Err(problem) => {
+                self.add.problem = Some(problem.into());
+                cx.notify();
+            }
+        }
     }
 
     /// The OS's own folder chooser, which the keyboard and a screen reader
@@ -138,7 +156,6 @@ impl SettingsSheet {
                 && let Some(folder) = folders.into_iter().next()
             {
                 let _ = sheet.update(cx, |sheet, cx| {
-                    sheet.add.busy = true;
                     sheet.add.problem = None;
                     cx.emit(SheetEvent::AddFolder(folder));
                     cx.notify();
@@ -203,7 +220,7 @@ impl SettingsSheet {
             .collect();
         let field = self.add.link.clone();
         pane.adopt(field.focus_handle(cx));
-        let add: AnyElement = if self.add.busy {
+        let add: AnyElement = if self.add.checking {
             muted_line(CHECKING, theme)
                 .pb_0()
                 .role(Role::Status)
@@ -274,14 +291,14 @@ impl SettingsSheet {
     }
 
     /// `button`, made to work by `working`, unless a link is being checked:
-    /// changing the plugins then would drop the check, so it waits, faded
-    /// and saying why.
+    /// what the check found replaces and keeps is read from the plugins as
+    /// they were when it started, so they wait, faded and saying why.
     pub(super) fn unless_checking(
         &self,
         button: Stateful<Div>,
         working: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
     ) -> Stateful<Div> {
-        if self.add.busy {
+        if self.add.checking {
             button.opacity(0.5).aria_description(WAITS_FOR_CHECK)
         } else {
             working(button)

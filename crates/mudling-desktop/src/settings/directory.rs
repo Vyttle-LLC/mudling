@@ -356,11 +356,11 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// The work of adding a plugin ended, with `problem` if it failed, which
-    /// shows on the page the player is on.
+    /// The work of installing a plugin ended, with `problem` if it failed,
+    /// which shows on the page the player is on. A link being checked has
+    /// its own end: [`SettingsSheet::link_checked`].
     fn plugin_work_ended(&mut self, problem: Option<SharedString>) {
         self.directory.busy = None;
-        self.add.busy = false;
         match self.page {
             Page::AddPlugin => self.add.problem = problem,
             _ => self.directory.problem = problem,

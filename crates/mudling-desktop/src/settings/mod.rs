@@ -2091,6 +2091,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_link_check_ends_only_with_its_own_result(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.open_add_plugin(window, cx);
+            sheet.add.checking = true;
+            // A directory install that ends meanwhile, either way.
+            sheet.installed(std::collections::BTreeMap::new(), Vec::new(), cx);
+            sheet.install_failed("Other wasn't installed.".to_owned(), cx);
+            assert!(sheet.add.checking, "the link is still being checked");
+
+            let why = "The plugin at x wasn't added: it failed a check.".to_owned();
+            sheet.link_checked(Err(why.clone()), window, cx);
+            assert!(!sheet.add.checking);
+            assert_eq!(sheet.add.problem.as_deref(), Some(why.as_str()));
+        });
+    }
+
+    #[gpui::test]
     fn removing_an_added_folder_asks_then_forgets_only_that_folder(cx: &mut TestAppContext) {
         let (sheet, cx) = plugins_with_one_waiting(cx);
         sheet.update_in(cx, |sheet, window, cx| {
