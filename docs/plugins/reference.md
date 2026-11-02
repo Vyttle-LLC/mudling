@@ -466,7 +466,8 @@ off, because a log doesn't arrive at the pace it was sent.
 
 ### Output
 
-Lines start with a fixed word, so a script can read them:
+Each line starts with a fixed word, or is indented under a `caught` line, and a
+`fail` line holds its whole reason, so a script can read them:
 
 | Line | Meaning |
 | --- | --- |

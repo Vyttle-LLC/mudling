@@ -48,10 +48,34 @@ fn test_log(plugin: &Path, log: &str) -> Run {
     mudling(&["plugin", "test", text(plugin), "--log", text(&path)])
 }
 
+/// The words the reference says a line of output starts with.
+const LINE_STARTS: [&str; 8] = [
+    "plugin ", "log ", "caught ", "  ", "skipped ", "cost ", "updated ", "fail ",
+];
+
+/// It failed, with `reason` on a `fail` line, as registry CI reads them.
 fn assert_fails(run: &Run, reason: &str) {
     assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
-    assert!(run.stdout.contains(reason), "{}", run.stdout);
-    assert!(run.stdout.ends_with("failed\n"), "{}", run.stdout);
+    let (last, lines) = run
+        .stdout
+        .lines()
+        .collect::<Vec<_>>()
+        .split_last()
+        .map_or(("", Vec::new()), |(last, lines)| (*last, lines.to_vec()));
+    assert_eq!(last, "failed", "{}", run.stdout);
+    for line in &lines {
+        assert!(
+            LINE_STARTS.iter().any(|start| line.starts_with(start)),
+            "an unmarked line: {line}"
+        );
+    }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("fail ") && line.contains(reason)),
+        "{}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -101,11 +125,7 @@ fn a_plugin_that_does_not_load_fails() {
     fs::write(manifest, declared.replace("api = 1", "api = 2")).unwrap();
     let run = test_log(&plugin, "Bo waves.\n");
     assert_fails(&run, "fail load: ");
-    assert!(
-        run.stdout.contains("`api = 2` isn't supported"),
-        "{}",
-        run.stdout
-    );
+    assert_fails(&run, "`api = 2` isn't supported");
 }
 
 #[test]
@@ -118,11 +138,8 @@ fn a_pattern_that_does_not_compile_fails() {
     .unwrap();
     let run = test_log(&plugin, "Bo waves.\n");
     assert_fails(&run, "fail load: ");
-    assert!(
-        run.stdout.contains("the pattern doesn't compile"),
-        "{}",
-        run.stdout
-    );
+    assert_fails(&run, "the pattern doesn't compile");
+    assert_fails(&run, "unclosed group");
 }
 
 #[test]
@@ -154,11 +171,7 @@ fn a_hook_that_raises_an_error_fails() {
     .unwrap();
     let run = test_log(&plugin, "Welcome back, Ana.\n");
     assert_fails(&run, "fail hook: on_welcome failed 1 times");
-    assert!(
-        run.stdout.contains("write_store:elsewhere"),
-        "{}",
-        run.stdout
-    );
+    assert_fails(&run, "write_store:elsewhere");
 }
 
 #[test]
@@ -190,6 +203,18 @@ fn a_test_fails_when_its_transcript_changes_until_it_is_updated() {
 
     let update = mudling(&["plugin", "test", text(&plugin), "--update"]);
     assert_eq!(update.code, 0, "{}", update.stdout);
+    let run = test_plugin(&plugin);
+    assert_eq!(run.code, 0, "{}", run.stdout);
+}
+
+#[test]
+fn a_test_that_should_catch_nothing_passes_once_updated() {
+    let (_parent, plugin) = scaffolded();
+    fs::write(plugin.join("tests/quiet.txt"), "Bo waves.\n").unwrap();
+    let update = mudling(&["plugin", "test", text(&plugin), "--update"]);
+    assert_eq!(update.code, 0, "{}", update.stdout);
+    let expected = fs::read_to_string(plugin.join("tests/quiet.expected")).unwrap();
+    assert_eq!(expected, "");
     let run = test_plugin(&plugin);
     assert_eq!(run.code, 0, "{}", run.stdout);
 }

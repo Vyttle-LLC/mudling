@@ -70,9 +70,15 @@ fn replay_and_measure(plugin: &Plugin, lines: &[String]) -> Result<(Replay, Cost
 }
 
 fn failed_to_load(error: &PluginError) -> bool {
-    println!("fail load: {error}");
+    println!("fail load: {}", one_line(&error.to_string()));
     println!("failed");
     false
+}
+
+/// A reason that may run over several lines, as TOML errors and Luau
+/// tracebacks do, on one: a script reads a `fail` line alone.
+fn one_line(reason: &str) -> String {
+    reason.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `tests/*.txt`, in name order. No folder means no tests.
@@ -112,7 +118,7 @@ fn print_caught(caught: &[Caught]) {
 /// Says what hooks did wrong; returns whether they did nothing wrong.
 fn report_hooks(replay: &Replay) -> bool {
     for ((hook, overran), failures) in &replay.failures {
-        let (times, first) = (failures.times, &failures.first);
+        let (times, first) = (failures.times, one_line(&failures.first));
         if *overran {
             println!("fail budget: the hook {hook} overran {times} times: {first}");
         } else {
@@ -142,8 +148,7 @@ fn report_cost(cost: &Cost) -> bool {
 fn compare(log: &Path, transcript: &[String], update: bool) -> Result<bool, String> {
     let path = log.with_extension(EXPECTED_EXTENSION);
     if update {
-        let mut text = transcript.join("\n");
-        text.push('\n');
+        let text: String = transcript.iter().map(|line| format!("{line}\n")).collect();
         fs::write(&path, text)
             .map_err(|error| format!("couldn't write {}: {error}", path.display()))?;
         println!("updated {}", path.display());
