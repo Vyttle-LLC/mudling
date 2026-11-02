@@ -48,7 +48,8 @@ pub fn replay(plugin: &Plugin, lines: &[String]) -> Result<Replay, PluginError> 
     Ok(reader.replay)
 }
 
-/// Whether the plugin runs: its hooks load and its patterns build together.
+/// A host of the built-in defaults and `plugin`, without cost sampling. It
+/// fails if their patterns won't compile together.
 pub fn host_with(plugin: Option<&Plugin>) -> Result<PluginHost, PluginError> {
     let plugins = [defaults::plugin()].into_iter().chain(plugin.cloned());
     let mut host = PluginHost::new(plugins)?;
