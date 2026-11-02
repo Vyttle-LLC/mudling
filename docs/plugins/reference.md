@@ -378,7 +378,7 @@ its top level, as it loads, goes nowhere.
 | --- | --- |
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
-| `send_commands` | `mud.send`. The plugin's hooks don't run until the player approves it. In the desktop app today, turning a plugin on approves it. |
+| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. Today only the desktop app's `--enable` approves a plugin: one turned on in Settings stays loaded with its hooks off until then. |
 
 A plugin with no hooks needs no permissions.
 
