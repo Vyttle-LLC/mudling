@@ -4,8 +4,10 @@ The Avatar game plugin (avatar.outland.org): TOML with Luau hooks, written
 only against the public plugin API (PRD §11). Everything MUDling knows about
 Avatar is in this folder; the core holds none of its wording.
 
-It's also the first worked example for plugin authors (the cookbook,
-VYT-235): each file says what it reads, and each regex has a comment.
+It's also the first worked example for plugin authors: each file says what it
+reads, and each regex has a comment. The
+[cookbook](../../docs/plugins/cookbook.md) works through it, quoting these files,
+so a change to a quoted line goes there too.
 
 The desktop app ships it compiled in (`bundled()` in `src/lib.rs`, which names
 every file here, so a new file goes there too). It stays off until the player
@@ -210,6 +212,10 @@ and runs scrubbed fixtures (`tests/fixtures/`) through the line pipeline,
 the plugin host and the Luau hooks. Fixtures are the game's own tables and
 messages with player-specific values changed; never add session logs, other
 players' names, or channel text.
+
+`mudling plugin test plugins/avatar` replays `tests/sample.txt`, made-up text,
+and compares what it produces with `tests/sample.expected`. See the
+[reference](../../docs/plugins/reference.md#commands).
 
 `cargo run --release -p mudling-plugin-avatar --bin avatar-replay -- <logs…>`
 replays local session logs and counts the reads each table completed, and

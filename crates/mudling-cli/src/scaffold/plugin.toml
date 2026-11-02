@@ -1,0 +1,20 @@
+# A game plugin for MUDling. docs/plugins/ in the MUDling repo has the API
+# reference, and a cookbook that works through a real plugin.
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+api = 1
+license = "MIT"
+layer = "game"
+# What the hooks in hooks.luau may do.
+permissions = ["write_store:character"]
+
+[servers]
+# The game's address, and its MSSP name if it sends one.
+hosts = ["{id}.example"]
+
+[points]
+text = "text.toml"
+
+[hooks]
+files = ["hooks.luau"]

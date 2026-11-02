@@ -3844,6 +3844,10 @@ dependencies = [
 [[package]]
 name = "mudling-cli"
 version = "0.0.0"
+dependencies = [
+ "mudling-core",
+ "tempfile",
+]
 
 [[package]]
 name = "mudling-core"

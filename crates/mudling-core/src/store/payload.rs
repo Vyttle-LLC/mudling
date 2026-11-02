@@ -20,10 +20,12 @@ use crate::map::{
 use crate::net::DisconnectReason;
 use crate::persist::{GearSet, Timestamp};
 use crate::plugin::PluginCost;
+use crate::plugin::inspect::InspectedLine;
 use crate::plugin::luau::{PluginDisabled, Value};
 use crate::repo::AppSettings;
 use crate::scrollback::Scrollback;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::stats::Summary;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -587,6 +589,9 @@ pub struct SettingsState {
     /// Each plugin's sampled cost per line, in the order added. Refreshed
     /// every few seconds while connected.
     pub plugin_costs: Vec<PluginCost>,
+    /// What all the plugins cost a sampled line together, refreshed with
+    /// `plugin_costs`.
+    pub plugin_line_cost: Option<Summary>,
     /// The plugins the core turned off, and why, until
     /// [`crate::session::Session::turn_plugin_on`] brings one back.
     pub turned_off: Vec<PluginDisabled>,
@@ -643,6 +648,48 @@ impl StoreState for CuesState {
                 earlier.push(sound);
             }
         }
+    }
+}
+
+/// How many lines the inspector keeps.
+pub const INSPECTED_LINES: usize = 200;
+
+/// The newest lines the chat showed while the inspector was open, oldest
+/// first. Held in memory only, for as long as it stays open.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectorState {
+    pub lines: VecDeque<InspectedLine>,
+}
+
+/// New lines, after forgetting the old ones if `clear` says so.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectorChange {
+    pub clear: bool,
+    pub lines: Vec<InspectedLine>,
+}
+
+impl StoreState for InspectorState {
+    type Change = InspectorChange;
+
+    fn apply(&mut self, change: &InspectorChange) -> bool {
+        let cleared = change.clear && !self.lines.is_empty();
+        if change.clear {
+            self.lines.clear();
+        }
+        self.lines.extend(change.lines.iter().cloned());
+        let overflow = self.lines.len().saturating_sub(INSPECTED_LINES);
+        self.lines.drain(..overflow);
+        cleared || !change.lines.is_empty()
+    }
+
+    fn coalesce(earlier: &mut InspectorChange, later: InspectorChange) {
+        if later.clear {
+            *earlier = later;
+            return;
+        }
+        earlier.lines.extend(later.lines);
+        let overflow = earlier.lines.len().saturating_sub(INSPECTED_LINES);
+        earlier.lines.drain(..overflow);
     }
 }
 

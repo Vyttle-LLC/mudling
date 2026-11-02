@@ -1,0 +1,6 @@
+[connected]
+Welcome back, Ana.
+<20hp 30m>
+It starts to rain.
+Bo says 'nice weather'
+<20hp 30m>

@@ -20,7 +20,8 @@
 //! `--long-lines` measures all of this with lines that wrap.
 //!
 //! `--settings-open` runs all of this with the settings sheet open, and
-//! `--settings-section` with Data & sync, Vault or Logs open and filled.
+//! `--settings-section` with Plugins, Data & sync, Vault or Logs open and
+//! filled, the Inspector recording every line, or a server's plugins.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -63,12 +64,14 @@ use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
-use crate::settings::Section;
+use crate::settings::{PluginRow, Section, ServerPlugins, SuggestedPlugin};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{
     ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, Window, point, px,
 };
+use mudling_core::Line;
+use mudling_core::defaults::detect::Source;
 use mudling_core::defaults::hud::Vital;
 use mudling_core::gear::sets::GearRules;
 use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
@@ -77,16 +80,18 @@ use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, Pla
 use mudling_core::persist::{
     self, Batch, Database, Exit, GearPiece, GearSet, Link, Meta, Room, Sighting, StatMap, Timestamp,
 };
+use mudling_core::plugin::inspect::{Claim, InspectedLine};
 use mudling_core::plugin::luau::Value;
 use mudling_core::plugin::points::Keywords;
+use mudling_core::plugin::{Layer, PluginId};
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
     Affect, CHARACTER_INVENTORY, CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CarriedBag,
-    CarriedItem, CharactersState, ConnectionStatus, Improved, Item, ItemsState, MapState,
-    MobsState, Occupant, RoomContents, RoomState, SettingsState, SheetState, SkillRow, StoreHub,
-    Target, TargetState, Versioned, VitalsState, WornItem,
+    CarriedItem, CharactersState, ConnectionStatus, Improved, InspectorChange, Item, ItemsState,
+    MapState, MobsState, Occupant, RoomContents, RoomState, SettingsState, SheetState, SkillRow,
+    StoreHub, Target, TargetState, Versioned, VitalsState, WornItem,
 };
 use mudling_core::telnet::gmcp;
 use mudling_core::vault::EntryKey;
@@ -1189,7 +1194,133 @@ pub fn open_sample_section(
             .to_vec();
         sheet.show_sample_vault(entries, 1, cx);
         sheet.show_logs(LogSettings::default(), sample_logs(), cx);
+        sheet.show_plugins(sample_plugins(), cx);
     });
+}
+
+/// A page of the sheet to measure, as `--settings-section` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplePage {
+    Inspector,
+    ServerPlugins,
+}
+
+/// Opens the Inspector with made-up plugins. In a measured run the session
+/// behind it records for real; `lines` fills it where there's none.
+pub fn open_sample_inspector(
+    shell: &mut Shell,
+    lines: &[InspectedLine],
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    open_sample_section(shell, Section::Plugins, window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.open_inspector(window, cx);
+        let change = InspectorChange {
+            clear: false,
+            lines: lines.to_vec(),
+        };
+        sheet.show_inspected(&change, cx);
+    });
+}
+
+/// A made-up server's plugins, its suggestion still open.
+pub fn open_sample_server_plugins(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_sample_section(shell, Section::Servers, window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.show_server_plugins(sample_server_plugins(), window, cx);
+    });
+}
+
+pub fn sample_server_plugins() -> ServerPlugins {
+    let mut plugins = sample_plugins();
+    plugins.retain(|row| row.layer != Layer::Game);
+    let game = PluginRow {
+        on: false,
+        ..sample_plugins().swap_remove(1)
+    };
+    plugins.push(game.clone());
+    ServerPlugins {
+        host: SAMPLE_HOST.into(),
+        suggested: Some(SuggestedPlugin {
+            plugin: game.id,
+            name: game.name,
+            source: Source::Host,
+        }),
+        plugins,
+        triggers: 2,
+        aliases: 1,
+    }
+}
+
+/// Made-up lines in the inspector: one claimed by two plugins, and one by none.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn sample_inspected() -> Vec<InspectedLine> {
+    let claim = |plugin: &str, events: &[&str]| Claim {
+        plugin: PluginId::try_from(plugin.to_owned()).expect("the id is valid"),
+        events: events.iter().map(|&event| Arc::from(event)).collect(),
+    };
+    let line = |text: &str, claims, micros| InspectedLine {
+        line: Line::command(text),
+        claims,
+        took: Duration::from_micros(micros),
+    };
+    vec![
+        line(
+            "The Great Hall",
+            vec![claim("sample-game", &["room.title"])],
+            3,
+        ),
+        line(
+            "Obvious exits: north south up",
+            vec![
+                claim("sample-game", &["exits"]),
+                claim("sample-tweaks", &[]),
+            ],
+            4,
+        ),
+        line("You feel a little better.", Vec::new(), 1),
+        line(
+            "A cave troll arrives from the north.",
+            vec![claim("sample-game", &["mob.arrives"])],
+            3,
+        ),
+    ]
+}
+
+/// A full list of made-up plugins, and the real defaults, whose cost the
+/// session goes on publishing.
+pub fn sample_plugins() -> Vec<PluginRow> {
+    let row = |name: &str, layer| PluginRow {
+        id: PluginId::try_from(name.to_lowercase().replace(' ', "-")).expect("the id is valid"),
+        name: name.to_owned().into(),
+        layer,
+        version: "1.0.0 · MIT".into(),
+        holds: "".into(),
+        always_on: false,
+        on: true,
+        flips: 0,
+        elsewhere: None,
+    };
+    let mut rows = vec![
+        PluginRow {
+            holds: "3 triggers, 2 aliases".into(),
+            ..row("Sample tweaks", Layer::Override)
+        },
+        row("Sample game", Layer::Game),
+        row("Sample helper", Layer::Game),
+        row("Sample maps", Layer::Game),
+        row("Sample colors", Layer::Game),
+        row("Sample chat", Layer::Game),
+        row("Sample vitals", Layer::Game),
+    ];
+    let defaults = mudling_core::defaults::plugin();
+    rows.push(PluginRow {
+        id: defaults.id().clone(),
+        always_on: true,
+        ..row("MUDling defaults", Layer::Default)
+    });
+    rows
 }
 
 /// Made-up logs with no files behind them.

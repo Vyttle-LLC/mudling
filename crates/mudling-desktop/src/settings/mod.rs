@@ -9,9 +9,11 @@
 
 mod appearance;
 mod data;
+mod inspector;
 mod logs;
 mod plugins;
 mod saved;
+mod server_plugins;
 mod servers;
 mod shortcuts;
 mod triggers;
@@ -19,6 +21,7 @@ mod vault;
 
 pub use plugins::PluginRow;
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
+pub use server_plugins::{ServerPlugins, SuggestedPlugin};
 pub use servers::SavedServer;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
@@ -34,8 +37,8 @@ use gpui::{
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
 use mudling_core::session::RuleEdit;
-use mudling_core::store::RulesState;
-use mudling_core::store::SettingsState;
+use mudling_core::stats::Summary;
+use mudling_core::store::{InspectorState, RulesState, SettingsState};
 use std::path::PathBuf;
 
 const WIDTH: Pixels = px(1000.);
@@ -122,6 +125,18 @@ pub enum SheetEvent {
     /// The player confirmed taking this host off their list.
     RemoveServer(String),
     TurnOn(PluginId),
+    /// The Inspector page opened or closed: the session records only between.
+    Inspect(bool),
+    /// Forget what the inspector recorded, and carry on recording.
+    ClearInspector,
+    /// The player asked to see this server's plugins.
+    ServerPlugins(String),
+    /// The player's switch for `plugin` on `host`, to save.
+    SetPlugin {
+        host: SharedString,
+        plugin: PluginId,
+        on: bool,
+    },
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -135,6 +150,14 @@ pub enum SheetEvent {
     SyncNow,
     LockAfter(LockAfter),
     VaultUnlocked,
+}
+
+/// What the pane shows: its section, or a page opened from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Page {
+    Section,
+    Inspector,
+    Server(ServerPlugins),
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -166,6 +189,9 @@ impl Stops {
 pub(crate) struct Pane {
     rows: Vec<AnyElement>,
     stops: Stops,
+    /// What a page puts beside its title: Back, then any action.
+    leading: Option<AnyElement>,
+    trailing: Option<AnyElement>,
 }
 
 impl Pane {
@@ -299,6 +325,7 @@ fn count_badge(count: usize, theme: &Theme) -> Div {
 
 pub struct SettingsSheet {
     section: Section,
+    page: Page,
     server: Option<SharedString>,
     servers: Vec<SavedServer>,
     /// What the last thing done to the saved servers ran into.
@@ -314,6 +341,16 @@ pub struct SettingsSheet {
     notices: Vec<String>,
     turned_off: Vec<PluginDisabled>,
     costs: Vec<PluginCost>,
+    /// What all the plugins cost a line together.
+    line_cost: Option<Summary>,
+    /// The inspector's lines, while its page is open.
+    inspector: InspectorState,
+    /// Held while the inspector has drawn lately, so new lines wait their turn.
+    inspector_cooldown: Option<Task<()>>,
+    /// Lines arrived during the cooldown, so the page is out of date.
+    inspector_late: bool,
+    /// Why the last switch couldn't be saved.
+    switch_problem: Option<SharedString>,
     /// The notice whose details are showing.
     details: Option<String>,
     /// The chat faces this machine has.
@@ -346,6 +383,7 @@ impl SettingsSheet {
         .detach();
         SettingsSheet {
             section: Section::Appearance,
+            page: Page::Section,
             server: None,
             servers: Vec::new(),
             servers_problem: None,
@@ -358,6 +396,11 @@ impl SettingsSheet {
             notices: Vec::new(),
             turned_off: Vec::new(),
             costs: Vec::new(),
+            line_cost: None,
+            inspector: InspectorState::default(),
+            inspector_cooldown: None,
+            inspector_late: false,
+            switch_problem: None,
             details: None,
             fonts: vec![CHAT_FONTS[0]],
             data: data::DataPane::default(),
@@ -403,6 +446,7 @@ impl SettingsSheet {
     }
 
     pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
+        self.leave_page(cx);
         if self.section == Section::Vault && section != Section::Vault {
             self.forget_typed(cx);
         }
@@ -420,6 +464,51 @@ impl SettingsSheet {
         cx.notify();
     }
 
+    /// Back to the section. Leaving the inspector ends its recording, and
+    /// forgets what it held.
+    pub fn leave_page(&mut self, cx: &mut Context<SettingsSheet>) {
+        if self.page == Page::Inspector {
+            self.forget_inspected();
+            cx.emit(SheetEvent::Inspect(false));
+        }
+        self.page = Page::Section;
+        cx.notify();
+    }
+
+    fn go_to_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        self.page = page;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        // The first stop of any page is its Back.
+        if let Some(back) = self.stops.handles.first() {
+            window.focus(back, cx);
+        }
+        cx.notify();
+    }
+
+    /// The button that leaves a page for `section`.
+    fn back_button(
+        &self,
+        section: Section,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> Stateful<Div> {
+        text_button("page-back", "Back", &pane.stop(cx), theme).on_click(cx.listener(
+            move |sheet, _, window, cx| {
+                sheet.leave_page(cx);
+                window.focus(&sheet.tabs[section as usize], cx);
+            },
+        ))
+    }
+
+    fn page_title(&self) -> SharedString {
+        match &self.page {
+            Page::Section => self.section.title().into(),
+            Page::Inspector => "Inspector".into(),
+            Page::Server(page) => format!("Plugins for {}", page.host).into(),
+        }
+    }
+
     /// What Data & sync adds to the sprocket's count.
     pub fn sync_problems(&self) -> usize {
         self.data.problems()
@@ -434,6 +523,37 @@ impl SettingsSheet {
         self.servers = servers;
         self.servers_problem = problem.map(Into::into);
         cx.notify();
+    }
+
+    pub fn show_servers_problem(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
+        self.servers_problem = Some(problem.into());
+        cx.notify();
+    }
+
+    /// Whether the player changed a switch for the session running, which
+    /// won't follow it.
+    pub fn reconnect_to_apply(&self) -> bool {
+        self.plugins.iter().any(|row| row.flips > 0)
+    }
+
+    #[cfg(test)]
+    pub fn close_stop(&self) -> FocusHandle {
+        self.close.clone()
+    }
+
+    #[cfg(test)]
+    pub fn is_asking_to_remove(&self) -> bool {
+        self.removing.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn on_a_page(&self) -> bool {
+        self.page != Page::Section
+    }
+
+    #[cfg(test)]
+    pub fn inspected_lines(&self) -> usize {
+        self.inspector.lines.len()
     }
 
     #[cfg(test)]
@@ -481,12 +601,14 @@ impl SettingsSheet {
         let changed = self.server.as_deref() != server
             || self.notices != settings.notices
             || self.turned_off != settings.turned_off
-            || self.costs != settings.plugin_costs;
+            || self.costs != settings.plugin_costs
+            || self.line_cost != settings.plugin_line_cost;
         if changed {
             self.server = server.map(|server| server.to_owned().into());
             self.notices.clone_from(&settings.notices);
             self.turned_off.clone_from(&settings.turned_off);
             self.costs.clone_from(&settings.plugin_costs);
+            self.line_cost = settings.plugin_line_cost;
             cx.notify();
         }
     }
@@ -637,24 +759,23 @@ impl SettingsSheet {
         let mut pane = Pane {
             rows: Vec::new(),
             stops,
+            leading: None,
+            trailing: None,
         };
-        match self.section {
-            Section::Servers => self.fill_servers(&mut pane, theme, cx),
-            Section::Plugins => self.fill_plugins(&mut pane, theme, cx),
-            Section::Triggers => self.fill_triggers_section(&mut pane, theme, cx),
-            Section::Appearance => self.fill_appearance(&mut pane, theme, cx),
-            Section::Shortcuts => shortcuts::fill(&mut pane, theme),
-            Section::Logs => self.fill_logs(&mut pane, theme, cx),
-            Section::Data => self.fill_data(&mut pane, theme, cx),
-            Section::Vault => self.fill_vault(&mut pane, theme, cx),
+        let page = self.page.clone();
+        match (&page, self.section) {
+            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
+            (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
+            (Page::Section, section) => self.fill_section(section, &mut pane, theme, cx),
         }
+
         if let Some(wanted) = self.reveal.take()
             && let Some(at) = pane.stops.in_use().iter().position(|stop| *stop == wanted)
         {
             self.scroll.scroll_to_item(pane.stops.rows[at]);
         }
         self.stops = pane.stops;
-        let title = self.section.title();
+        let title = self.page_title();
         let header = div()
             .flex_none()
             .h(px(84.))
@@ -666,21 +787,40 @@ impl SettingsSheet {
             .border_color(theme.divider)
             .child(
                 div()
-                    .id("settings-title")
-                    .role(Role::Heading)
-                    .aria_label(title)
-                    .aria_level(2)
-                    .font_family(HEADING_FONT)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(19.))
-                    .text_color(theme.text)
-                    .child(title),
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(pane.leading)
+                    .child(
+                        div()
+                            .id("settings-title")
+                            .role(Role::Heading)
+                            .aria_label(title.clone())
+                            .aria_level(2)
+                            .min_w_0()
+                            .truncate()
+                            .font_family(HEADING_FONT)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(19.))
+                            .text_color(theme.text)
+                            .child(title.clone()),
+                    ),
             )
             .child(
-                control("settings-close", "Close settings", &self.close, theme)
-                    .size(px(32.))
-                    .on_click(cx.listener(|sheet, _, _, cx| sheet.close(cx)))
-                    .child(Icon::WindowClose.svg().size(px(16.)).text_color(theme.text)),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(pane.trailing)
+                    .child(
+                        control("settings-close", "Close settings", &self.close, theme)
+                            .size(px(32.))
+                            .on_click(cx.listener(|sheet, _, _, cx| sheet.close(cx)))
+                            .child(Icon::WindowClose.svg().size(px(16.)).text_color(theme.text)),
+                    ),
             );
         div()
             .id("settings-pane")
@@ -703,6 +843,27 @@ impl SettingsSheet {
                     .track_scroll(&self.scroll)
                     .children(pane.rows),
             )
+    }
+}
+
+impl SettingsSheet {
+    fn fill_section(
+        &mut self,
+        section: Section,
+        pane: &mut Pane,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        match section {
+            Section::Servers => self.fill_servers(pane, theme, cx),
+            Section::Plugins => self.fill_plugins(pane, theme, cx),
+            Section::Triggers => self.fill_triggers_section(pane, theme, cx),
+            Section::Appearance => self.fill_appearance(pane, theme, cx),
+            Section::Shortcuts => shortcuts::fill(pane, theme),
+            Section::Logs => self.fill_logs(pane, theme, cx),
+            Section::Data => self.fill_data(pane, theme, cx),
+            Section::Vault => self.fill_vault(pane, theme, cx),
+        }
     }
 }
 
@@ -796,6 +957,7 @@ fn chosen_ground(chosen: bool, theme: &Theme) -> Hsla {
 
 #[cfg(test)]
 mod tests {
+    use super::inspector::REFRESH_EVERY;
     use super::*;
     use crate::chat::{COLUMN_PADDING, min_column_width};
     use crate::hud::HudPlacement;
@@ -807,6 +969,7 @@ mod tests {
     };
     use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
     use mudling_core::plugin::luau::DisabledReason;
+    use mudling_core::store::InspectorChange;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::Duration;
@@ -879,6 +1042,74 @@ mod tests {
             cx.debug_bounds("settings-sheet").is_some(),
             "it still shows"
         );
+    }
+
+    fn inspected(lines: usize) -> InspectorChange {
+        let line = crate::measure::sample_inspected().swap_remove(0);
+        InspectorChange {
+            clear: false,
+            lines: vec![line; lines],
+        }
+    }
+
+    #[gpui::test]
+    fn the_inspector_draws_on_a_schedule_however_many_lines_arrive(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        cx.run_until_parked();
+        let before = renders(&sheet, cx);
+
+        let apart = Duration::from_millis(30);
+        for _ in 0..100 {
+            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+            cx.run_until_parked();
+            cx.executor().advance_clock(apart);
+        }
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        let drawn = renders(&sheet, cx) - before;
+        let at_most = (apart * 100).div_duration_f64(REFRESH_EVERY) as usize + 2;
+        assert!(
+            (3..=at_most).contains(&drawn),
+            "100 lines drew {drawn} times"
+        );
+        assert_eq!(sheet.read_with(cx, |sheet, _| sheet.inspected_lines()), 100);
+        assert!(cx.debug_bounds("inspected-0").is_some(), "the newest shows");
+
+        let settled = renders(&sheet, cx);
+        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            renders(&sheet, cx),
+            settled + 1,
+            "the first line draws at once"
+        );
+        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), settled + 1, "the next waits its turn");
+        cx.executor().advance_clock(REFRESH_EVERY);
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), settled + 2, "and draws once it's due");
+    }
+
+    #[gpui::test]
+    fn leaving_the_inspector_cancels_the_draw_it_was_waiting_for(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        (0..2).for_each(|_| {
+            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        });
+        sheet.update(cx, |sheet, cx| sheet.leave_page(cx));
+        cx.run_until_parked();
+        let left = renders(&sheet, cx);
+        cx.executor().advance_clock(REFRESH_EVERY * 2);
+        cx.run_until_parked();
+        assert_eq!(renders(&sheet, cx), left);
+        assert_eq!(sheet.read_with(cx, |sheet, _| sheet.inspected_lines()), 0);
     }
 
     #[gpui::test]

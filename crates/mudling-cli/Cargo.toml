@@ -1,6 +1,6 @@
 [package]
 name = "mudling-cli"
-description = "The mudling command line, including `mudling plugin …`. A stub until Phase 1."
+description = "The mudling command line: `mudling plugin new` and `mudling plugin test`, for plugin authors."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,12 @@ publish.workspace = true
 [[bin]]
 name = "mudling"
 path = "src/main.rs"
+
+[dependencies]
+mudling-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

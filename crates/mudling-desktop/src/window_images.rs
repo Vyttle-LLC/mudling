@@ -33,7 +33,8 @@ use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
-use mudling_core::plugin::{Layer, PluginId};
+use mudling_core::plugin::{Layer, PluginCost, PluginId};
+use mudling_core::stats::Summary;
 use mudling_core::store::{
     ConnectionStatus, Diff, Revision, RulesState, SettingsState, TerminalChange, TerminalState,
     VitalsState,
@@ -84,8 +85,20 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         id: PluginId::try_from(id.to_owned()).expect("the id is valid"),
         name: name.to_owned().into(),
         layer,
-        detail: "Version 1.0.0 · MIT".into(),
+        version: "1.0.0 · MIT".into(),
+        holds: "".into(),
+        always_on: false,
         on,
+        flips: 0,
+        elsewhere: None,
+    }
+}
+
+fn sample_cost(id: &str, nanos: u64) -> PluginCost {
+    PluginCost {
+        plugin: PluginId::try_from(id.to_owned()).expect("the id is valid"),
+        sampled_lines: 1,
+        per_line: Summary::of(&[Duration::from_nanos(nanos)]),
     }
 }
 
@@ -94,6 +107,13 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
 fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut Context<Shell>) {
     let settings = SettingsState {
         server: Some("mud.example".to_owned()),
+        plugin_costs: vec![
+            sample_cost("sample-tweaks", 300),
+            sample_cost("sample-game", 2_800),
+            sample_cost("sample-helper", 9_400),
+            sample_cost("sample-defaults", 1_200),
+        ],
+        plugin_line_cost: Summary::of(&[Duration::from_nanos(4_100)]),
         turned_off: vec![PluginDisabled {
             plugin: PluginId::try_from("sample-helper".to_owned()).expect("a good id"),
             reason: DisabledReason::Overran(3),
@@ -726,6 +746,24 @@ fn window_images() {
         };
         shell.show_sample_offers(&settings, cx);
     });
+    for (name, appearance) in [
+        ("settings-inspector-dark", Dark),
+        ("settings-inspector-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            open_sheet(shell, Section::Plugins, window, cx);
+            measure::open_sample_inspector(shell, &measure::sample_inspected(), window, cx);
+        });
+    }
+    for (name, appearance) in [
+        ("settings-server-plugins-dark", Dark),
+        ("settings-server-plugins-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            open_sheet(shell, Section::Servers, window, cx);
+            measure::open_sample_server_plugins(shell, window, cx);
+        });
+    }
     for (name, appearance, section) in [
         ("settings-plugins-dark", Dark, Section::Plugins),
         ("settings-plugins-light", Light, Section::Plugins),
