@@ -1382,6 +1382,7 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         sending: Sending::No,
         asks: Vec::new(),
         removable: false,
+        arrived: false,
     };
     let sender = |name, sending| PluginRow {
         sending,
@@ -1399,6 +1400,12 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         row("Sample maps", Layer::Game),
         row("Sample colors", Layer::Game),
         sender("Sample chat", Sending::Waiting),
+        PluginRow {
+            arrived: true,
+            removable: true,
+            on: false,
+            ..row("Sample notes", Layer::Game)
+        },
         row("Sample vitals", Layer::Game),
     ];
     let defaults = mudling_core::defaults::plugin();

@@ -16,6 +16,8 @@ use std::time::Duration;
 
 /// How long a fetch from the registry may take before the page says so.
 const REGISTRY_WAIT: Duration = Duration::from_secs(60);
+const ARRIVED_NOTE: &str = "It arrived from another device in a copy this device didn't install.";
+const NOT_SIGNED: &str = "The directory doesn't list this copy.";
 
 /// What the installed plugins are now, read off the UI thread.
 struct PluginsNow {
@@ -146,6 +148,62 @@ impl Shell {
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = remove.await;
+            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
+        }));
+    }
+
+    /// Checks a copy that arrived against the directory's verified index,
+    /// which trusts it if the registry signed for it. If not, asks the
+    /// player, saying why.
+    pub(super) fn review_arrival(
+        &mut self,
+        plugin: PluginId,
+        window: &mut Window,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let host = self.game.as_ref().map(|game| game.target.host.clone());
+        let checking = plugin.clone();
+        let check = cx.background_spawn(async move {
+            let checked = launcher.registry().refresh(&Limit::after(REGISTRY_WAIT));
+            let launcher = launcher.with_installed();
+            let why = launcher.is_held_back(&checking).then(|| match checked {
+                Ok(_) => format!("{ARRIVED_NOTE} {NOT_SIGNED}"),
+                Err(refused) => {
+                    format!("{ARRIVED_NOTE} The directory couldn't vouch for it: {refused}")
+                }
+            });
+            PluginsNow::read(launcher, host.as_deref()).map(|now| (now, why))
+        });
+        self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
+            let checked = check.await;
+            let _ = shell.update_in(cx, |shell, window, cx| match checked {
+                Ok((now, why)) => {
+                    shell.show_plugins_now(Ok(now), why.is_none(), cx);
+                    if let Some(why) = why {
+                        shell.settings.update(cx, |sheet, cx| {
+                            sheet.ask_to_trust(&plugin, why, window, cx);
+                        });
+                    }
+                }
+                Err(problem) => shell.show_plugins_now(Err(problem), false, cx),
+            });
+        }));
+    }
+
+    /// Loads the copy of `plugin` that arrived, as the player chose.
+    pub(super) fn trust_plugin(&mut self, plugin: PluginId, cx: &mut Context<Shell>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let host = self.game.as_ref().map(|game| game.target.host.clone());
+        let trust = cx.background_spawn(async move {
+            PluginsNow::read(launcher.trust(&plugin)?, host.as_deref())
+        });
+        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
+            let now = trust.await;
             let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
         }));
     }

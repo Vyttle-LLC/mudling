@@ -39,6 +39,7 @@ const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins o
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
 const SENDS_COMMANDS: &str = "Sends commands";
 const NEEDS_APPROVAL: &str = "Needs your approval to send commands";
+const ARRIVED: &str = "Arrived from another device";
 const SENDS_ASK: &str =
     "send commands to the game, which show in the chat like yours and are rate-limited";
 const READS_ASK: &str = "read your character's state";
@@ -71,8 +72,11 @@ pub struct PluginRow {
     pub sending: Sending,
     /// What its hooks ask to do, as the approval says it.
     pub asks: Vec<SharedString>,
-    /// It came from the directory, so the player can take it out.
+    /// It's in the data folder, not built in, so the player can take it out.
     pub removable: bool,
+    /// Its copy arrived in a shape this device doesn't trust, so it isn't
+    /// loaded until the player reviews it.
+    pub arrived: bool,
 }
 
 /// Whether a plugin's hooks send commands, and whether the player let them.
@@ -110,7 +114,7 @@ impl PluginRow {
         }
     }
 
-    pub(super) fn of(plugin: &Plugin, on: bool) -> PluginRow {
+    pub fn of(plugin: &Plugin, on: bool) -> PluginRow {
         let manifest = &plugin.manifest;
         let triggers = plugin.points.text.as_ref().map_or(0, |t| t.patterns.len());
         let aliases = plugin
@@ -134,6 +138,7 @@ impl PluginRow {
             },
             asks: asks_of(plugin),
             removable: false,
+            arrived: false,
         }
     }
 
@@ -315,12 +320,25 @@ enum CardItem<'a> {
     Footer,
 }
 
-/// The words about a plugin's approval, and the button that changes it.
-fn sending_words(sending: Sending) -> Option<(&'static str, &'static str)> {
-    match sending {
+/// What a row's status button does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// Its copy arrived and waits to be trusted.
+    Arrived,
+    Approved,
+    Waiting,
+}
+
+/// A plugin's status, as words and the button that changes it. A copy that
+/// arrived says so first: until it's trusted, nothing else about it counts.
+fn status_words(row: &PluginRow) -> Option<(Status, &'static str, &'static str)> {
+    if row.arrived {
+        return Some((Status::Arrived, ARRIVED, "Review"));
+    }
+    match row.sending {
         Sending::No => None,
-        Sending::Approved => Some((SENDS_COMMANDS, "Take back")),
-        Sending::Waiting => Some((NEEDS_APPROVAL, "Review")),
+        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, "Take back")),
+        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, "Review")),
     }
 }
 
@@ -341,10 +359,11 @@ fn plugin_row(
         Some(servers) => format!("For {servers} · Version {}", row.version),
         None => format!("Version {}", row.version),
     };
-    let sending_said = sending_words(row.sending)
-        .map(|(words, _)| format!(" {words}."))
+    let sending_said = status_words(row)
+        .map(|(_, words, _)| format!(" {words}."))
         .unwrap_or_default();
     let state = match (switched_on, overran) {
+        _ if row.arrived => "Not loaded",
         (true, _) => "On",
         (false, true) => "Turned off · over budget",
         (false, false) => "Off",
@@ -499,7 +518,9 @@ impl SettingsSheet {
         row.map(|row| row.sending)
     }
 
-    /// The line saying whether a plugin may send commands, with its button.
+    /// The line saying whether a plugin's copy is trusted and whether it may
+    /// send commands, with their buttons, and Remove for one the player
+    /// installed.
     fn actions_line(
         &self,
         row: &PluginRow,
@@ -508,20 +529,23 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> Option<AnyElement> {
         let small = |button: Stateful<Div>| button.h(px(26.)).px_2().text_size(px(13.));
-        let approval = sending_words(row.sending).map(|(words, action)| {
-            let approved = row.sending == Sending::Approved;
+        let status = status_words(row).map(|(status, words, action)| {
             let plugin = row.clone();
+            let id = match status {
+                Status::Arrived => format!("arrival-{}", row.id),
+                _ => format!("approval-{}", row.id),
+            };
             let button = small(text_button(
-                SharedString::from(format!("approval-{}", row.id)),
+                SharedString::from(id),
                 action,
                 &pane.stop(cx),
                 theme,
             ))
             .aria_label(format!("{action}: {words}, {}", row.name))
-            .on_click(cx.listener(move |sheet, _, window, cx| {
-                if approved {
-                    sheet.set_approved(plugin.id.clone(), false, cx);
-                } else {
+            .on_click(cx.listener(move |sheet, _, window, cx| match status {
+                Status::Arrived => cx.emit(SheetEvent::ReviewArrival(plugin.id.clone())),
+                Status::Approved => sheet.set_approved(plugin.id.clone(), false, cx),
+                Status::Waiting => {
                     let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
                     sheet.ask(approval, window, cx);
                 }
@@ -530,10 +554,9 @@ impl SettingsSheet {
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_color(if approved {
-                    theme.text_muted
-                } else {
-                    theme.warning
+                .text_color(match status {
+                    Status::Approved => theme.text_muted,
+                    _ => theme.warning,
                 })
                 .child(words)
                 .child(button)
@@ -547,8 +570,11 @@ impl SettingsSheet {
                 theme,
             ))
             .aria_label(format!("Remove {}", row.name))
-            .on_click(cx.listener(move |sheet, _, _, cx| sheet.remove_plugin(plugin.clone(), cx)))
+            .on_click(cx.listener(move |sheet, _, window, cx| {
+                sheet.confirm_remove(&plugin, window, cx);
+            }))
         });
+        let approval = status;
         if approval.is_none() && remove.is_none() {
             return None;
         }
@@ -588,11 +614,6 @@ impl SettingsSheet {
             self.refused = refused;
             cx.notify();
         }
-    }
-
-    fn remove_plugin(&mut self, plugin: PluginId, cx: &mut Context<SettingsSheet>) {
-        cx.emit(SheetEvent::Remove(plugin));
-        cx.notify();
     }
 
     pub fn show_switch_problem(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
@@ -885,6 +906,8 @@ impl SettingsSheet {
         let approval = self.actions_line(row, pane, theme, cx);
         let control = match (row.always_on, elsewhere) {
             (true, _) => switch(true, theme).into_any_element(),
+            // Not loaded, so there's nothing to switch until it's trusted.
+            _ if row.arrived => div().w(SWITCH_WIDTH).into_any_element(),
             (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
             (false, None) => self
                 .plugin_switch(row, switched_on, pane, theme, cx)

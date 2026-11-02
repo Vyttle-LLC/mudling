@@ -140,7 +140,8 @@ pub(super) fn card_row(at: InCard, theme: &Theme) -> Div {
         .when(bottom, |row| row.border_b_1().rounded_b_lg())
 }
 
-/// The approval a plugin that sends commands asks for.
+/// What the sheet asks before a plugin changes: approval for one that sends
+/// commands, trust for a copy that arrived, or a removal.
 pub(super) struct Approval {
     plugin: PluginId,
     name: SharedString,
@@ -154,6 +155,61 @@ pub(super) enum Purpose {
     Install(Arc<Fetched>),
     TurnOn(SharedString),
     Review,
+    /// Load a copy this device didn't install, which the directory doesn't
+    /// vouch for: the words say why.
+    Trust(SharedString),
+    Remove,
+}
+
+/// What the dialog says and offers for its purpose.
+struct Words {
+    title: String,
+    /// Said first, before what it asks to do.
+    lead: Option<SharedString>,
+    shows_asks: bool,
+    footer: &'static str,
+    without: Option<&'static str>,
+    with: &'static str,
+}
+
+const TRUST_FOOTER: &str = "Trusting this copy loads it from your next connect. It can send \
+     commands only if you approve that too.";
+const REMOVE_FOOTER: &str = "It comes off this device, and off your other devices when they \
+     sync. Its approval goes with it, and it stops at your next connect.";
+
+impl Approval {
+    fn words(&self) -> Words {
+        let name = &self.name;
+        let approval = |without, with| Words {
+            title: format!("Let {name} send commands?"),
+            lead: None,
+            shows_asks: true,
+            footer: CANT_REACH,
+            without,
+            with,
+        };
+        match &self.purpose {
+            Purpose::Install(_) => approval(Some("Install without sending"), "Allow and install"),
+            Purpose::TurnOn(_) => approval(Some("Turn on without sending"), "Allow and turn on"),
+            Purpose::Review => approval(None, "Allow"),
+            Purpose::Trust(why) => Words {
+                title: format!("Load this copy of {name}?"),
+                lead: Some(why.clone()),
+                shows_asks: !self.asks.is_empty(),
+                footer: TRUST_FOOTER,
+                without: None,
+                with: "Trust this copy",
+            },
+            Purpose::Remove => Words {
+                title: format!("Remove {name}?"),
+                lead: None,
+                shows_asks: false,
+                footer: REMOVE_FOOTER,
+                without: None,
+                with: "Remove",
+            },
+        }
+    }
 }
 
 impl Approval {
@@ -471,6 +527,36 @@ impl SettingsSheet {
         self.ask(approval, window, cx);
     }
 
+    /// Asks before taking `plugin` out of the data folder.
+    pub fn confirm_remove(
+        &mut self,
+        plugin: &PluginId,
+        window: &mut Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        let Some(row) = self.plugins.iter().find(|row| row.id == *plugin) else {
+            return;
+        };
+        let confirm = Approval::for_row(row, Purpose::Remove, window, cx);
+        self.ask(confirm, window, cx);
+    }
+
+    /// Asks whether to trust the copy of `plugin` that arrived, which the
+    /// directory didn't vouch for, saying `why`.
+    pub fn ask_to_trust(
+        &mut self,
+        plugin: &PluginId,
+        why: String,
+        window: &mut Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        let Some(row) = self.plugins.iter().find(|row| row.id == *plugin) else {
+            return;
+        };
+        let approval = Approval::for_row(row, Purpose::Trust(why.into()), window, cx);
+        self.ask(approval, window, cx);
+    }
+
     /// Opens the approval over the sheet, with the keyboard on its first
     /// button.
     pub(super) fn ask(
@@ -527,7 +613,9 @@ impl SettingsSheet {
                 self.set_plugin(host, plugin, true, cx);
             }
             Purpose::Review if go_on && send => self.set_approved(plugin, true, cx),
-            Purpose::TurnOn(_) | Purpose::Review => {}
+            Purpose::Trust(_) if go_on => cx.emit(SheetEvent::Trust(plugin)),
+            Purpose::Remove if go_on => cx.emit(SheetEvent::Remove(plugin)),
+            Purpose::TurnOn(_) | Purpose::Review | Purpose::Trust(_) | Purpose::Remove => {}
         }
         if let Some(back) = approval.return_to {
             window.focus(&back, cx);
@@ -569,12 +657,14 @@ impl SettingsSheet {
             leading: None,
             trailing: None,
         };
-        let (without, with) = match approval.purpose {
-            Purpose::Install(_) => (Some("Install without sending"), "Allow and install"),
-            Purpose::TurnOn(_) => (Some("Turn on without sending"), "Allow and turn on"),
-            Purpose::Review => (None, "Allow"),
-        };
-        let title = format!("Let {} send commands?", approval.name);
+        let Words {
+            title,
+            lead,
+            shows_asks,
+            footer,
+            without,
+            with,
+        } = approval.words();
         let asks = approval.asks.iter().map(|ask| {
             div()
                 .id(ask.clone())
@@ -621,18 +711,20 @@ impl SettingsSheet {
                     .text_color(theme.text)
                     .child(title),
             )
-            .child(muted_line("It asks to:", theme).pb_1())
-            .child(
-                div()
-                    .id("approval-asks")
-                    .role(Role::List)
-                    .aria_label("It asks to")
-                    .pb_3()
-                    .text_size(px(14.))
-                    .text_color(theme.text_muted)
-                    .children(asks),
-            )
-            .child(muted_line(CANT_REACH, theme).text_size(px(13.)))
+            .children(lead.map(|lead| muted_line(lead, theme).text_color(theme.text)))
+            .when(shows_asks, |dialog| {
+                dialog.child(muted_line("It asks to:", theme).pb_1()).child(
+                    div()
+                        .id("approval-asks")
+                        .role(Role::List)
+                        .aria_label("It asks to")
+                        .pb_3()
+                        .text_size(px(14.))
+                        .text_color(theme.text_muted)
+                        .children(asks),
+                )
+            })
+            .child(muted_line(footer, theme).text_size(px(13.)))
             .child(
                 div()
                     .pt_2()

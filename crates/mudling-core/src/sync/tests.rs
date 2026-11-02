@@ -1675,6 +1675,27 @@ fn two_devices_updating_one_plugin_keep_one_whole_version_of_it() {
 }
 
 #[test]
+fn a_plugin_from_another_device_waits_until_this_one_trusts_it() {
+    let world = two_devices();
+    let manifest = "id = \"tells\"\nname = \"Tells\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", manifest)]);
+    let on_mac = crate::registry::InstalledPlugins::in_data_folder(&world.mac.data);
+    on_mac.trust("tells").unwrap();
+    assert_eq!(on_mac.load().plugins.len(), 1);
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let on_ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    let loaded = on_ipad.load();
+    assert!(loaded.plugins.is_empty(), "the Mac's trust didn't travel");
+    assert_eq!(loaded.arrived.len(), 1);
+}
+
+#[test]
 fn approvals_never_leave_the_device() {
     let world = two_devices();
     world

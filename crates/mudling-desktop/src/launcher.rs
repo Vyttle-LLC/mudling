@@ -11,7 +11,9 @@ use mudling_core::defaults::detect::{ServerSignals, Suggestion, suggest};
 use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
-use mudling_core::registry::{Approvals, Fetched, InstalledPlugins, Record, Refused, Registry};
+use mudling_core::registry::{
+    Approvals, Arrived, Fetched, InstalledPlugins, Record, Refused, Registry,
+};
 use mudling_core::session::{Credentials, Session, SessionConfig};
 use mudling_core::sync::Syncer;
 use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
@@ -41,7 +43,9 @@ pub struct Launcher {
     own: Vec<Plugin>,
     /// What the data folder had when last read.
     installed: Vec<Plugin>,
-    /// What it had that wasn't loaded, and why.
+    /// What it had in a copy this device doesn't trust, so didn't load.
+    arrived: Vec<Arrived>,
+    /// What it had that wouldn't load, and why.
     refused: Vec<Refused>,
     /// The command line's `--plugin` folders.
     named: Vec<Plugin>,
@@ -75,6 +79,7 @@ impl Launcher {
             data_folder,
             own: plugins.clone(),
             installed: Vec::new(),
+            arrived: Vec::new(),
             refused: Vec::new(),
             named: Vec::new(),
             plugins,
@@ -89,24 +94,41 @@ impl Launcher {
         Launcher { named, ..self }.layered()
     }
 
-    /// With the plugins the data folder holds now, each one from the
-    /// directory checked against its hash. Reads the disk.
+    /// With the plugins the data folder holds now, each loaded only in a
+    /// copy this device trusts. Reads the disk.
     pub fn with_installed(self) -> Launcher {
-        let (installed, refused) = InstalledPlugins::in_data_folder(&self.data_folder).load();
-        for refused in &refused {
+        let loaded = InstalledPlugins::in_data_folder(&self.data_folder).load();
+        for refused in &loaded.refused {
             eprintln!("skipping the plugin {}: {}", refused.id, refused.why);
         }
         Launcher {
-            installed,
-            refused,
+            installed: loaded.plugins,
+            arrived: loaded.arrived,
+            refused: loaded.refused,
             ..self
         }
         .layered()
     }
 
-    /// Installed plugins that weren't loaded, and why.
+    /// Installed plugins that wouldn't load, and why.
     pub fn refused(&self) -> &[Refused] {
         &self.refused
+    }
+
+    /// Trusts the copy of `plugin` the data folder holds, and returns the
+    /// launcher that loads it.
+    pub fn trust(&self, plugin: &PluginId) -> Result<Launcher, String> {
+        InstalledPlugins::in_data_folder(&self.data_folder)
+            .trust(plugin.as_str())
+            .map_err(|error| format!("couldn't trust {plugin}: {error}"))?;
+        Ok(self.clone().with_installed())
+    }
+
+    /// Whether the copy of `plugin` this device holds is held back.
+    pub fn is_held_back(&self, plugin: &PluginId) -> bool {
+        self.arrived
+            .iter()
+            .any(|arrived| arrived.plugin.id() == plugin)
     }
 
     fn layered(self) -> Launcher {
@@ -184,12 +206,23 @@ impl Launcher {
         Ok(self.clone().with_installed())
     }
 
-    /// Marks what may send commands, and what came from the directory.
-    fn finished_rows(&self, rows: &mut [PluginRow]) {
+    /// Marks what may send commands and what the data folder holds, which
+    /// the player can remove, and adds a row for each copy held back.
+    fn finished_rows(&self, rows: &mut Vec<PluginRow>) {
         PluginRow::approve(rows, &self.approved());
-        let records = self.records();
+        let held_back = self.arrived.iter().map(|arrived| PluginRow {
+            arrived: true,
+            ..PluginRow::of(&arrived.plugin, false)
+        });
+        rows.extend(held_back);
+        let in_data_folder = |id: &PluginId| {
+            let installed = self.installed.iter().map(Plugin::id);
+            let arrived = self.arrived.iter().map(|arrived| arrived.plugin.id());
+            installed.chain(arrived).any(|other| other == id)
+                && !self.named.iter().any(|named| named.id() == id)
+        };
         for row in rows.iter_mut() {
-            row.removable = records.contains_key(row.id.as_str());
+            row.removable = in_data_folder(&row.id);
         }
     }
 
@@ -730,14 +763,25 @@ mod tests {
              license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n"
         );
         std::fs::write(mine.join("plugin.toml"), manifest).unwrap();
-
         let launcher = Launcher::new(folder.path().to_owned(), bundled, Vec::new(), || {});
-        let launcher = launcher.with_installed();
-        let named: Vec<_> = (launcher.plugins().iter())
-            .filter(|p| p.id().as_str() == game)
-            .collect();
-        assert_eq!(named.len(), 1);
-        assert_eq!(named[0].manifest.name, "Mine");
+        let named = |launcher: &Launcher| -> Vec<String> {
+            (launcher.plugins().iter())
+                .filter(|p| p.id().as_str() == game)
+                .map(|p| p.manifest.name.clone())
+                .collect()
+        };
+
+        let held_back = launcher.clone().with_installed();
+        assert_eq!(
+            named(&held_back),
+            ["Avatar"],
+            "a copy put there by hand waits"
+        );
+
+        InstalledPlugins::in_data_folder(folder.path())
+            .trust("mine")
+            .unwrap();
+        assert_eq!(named(&launcher.with_installed()), ["Mine"]);
     }
 
     #[test]
@@ -756,6 +800,9 @@ mod tests {
         let manifest = "id = \"good\"\nname = \"Good\"\nversion = \"1.0.0\"\napi = 1\n\
                         license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n";
         std::fs::write(good.join("plugin.toml"), manifest).unwrap();
+        InstalledPlugins::in_data_folder(folder.path())
+            .trust("good")
+            .unwrap();
 
         let launcher = installed();
         assert_eq!(launcher.plugins().len(), 1);
@@ -768,23 +815,39 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_plugin_whose_files_changed_under_it_is_refused_and_says_why() {
+    fn a_tampered_copy_with_a_matching_record_is_held_back_until_trusted() {
         let folder = TempDir::new().unwrap();
         let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
         let extras = fetched_sender("function on_go() end");
+        let id = extras.plugin.id().clone();
         let launcher = launcher.install(&extras, false).unwrap();
 
-        // As a tampered repo's sync would leave it: the same name, other code.
-        let patterns = folder.path().join(PLUGINS_FOLDER).join("extras/text.toml");
+        // As a tampered repo's sync would leave it: the same name, other
+        // code, and a record rewritten to match.
+        let plugins = folder.path().join(PLUGINS_FOLDER);
+        let swapped = "[[pattern]]\nname = \"go\"\npattern = '''.*'''\nhook = \"on_go\"\n";
+        std::fs::write(plugins.join("extras/text.toml"), swapped).unwrap();
+        let hash = mudling_core::registry::folder_hash(&plugins.join("extras")).unwrap();
+        let record = Record::Registry {
+            version: "1.0.0".to_owned(),
+            commit: "0".repeat(40),
+            hash,
+        };
         std::fs::write(
-            patterns,
-            "[[pattern]]\nname = \"all\"\npattern = '''.*'''\n",
+            plugins.join("extras.json"),
+            serde_json::to_vec(&record).unwrap(),
         )
         .unwrap();
         let launcher = launcher.with_installed();
 
-        assert!(launcher.plugins().is_empty());
-        assert_eq!(launcher.refused()[0].id, "extras");
+        assert!(launcher.plugins().is_empty(), "nothing of it runs");
+        assert!(launcher.is_held_back(&id));
+        let rows = launcher.plugin_rows("mud.example").unwrap();
+        let row = rows.iter().find(|row| row.id == id).unwrap();
+        assert!(row.arrived && row.removable && !row.on);
+
+        let launcher = launcher.trust(&id).unwrap();
+        assert_eq!(launcher.plugins().len(), 1, "the player trusted this copy");
     }
 
     #[test]

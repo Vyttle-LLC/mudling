@@ -2,7 +2,7 @@
 //! `plugins/<id>.json` beside it saying where it came from. The folder is a
 //! plugin's files exactly as fetched, so its content hash still holds.
 
-use super::{Fetched, InstallError, content_hash};
+use super::{Fetched, InstallError, Trusted, content_hash};
 use crate::git::FolderFiles;
 use crate::plugin::Plugin;
 use serde::{Deserialize, Serialize};
@@ -28,26 +28,42 @@ pub enum Record {
     },
 }
 
-const NOT_AS_INSTALLED: &str = "its files aren't the ones the directory signed for, so it \
-     wasn't loaded. Install it again from the directory";
-
-/// An installed plugin that wasn't loaded, and why.
+/// An installed plugin that wouldn't load, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused {
     pub id: String,
     pub why: String,
 }
 
+/// A plugin in the data folder whose copy this device doesn't trust, so it
+/// isn't loaded: it arrived by sync, or was put there by hand.
+#[derive(Clone, Debug)]
+pub struct Arrived {
+    /// Read to show it, never run.
+    pub plugin: Plugin,
+    pub hash: String,
+}
+
+/// What the data folder's plugins came to.
+#[derive(Clone, Debug, Default)]
+pub struct Loaded {
+    pub plugins: Vec<Plugin>,
+    pub arrived: Vec<Arrived>,
+    pub refused: Vec<Refused>,
+}
+
 /// The plugins folder of a data folder.
 #[derive(Clone, Debug)]
 pub struct InstalledPlugins {
     folder: PathBuf,
+    trusted: Trusted,
 }
 
 impl InstalledPlugins {
     pub fn in_data_folder(data_folder: &Path) -> InstalledPlugins {
         InstalledPlugins {
             folder: data_folder.join(PLUGINS_FOLDER),
+            trusted: Trusted::in_data_folder(data_folder),
         }
     }
 
@@ -70,8 +86,9 @@ impl InstalledPlugins {
         folders
     }
 
-    /// Puts `fetched` in place of any plugin with its id. The files are
-    /// written beside it first, so a crash leaves the old one or the new one.
+    /// Puts `fetched` in place of any plugin with its id, and trusts that
+    /// copy here. The files are written beside it first, so a crash leaves
+    /// the old one or the new one.
     pub fn install(&self, fetched: &Fetched) -> Result<(), InstallError> {
         let id = &fetched.entry.id;
         if !is_safe_name(id) {
@@ -80,6 +97,7 @@ impl InstalledPlugins {
             )));
         }
         let disk = |error: io::Error| InstallError::Disk(error.to_string());
+        self.trusted.trust(id, &fetched.entry.hash).map_err(disk)?;
         let incoming = self.folder.join(format!("{WORKING_PREFIX}{id}.new"));
         let outgoing = self.folder.join(format!("{WORKING_PREFIX}{id}.old"));
         remove_folder(&incoming).map_err(disk)?;
@@ -100,43 +118,37 @@ impl InstalledPlugins {
         super::save(&self.record_path(id), &record).map_err(disk)
     }
 
-    /// Loads every installed plugin. One from the directory loads only if its
-    /// files still hash to what was installed, so a repo changed by someone
-    /// else can't swap a plugin's code under its name. One with no record is
-    /// the player's own, and loads as it is.
-    pub fn load(&self) -> (Vec<Plugin>, Vec<Refused>) {
-        let mut plugins = Vec::new();
-        let mut refused = Vec::new();
+    /// Loads every installed plugin whose copy this device trusts, by its
+    /// content hash. The record beside it travels in the same repo as the
+    /// files, so it vouches for nothing: a copy that arrived any other way
+    /// is read to be shown, and waits for the player.
+    pub fn load(&self) -> Loaded {
+        let mut loaded = Loaded::default();
         for folder in self.plugin_folders() {
             let id = folder
                 .file_name()
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-            match self
-                .check(&id, &folder)
-                .and_then(|()| Plugin::load(&folder).map_err(|error| error.to_string()))
-            {
-                Ok(plugin) => plugins.push(plugin),
-                Err(why) => refused.push(Refused { id, why }),
+            let read = folder_hash(&folder)
+                .map_err(|error| error.to_string())
+                .and_then(|hash| {
+                    let plugin = Plugin::load(&folder).map_err(|error| error.to_string())?;
+                    Ok((plugin, hash))
+                });
+            match read {
+                Ok((plugin, hash)) if self.trusted.trusts(&id, &hash) => {
+                    loaded.plugins.push(plugin);
+                }
+                Ok((plugin, hash)) => loaded.arrived.push(Arrived { plugin, hash }),
+                Err(why) => loaded.refused.push(Refused { id, why }),
             }
         }
-        (plugins, refused)
+        loaded
     }
 
-    /// Whether a plugin's files are the ones its record says were installed.
-    fn check(&self, id: &str, folder: &Path) -> Result<(), String> {
-        let bytes = match fs::read(self.record_path(id)) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("its record couldn't be read: {error}")),
-        };
-        let Ok(Record::Registry { hash, .. }) = serde_json::from_slice(&bytes) else {
-            return Err("its record can't be read".to_owned());
-        };
-        let found = folder_hash(folder).map_err(|error| error.to_string())?;
-        if found != hash {
-            return Err(NOT_AS_INSTALLED.to_owned());
-        }
-        Ok(())
+    /// Trusts the copy of `id` the data folder holds now.
+    pub fn trust(&self, id: &str) -> io::Result<()> {
+        let hash = folder_hash(&self.folder.join(id))?;
+        self.trusted.trust(id, &hash)
     }
 
     /// Takes a plugin and its record out.

@@ -252,13 +252,17 @@ const SERVER_PLUGINS_TEXT: [&str; 2] = [
 ];
 
 /// What a screen reader must find on the Plugins page about approvals.
-const PLUGINS_APPROVAL_CONTROLS: [&str; 3] = [
+const PLUGINS_APPROVAL_CONTROLS: [&str; 4] = [
     "Browse directory",
     "Review: Needs your approval to send commands, Sample chat",
+    "Review: Arrived from another device, Sample notes",
     "Remove Sample helper",
 ];
-const PLUGINS_APPROVAL_TEXT: [&str; 2] =
-    ["Sends commands.", "Needs your approval to send commands."];
+const PLUGINS_APPROVAL_TEXT: [&str; 3] = [
+    "Sends commands.",
+    "Needs your approval to send commands.",
+    "Sample notes, Game plugin: Not loaded.",
+];
 /// What a screen reader must find in the directory, filled with a made-up
 /// index.
 const DIRECTORY_CONTROLS: [&str; 6] = [

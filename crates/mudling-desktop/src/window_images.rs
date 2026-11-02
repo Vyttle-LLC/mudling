@@ -96,6 +96,7 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         sending: Sending::No,
         asks: Vec::new(),
         removable: false,
+        arrived: false,
     }
 }
 
@@ -181,6 +182,11 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
                 sample_plugin("sample-helper", "Sample helper", Layer::Game, true),
                 sample_sender("sample-extras", "Sample extras", Sending::Approved),
                 sample_sender("sample-chat", "Sample chat", Sending::Waiting),
+                PluginRow {
+                    arrived: true,
+                    removable: true,
+                    ..sample_plugin("sample-notes", "Sample notes", Layer::Game, false)
+                },
                 sample_plugin("sample-defaults", "MUDling defaults", Layer::Default, true),
             ],
             cx,
@@ -845,6 +851,22 @@ fn window_images() {
             });
         },
     );
+    render("settings-trust-dark", Dark, WIDE, |shell, window, cx| {
+        measure::open_sample_section(shell, Section::Plugins, window, cx);
+        let notes = PluginId::try_from("sample-notes".to_owned()).expect("a valid id");
+        shell.settings_sheet().update(cx, |sheet, cx| {
+            let why = "It arrived from another device in a copy this device didn't \
+                       install. The directory doesn't list this copy.";
+            sheet.ask_to_trust(&notes, why.to_owned(), window, cx);
+        });
+    });
+    render("settings-remove-dark", Dark, WIDE, |shell, window, cx| {
+        measure::open_sample_section(shell, Section::Plugins, window, cx);
+        let helper = PluginId::try_from("sample-helper".to_owned()).expect("a valid id");
+        shell.settings_sheet().update(cx, |sheet, cx| {
+            sheet.confirm_remove(&helper, window, cx);
+        });
+    });
     for (name, appearance) in [
         ("settings-server-plugins-dark", Dark),
         ("settings-server-plugins-light", Light),

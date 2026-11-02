@@ -14,19 +14,25 @@
 //!   tarball or a checkout, because both apply the plugin's own
 //!   `.gitattributes` (`export-ignore`, `export-subst`, line endings). Its
 //!   content hash must equal the index's before a byte reaches the disk.
+//! - **An installed plugin** loads only as a copy this device trusts: see
+//!   [`Trusted`]. Plugins sync through the repo, so one can arrive changed.
 //!
 //! Every call here waits on the disk or the network: run them off the UI
 //! thread.
 
 mod approvals;
 mod installed;
+mod trust;
 
 #[cfg(test)]
 mod tests;
 
 pub use approvals::{Approvals, fingerprint, sends_commands};
 pub(crate) use installed::plugin_of;
-pub use installed::{InstalledPlugins, PLUGINS_FOLDER, Record, Refused, folder_hash};
+pub use installed::{
+    Arrived, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
+};
+pub use trust::Trusted;
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
 use crate::plugin::{Plugin, PluginError};
@@ -191,6 +197,7 @@ pub struct Registry {
     folder: PathBuf,
     url: String,
     key: Option<VerifyingKey>,
+    trusted: Trusted,
 }
 
 impl Registry {
@@ -209,6 +216,7 @@ impl Registry {
             folder: data_folder.join(REGISTRY_FOLDER),
             url: url.to_owned(),
             key,
+            trusted: Trusted::in_data_folder(data_folder),
         }
     }
 
@@ -226,8 +234,10 @@ impl Registry {
             .ok_or_else(|| IndexError::Malformed(format!("the branch has no {INDEX_FILE}")))?;
         let seen = self.newest_seen(&key);
         let index = verify(&bytes, &key, seen.as_deref())?;
-        save(&self.folder.join(INDEX_FILE), &bytes)
-            .map_err(|error| IndexError::Malformed(format!("couldn't keep it: {error}")))?;
+        let keep = |error: io::Error| IndexError::Malformed(format!("couldn't keep it: {error}"));
+        save(&self.folder.join(INDEX_FILE), &bytes).map_err(keep)?;
+        // A copy the registry signed for is one this device can run.
+        self.trusted.trust_index(&index.plugins).map_err(keep)?;
         Ok(index)
     }
 

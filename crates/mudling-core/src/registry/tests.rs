@@ -419,43 +419,63 @@ fn installed_tells() -> (TempDir, InstalledPlugins) {
 }
 
 #[test]
-fn an_installed_plugin_whose_files_changed_under_it_is_not_loaded() {
+fn a_copy_this_device_installed_loads() {
     let (_data, installed) = installed_tells();
-    let (plugins, refused) = installed.load();
-    assert_eq!(plugins.len(), 1);
-    assert!(refused.is_empty());
 
-    // As a tampered repo would bring it: same name, other patterns.
+    let loaded = installed.load();
+
+    assert_eq!(loaded.plugins.len(), 1);
+    assert!(loaded.arrived.is_empty() && loaded.refused.is_empty());
+}
+
+#[test]
+fn a_tampered_copy_arriving_with_a_matching_record_is_not_loaded() {
+    let (_data, installed) = installed_tells();
+
+    // As a tampered repo would bring it: other patterns under the same name,
+    // with a record rewritten to their hash.
     let swapped = "[[pattern]]\nname = \"tell\"\npattern = '''^.*$'''\n";
     fs::write(installed.folder().join("tells/text.toml"), swapped).unwrap();
+    let hash = folder_hash(&installed.folder().join("tells")).unwrap();
+    let record = Record::Registry {
+        version: "1.0.0".to_owned(),
+        commit: "0".repeat(40),
+        hash: hash.clone(),
+    };
+    let record = serde_json::to_vec(&record).unwrap();
+    fs::write(installed.folder().join("tells.json"), record).unwrap();
 
-    let (plugins, refused) = installed.load();
-    assert!(plugins.is_empty());
-    assert_eq!(refused[0].id, "tells");
-    assert!(refused[0].why.contains("signed for"), "{}", refused[0].why);
+    let loaded = installed.load();
+
+    assert!(loaded.plugins.is_empty());
+    assert_eq!(loaded.arrived[0].plugin.id().as_str(), "tells");
+    assert_eq!(loaded.arrived[0].hash, hash);
+
+    installed.trust("tells").unwrap();
+    assert_eq!(
+        installed.load().plugins.len(),
+        1,
+        "the player trusted this copy"
+    );
 }
 
 #[test]
-fn a_broken_record_refuses_its_plugin_rather_than_load_it_as_the_player_s_own() {
-    let (_data, installed) = installed_tells();
-    fs::write(installed.folder().join("tells.json"), "not a record").unwrap();
-
-    let (plugins, refused) = installed.load();
-
-    assert!(plugins.is_empty());
-    assert_eq!(refused.len(), 1);
-}
-
-#[test]
-fn a_plugin_folder_with_no_record_is_the_player_s_own_and_loads() {
+fn a_copy_a_verified_index_lists_loads_wherever_it_came_from() {
+    let upstream = Upstream::new();
+    upstream.publish(&upstream.signed("2026-11-02T17:04:31Z", |_| {}), &key(1));
     let data = TempDir::new().unwrap();
     let installed = InstalledPlugins::in_data_folder(data.path());
+    // Another device installed it, and sync brought the files.
     let mine = installed.folder().join("tells");
-    fs::create_dir_all(&mine).unwrap();
-    fs::write(mine.join("plugin.toml"), MANIFEST).unwrap();
-    fs::write(mine.join("text.toml"), PATTERNS).unwrap();
+    for (path, bytes) in folder_of(&plugin_files(), "plugins/tells/") {
+        fs::create_dir_all(mine.join(&path).parent().unwrap()).unwrap();
+        fs::write(mine.join(path), bytes).unwrap();
+    }
+    assert_eq!(installed.load().arrived.len(), 1);
 
-    let (plugins, refused) = installed.load();
+    registry(&upstream, &data, Some(&key(1)))
+        .refresh(&limit())
+        .unwrap();
 
-    assert_eq!((plugins.len(), refused.len()), (1, 0));
+    assert_eq!(installed.load().plugins.len(), 1);
 }

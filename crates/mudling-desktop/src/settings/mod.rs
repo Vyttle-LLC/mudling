@@ -158,8 +158,13 @@ pub enum SheetEvent {
         plugin: PluginId,
         approved: bool,
     },
-    /// Take a plugin installed from the directory out.
+    /// Take a plugin in the data folder out, which the player confirmed.
     Remove(PluginId),
+    /// Check a copy that arrived against the directory, or else ask the
+    /// player whether to trust it.
+    ReviewArrival(PluginId),
+    /// Load the copy of this plugin the data folder holds, as the player chose.
+    Trust(PluginId),
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -1984,6 +1989,11 @@ mod tests {
         assert!(cx.debug_bounds("reconnect-note").is_none());
 
         click("remove-sample-helper", cx);
+        assert!(removed.borrow().is_none(), "it asks first");
+        click("approval-cancel", cx);
+        assert!(removed.borrow().is_none());
+        click("remove-sample-helper", cx);
+        click("approval-allow", cx);
         assert_eq!(removed.borrow().as_deref(), Some("sample-helper"));
         sheet.update(cx, |sheet, cx| {
             let mut rows = sheet.plugins.clone();
@@ -1995,6 +2005,52 @@ mod tests {
         assert!(cx.debug_bounds("remove-sample-helper").is_none());
         assert!(cx.debug_bounds("reconnect-note").is_some());
         assert!(sheet.read_with(cx, |sheet, _| sheet.reconnect_to_apply()));
+    }
+
+    #[gpui::test]
+    fn a_copy_that_arrived_is_reviewed_and_trusted_only_as_the_player_chooses(
+        cx: &mut TestAppContext,
+    ) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            let arrived = rows.iter_mut().find(|row| row.id.as_str() == "sample-chat");
+            arrived.unwrap().arrived = true;
+            sheet.refresh_plugins(rows, false, cx);
+        });
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let keep = Rc::clone(&said);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| match event {
+                SheetEvent::ReviewArrival(plugin) => {
+                    keep.borrow_mut().push(format!("review {plugin}"))
+                }
+                SheetEvent::Trust(plugin) => keep.borrow_mut().push(format!("trust {plugin}")),
+                _ => {}
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("switch-sample-chat").is_none(),
+            "nothing to switch"
+        );
+
+        click("arrival-sample-chat", cx);
+        assert_eq!(*said.borrow(), ["review sample-chat"]);
+        // The directory didn't vouch for it, so the shell asks the player.
+        let plugin = PluginId::try_from("sample-chat".to_owned()).unwrap();
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.ask_to_trust(
+                &plugin,
+                "The directory doesn't list this copy.".into(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        click("approval-allow", cx);
+
+        assert_eq!(*said.borrow(), ["review sample-chat", "trust sample-chat"]);
     }
 
     #[gpui::test]
