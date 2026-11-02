@@ -10,6 +10,8 @@
 
 [GMCP] char.status {"level": 12, "tnl": 980, "hunger": 80, "thirst": 80, "align": 850, "state": 3, "pos": "Standing", "enemy": "", "enemypct": 0}
 
+[GMCP] char.worth {"gold": 2450, "bank": 10000, "qp": 35, "tp": 0, "trains": 3, "pracs": 7, "qpearned": 35}
+
 [GMCP] room.info {"num": 30001, "name": "A Quiet Courtyard", "zone": "hedgerow", "terrain": "city", "details": "", "exits": {"n": 30002, "e": 30003, "s": 30004}, "coord": {"id": 0, "x": 10, "y": 12, "cont": 0}}
 A Quiet Courtyard
    Low hedges ring a dry stone fountain. A gravel path leaves to the north,
@@ -26,3 +28,6 @@ A Gravel Path
    The path ends at a bank of brambles. The courtyard lies back to the south.
 [ Exits: south ]
 <400/420hp 610/610mn 512/530mv 980tnl>
+
+[GMCP] char.status {"level": 12, "tnl": 980, "hunger": 80, "thirst": 80, "align": 850, "state": 8, "pos": "Fighting", "enemy": "a bramble sprite", "enemypct": 64}
+<390/420hp 610/610mn 512/530mv 980tnl>

@@ -18,7 +18,7 @@ use crate::defaults::commands::{
     CommandVariety, WalkSyntax, chain_lines, parse_speedwalk, split_chain,
 };
 use crate::defaults::detect::{ServerSignals, suggest};
-use crate::defaults::hud::{self, Field, FieldMap};
+use crate::defaults::hud::{self, Field, FieldMap, GameFields};
 use crate::defaults::triggers::{Scope, TriggerResponse, TriggerRule};
 use crate::defaults::{self, Defaults, PendingAction, hotbar};
 use crate::line::{Encoding, Line, LineEnd, LineKind, LinePipeline};
@@ -171,6 +171,9 @@ pub struct Engine {
     hud_fields: Memo<(u64, bool), FieldMap>,
     /// Where affects are listed, by plugin set.
     affects_field: Memo<u64, Option<Field>>,
+    /// Where the character sheet's values and the opponent's are, by plugin
+    /// set.
+    game_fields: Memo<u64, GameFields>,
     /// The room's contents changed since the last settle.
     contents_changed: bool,
     /// The game or a plugin named the character, at the next settle.
@@ -276,6 +279,7 @@ impl Engine {
             rules_made: 0,
             hud_fields: Memo::default(),
             affects_field: Memo::default(),
+            game_fields: Memo::default(),
             contents_changed: false,
             character_renamed: false,
             playing: String::new(),
@@ -1376,7 +1380,9 @@ impl Engine {
         } else if link.inventory.read_bag(package, json) {
             self.gear.bags_changed(&link.inventory);
         }
-        let heard = link.game.read(package, json);
+        let plugins = &self.plugins;
+        let fields = (self.game_fields).get(plugins.generation(), || GameFields::of(plugins));
+        let heard = link.game.read(package, json, fields);
         // The first room means the character is in the game. Asking for the
         // modules again has a server send their values, which it may not
         // have done when the character came in.

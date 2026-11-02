@@ -743,11 +743,29 @@ pub struct Hud {
     /// Each vital and the GMCP field that holds it: `hp = "Char.Vitals.hp"`.
     #[serde(default)]
     pub vitals: BTreeMap<String, String>,
+    /// Each character sheet key and the GMCP field that holds it, the same
+    /// way: `name = "Char.Name.name"`, `str = "Char.Stats.str"`.
+    #[serde(default)]
+    pub character: BTreeMap<String, String>,
     /// The opponent bar's fields, the same way.
     #[serde(default)]
-    pub opponent: BTreeMap<String, String>,
+    pub opponent: BTreeMap<OpponentField, String>,
     /// The GMCP message that lists affects.
     pub affects: Option<String>,
+}
+
+/// What the opponent bar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpponentField {
+    /// Empty when the fight is over.
+    Name,
+    Level,
+    Health,
+    /// What `health` is out of.
+    MaxHealth,
+    /// Health as a percentage, for a game that sends no maximum.
+    Percent,
 }
 
 // ---- Map ----

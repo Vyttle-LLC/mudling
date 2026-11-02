@@ -4,8 +4,9 @@ The Aardwolf game plugin (aardmud.org): TOML only, written against the public
 plugin API (PRD §11). Aardwolf is a heavily customized ROM derivative with
 rich GMCP, the other end of the range from [Avatar](../avatar), which MUDling
 reads mostly from its text. Here GMCP carries most of it, and the core reads
-GMCP itself, so the plugin is small: the prompt, the exits line, the moves
-the game refuses, and where each vital is.
+GMCP where the plugin says, so the plugin is small: the prompt, the exits
+line, the moves the game refuses, and where each vital, each of the
+character's values and the opponent are.
 
 It has no hooks, so it needs no permissions. It isn't bundled with the
 desktop app; add it from this folder (see the
@@ -18,7 +19,7 @@ desktop app; add it from this folder (see the
 | `plugin.toml` | The manifest: Aardwolf's host and MSSP name, its points, and the `prompt` fragment. |
 | `text.toml` | The prompt, known by its shape. |
 | `map.toml` | The exits line and the moves the game refuses. Rooms are known by room.info's number, the default. |
-| `hud.toml` | Where each vital's maximum is, and experience. |
+| `hud.toml` | Where each vital's maximum is, experience, the character sheet's values and the opponent. |
 
 ## What comes from where
 
@@ -31,7 +32,12 @@ desktop app; add it from this folder (see the
 | HP, mana and moves | `char.vitals`: `hp`, `mana`, `moves` | The core, by their common names |
 | Their maximums | `char.maxstats`: `maxhp`, `maxmana`, `maxmoves` | `hud.toml` |
 | Experience to the next level, and a level's whole | `char.status`'s `tnl`; `char.base`'s `perlevel` | `hud.toml` |
-| The level | `char.status`'s `level` | The core |
+| The level | `char.status`'s `level` | The defaults' `Char.Status.level` |
+| The character's name, race and class | `char.base`: `name`, `race`, `class` | `hud.toml` |
+| Stats | `char.stats`: `str`, `int`, `wis`, `dex`, `con`, `luck`, and `hr`, `dr`, `saves` as `hitroll`, `damroll`, `saves` | `hud.toml` |
+| Position and alignment | `char.status`'s `pos`, `align` | `hud.toml` |
+| Gold and practices | `char.worth`'s `gold`, `pracs` | `hud.toml` |
+| The opponent | `char.status`'s `enemy`, and its health as a percentage, `enemypct` | `hud.toml` |
 | The prompt | Text: `<400/420hp 610/610mn 515/530mv 980tnl>` | `text.toml` |
 
 The room's title comes from `room.info`'s `name`. In text it's a plain line
@@ -76,42 +82,27 @@ Michael's playtest confirms these:
 - **A maze room's exits.** The GMCP page says maze rooms leave out the room
   numbers, but not what they send instead.
 
-## What the API can't say yet
+## Follow-ups
 
-API v1 hands a plugin only text: its patterns read lines, and its hooks see
-only what they match. GMCP goes to the core, which reads fixed names in it,
-the ones Avatar sends. Where Aardwolf's names differ, nothing in a plugin can
-point the core at them, so these don't reach MUDling:
+Writing this plugin found where API v1 was shaped around Avatar. The core
+read the character sheet and the opponent from Avatar's GMCP names; it now
+reads them where a plugin's HUD point says, which is how this plugin names
+Aardwolf's. Three things remain, none of which a v1 plugin will need to
+change for:
 
-| What | Aardwolf sends | What the core reads | Effect |
+| What | Aardwolf sends | What's missing | Effect now |
 | --- | --- | --- | --- |
-| Chat channels | `comm.channel`: `chan`, `msg`, `player` | Nothing: the API has no point for channels | No channel view. The plugin doesn't subscribe to `Comm 1`, since nothing would read it. |
-| Stats | `char.stats`: `str`, `int`, `wis`, `dex`, `con`, `luck`, `hr`, `dr`, `saves` | The same names, but only from `Char.Status` | The character sheet shows no stats. |
-| The character's name, class and race | `char.base`: `name`, `class`, `race` | `Char.Status`'s `character_name`, `class`, `race` | The character isn't named from GMCP, and isn't saved by name. |
-| Position | `char.status`'s `pos` | `Char.Vitals`'s `position` | No position. |
-| Alignment, gold, practices | `char.status`'s `align`; `char.worth`'s `gold`, `pracs` | `Char.Status`'s `alignment`, `gold`, `practice` | Not on the sheet. |
-| The opponent | `char.status`'s `enemy`, `enemypct` | `Char.Status`'s `opponent_name`, `opponent_health`, `opponent_health_max` | No opponent bar. `hud.toml`'s `opponent` is declared but nothing reads it. |
-| Area names | `room.area`, only when asked with `request area` | A plugin can't send GMCP or read it | Areas show as `room.info`'s zone id, such as `hedgerow`. `map.toml`'s `areas` could name them, but no public page lists the ids. |
-
-The Map point's `exits` rule also assumes the room's description follows the
-exits line, as in Avatar. Aardwolf prints it before, so the map reads no
-description. Room numbers tell rooms apart without one, so nothing is lost
-here, but a game that prints exits last and has no room numbers couldn't be
-mapped by description.
-
-The smallest general fix for most of the table is a GMCP field map for the
-character sheet, like `hud.toml`'s `vitals`: each sheet key and the field that
-holds it, `str = "char.stats.str"`, `name = "char.base.name"`, read by the
-code that reads `Char.Status` today. Reading `hud.toml`'s `opponent` the same
-way would give the opponent bar. Chat channels need a point of their own.
+| Chat channels | `comm.channel`: `chan`, `msg`, `player` | A point for channels | No channel view. The plugin doesn't subscribe to `Comm 1`, since nothing would read it. |
+| Area names | `room.area`, only when asked with `request area` | A way for a plugin to send GMCP | Areas show as `room.info`'s zone id, such as `hedgerow`. `map.toml`'s `areas` could name them, but no public page lists the ids. |
+| The room's description | The description, then the exits line | An `exits` rule for exits printed after the description | The map reads no description. Room numbers tell rooms apart without one, so nothing is lost here, but a game that prints exits last and has no room numbers couldn't be mapped by description. |
 
 ## Tests
 
 `cargo test -p mudling-plugin-aardwolf` loads this folder with `Plugin::load`.
 `tests/text.rs` runs text through the line pipeline and the plugin host.
 `tests/gmcp.rs` feeds `tests/sample.txt`, its text and its GMCP, through a
-session engine with the plugin turned on, and reads the map, vitals and
-character stores; nothing opens a socket. `tests/plugin.rs` runs the checks a
+session engine with the plugin turned on, and reads the map, vitals,
+character and opponent stores; nothing opens a socket. `tests/plugin.rs` runs the checks a
 plugin added from a link must pass.
 
 `mudling plugin test plugins/aardwolf` replays `tests/sample.txt`'s text and
@@ -121,12 +112,15 @@ see the [reference](../../docs/plugins/reference.md#what-a-replay-does-and-doesn
 ## Cost
 
 Measured as Avatar's was, in a release build on an Apple Silicon Mac shared
-with other builds (load average 16 to 23), on 2026-11-02:
+with other builds (load average 14 to 19), on 2026-11-02:
 
 | Measure | Text | Added per line at p99 |
 | --- | --- | --- |
-| `mudling plugin test` | `tests/sample.txt`, 11 lines | +0.71 µs |
-| `mudling-bench --plugin` | the bench's fixture, 5,059 lines | +0.00 µs (Avatar: +0.17 µs) |
+| `mudling plugin test` | `tests/sample.txt`, 12 lines | +0.75 µs |
+| `mudling-bench --plugin` | the bench's fixture, 5,059 lines | +0.00 µs (Avatar: +0.13 µs) |
+
+Its GMCP fields cost no line anything: the core reads them only when a GMCP
+message arrives.
 
 Both are within the 5 µs budget. The bench's fixture is Avatar-like text,
 which these patterns mostly don't match, so the sample is the closer

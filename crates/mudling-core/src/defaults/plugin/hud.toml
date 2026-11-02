@@ -1,0 +1,6 @@
+# The only character fields GMCP games widely share: IRE's GMCP names the
+# character in Char.Name, and many games, IRE's among them, send the level as
+# Char.Status's `level`. A game's plugin names the rest.
+[character]
+name = "Char.Name.name"
+level = "Char.Status.level"
