@@ -30,8 +30,9 @@ MUDling is a Cargo workspace:
 | `crates/mudling-desktop` | The desktop shell, drawn with [gpui](https://gpui.rs) |
 | `crates/mudling-bench` | The headless benchmarks against the performance budgets |
 | `crates/mudling-ffi` | UniFFI bindings for the iOS app: store subscriptions and diffs (commands only echo for now) |
-| `crates/mudling-cli` | The `mudling` command line (a stub for now) |
+| `crates/mudling-cli` | The `mudling` command line, for plugin authors: `mudling plugin new` and `mudling plugin test` |
 | `plugins/avatar/` | The first game plugin, in TOML and Luau |
+| `docs/plugins/` | The plugin [API reference](docs/plugins/reference.md) and [cookbook](docs/plugins/cookbook.md) |
 | `apple/` | The iOS app, to come |
 
 ```sh

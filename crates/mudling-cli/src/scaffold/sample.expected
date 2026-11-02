@@ -1,0 +1,3 @@
+event text character.welcome name="Ana"
+store character name "Ana"
+event text weather weather="rain"

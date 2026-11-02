@@ -1,0 +1,10 @@
+[connected]
+Welcome back to the AVATAR System, Hero Wren.
+(110h-125m-120v-1062)(-/-)
+You are affected by:
+Spell: 'bless': modifies hit roll by 3 for 6 hours.
+(110h-125m-120v-1062)(-/-)
+The ugly bear GLARES at you and SNARLS!
+You flee north! What a COWARD!
+[Exits: north up]
+(90h-125m-118v-1062)(-/-)
