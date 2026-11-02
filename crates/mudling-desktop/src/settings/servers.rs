@@ -116,6 +116,16 @@ impl SettingsSheet {
                     .text_color(theme.text_muted)
                     .child(summary),
             );
+        // Stops go in the order they're drawn: Tab follows them.
+        let plugins = {
+            let id = SharedString::from(format!("server-plugins-{number}"));
+            let host = server.host.to_string();
+            text_button(id, "Plugins", &pane.stop(cx), theme)
+                .aria_label(format!("Plugins for {}", server.name))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(SheetEvent::ServerPlugins(host.clone()));
+                }))
+        };
         let remove = (!playing && !asking).then(|| {
             let id = SharedString::from(format!("remove-server-{number}"));
             let host = server.host.clone();
@@ -126,15 +136,6 @@ impl SettingsSheet {
                     cx.notify();
                 }))
         });
-        let plugins = {
-            let id = SharedString::from(format!("server-plugins-{number}"));
-            let host = server.host.to_string();
-            text_button(id, "Plugins", &pane.stop(cx), theme)
-                .aria_label(format!("Plugins for {}", server.name))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(SheetEvent::ServerPlugins(host.clone()));
-                }))
-        };
         let in_play = playing.then(|| {
             div()
                 .flex_none()

@@ -106,6 +106,7 @@ impl SettingsSheet {
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
+        self.servers_problem = None;
         if self.section == Section::Servers {
             self.go_to_page(Page::Server(plugins), window, cx);
         }
@@ -170,7 +171,10 @@ impl SettingsSheet {
                     .text_color(theme.error),
             );
         }
-        if self.reconnect_to_apply && self.server.as_ref() == Some(&page.host) {
+        if let Some(problem) = self.switch_problem_line(theme) {
+            pane.row(problem);
+        }
+        if self.reconnect_to_apply() && self.server.as_ref() == Some(&page.host) {
             pane.row(self.reconnect_note(theme));
         }
         if let Some(offer) = page.offer() {
@@ -242,7 +246,8 @@ mod tests {
             holds: "".into(),
             always_on: false,
             on,
-            flipped: false,
+            flips: 0,
+            elsewhere: None,
         }
     }
 

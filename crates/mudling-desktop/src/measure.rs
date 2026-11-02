@@ -1299,7 +1299,8 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         holds: "".into(),
         always_on: false,
         on: true,
-        flipped: false,
+        flips: 0,
+        elsewhere: None,
     };
     let mut rows = vec![
         PluginRow {

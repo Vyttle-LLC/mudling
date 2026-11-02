@@ -285,6 +285,14 @@ struct Outcome {
     only_listing: bool,
     /// A server's plugins, read for Settings.
     server_plugins: Option<ServerPlugins>,
+    /// The switch this tried to save, `problem` saying if it couldn't.
+    switch: Option<SavedSwitch>,
+}
+
+struct SavedSwitch {
+    host: SharedString,
+    plugin: PluginId,
+    on: bool,
 }
 
 pub struct Shell {
@@ -984,8 +992,13 @@ impl Shell {
                     if let Some(plugins) = outcome.server_plugins {
                         sheet.show_server_plugins(plugins, window, cx);
                     }
-                    if let Some(problem) = outcome.problem {
-                        sheet.show_servers_problem(problem, cx);
+                    match (outcome.switch, outcome.problem) {
+                        (Some(switch), problem) => {
+                            let SavedSwitch { host, plugin, on } = switch;
+                            sheet.plugin_saved(&host, &plugin, on, problem, cx);
+                        }
+                        (None, Some(problem)) => sheet.show_servers_problem(problem, cx),
+                        (None, None) => {}
                     }
                 });
                 self.start_waiting(window, cx);
@@ -1139,6 +1152,11 @@ impl Shell {
                     saved: launcher.saved(),
                     only_listing: true,
                     problem: launcher.set_plugin(&host, &plugin, on).err(),
+                    switch: Some(SavedSwitch {
+                        host: host.into(),
+                        plugin,
+                        on,
+                    }),
                     ..Outcome::default()
                 },
                 window,
@@ -4751,6 +4769,107 @@ pub mod tests {
         launched.wait_for_connection(ConnectionStatus::Connected);
         assert_eq!(enabled(&mut launched), 1, "Reconnect brings it in");
         assert!(!launched.is_drawn("reconnect-note"));
+    }
+
+    #[gpui::test]
+    fn a_switch_that_could_not_be_saved_goes_back_and_says_so_until_one_is(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut launched, _socket) = launch_playing(game_plugin(), cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let sheet = &shell.settings;
+            sheet.update(cx, |sheet, cx| sheet.select(Section::Plugins, cx));
+        });
+        launched.cx.run_until_parked();
+        let game_row_on = |launched: &mut Launched<'_>| {
+            launched.shell.read_with(launched.cx, |shell, cx| {
+                let rows = shell.settings.read(cx).plugins();
+                rows.iter()
+                    .find(|row| row.id.as_str() == "game")
+                    .unwrap()
+                    .on
+            })
+        };
+        assert!(game_row_on(&mut launched));
+
+        launched.click("switch-game");
+        launched.frames_until("the save", |shell, _| shell.job.is_none());
+        assert!(!game_row_on(&mut launched));
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            let failed = Outcome {
+                saved: shell.listed.clone(),
+                only_listing: true,
+                problem: Some("couldn't save 127.0.0.1: the disk is full".to_owned()),
+                switch: Some(SavedSwitch {
+                    host: "127.0.0.1".into(),
+                    plugin: PluginId::try_from("game".to_owned()).unwrap(),
+                    on: false,
+                }),
+                ..Outcome::default()
+            };
+            shell.job_done(failed, window, cx);
+        });
+        launched.cx.run_until_parked();
+        assert!(game_row_on(&mut launched), "the switch goes back");
+        assert!(launched.is_drawn("switch-problem"));
+        assert!(
+            !launched.is_drawn("reconnect-note"),
+            "nothing is waiting to apply"
+        );
+
+        launched.click("switch-game");
+        launched.frames_until("the save", |shell, _| shell.job.is_none());
+        launched.cx.run_until_parked();
+        assert!(
+            !launched.is_drawn("switch-problem"),
+            "a good save clears it"
+        );
+        assert!(launched.is_drawn("reconnect-note"));
+    }
+
+    #[gpui::test]
+    fn an_override_for_another_server_has_no_switch_in_plugins(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                        license = \"MIT\"\nlayer = \"override\"\n[servers]\n\
+                        hosts = [\"b.example\"]\n";
+        let mine = Plugin::from_files(|file| match file {
+            "plugin.toml" => Ok(manifest.to_owned()),
+            _ => Err(std::io::Error::other(file.to_owned())),
+        })
+        .unwrap();
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            let rows = PluginRow::for_session(&[mine], &[], &[], "a.example");
+            shell.settings.update(cx, |sheet, cx| {
+                sheet.show_plugins(rows, cx);
+                sheet.select(Section::Plugins, cx);
+            });
+        });
+        launched.cx.run_until_parked();
+        assert!(launched.is_drawn("plugin-mine"));
+        assert!(!launched.is_drawn("switch-mine"));
+    }
+
+    #[gpui::test]
+    fn tab_reaches_a_servers_plugins_before_remove(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        open_servers(&mut launched);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            let close = shell.settings.read(cx).close_stop();
+            window.focus(&close, cx);
+        });
+        launched.cx.simulate_keystrokes("tab");
+        press_enter(launched.cx);
+        launched.frames_until("the server's plugins", |shell, cx| {
+            let sheet = shell.settings.read(cx);
+            sheet.on_a_page() || sheet.is_asking_to_remove()
+        });
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            assert!(shell.settings.read(cx).on_a_page());
+        });
     }
 
     #[gpui::test]

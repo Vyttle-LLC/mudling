@@ -55,8 +55,11 @@ pub struct PluginRow {
     /// Whether the player has it on for this server. A session reads that
     /// when it opens, so a change shows here before it runs.
     pub on: bool,
-    /// The player changed its switch while this session runs.
-    pub flipped: bool,
+    /// The player's changes to its switch since the session opened that were
+    /// saved or are saving.
+    pub flips: u32,
+    /// Where an override meant for another server is meant to run.
+    pub elsewhere: Option<SharedString>,
 }
 
 impl PluginRow {
@@ -76,7 +79,8 @@ impl PluginRow {
             holds: rule_counts(triggers, aliases).into(),
             always_on: false,
             on,
-            flipped: false,
+            flips: 0,
+            elsewhere: None,
         }
     }
 
@@ -93,13 +97,25 @@ impl PluginRow {
             mssp_name: None,
         };
         let installed = plugins.iter().map(|plugin| {
-            let on = match plugin.layer() {
-                Layer::Override => {
-                    plugin.manifest.matches_server(server) && !overrides_off.contains(plugin.id())
-                }
-                _ => enabled.contains(plugin.id()),
+            let is_override = plugin.layer() == Layer::Override;
+            let matches_host = plugin.manifest.matches_server(server);
+            let turned_off = overrides_off.contains(plugin.id());
+            let on = match is_override {
+                true => matches_host && !turned_off,
+                false => enabled.contains(plugin.id()),
             };
-            PluginRow::of(plugin, on)
+            // Turning it off for this server says it's meant for this server.
+            let elsewhere = (is_override && !matches_host && !turned_off).then(|| {
+                let servers = &plugin.manifest.servers;
+                let names: Vec<&str> = (servers.hosts.iter().chain(&servers.mssp_names))
+                    .map(String::as_str)
+                    .collect();
+                names.join(", ").into()
+            });
+            PluginRow {
+                elsewhere,
+                ..PluginRow::of(plugin, on)
+            }
         });
         let built_in = PluginRow {
             always_on: true,
@@ -112,10 +128,18 @@ impl PluginRow {
     /// An override a game's MSSP name brought on shows in the core's costs, as
     /// nothing here knows that name.
     fn switched_on(&self, costs: &[PluginCost], turned_off: &[PluginDisabled]) -> bool {
-        let came_on = self.layer == Layer::Override
-            && !self.flipped
-            && costs.iter().any(|cost| cost.plugin == self.id);
+        let came_on = self.layer == Layer::Override && self.flips == 0 && self.is_running(costs);
         (self.on || came_on) && !turned_off.iter().any(|off| off.plugin == self.id)
+    }
+
+    fn is_running(&self, costs: &[PluginCost]) -> bool {
+        costs.iter().any(|cost| cost.plugin == self.id)
+    }
+
+    /// Where it's meant to run instead. A switch here wouldn't stick: the next
+    /// session wouldn't run it, whatever was saved. One running here isn't.
+    fn meant_elsewhere(&self, costs: &[PluginCost]) -> Option<&SharedString> {
+        self.elsewhere.as_ref().filter(|_| !self.is_running(costs))
     }
 
     /// What it costs a line in µs at p99, once sampled.
@@ -235,9 +259,14 @@ fn plugin_row(
     switched_on: bool,
     overran: bool,
     cost: Option<f64>,
+    elsewhere: Option<&SharedString>,
     control: AnyElement,
     theme: &Theme,
 ) -> impl IntoElement + use<> {
+    let about = match elsewhere {
+        Some(servers) => format!("For {servers} · Version {}", row.version),
+        None => format!("Version {}", row.version),
+    };
     let state = match (switched_on, overran) {
         (true, _) => "On",
         (false, true) => "Turned off · over budget",
@@ -267,10 +296,9 @@ fn plugin_row(
                 .id(SharedString::from(format!("plugin-{}", row.id)))
                 .role(Role::Label)
                 .aria_value(format!(
-                    "{}, {}: {state}. Version {}.{cost_said}",
+                    "{}, {}: {state}. {about}.{cost_said}",
                     row.name,
                     layer_badge(row.layer),
-                    row.version,
                 ))
                 .flex_1()
                 .min_w_0()
@@ -297,7 +325,7 @@ fn plugin_row(
                     div()
                         .text_size(px(13.))
                         .text_color(theme.text_muted)
-                        .child(format!("Version {}", row.version)),
+                        .child(about),
                 ),
         )
         .child(
@@ -383,21 +411,60 @@ impl SettingsSheet {
         on: bool,
         cx: &mut Context<SettingsSheet>,
     ) {
-        let playing = self.server.as_ref() == Some(&host);
-        let page = match &mut self.page {
-            Page::Server(page) if page.host == host => Some(&mut page.plugins),
-            _ => None,
-        };
-        let on_session = playing.then_some(&mut self.plugins);
-        for row in [page, on_session].into_iter().flatten().flatten() {
-            if row.id == plugin {
-                row.on = on;
-                row.flipped = true;
-            }
-        }
-        self.reconnect_to_apply |= playing;
+        self.with_plugin_rows(&host, &plugin, |row| {
+            row.on = on;
+            row.flips += 1;
+        });
         cx.emit(SheetEvent::SetPlugin { host, plugin, on });
         cx.notify();
+    }
+
+    /// How a switch's save went. One that failed goes back, and says why until
+    /// the next save works.
+    pub fn plugin_saved(
+        &mut self,
+        host: &SharedString,
+        plugin: &PluginId,
+        on: bool,
+        problem: Option<String>,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        if problem.is_some() {
+            self.with_plugin_rows(host, plugin, |row| {
+                row.on = !on;
+                row.flips = row.flips.saturating_sub(1);
+            });
+        }
+        self.switch_problem = problem.map(Into::into);
+        cx.notify();
+    }
+
+    /// Runs `change` on what's on the screen of `plugin` for `host`.
+    fn with_plugin_rows(
+        &mut self,
+        host: &SharedString,
+        plugin: &PluginId,
+        change: impl Fn(&mut PluginRow),
+    ) {
+        let page = match &mut self.page {
+            Page::Server(page) if page.host == *host => Some(&mut page.plugins),
+            _ => None,
+        };
+        let playing = self.server.as_ref() == Some(host);
+        let on_session = playing.then_some(&mut self.plugins);
+        let rows = [page, on_session].into_iter().flatten().flatten();
+        rows.filter(|row| row.id == *plugin).for_each(change);
+    }
+
+    /// Why the last switch wasn't saved.
+    pub(super) fn switch_problem_line(&self, theme: &Theme) -> Option<Stateful<Div>> {
+        self.switch_problem.clone().map(|problem| {
+            muted_line(problem, theme)
+                .debug_selector(|| "switch-problem".to_owned())
+                .role(Role::Alert)
+                .mt_2()
+                .text_color(theme.error)
+        })
     }
 
     /// Says when a switch flipped on the server being played takes effect.
@@ -546,7 +613,10 @@ impl SettingsSheet {
                 .child(muted_line(scope, theme).flex_1().min_w_0().pb_0())
                 .child(inspector),
         );
-        if self.reconnect_to_apply {
+        if let Some(problem) = self.switch_problem_line(theme) {
+            pane.row(problem);
+        }
+        if self.reconnect_to_apply() {
             pane.row(self.reconnect_note(theme));
         }
         let mut card = div()
@@ -566,9 +636,11 @@ impl SettingsSheet {
             first = false;
             for row in in_layer {
                 let switched_on = row.switched_on(&self.costs, &self.turned_off);
-                let control = match row.always_on {
-                    true => switch(true, theme).into_any_element(),
-                    false => self
+                let elsewhere = row.meant_elsewhere(&self.costs);
+                let control = match (row.always_on, elsewhere) {
+                    (true, _) => switch(true, theme).into_any_element(),
+                    (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
+                    (false, None) => self
                         .plugin_switch(row, switched_on, pane, theme, cx)
                         .into_any_element(),
                 };
@@ -577,6 +649,7 @@ impl SettingsSheet {
                     switched_on,
                     self.turned_off.iter().any(|off| off.plugin == row.id),
                     row.cost(&self.costs),
+                    elsewhere,
                     control,
                     theme,
                 ));
@@ -710,11 +783,32 @@ mod tests {
         let (layers, _) = cost_lines(&[row.clone()], &in_the_host, &[], &whole);
         assert!(layers.contains("Overrides 2.0 µs"), "{layers}");
 
-        row.flipped = true;
+        row.flips = 1;
         assert!(
             !row.switched_on(&in_the_host, &[]),
             "the player's word wins"
         );
+    }
+
+    #[test]
+    fn an_override_for_another_server_says_where_it_goes() {
+        let mine = plugin(AN_OVERRIDE);
+        let id = mine.id().clone();
+        let row = |host, off: &[PluginId]| {
+            PluginRow::for_session(std::slice::from_ref(&mine), &[], off, host).remove(1)
+        };
+        let there = row("b.example", &[]);
+        assert_eq!(there.meant_elsewhere(&[]).unwrap(), "a.example");
+        assert_eq!(row("a.example", &[]).meant_elsewhere(&[]), None);
+        let turned_off_here = row("b.example", std::slice::from_ref(&id));
+        assert_eq!(turned_off_here.meant_elsewhere(&[]), None);
+
+        let running = PluginCost {
+            plugin: id,
+            sampled_lines: 1,
+            per_line: None,
+        };
+        assert_eq!(there.meant_elsewhere(&[running]), None, "it runs here");
     }
 
     #[test]

@@ -345,8 +345,8 @@ pub struct SettingsSheet {
     line_cost: Option<Summary>,
     /// The inspector's lines, while its page is open.
     inspector: InspectorState,
-    /// A switch changed for the session running, which won't follow it.
-    reconnect_to_apply: bool,
+    /// Why the last switch couldn't be saved.
+    switch_problem: Option<SharedString>,
     /// The notice whose details are showing.
     details: Option<String>,
     /// The chat faces this machine has.
@@ -394,7 +394,7 @@ impl SettingsSheet {
             costs: Vec::new(),
             line_cost: None,
             inspector: InspectorState::default(),
-            reconnect_to_apply: false,
+            switch_problem: None,
             details: None,
             fonts: vec![CHAT_FONTS[0]],
             data: data::DataPane::default(),
@@ -524,9 +524,20 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// Whether the player changed a switch for the session running.
+    /// Whether the player changed a switch for the session running, which
+    /// won't follow it.
     pub fn reconnect_to_apply(&self) -> bool {
-        self.reconnect_to_apply
+        self.plugins.iter().any(|row| row.flips > 0)
+    }
+
+    #[cfg(test)]
+    pub fn close_stop(&self) -> FocusHandle {
+        self.close.clone()
+    }
+
+    #[cfg(test)]
+    pub fn is_asking_to_remove(&self) -> bool {
+        self.removing.is_some()
     }
 
     #[cfg(test)]
@@ -555,7 +566,6 @@ impl SettingsSheet {
 
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
         self.plugins = plugins;
-        self.reconnect_to_apply = false;
         cx.notify();
     }
 
