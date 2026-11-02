@@ -1,12 +1,14 @@
-//! HUD fields: which GMCP field holds each vital.
+//! HUD fields: which GMCP field holds each vital, each of the character
+//! sheet's values, and the opponent's.
 //!
 //! The defaults read the keys of the first `Char.Vitals` message and match
 //! them by common names (`hp`, `HP`, `health`; `maxhp`, `max_hp`; …). A
 //! plugin's HUD point maps fields itself, and its mapping wins, the highest
-//! layer last. Affects come only from a plugin's HUD point: GMCP has no
-//! common name for them.
+//! layer last. The sheet, the opponent and affects come only from HUD points
+//! (see [`GameFields`]): GMCP has few common names for them.
 
 use crate::plugin::PluginHost;
+use crate::plugin::points::{Hud, OpponentField};
 use crate::store::Affect;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -138,6 +140,52 @@ impl HudFields {
             }
         }
         fields
+    }
+}
+
+/// Where GMCP holds the character sheet's values and the opponent bar's: no
+/// game's names are the core's, so every one comes from a HUD point, the
+/// defaults' included, the highest layer's field for each key winning.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GameFields {
+    /// Each sheet key, such as `name`, `level`, `position` or `str`, and its
+    /// field.
+    pub character: BTreeMap<String, Field>,
+    pub opponent: BTreeMap<OpponentField, Field>,
+}
+
+impl GameFields {
+    /// Every enabled plugin's, in run order.
+    pub fn of(host: &PluginHost) -> GameFields {
+        GameFields::from_huds(
+            host.declared(|points| points.hud.as_ref())
+                .map(|(_, hud)| hud),
+        )
+    }
+
+    /// These HUD points', later ones winning.
+    pub fn from_huds<'a>(huds: impl IntoIterator<Item = &'a Hud>) -> GameFields {
+        let mut fields = GameFields::default();
+        for hud in huds {
+            for (key, path) in &hud.character {
+                if let Some(field) = Field::parse(path) {
+                    fields.character.insert(key.clone(), field);
+                }
+            }
+            for (key, path) in &hud.opponent {
+                if let Some(field) = Field::parse(path) {
+                    fields.opponent.insert(*key, field);
+                }
+            }
+        }
+        fields
+    }
+
+    /// Whether a message of `package` holds any of them, so one that doesn't
+    /// isn't parsed.
+    pub fn read_from(&self, package: &str) -> bool {
+        let mut all = self.character.values().chain(self.opponent.values());
+        all.any(|field| field.package.eq_ignore_ascii_case(package))
     }
 }
 

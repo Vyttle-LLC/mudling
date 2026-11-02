@@ -810,7 +810,7 @@ fn in_a_room(name: &str) -> Driven {
 #[test]
 fn the_room_fills_from_gmcp_and_empties_with_the_connection() {
     let mut driven = in_a_room("A road");
-    driven.gmcp(r#"Char.Status {"character_name": "Tamsin", "level": "22"}"#);
+    driven.gmcp(r#"Char.Name {"name": "Tamsin"}"#);
     driven.gmcp(
         r#"Room.Players {"Tamsin": {"name": "Tamsin", "fullname": "Tamsin is here."},
             "Mira": {"name": "Mira", "fullname": "Mira the Quick is here."},
@@ -852,15 +852,40 @@ fn the_room_fills_from_gmcp_and_empties_with_the_connection() {
     assert_eq!(room_state(&driven).contents, Default::default());
 }
 
+/// A game plugin whose HUD point names where its position and opponent are.
+fn fighter() -> Plugin {
+    Plugin::from_files(|file| {
+        Ok(match file {
+            "plugin.toml" => {
+                "id = \"fighter\"\nname = \"Fighter\"\nversion = \"1.0.0\"\napi = 1\n\
+                 license = \"MIT\"\nlayer = \"game\"\n[servers]\nmssp_names = [\"Fighter\"]\n\
+                 [points]\nhud = \"hud.toml\"\n"
+            }
+            _ => {
+                "[character]\nposition = \"Char.Vitals.pos\"\n\
+                 [opponent]\nname = \"Char.Foe.name\"\nlevel = \"Char.Foe.level\"\n\
+                 health = \"Char.Foe.hp\"\nmax_health = \"Char.Foe.maxhp\"\n"
+            }
+        }
+        .to_owned())
+    })
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
 #[test]
-fn the_character_and_the_fight_reach_their_stores() {
-    let mut driven = in_a_room("A road");
-    driven.gmcp(r#"Char.Status {"character_name": "Tamsin", "level": "22"}"#);
-    driven.gmcp(r#"Char.Vitals {"hp": "30", "maxhp": "42", "position": "Fight"}"#);
-    driven.gmcp(
-        r#"Char.Status {"opponent_name": "A rat", "opponent_level": "3",
-            "opponent_health": "36", "opponent_health_max": "100"}"#,
-    );
+fn the_character_and_the_fight_reach_their_stores_where_the_hud_says() {
+    let plugin = fighter();
+    let id = plugin.id().clone();
+    let mut driven = Driven::configured("mud.example", |config| {
+        config.plugins = vec![plugin];
+        config.enabled = vec![id];
+    });
+    driven.engine.start_connection().unwrap();
+    driven.gmcp(r#"Room.Info {"num": 1, "name": "A road", "exits": {"n": 2}}"#);
+    driven.gmcp(r#"Char.Name {"name": "Tamsin"}"#);
+    driven.gmcp(r#"Char.Status {"level": "22"}"#);
+    driven.gmcp(r#"Char.Vitals {"hp": "30", "maxhp": "42", "pos": "Fight"}"#);
+    driven.gmcp(r#"Char.Foe {"name": "A rat", "level": "3", "hp": "36", "maxhp": "100"}"#);
     assert_eq!(
         character(&driven, CHARACTER_NAME),
         Some(Value::Text("Tamsin".to_owned()))
@@ -982,7 +1007,7 @@ fn the_login_names_the_character_until_the_game_does() {
         character(&driven, CHARACTER_NAME),
         Some(Value::Text("bren".to_owned()))
     );
-    driven.gmcp(r#"Char.Status {"character_name": "Bren", "level": "9"}"#);
+    driven.gmcp(r#"Char.Name {"name": "Bren"}"#);
     assert_eq!(
         character(&driven, CHARACTER_NAME),
         Some(Value::Text("Bren".to_owned()))
@@ -997,7 +1022,9 @@ fn a_name_from_gmcp_is_saved_for_the_server_list() {
     let typing = Arc::new(Mutex::new(Typing::default()));
     let mut engine = Engine::open(config, hub, typing).unwrap();
     engine.start_connection().unwrap();
-    let status = gmcp_frame(r#"Char.Status {"character_name": "Bren", "level": "9"}"#);
+    let name = gmcp_frame(r#"Char.Name {"name": "Bren"}"#);
+    engine.receive(name.into(), Timestamp(0)).unwrap();
+    let status = gmcp_frame(r#"Char.Status {"level": "9"}"#);
     engine.receive(status.into(), Timestamp(0)).unwrap();
     engine.settle(Timestamp(0));
     engine.finish().unwrap();

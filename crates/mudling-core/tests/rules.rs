@@ -70,11 +70,11 @@ impl Played {
         self.engine.settle(NOW);
     }
 
-    /// The game says who is playing, as Char.Status does.
+    /// The game says who is playing, in the defaults' Char.Name.
     fn named(&mut self, name: &str) {
         let mut frame = Vec::new();
-        let status = format!(r#"{{"character_name": "{name}"}}"#);
-        gmcp::encode("Char.Status", &status, &mut frame);
+        let status = format!(r#"{{"name": "{name}"}}"#);
+        gmcp::encode("Char.Name", &status, &mut frame);
         self.say(&frame);
     }
 

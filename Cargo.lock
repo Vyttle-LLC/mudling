@@ -4046,6 +4046,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mudling-plugin-aardwolf"
+version = "0.0.0"
+dependencies = [
+ "mudling-core",
+ "tempfile",
+]
+
+[[package]]
 name = "mudling-plugin-avatar"
 version = "0.0.0"
 dependencies = [

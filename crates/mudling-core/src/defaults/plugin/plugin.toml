@@ -8,3 +8,4 @@ layer = "default"
 
 [points]
 text = "text.toml"
+hud = "hud.toml"

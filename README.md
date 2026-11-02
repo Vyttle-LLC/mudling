@@ -32,6 +32,7 @@ MUDling is a Cargo workspace:
 | `crates/mudling-ffi` | UniFFI bindings for the iOS app: store subscriptions and diffs (commands only echo for now) |
 | `crates/mudling-cli` | The `mudling` command line, for plugin authors: `mudling plugin new` and `mudling plugin test` |
 | `plugins/avatar/` | The first game plugin, in TOML and Luau |
+| `plugins/aardwolf/` | The Aardwolf game plugin: TOML alone, over Aardwolf's GMCP |
 | `docs/plugins/` | The plugin [API reference](docs/plugins/reference.md) and [cookbook](docs/plugins/cookbook.md) |
 | `apple/` | The iOS app, to come |
 

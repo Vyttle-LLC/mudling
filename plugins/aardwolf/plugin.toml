@@ -1,0 +1,27 @@
+# Aardwolf (aardmud.org): a heavily customized ROM derivative with rich GMCP.
+# Most of what MUDling knows about the game comes from GMCP, which the core
+# reads; this folder adds the text GMCP doesn't carry, and where each vital
+# is. It's written against the public plugin API only, with no hooks, so it
+# needs no permissions. See README.md for the events, sources and gaps.
+id = "aardwolf"
+name = "Aardwolf"
+version = "0.1.0"
+api = 1
+license = "MIT"
+layer = "game"
+
+[servers]
+hosts = ["aardmud.org"]
+mssp_names = ["Aardwolf"]
+
+[points]
+text = "text.toml"
+map = "map.toml"
+hud = "hud.toml"
+
+[fragments]
+# A prompt built from `help prompt`'s tokens, as its example shows it, "10hp
+# 10mn 10mv qt0>", or with maximums, "<1000/1000hp 800/800mn 900/900mv
+# 1200tnl>": hit points, mana and moves, each perhaps over its maximum and
+# below zero, then anything up to the closing ">".
+prompt = '''[<\[]?-?\d+(?:/\d+)?hp -?\d+(?:/\d+)?mn -?\d+(?:/\d+)?mv\b[^<>]*>'''

@@ -1,0 +1,9 @@
+# Aardwolf's prompt. The rest of its text the core reads from GMCP: the room
+# from room.info, the vitals from char.vitals.
+#
+# The game may end its prompt with GA, but a player can turn that off, and a
+# prompt without `%c` at its end leaves the next output glued after it. This
+# knows the prompt by its shape, the `prompt` fragment in plugin.toml, so
+# either way it ends where the prompt does.
+[[prompt]]
+pattern = '''^{prompt}'''

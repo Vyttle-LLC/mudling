@@ -4015,7 +4015,7 @@ pub mod tests {
     fn wearing_a_set_is_refused_while_the_shell_sees_echo_off(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.connected();
-        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Name {"name": "Bren"}"#);
         played.gmcp(r#"Char.Items.List {"location": "inv", "items": [{"id": "7", "name": "a linen robe"}]}"#);
         played.frames_until("the robe", |shell, _| {
             !shell.copies.items.value().carried.is_empty()
@@ -5179,7 +5179,7 @@ pub mod tests {
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.settings.read(cx).rules().character, "");
         });
-        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Name {"name": "Bren"}"#);
         played.frames_until("the rules to know who plays", |shell, cx| {
             shell.settings.read(cx).rules().character == "bren"
         });

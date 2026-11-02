@@ -5,3 +5,37 @@
 # each affect once. The vitals, experience included, are read by their common
 # names.
 affects = "Char.Status.affects"
+
+# The character sheet. Char.Status sends only what changed, under these
+# names; the level is the defaults' `Char.Status.level`. The position, such as
+# "Stand" or "Fight", comes with the vitals.
+[character]
+name = "Char.Status.character_name"
+position = "Char.Vitals.position"
+race = "Char.Status.race"
+class = "Char.Status.class"
+str = "Char.Status.str"
+int = "Char.Status.int"
+wis = "Char.Status.wis"
+dex = "Char.Status.dex"
+con = "Char.Status.con"
+str_perm = "Char.Status.str_perm"
+int_perm = "Char.Status.int_perm"
+wis_perm = "Char.Status.wis_perm"
+dex_perm = "Char.Status.dex_perm"
+con_perm = "Char.Status.con_perm"
+gold = "Char.Status.gold"
+practice = "Char.Status.practice"
+hitroll = "Char.Status.hitroll"
+damroll = "Char.Status.damroll"
+ac = "Char.Status.ac"
+saves = "Char.Status.saves"
+alignment = "Char.Status.alignment"
+wimpy = "Char.Status.wimpy"
+
+# The opponent, in the same diffs: an empty name ends the fight.
+[opponent]
+name = "Char.Status.opponent_name"
+level = "Char.Status.opponent_level"
+health = "Char.Status.opponent_health"
+max_health = "Char.Status.opponent_health_max"
