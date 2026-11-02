@@ -14,7 +14,9 @@ use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{duplicated_map, sample_map};
 use crate::measure;
-use crate::settings::{Listing, PluginRow, SavedServer as SheetServer, Section, Sending};
+use crate::settings::{
+    Downloaded, Listing, PluginRow, SavedServer as SheetServer, Section, Sending,
+};
 use crate::shell::Shell;
 use crate::theme::Theme;
 use crate::title_bar::SessionLabel;
@@ -35,7 +37,7 @@ use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId};
-use mudling_core::registry::{Fetched, IndexError};
+use mudling_core::registry::{self, Fetched, IndexError};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
     ConnectionStatus, Diff, Revision, RulesState, SettingsState, TerminalChange, TerminalState,
@@ -96,6 +98,9 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         sending: Sending::No,
         asks: Vec::new(),
         folder: None,
+        added_from: None,
+        source: None,
+        problem: None,
         held_back: None,
     }
 }
@@ -139,8 +144,10 @@ fn sample_fetched() -> Fetched {
     let (Listing::Listed { index, .. }, _) = measure::sample_directory() else {
         unreachable!("the sample directory is listed");
     };
+    let entry = index.plugins[1].clone();
     Fetched {
-        entry: index.plugins[1].clone(),
+        hash: entry.hash.clone(),
+        source: registry::Source::Directory(entry),
         commit: index.commit,
         files,
         plugin,
@@ -834,6 +841,24 @@ fn window_images() {
         },
     );
     for (name, appearance) in [
+        ("settings-add-plugin-dark", Dark),
+        ("settings-add-plugin-light", Light),
+    ] {
+        render(name, appearance, WIDE, measure::open_sample_add_plugin);
+    }
+    render(
+        "settings-add-plugin-forget-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_section(shell, Section::Plugins, window, cx);
+            let colors = PluginId::try_from("sample-colors".to_owned()).expect("a valid id");
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.confirm_remove(&colors, window, cx);
+            });
+        },
+    );
+    for (name, appearance) in [
         ("settings-approval-dark", Dark),
         ("settings-approval-light", Light),
     ] {
@@ -845,9 +870,13 @@ fn window_images() {
         WIDE,
         |shell, window, cx| {
             measure::open_sample_directory(shell, window, cx);
-            let fetched = Arc::new(sample_fetched());
+            let downloaded = Downloaded {
+                fetched: Arc::new(sample_fetched()),
+                keeps_approval: false,
+                replaces: None,
+            };
             shell.settings_sheet().update(cx, |sheet, cx| {
-                sheet.fetched(Ok((fetched, false)), window, cx);
+                sheet.fetched(Ok(downloaded), window, cx);
             });
         },
     );

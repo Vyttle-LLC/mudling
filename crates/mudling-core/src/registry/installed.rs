@@ -2,11 +2,10 @@
 //! `plugins/<id>.json` beside it saying where it came from. The folder is a
 //! plugin's files exactly as fetched, so its content hash still holds.
 
-use super::{Fetched, InstallError, Origins, Trusted, content_hash};
+use super::{Fetched, InstallError, Origins, Source, Trusted, content_hash};
 use crate::git::FolderFiles;
 use crate::plugin::Plugin;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,6 +22,11 @@ const WORKING_PREFIX: &str = ".";
 pub enum Record {
     Registry {
         version: String,
+        commit: String,
+        hash: String,
+    },
+    Link {
+        url: String,
         commit: String,
         hash: String,
     },
@@ -44,8 +48,16 @@ pub struct FolderCopy {
     pub folder: String,
     /// The folder's content hash as this device computed it.
     pub hash: String,
-    /// A record beside it says it came from the directory.
-    pub from_directory: bool,
+    /// What the record beside it says it came from, the directory or a
+    /// link, if there's one. It travels with the folder, so it vouches for
+    /// nothing.
+    pub record: Option<Record>,
+}
+
+impl FolderCopy {
+    pub fn from_directory(&self) -> bool {
+        matches!(self.record, Some(Record::Registry { .. }))
+    }
 }
 
 /// What the data folder's plugins came to.
@@ -100,22 +112,30 @@ impl InstalledPlugins {
     /// copy here. The files are written beside it first, so a crash leaves
     /// the old one or the new one.
     pub fn install(&self, fetched: &Fetched) -> Result<(), InstallError> {
-        let id = &fetched.entry.id;
+        let id = fetched.plugin.id().as_str();
         if !is_safe_name(id) {
             return Err(InstallError::NotAPlugin(format!(
                 "{id:?} isn't a folder name"
             )));
         }
         let disk = |error: io::Error| InstallError::Disk(error.to_string());
-        self.trusted.trust(id, &fetched.entry.hash).map_err(disk)?;
+        self.trusted.trust(id, &fetched.hash).map_err(disk)?;
         let incoming = self.folder.join(format!("{WORKING_PREFIX}{id}.new"));
         let outgoing = self.folder.join(format!("{WORKING_PREFIX}{id}.old"));
         remove_folder(&incoming).map_err(disk)?;
         write_files(&incoming, &fetched.files)?;
-        let record = Record::Registry {
-            version: fetched.entry.version.clone(),
-            commit: fetched.commit.to_string(),
-            hash: fetched.entry.hash.clone(),
+        let (commit, hash) = (fetched.commit.to_string(), fetched.hash.clone());
+        let record = match &fetched.source {
+            Source::Directory(entry) => Record::Registry {
+                version: entry.version.clone(),
+                commit,
+                hash,
+            },
+            Source::Link(url) => Record::Link {
+                url: url.clone(),
+                commit,
+                hash,
+            },
         };
         let target = self.folder.join(id);
         remove_folder(&outgoing).map_err(disk)?;
@@ -152,14 +172,15 @@ impl InstalledPlugins {
                     continue;
                 }
             };
-            let from_directory = self.record_path(&folder).exists();
+            let has_record = self.record_path(&folder).exists();
+            let record = has_record.then(|| self.record(&folder)).flatten();
             let copy = FolderCopy {
                 plugin,
                 folder,
                 hash,
-                from_directory,
+                record,
             };
-            if self.is_trusted(&copy) {
+            if self.is_trusted(&copy, has_record) {
                 loaded.plugins.push(copy);
             } else {
                 loaded.arrived.push(copy);
@@ -170,9 +191,9 @@ impl InstalledPlugins {
 
     /// Whether this device trusts `copy`. A folder whose origin can't be
     /// read or saved isn't the player's own.
-    fn is_trusted(&self, copy: &FolderCopy) -> bool {
+    fn is_trusted(&self, copy: &FolderCopy, has_record: bool) -> bool {
         self.trusted.trusts(&copy.folder, &copy.hash)
-            || (!copy.from_directory && self.origins.is_local(&copy.folder).unwrap_or(false))
+            || (!has_record && self.origins.is_local(&copy.folder).unwrap_or(false))
     }
 
     /// Trusts the copy in `folder` that hashes to `hash`, the copy the player
@@ -201,21 +222,10 @@ impl InstalledPlugins {
         self.origins.forget(folder)
     }
 
-    /// Where each plugin with a record came from, by id.
-    pub fn records(&self) -> BTreeMap<String, Record> {
-        let Ok(entries) = fs::read_dir(&self.folder) else {
-            return BTreeMap::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let id = path.file_stem()?.to_str()?.to_owned();
-                let is_record = path.extension()? == RECORD_EXTENSION && !is_working(&path);
-                let record = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
-                is_record.then_some((id, record))
-            })
-            .collect()
+    /// What the record beside `folder` says, if it can be read.
+    fn record(&self, folder: &str) -> Option<Record> {
+        let bytes = fs::read(self.record_path(folder)).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     fn record_path(&self, id: &str) -> PathBuf {

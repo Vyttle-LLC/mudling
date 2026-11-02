@@ -4,13 +4,14 @@
 
 use super::Shell;
 use crate::launcher::Launcher;
-use crate::settings::{Listing, PluginRow};
+use crate::settings::{AddedPlugin, Listing, PluginRow};
 use gpui::{AppContext, Context, SharedString, Window};
 use mudling_core::git::Limit;
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
 use mudling_core::registry::{Entry, Fetched, Index};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ const NOT_SIGNED: &str = "The directory doesn't list this copy.";
 struct PluginsNow {
     launcher: Launcher,
     installed: BTreeMap<String, Option<String>>,
+    added: Vec<AddedPlugin>,
     /// The rows of the server being played, if there's one.
     rows: Option<Vec<PluginRow>>,
 }
@@ -30,10 +32,12 @@ struct PluginsNow {
 impl PluginsNow {
     fn read(launcher: Launcher, host: Option<&str>) -> Result<PluginsNow, String> {
         let installed = launcher.installed_versions();
+        let added = launcher.added_plugins();
         let rows = host.map(|host| launcher.plugin_rows(host)).transpose()?;
         Ok(PluginsNow {
             launcher,
             installed,
+            added,
             rows,
         })
     }
@@ -81,8 +85,7 @@ impl Shell {
             let fetched = (launcher.registry())
                 .fetch(&index, &entry, &Limit::after(REGISTRY_WAIT))
                 .map_err(|error| format!("{} wasn't installed: {error}.", entry.name))?;
-            let approved = launcher.approved().contains(fetched.plugin.id());
-            Ok((Arc::new(fetched), approved))
+            Ok(launcher.downloaded(fetched))
         });
         self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
             let fetched = fetch.await;
@@ -141,7 +144,10 @@ impl Shell {
         let Some(launcher) = self.launcher.clone() else {
             return;
         };
-        if let Some(game) = &self.game {
+        // A copy held back beside the one that runs never ran.
+        if let Some(game) = &self.game
+            && launcher.runs_from_folder(&plugin, &folder)
+        {
             game.session.set_approved(plugin.clone(), false);
         }
         let host = self.game.as_ref().map(|game| game.target.host.clone());
@@ -151,6 +157,114 @@ impl Shell {
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = remove.await;
+            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
+        }));
+    }
+
+    /// Hands the sheet what was added from links and folders.
+    pub(super) fn show_added(&mut self, cx: &mut Context<Shell>) {
+        let Some(launcher) = &self.launcher else {
+            return;
+        };
+        let added = launcher.added_plugins();
+        self.settings
+            .update(cx, |sheet, cx| sheet.show_added(added, cx));
+    }
+
+    /// Fetches the plugin at `url` and checks it, then hands it to the
+    /// sheet, which asks for approval if it needs one, as the directory's.
+    pub(super) fn add_link(&mut self, url: String, window: &mut Window, cx: &mut Context<Shell>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let fetch = cx.background_spawn(async move {
+            let fetched = launcher.fetch_link(&url, &Limit::after(REGISTRY_WAIT))?;
+            Ok(launcher.downloaded(fetched))
+        });
+        // Its own task, so other plugin work started meanwhile can't drop it.
+        self.link_check = Some(cx.spawn_in(window, async move |shell, cx| {
+            let checked = fetch.await;
+            let _ = shell.update_in(cx, |shell, window, cx| {
+                shell
+                    .settings
+                    .update(cx, |sheet, cx| sheet.link_checked(checked, window, cx));
+            });
+        }));
+    }
+
+    /// Loads the plugin in `folder` from now on, and watches it.
+    pub(super) fn add_folder(&mut self, folder: PathBuf, cx: &mut Context<Shell>) {
+        let repo = self
+            .sync
+            .as_ref()
+            .and_then(|link| link.choices.repo.clone());
+        self.change_plugins(
+            move |launcher| launcher.add_folder(&folder, repo.as_deref()),
+            cx,
+        );
+    }
+
+    /// Reads `folders` again, as a file in each changed. It has its own
+    /// task, and leaves the sheet's other work alone, so a save neither
+    /// cancels nor ends an install.
+    pub(super) fn reload_folders(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Shell>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let host = self.game.as_ref().map(|game| game.target.host.clone());
+        let reload = cx.background_spawn(async move {
+            let reloaded =
+                (folders.iter()).fold(launcher, |launcher, folder| launcher.reload_folder(folder));
+            PluginsNow::read(reloaded, host.as_deref())
+        });
+        self.folder_reload = Some(cx.spawn(async move |shell, cx| {
+            let now = reload.await;
+            let _ = shell.update(cx, |shell, cx| match now {
+                Ok(now) => {
+                    shell.launcher = Some(now.launcher);
+                    shell.settings.update(cx, |sheet, cx| {
+                        sheet.show_added(now.added, cx);
+                        if let Some(rows) = now.rows {
+                            sheet.refresh_plugins(rows, true, cx);
+                        }
+                    });
+                }
+                Err(problem) => eprintln!("couldn't show a reloaded plugin: {problem}"),
+            });
+        }));
+    }
+
+    /// Stops loading the folder at `path`, which held `plugin` if it ever
+    /// loaded. A session running it stops letting it send at once.
+    pub(super) fn forget_folder(
+        &mut self,
+        plugin: Option<PluginId>,
+        path: PathBuf,
+        cx: &mut Context<Shell>,
+    ) {
+        if let (Some(game), Some(launcher), Some(plugin)) = (&self.game, &self.launcher, plugin)
+            && launcher.runs_from_added(&plugin, &path)
+        {
+            game.session.set_approved(plugin, false);
+        }
+        self.change_plugins(move |launcher| launcher.forget_folder(&path), cx);
+    }
+
+    /// Runs the player's `change` on the launcher off the UI thread, and
+    /// then shows what's installed after it.
+    fn change_plugins(
+        &mut self,
+        change: impl FnOnce(Launcher) -> Result<Launcher, String> + Send + 'static,
+        cx: &mut Context<Shell>,
+    ) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let host = self.game.as_ref().map(|game| game.target.host.clone());
+        let changed = cx
+            .background_spawn(async move { PluginsNow::read(change(launcher)?, host.as_deref()) });
+        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
+            let now = changed.await;
             let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
         }));
     }
@@ -230,9 +344,10 @@ impl Shell {
         match now {
             Ok(now) => {
                 let refused = now.launcher.refused().to_vec();
+                self.watch_added_folders(now.launcher.added_folders(), cx);
                 self.launcher = Some(now.launcher);
                 self.settings.update(cx, |sheet, cx| {
-                    sheet.installed(None, now.installed, cx);
+                    sheet.installed(now.installed, now.added, cx);
                     sheet.show_refused(refused, cx);
                     if let Some(rows) = now.rows {
                         sheet.refresh_plugins(rows, by_player, cx);

@@ -23,6 +23,7 @@ use mudling_core::plugin::manifest::Permission;
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
 use mudling_core::registry::{self, Refused};
 use mudling_core::stats::Summary;
+use std::path::PathBuf;
 
 const SWITCH_WIDTH: Pixels = px(40.);
 const SWITCH_HEIGHT: Pixels = px(22.);
@@ -39,6 +40,7 @@ const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins o
 const OVERRAN: &str = " One of its hooks ran past its time limit three times this session.";
 const SENDS_COMMANDS: &str = "Sends commands";
 const NEEDS_APPROVAL: &str = "Needs your approval to send commands";
+const ONLY_WITH_ENABLE: &str = "Sends commands only when MUDling starts with --enable";
 const ARRIVED: &str = "Arrived from another device";
 const SENDS_ASK: &str =
     "send commands to the game, which show in the chat like yours and are rate-limited";
@@ -75,6 +77,13 @@ pub struct PluginRow {
     /// Its folder in the data folder, for one the player can take out. A
     /// folder needn't be named for the plugin it holds.
     pub folder: Option<SharedString>,
+    /// The folder on this device it loads from, for one the player added.
+    pub added_from: Option<PathBuf>,
+    /// Where it came from, in words, when that's not the app.
+    pub source: Option<SharedString>,
+    /// Why its folder's files don't load now, while its last working copy
+    /// runs.
+    pub problem: Option<SharedString>,
     /// The content hash of a copy this device doesn't trust, as shown: it
     /// isn't loaded until the player trusts exactly that copy.
     pub held_back: Option<SharedString>,
@@ -87,6 +96,9 @@ pub enum Sending {
     Approved,
     /// Its hooks stay off until the player approves.
     Waiting,
+    /// Its hooks stay off: only the command line's `--enable` can let this
+    /// copy send, as it's the app's own or the command line's.
+    OnlyWithEnable,
 }
 
 /// What `plugin`'s permissions let its hooks do, in the approval's words.
@@ -139,7 +151,28 @@ impl PluginRow {
             },
             asks: asks_of(plugin),
             folder: None,
+            added_from: None,
+            source: None,
+            problem: None,
             held_back: None,
+        }
+    }
+
+    /// What tells its elements from any other row's. A copy held back
+    /// shares its id with the copy that runs, so it's told by its folder.
+    pub fn key(&self) -> String {
+        match (&self.held_back, &self.folder) {
+            (Some(_), Some(folder)) => format!("{}-in-{folder}", self.id),
+            _ => self.id.to_string(),
+        }
+    }
+
+    /// How the player takes it out, for one they installed or added.
+    pub(super) fn removal(&self) -> Option<Purpose> {
+        match (&self.folder, &self.added_from) {
+            (Some(folder), _) => Some(Purpose::Remove(folder.clone())),
+            (None, Some(path)) => Some(Purpose::Forget(path.clone())),
+            (None, None) => None,
         }
     }
 
@@ -206,6 +239,11 @@ impl PluginRow {
         let sampled = costs.iter().find(|cost| cost.plugin == self.id)?;
         sampled.per_line.as_ref().map(|cost| cost.p99_us)
     }
+}
+
+/// What's wrong with a folder whose last working copy runs instead.
+pub(super) fn broken_reload(problem: &str) -> String {
+    format!("Its last reload broke it: {problem}. The last working copy keeps running.")
 }
 
 pub(super) fn micros(cost: f64) -> String {
@@ -328,18 +366,22 @@ enum Status {
     Arrived,
     Approved,
     Waiting,
+    /// Nothing on this page can change it.
+    OnlyWithEnable,
 }
 
-/// A plugin's status, as words and the button that changes it. A copy that
-/// arrived says so first: until it's trusted, nothing else about it counts.
-fn status_words(row: &PluginRow) -> Option<(Status, &'static str, &'static str)> {
+/// A plugin's status, as words and the button that changes it, if one can.
+/// A copy that arrived says so first: until it's trusted, nothing else about
+/// it counts.
+fn status_words(row: &PluginRow) -> Option<(Status, &'static str, Option<&'static str>)> {
     if row.held_back.is_some() {
-        return Some((Status::Arrived, ARRIVED, "Review"));
+        return Some((Status::Arrived, ARRIVED, Some("Review")));
     }
     match row.sending {
         Sending::No => None,
-        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, "Take back")),
-        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, "Review")),
+        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, Some("Take back"))),
+        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, Some("Review"))),
+        Sending::OnlyWithEnable => Some((Status::OnlyWithEnable, ONLY_WITH_ENABLE, None)),
     }
 }
 
@@ -356,13 +398,18 @@ fn plugin_row(
     approval: Option<AnyElement>,
     theme: &Theme,
 ) -> Div {
-    let about = match elsewhere {
+    let mut about = match elsewhere {
         Some(servers) => format!("For {servers} · Version {}", row.version),
         None => format!("Version {}", row.version),
     };
+    if let Some(source) = &row.source {
+        about.push_str(&format!(" · {source}"));
+    }
+    let broken = row.problem.as_ref().map(|problem| broken_reload(problem));
     let sending_said = status_words(row)
         .map(|(_, words, _)| format!(" {words}."))
         .unwrap_or_default();
+    let broken_said = broken.as_ref().map(|broken| format!(" {broken}"));
     let state = match (switched_on, overran) {
         _ if row.held_back.is_some() => "Not loaded",
         (true, _) => "On",
@@ -377,9 +424,10 @@ fn plugin_row(
         Some(cost) => format!(" {} a line.", micros(cost)),
         None => String::new(),
     };
-    let id = row.id.clone();
+    let key = row.key();
+    let selector = key.clone();
     div()
-        .debug_selector(move || format!("plugin-{id}"))
+        .debug_selector(move || format!("plugin-{selector}"))
         .flex()
         .items_center()
         .gap_3()
@@ -392,12 +440,13 @@ fn plugin_row(
                 .min_w_0()
                 .child(
                     div()
-                        .id(SharedString::from(format!("plugin-{}", row.id)))
+                        .id(SharedString::from(format!("plugin-{key}")))
                         .role(Role::Label)
                         .aria_value(format!(
-                            "{}, {}: {state}. {about}.{cost_said}{sending_said}",
+                            "{}, {}: {state}. {about}.{cost_said}{sending_said}{}",
                             row.name,
                             layer_badge(row.layer),
+                            broken_said.unwrap_or_default(),
                         ))
                         .child(
                             div()
@@ -423,7 +472,13 @@ fn plugin_row(
                                 .text_size(px(13.))
                                 .text_color(theme.text_muted)
                                 .child(about),
-                        ),
+                        )
+                        .children(broken.map(|broken| {
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme.warning)
+                                .child(broken)
+                        })),
                 )
                 .children(approval),
         )
@@ -480,7 +535,7 @@ impl SettingsSheet {
             && self.turned_off.iter().any(|off| off.plugin == row.id);
         let on = on && !overran;
         let state = if on { "on" } else { "off" };
-        let id = SharedString::from(format!("switch-{}", row.id));
+        let id = SharedString::from(format!("switch-{}", row.key()));
         control(id, format!("{}, {state}", row.name), &pane.stop(cx), theme)
             .role(Role::Switch)
             .aria_toggled(toggled(on))
@@ -521,7 +576,7 @@ impl SettingsSheet {
 
     /// The line saying whether a plugin's copy is trusted and whether it may
     /// send commands, with their buttons, and Remove for one the player
-    /// installed.
+    /// installed or added.
     fn actions_line(
         &self,
         row: &PluginRow,
@@ -533,57 +588,61 @@ impl SettingsSheet {
         let status = status_words(row).map(|(status, words, action)| {
             let plugin = row.clone();
             let id = match status {
-                Status::Arrived => format!("arrival-{}", row.id),
-                _ => format!("approval-{}", row.id),
+                Status::Arrived => format!("arrival-{}", row.key()),
+                _ => format!("approval-{}", row.key()),
             };
-            let button = small(text_button(
-                SharedString::from(id),
-                action,
-                &pane.stop(cx),
-                theme,
-            ))
-            .aria_label(format!("{action}: {words}, {}", row.name))
-            .on_click(cx.listener(move |sheet, _, window, cx| match status {
-                Status::Arrived => {
-                    let (Some(folder), Some(hash)) = (&plugin.folder, &plugin.held_back) else {
-                        return;
-                    };
-                    cx.emit(SheetEvent::ReviewArrival {
-                        folder: folder.clone(),
-                        hash: hash.clone(),
-                    });
-                }
-                Status::Approved => sheet.set_approved(plugin.id.clone(), false, cx),
-                Status::Waiting => {
-                    let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
-                    sheet.ask(approval, window, cx);
-                }
-            }));
+            let button = action.map(|action| {
+                small(text_button(
+                    SharedString::from(id),
+                    action,
+                    &pane.stop(cx),
+                    theme,
+                ))
+                .aria_label(format!("{action}: {words}, {}", row.name))
+                .on_click(cx.listener(move |sheet, _, window, cx| match status {
+                    Status::Arrived => {
+                        let (Some(folder), Some(hash)) = (&plugin.folder, &plugin.held_back) else {
+                            return;
+                        };
+                        cx.emit(SheetEvent::ReviewArrival {
+                            folder: folder.clone(),
+                            hash: hash.clone(),
+                        });
+                    }
+                    Status::Approved => sheet.set_approved(plugin.id.clone(), false, cx),
+                    Status::Waiting => {
+                        let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
+                        sheet.ask(approval, window, cx);
+                    }
+                    Status::OnlyWithEnable => {}
+                }))
+            });
             div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .text_color(match status {
-                    Status::Approved => theme.text_muted,
+                    Status::Approved | Status::OnlyWithEnable => theme.text_muted,
                     _ => theme.warning,
                 })
                 .child(words)
-                .child(button)
+                .children(button)
         });
-        let remove = row.folder.as_ref().map(|folder| {
-            let (plugin, folder) = (row.clone(), folder.clone());
-            small(text_button(
-                SharedString::from(format!("remove-{}", row.id)),
+        let remove = row.removal().map(|purpose| {
+            let plugin = row.clone();
+            let button = small(text_button(
+                SharedString::from(format!("remove-{}", row.key())),
                 "Remove",
                 &pane.stop(cx),
                 theme,
             ))
-            .aria_label(format!("Remove {}", row.name))
-            .on_click(cx.listener(move |sheet, _, window, cx| {
-                let purpose = Purpose::Remove(folder.clone());
-                let confirm = Approval::for_row(&plugin, purpose, window, cx);
-                sheet.ask(confirm, window, cx);
-            }))
+            .aria_label(format!("Remove {}", row.name));
+            self.unless_checking(button, |button| {
+                button.on_click(cx.listener(move |sheet, _, window, cx| {
+                    let confirm = Approval::for_row(&plugin, purpose.clone(), window, cx);
+                    sheet.ask(confirm, window, cx);
+                }))
+            })
         });
         let approval = status;
         if approval.is_none() && remove.is_none() {

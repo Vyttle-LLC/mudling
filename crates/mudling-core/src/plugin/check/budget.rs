@@ -7,10 +7,11 @@
 //! only ever add time, so each host's best round is its truest, and a plugin
 //! over budget stays over it in every round.
 
-use crate::replay::host_with;
-use mudling_core::line::{Line, LinePipeline};
-use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginSink};
-use mudling_core::stats::Summary;
+use super::replay::host_with;
+use crate::line::{Line, LinePipeline};
+use crate::plugin::{Plugin, PluginError, PluginEvent, PluginHost, PluginSink};
+use crate::stats::Summary;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Microseconds a plugin may add to a line at p99. A debug build reads a line
@@ -37,6 +38,19 @@ impl Cost {
 
     pub fn within_budget(&self) -> bool {
         self.added_us() <= self.budget_us
+    }
+}
+
+impl fmt::Display for Cost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "+{:.2} µs a line at p99 ({:.2} with, {:.2} without), budget {} µs",
+            self.added_us(),
+            self.with_us,
+            self.without_us,
+            self.budget_us
+        )
     }
 }
 

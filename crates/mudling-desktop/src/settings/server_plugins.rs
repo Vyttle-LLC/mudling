@@ -251,6 +251,9 @@ mod tests {
             sending: crate::settings::Sending::No,
             asks: Vec::new(),
             folder: None,
+            added_from: None,
+            source: None,
+            problem: None,
             held_back: None,
         }
     }

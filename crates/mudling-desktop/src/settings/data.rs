@@ -29,13 +29,15 @@ const NOT_SYNCED_YET: &str = "Not synced yet.";
 const SYNCING: &str = "Syncing…";
 /// The history lists this many sessions, the newest first.
 const HISTORY_LENGTH: usize = 50;
-/// PRD §10's list, said as it is. Installed plugins sync; which are on for a
-/// server, which may send commands and which copies may load stay with the
-/// device that chose. Nothing here comes from a game.
-const WHATS_KEPT: [(&str, &str); 5] = [
+/// PRD §10's list, said as it is. Plugins installed from the directory or a
+/// link sync; folders added as plugins, which are on for a server, which may
+/// send commands and which copies may load stay with the device that chose.
+/// Nothing here comes from a game.
+const WHATS_KEPT: [(&str, &str); 6] = [
     ("Maps, characters and notes", "Synced"),
     ("Triggers, aliases and settings", "Synced"),
     ("Installed plugins", "Synced"),
+    ("Plugin folders you added", "On this device"),
     ("Plugin switches, approvals and trust", "On this device"),
     ("Game logs and typing", "Never synced"),
 ];
@@ -458,6 +460,7 @@ mod tests {
     fn installed_plugins_sync_and_approvals_stay_on_this_device() {
         let how = |what: &str| WHATS_KEPT.iter().find(|row| row.0 == what).map(|row| row.1);
         assert_eq!(how("Installed plugins"), Some("Synced"));
+        assert_eq!(how("Plugin folders you added"), Some("On this device"));
         assert_eq!(
             how("Plugin switches, approvals and trust"),
             Some("On this device")

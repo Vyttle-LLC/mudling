@@ -103,7 +103,13 @@ pub(super) struct Repository {
 /// vault in from where it already is. Paths are compared as the disk has them,
 /// through links, and for a folder not made yet by what exists of it.
 pub fn repo_holds_data_folder(repo: &Path, data_folder: &Path) -> bool {
-    resolved(data_folder).starts_with(resolved(repo))
+    is_within(data_folder, repo)
+}
+
+/// Whether `path` is `folder` or inside it, compared as
+/// [`repo_holds_data_folder`] compares them.
+pub fn is_within(path: &Path, folder: &Path) -> bool {
+    resolved(path).starts_with(resolved(folder))
 }
 
 fn resolved(path: &Path) -> PathBuf {

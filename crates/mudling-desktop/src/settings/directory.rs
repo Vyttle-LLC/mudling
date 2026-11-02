@@ -5,6 +5,7 @@
 //! page only shows what it hands over: a list, or why there's none. Nothing
 //! that didn't check out is ever listed.
 
+use super::add_plugin::AddedPlugin;
 use super::plugins::{PluginRow, Sending};
 use super::{
     Page, Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, text_button,
@@ -20,6 +21,7 @@ use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
 use mudling_core::registry::{self, Entry, Fetched, Index};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(super) const DIRECTORY_TITLE: &str = "Plugin directory";
@@ -31,6 +33,16 @@ const ANY_GAME: &str = "Any game";
 const CANT_REACH: &str =
     "It can't read your files or reach the network. You can take this back on the Plugins page.";
 const CHIP_HEIGHT: gpui::Pixels = px(28.);
+
+/// A plugin downloaded and checked, with what installing it means here.
+pub struct Downloaded {
+    pub fetched: Arc<Fetched>,
+    /// It updates an approved copy from where that came from, so it may
+    /// send without asking again.
+    pub keeps_approval: bool,
+    /// The installed plugin from elsewhere it would replace, in words.
+    pub replaces: Option<String>,
+}
 
 /// What the directory has to show.
 #[derive(Clone, Debug, Default)]
@@ -151,8 +163,13 @@ pub(super) struct Approval {
     return_to: Option<FocusHandle>,
 }
 
+#[derive(Clone)]
 pub(super) enum Purpose {
-    Install(Arc<Fetched>),
+    /// Install `fetched`, saying first what it replaces, if anything.
+    Install {
+        fetched: Arc<Fetched>,
+        replaces: Option<SharedString>,
+    },
     TurnOn(SharedString),
     Review,
     /// Load a copy this device didn't install, which the directory doesn't
@@ -163,8 +180,10 @@ pub(super) enum Purpose {
         folder: SharedString,
         hash: SharedString,
     },
-    /// Take out the plugin in this folder.
+    /// Take out the plugin in this folder of the data folder.
     Remove(SharedString),
+    /// Stop loading the folder the player added, leaving it be.
+    Forget(PathBuf),
 }
 
 /// What the dialog says and offers for its purpose.
@@ -182,6 +201,8 @@ const TRUST_FOOTER: &str = "Trusting this copy loads it from your next connect. 
      commands only if you approve that too.";
 const REMOVE_FOOTER: &str = "It comes off this device, and off your other devices when they \
      sync. Its approval goes with it, and it stops at your next connect.";
+const FORGET_FOOTER: &str = "MUDling stops loading it at your next connect, and its approval \
+     goes with it. Your folder and its files stay where they are.";
 
 impl Approval {
     fn words(&self) -> Words {
@@ -195,7 +216,10 @@ impl Approval {
             with,
         };
         match &self.purpose {
-            Purpose::Install(_) => approval(Some("Install without sending"), "Allow and install"),
+            Purpose::Install { replaces, .. } => Words {
+                lead: replaces.clone(),
+                ..approval(Some("Install without sending"), "Allow and install")
+            },
             Purpose::TurnOn(_) => approval(Some("Turn on without sending"), "Allow and turn on"),
             Purpose::Review => approval(None, "Allow"),
             Purpose::Trust { why, .. } => Words {
@@ -214,6 +238,14 @@ impl Approval {
                 without: None,
                 with: "Remove",
             },
+            Purpose::Forget(_) => Words {
+                title: format!("Remove {name}?"),
+                lead: None,
+                shows_asks: false,
+                footer: FORGET_FOOTER,
+                without: None,
+                with: "Remove",
+            },
         }
     }
 }
@@ -229,6 +261,24 @@ impl Approval {
             plugin: row.id.clone(),
             name: row.name.clone(),
             asks: row.asks.clone(),
+            purpose,
+            return_to: window.focused(cx),
+        }
+    }
+
+    /// Asks before taking out `plugin`, named `name`, which has no row on
+    /// the Plugins page to ask from.
+    pub(super) fn to_remove(
+        plugin: PluginId,
+        name: SharedString,
+        purpose: Purpose,
+        window: &Window,
+        cx: &App,
+    ) -> Approval {
+        Approval {
+            plugin,
+            name,
+            asks: Vec::new(),
             purpose,
             return_to: window.focused(cx),
         }
@@ -256,25 +306,30 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A plugin downloaded and checked. One that sends commands, and isn't
-    /// approved already, asks first.
+    /// A plugin downloaded and checked. One that sends commands asks first,
+    /// unless it's an update of an approved copy from where that came from.
     pub fn fetched(
         &mut self,
-        fetched: Result<(Arc<Fetched>, bool), String>,
+        downloaded: Result<Downloaded, String>,
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
-        match fetched {
-            Err(problem) => {
-                self.directory.busy = None;
-                self.directory.problem = Some(problem.into());
-            }
-            Ok((fetched, approved)) if registry::sends_commands(&fetched.plugin) && !approved => {
+        match downloaded {
+            Err(problem) => self.plugin_work_ended(Some(problem.into())),
+            Ok(Downloaded {
+                fetched,
+                keeps_approval: false,
+                replaces,
+            }) if registry::sends_commands(&fetched.plugin) => {
                 let row = PluginRow::of(&fetched.plugin, false);
-                let approval = Approval::for_row(&row, Purpose::Install(fetched), window, cx);
+                let purpose = Purpose::Install {
+                    fetched,
+                    replaces: replaces.map(Into::into),
+                };
+                let approval = Approval::for_row(&row, purpose, window, cx);
                 self.ask(approval, window, cx);
             }
-            Ok((fetched, _)) => cx.emit(SheetEvent::Install {
+            Ok(Downloaded { fetched, .. }) => cx.emit(SheetEvent::Install {
                 fetched,
                 approve: false,
             }),
@@ -282,23 +337,34 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// How an install went. What's installed now comes with it.
+    /// What's installed now, after a change to it, and what was added from
+    /// links and folders.
     pub fn installed(
         &mut self,
-        problem: Option<String>,
         installed: BTreeMap<String, Option<String>>,
+        added: Vec<AddedPlugin>,
         cx: &mut Context<SettingsSheet>,
     ) {
-        self.directory.busy = None;
-        self.directory.problem = problem.map(Into::into);
+        self.plugin_work_ended(None);
         self.directory.installed = installed;
+        self.show_added(added, cx);
         cx.notify();
     }
 
     pub fn install_failed(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
-        self.directory.busy = None;
-        self.directory.problem = Some(problem.into());
+        self.plugin_work_ended(Some(problem.into()));
         cx.notify();
+    }
+
+    /// The work of installing a plugin ended, with `problem` if it failed,
+    /// which shows on the page the player is on. A link being checked has
+    /// its own end: [`SettingsSheet::link_checked`].
+    fn plugin_work_ended(&mut self, problem: Option<SharedString>) {
+        self.directory.busy = None;
+        match self.page {
+            Page::AddPlugin => self.add.problem = problem,
+            _ => self.directory.problem = problem,
+        }
     }
 
     fn get(&mut self, entry: Entry, index: Arc<Index>, cx: &mut Context<SettingsSheet>) {
@@ -321,6 +387,15 @@ impl SettingsSheet {
     ) {
         let back = self.back_button(Section::Plugins, pane, theme, cx);
         pane.leading = Some(back.into_any_element());
+        // Whatever the index says, a link or a folder can be added.
+        let add = text_button(
+            "directory-add",
+            "Add from a link or folder",
+            &pane.stop(cx),
+            theme,
+        )
+        .on_click(cx.listener(|sheet, _, window, cx| sheet.open_add_plugin(window, cx)));
+        pane.trailing = Some(add.into_any_element());
         let index = match self.directory.listing.clone() {
             Listing::Checking => {
                 pane.row(muted_line(CHECKING, theme).role(Role::Status));
@@ -533,7 +608,8 @@ impl SettingsSheet {
         self.ask(approval, window, cx);
     }
 
-    /// Asks before taking `plugin` out of the data folder.
+    /// Asks before taking `plugin` out of the data folder, or forgetting the
+    /// folder it was added from.
     #[cfg(all(test, target_os = "macos"))]
     pub fn confirm_remove(
         &mut self,
@@ -544,10 +620,10 @@ impl SettingsSheet {
         let Some(row) = self.plugins.iter().find(|row| row.id == *plugin) else {
             return;
         };
-        let Some(folder) = row.folder.clone() else {
+        let Some(removal) = row.removal() else {
             return;
         };
-        let confirm = Approval::for_row(row, Purpose::Remove(folder), window, cx);
+        let confirm = Approval::for_row(row, removal, window, cx);
         self.ask(confirm, window, cx);
     }
 
@@ -597,11 +673,11 @@ impl SettingsSheet {
     /// Closes an approval left unanswered, as Cancel would.
     pub(super) fn drop_approval(&mut self) {
         if let Some(Approval {
-            purpose: Purpose::Install(_),
+            purpose: Purpose::Install { .. },
             ..
         }) = self.asking.take()
         {
-            self.directory.busy = None;
+            self.plugin_work_ended(None);
         }
     }
 
@@ -619,13 +695,13 @@ impl SettingsSheet {
         };
         let plugin = approval.plugin.clone();
         match approval.purpose {
-            Purpose::Install(fetched) if go_on => {
+            Purpose::Install { fetched, .. } if go_on => {
                 cx.emit(SheetEvent::Install {
                     fetched,
                     approve: send,
                 });
             }
-            Purpose::Install(_) => self.directory.busy = None,
+            Purpose::Install { .. } => self.plugin_work_ended(None),
             Purpose::TurnOn(host) if go_on => {
                 if send {
                     self.set_approved(plugin.clone(), true, cx);
@@ -637,7 +713,15 @@ impl SettingsSheet {
                 cx.emit(SheetEvent::Trust { folder, hash });
             }
             Purpose::Remove(folder) if go_on => cx.emit(SheetEvent::Remove { plugin, folder }),
-            Purpose::TurnOn(_) | Purpose::Review | Purpose::Trust { .. } | Purpose::Remove(_) => {}
+            Purpose::Forget(path) if go_on => cx.emit(SheetEvent::ForgetFolder {
+                plugin: Some(plugin),
+                path,
+            }),
+            Purpose::TurnOn(_)
+            | Purpose::Review
+            | Purpose::Trust { .. }
+            | Purpose::Remove(_)
+            | Purpose::Forget(_) => {}
         }
         if let Some(back) = approval.return_to {
             window.focus(&back, cx);

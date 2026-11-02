@@ -261,7 +261,47 @@ fn without_a_key_every_index_is_refused_before_the_network() {
     let registry = Registry::at(data.path(), "/nowhere/at/all", None);
 
     assert_eq!(registry.refresh(&limit()), Err(IndexError::NoKey));
-    assert_eq!(REGISTRY_PUBLIC_KEY, None, "set it, and drop this line");
+}
+
+/// The first index the registry's CI published, on its `index` branch.
+const PUBLISHED_INDEX: &[u8] = include_bytes!("testdata/index.json");
+
+#[test]
+fn the_registry_s_published_index_checks_out_with_this_build_s_key() {
+    let data = TempDir::new().unwrap();
+    let registry_key = Registry::new(data.path())
+        .key
+        .expect("this build has the key");
+
+    let index = verify(PUBLISHED_INDEX, &registry_key, None).unwrap();
+
+    assert_eq!(
+        index.commit.to_string(),
+        "a8ee5024e7529c44aaa2aee933feae18b1b234af"
+    );
+    assert_eq!(index.published_at, "2026-11-02T14:30:07Z");
+    assert!(index.plugins.is_empty());
+    let signed_by_another = verify(PUBLISHED_INDEX, &key(1).verifying_key(), None);
+    assert_eq!(signed_by_another, Err(IndexError::Forged));
+}
+
+/// Reaches GitHub, so it runs only when asked:
+/// `cargo test -p mudling-core live_registry -- --ignored`.
+#[test]
+#[ignore = "fetches the real registry"]
+fn the_live_registry_s_index_checks_out() {
+    let data = TempDir::new().unwrap();
+
+    let index = Registry::new(data.path())
+        .refresh(&Limit::after(Duration::from_secs(60)))
+        .unwrap();
+
+    println!(
+        "commit {} published {} with {} plugins",
+        index.commit,
+        index.published_at,
+        index.plugins.len()
+    );
 }
 
 #[test]
@@ -303,8 +343,8 @@ fn a_plugin_installs_with_the_bytes_git_holds_whatever_its_attributes_say() {
     );
     assert_eq!(Plugin::load(&folder).unwrap().id().as_str(), "tells");
     assert_eq!(
-        installed.records().get("tells"),
-        Some(&Record::Registry {
+        installed.load().plugins[0].record,
+        Some(Record::Registry {
             version: "1.0.0".to_owned(),
             commit: upstream.main.to_string(),
             hash: index.plugins[0].hash.clone(),
@@ -613,4 +653,223 @@ fn a_copy_a_verified_index_lists_loads_wherever_it_came_from() {
         .unwrap();
 
     assert_eq!(installed.load().plugins.len(), 1);
+}
+
+/// A repo's files, by path.
+type RepoFiles = Vec<(&'static str, Vec<u8>)>;
+
+/// What `mudling plugin new linked` makes: a plugin that passes its own test.
+fn new_plugin_files() -> RepoFiles {
+    let scaffold = |file: &str| -> &'static str {
+        match file {
+            "plugin.toml" => include_str!("../../../mudling-cli/src/scaffold/plugin.toml"),
+            "text.toml" => include_str!("../../../mudling-cli/src/scaffold/text.toml"),
+            "hooks.luau" => include_str!("../../../mudling-cli/src/scaffold/hooks.luau"),
+            "sample.txt" => include_str!("../../../mudling-cli/src/scaffold/sample.txt"),
+            _ => include_str!("../../../mudling-cli/src/scaffold/sample.expected"),
+        }
+    };
+    vec![
+        (
+            "plugin.toml",
+            scaffold("plugin.toml").replace("{id}", "linked").into(),
+        ),
+        ("text.toml", scaffold("text.toml").into()),
+        ("hooks.luau", scaffold("hooks.luau").into()),
+        ("tests/sample.txt", scaffold("sample.txt").into()),
+        ("tests/sample.expected", scaffold("sample.expected").into()),
+    ]
+}
+
+/// A plugin's own repo, with `files` at its root on the branch `HEAD` names.
+fn plugin_repo(files: &[(&str, Vec<u8>)]) -> TempDir {
+    let folder = TempDir::new().unwrap();
+    let repo = Repository::init_bare(folder.path()).unwrap();
+    commit(&repo, "refs/heads/trunk", files);
+    repo.set_head("refs/heads/trunk").unwrap();
+    folder
+}
+
+fn link_of(repo: &TempDir) -> String {
+    repo.path().display().to_string()
+}
+
+#[test]
+fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let data = TempDir::new().unwrap();
+
+    let fetched = fetch_link(data.path(), &link_of(&upstream), &limit()).unwrap();
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    installed.install(&fetched).unwrap();
+
+    let loaded = installed.load();
+    assert_eq!(loaded.plugins.len(), 1, "installed here, so trusted here");
+    let copy = &loaded.plugins[0];
+    assert_eq!(copy.plugin.id().as_str(), "linked");
+    assert_eq!(copy.hash, fetched.hash);
+    assert!(matches!(&copy.record, Some(Record::Link { url, .. }) if *url == link_of(&upstream)));
+    assert!(!copy.from_directory(), "the directory offers it no updates");
+
+    assert_eq!(link_mirrors(&data).len(), 1, "kept for its updates");
+    forget_link(data.path(), &link_of(&upstream)).unwrap();
+    assert!(link_mirrors(&data).is_empty());
+}
+
+#[test]
+fn a_plugin_from_a_link_that_fails_a_check_is_not_installed() {
+    let data = TempDir::new().unwrap();
+    let fetch = |change: &dyn Fn(&mut RepoFiles)| {
+        let mut files = new_plugin_files();
+        change(&mut files);
+        fetch_link(data.path(), &link_of(&plugin_repo(&files)), &limit())
+    };
+
+    let changed = fetch(&|files| files[4].1 = b"event text nothing\n".to_vec());
+    assert!(
+        matches!(
+            &changed,
+            Err(InstallError::Failed(Failure::Expected { line: 1, .. }))
+        ),
+        "{changed:?}"
+    );
+    let untested = fetch(&|files| files.truncate(3));
+    assert!(
+        matches!(&untested, Err(InstallError::Failed(Failure::Tests(_)))),
+        "{untested:?}"
+    );
+    let unloadable = fetch(&|files| files[1].1 = b"[[pattern]]\npattern = '''('''\n".to_vec());
+    assert!(
+        matches!(&unloadable, Err(InstallError::NotAPlugin(_))),
+        "{unloadable:?}"
+    );
+    let raising = fetch(&|files| {
+        let hooks = String::from_utf8(files[2].1.clone()).unwrap();
+        files[2].1 = format!("{hooks}\nfunction on_welcome() error('no') end\n").into();
+    });
+    assert!(
+        matches!(&raising, Err(InstallError::Failed(Failure::Hook { .. }))),
+        "{raising:?}"
+    );
+
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    assert!(installed.plugin_folders().is_empty());
+    assert!(link_mirrors(&data).is_empty(), "no mirror is left behind");
+}
+
+/// The mirrors kept for links under `data`.
+fn link_mirrors(data: &TempDir) -> Vec<std::path::PathBuf> {
+    let links = data.path().join(REGISTRY_FOLDER).join("links");
+    fs::read_dir(links)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+/// Bytes that don't compress, so a pack can't shrink them.
+fn noise(length: usize) -> Vec<u8> {
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+#[test]
+fn a_link_to_a_repo_too_large_for_a_plugin_is_refused_before_it_is_read() {
+    let mut files = new_plugin_files();
+    files.push(("sounds/huge.bin", noise(3 * 1024 * 1024)));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 2 MB")),
+        "{refused:?}"
+    );
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    assert!(installed.plugin_folders().is_empty());
+}
+
+#[test]
+fn a_fetch_past_its_cap_is_stopped() {
+    let mut files = new_plugin_files();
+    files.push(("big.bin", noise(256 * 1024)));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+    let mirror = Mirror::open(&data.path().join("mirror.git"), &link_of(&upstream))
+        .unwrap()
+        .capped(64 * 1024);
+
+    let stopped = mirror.fetch_default_branch(&limit());
+
+    assert!(matches!(stopped, Err(GitError::TooLarge(_))), "{stopped:?}");
+}
+
+#[test]
+fn a_link_whose_folders_all_name_one_folder_is_refused_quickly() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let repo = Repository::open_bare(upstream.path()).unwrap();
+    // Ten levels of 16 names for one folder, down to an empty one: 16^10
+    // folders to walk and no file, from a repo of eleven small objects.
+    let mut folder = repo.treebuilder(None).unwrap().write().unwrap();
+    for _ in 0..10 {
+        let mut level = repo.treebuilder(None).unwrap();
+        for name in 0..16 {
+            level.insert(name.to_string(), folder, 0o040_000).unwrap();
+        }
+        folder = level.write().unwrap();
+    }
+    let tip = repo.head().unwrap().peel_to_commit().unwrap();
+    let mut root = repo.treebuilder(Some(&tip.tree().unwrap())).unwrap();
+    root.insert("many", folder, 0o040_000).unwrap();
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::now("Test", "test@example.org").unwrap();
+    repo.commit(Some("HEAD"), &signature, &signature, "Many", &tree, &[&tip])
+        .unwrap();
+    let data = TempDir::new().unwrap();
+
+    let started = std::time::Instant::now();
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 2000 folders")),
+        "{refused:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[test]
+fn a_link_whose_folders_go_too_deep_is_refused_without_a_crash() {
+    let mut files = new_plugin_files();
+    let deep = format!("{}deep.txt", "a/".repeat(1_000));
+    files.push((deep.leak(), b"bottom\n".to_vec()));
+    let upstream = plugin_repo(&files);
+    let data = TempDir::new().unwrap();
+
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 16 deep")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_folder_the_player_added_is_kept_until_forgotten_and_its_files_stay() {
+    let data = TempDir::new().unwrap();
+    let mine = TempDir::new().unwrap();
+    fs::write(mine.path().join("plugin.toml"), MANIFEST).unwrap();
+    let origins = Origins::in_data_folder(data.path());
+
+    origins.add_folder(mine.path()).unwrap();
+    assert_eq!(origins.added_folders().unwrap(), [mine.path().to_owned()]);
+
+    origins.forget_folder(mine.path()).unwrap();
+    assert!(origins.added_folders().unwrap().is_empty());
+    assert!(mine.path().join("plugin.toml").exists());
 }

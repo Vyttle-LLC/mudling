@@ -10,6 +10,7 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 mod directory;
+mod watch;
 
 use crate::assets::UI_FONT;
 use crate::character_panel::{CharacterPanel, RefreshCharacter};
@@ -310,6 +311,12 @@ pub struct Shell {
     directory_read: Option<Task<()>>,
     /// A plugin being fetched or installed, or the installed ones read again.
     plugin_work: Option<Task<()>>,
+    /// A link being fetched and checked.
+    link_check: Option<Task<()>>,
+    /// The plugin folders the player added, watched for changes.
+    folder_watch: Option<watch::FolderWatch>,
+    /// Those of them a change is being read from.
+    folder_reload: Option<Task<()>>,
     /// What the player asked for while a job ran, to run in turn.
     waiting: VecDeque<Request>,
     /// What the last job ran into, for a window on a game.
@@ -488,6 +495,12 @@ impl Shell {
                     SheetEvent::Remove { plugin, folder } => {
                         shell.remove_plugin(plugin.clone(), folder.clone(), cx);
                     }
+                    SheetEvent::OpenAddPlugin => shell.show_added(cx),
+                    SheetEvent::AddLink(url) => shell.add_link(url.clone(), window, cx),
+                    SheetEvent::AddFolder(folder) => shell.add_folder(folder.clone(), cx),
+                    SheetEvent::ForgetFolder { plugin, path } => {
+                        shell.forget_folder(plugin.clone(), path.clone(), cx);
+                    }
                     SheetEvent::ReviewArrival { folder, hash } => {
                         shell.review_arrival(folder.clone(), hash.clone(), window, cx);
                     }
@@ -587,6 +600,9 @@ impl Shell {
             job: None,
             directory_read: None,
             plugin_work: None,
+            link_check: None,
+            folder_watch: None,
+            folder_reload: None,
             waiting: VecDeque::new(),
             trouble: None,
             listed: SavedServers::default(),
@@ -775,10 +791,13 @@ impl Shell {
     ) {
         let logs = launcher.logs();
         let refused = launcher.refused().to_vec();
+        let added = launcher.added_plugins();
         self.settings.update(cx, |sheet, cx| {
             sheet.use_logs(logs, cx);
             sheet.show_refused(refused, cx);
+            sheet.show_added(added, cx);
         });
+        self.watch_added_folders(launcher.added_folders(), cx);
         self.launcher = Some(launcher);
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(

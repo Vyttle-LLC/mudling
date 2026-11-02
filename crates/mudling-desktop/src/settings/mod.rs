@@ -7,6 +7,7 @@
 //! control scrolled out of view back in. The arrow and page keys scroll what
 //! has no control to land on, like the list of shortcuts.
 
+mod add_plugin;
 mod appearance;
 mod data;
 mod directory;
@@ -20,7 +21,8 @@ mod shortcuts;
 mod triggers;
 mod vault;
 
-pub use directory::Listing;
+pub use add_plugin::{Added, AddedPlugin, shown_path};
+pub use directory::{Downloaded, Listing};
 pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};
@@ -164,6 +166,18 @@ pub enum SheetEvent {
         plugin: PluginId,
         folder: SharedString,
     },
+    /// The page that adds a plugin opened: show what was added.
+    OpenAddPlugin,
+    /// Fetch the plugin at this git link and check it.
+    AddLink(String),
+    /// Load the plugin in this folder on this device from now on.
+    AddFolder(PathBuf),
+    /// Stop loading the folder the player added, and `plugin`, the one it
+    /// held, if it ever loaded. The folder stays.
+    ForgetFolder {
+        plugin: Option<PluginId>,
+        path: PathBuf,
+    },
     /// Check the copy in `folder`, shown with `hash`, against the directory,
     /// or else ask the player whether to trust it.
     ReviewArrival {
@@ -198,6 +212,7 @@ enum Page {
     Inspector,
     Server(ServerPlugins),
     Directory,
+    AddPlugin,
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -404,6 +419,7 @@ pub struct SettingsSheet {
     data: data::DataPane,
     vault: vault::VaultPane,
     directory: directory::DirectoryPane,
+    add: add_plugin::AddPane,
     /// The approval open over the sheet, which keeps the keyboard until it's
     /// answered.
     asking: Option<directory::Approval>,
@@ -458,6 +474,7 @@ impl SettingsSheet {
             data: data::DataPane::default(),
             vault: vault::VaultPane::new(window, cx),
             directory: directory::DirectoryPane::new(cx),
+            add: add_plugin::AddPane::new(window, cx),
             asking: None,
             dialog: cx.focus_handle(),
             tabs: std::array::from_fn(|_| cx.focus_handle()),
@@ -562,6 +579,7 @@ impl SettingsSheet {
             Page::Inspector => "Inspector".into(),
             Page::Server(page) => format!("Plugins for {}", page.host).into(),
             Page::Directory => directory::DIRECTORY_TITLE.into(),
+            Page::AddPlugin => add_plugin::ADD_TITLE.into(),
         }
     }
 
@@ -831,6 +849,7 @@ impl SettingsSheet {
             (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
             (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
+            (Page::AddPlugin, _) => self.fill_add_plugin(&mut pane, theme, cx),
             (Page::Section, section) => self.fill_section(section, &mut pane, theme, cx),
         }
 
@@ -2051,7 +2070,8 @@ mod tests {
             "nothing to switch"
         );
 
-        click("arrival-sample-chat", cx);
+        // A held-back copy's elements are told by its folder too.
+        click("arrival-sample-chat-in-sample-chat", cx);
         assert_eq!(*said.borrow(), ["review sample-chat sha256:shown"]);
         // The directory didn't vouch for it, so the shell asks the player.
         sheet.update_in(cx, |sheet, window, cx| {
@@ -2067,6 +2087,54 @@ mod tests {
                 "review sample-chat sha256:shown",
                 "trust sample-chat sha256:shown"
             ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_link_check_ends_only_with_its_own_result(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.open_add_plugin(window, cx);
+            sheet.add.checking = true;
+            // A directory install that ends meanwhile, either way.
+            sheet.installed(std::collections::BTreeMap::new(), Vec::new(), cx);
+            sheet.install_failed("Other wasn't installed.".to_owned(), cx);
+            assert!(sheet.add.checking, "the link is still being checked");
+
+            let why = "The plugin at x wasn't added: it failed a check.".to_owned();
+            sheet.link_checked(Err(why.clone()), window, cx);
+            assert!(!sheet.add.checking);
+            assert_eq!(sheet.add.problem.as_deref(), Some(why.as_str()));
+        });
+    }
+
+    #[gpui::test]
+    fn removing_an_added_folder_asks_then_forgets_only_that_folder(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.open_add_plugin(window, cx);
+            sheet.show_sample_added(cx);
+        });
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let keep = Rc::clone(&said);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::ForgetFolder { plugin, path } = event {
+                    let plugin = plugin.as_ref().map(PluginId::as_str);
+                    keep.borrow_mut()
+                        .push(format!("forget {plugin:?} {}", path.display()));
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        click("remove-folder-/Users/sample/plugins/prompts", cx);
+        assert!(said.borrow().is_empty(), "it asks first");
+        click("approval-allow", cx);
+
+        assert_eq!(
+            *said.borrow(),
+            ["forget Some(\"prompts\") /Users/sample/plugins/prompts"]
         );
     }
 

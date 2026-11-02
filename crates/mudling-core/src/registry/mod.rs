@@ -1,5 +1,6 @@
 //! The plugin directory (PRD §11): the community registry's signed index, the
-//! plugins installed from it, and the player's approvals.
+//! plugins installed from it or from a link, the player's own plugin folders,
+//! and the player's approvals.
 //!
 //! The registry's own docs say what's read here: `docs/index-format.md` and
 //! `docs/signing.md` in `mudling-plugins`. Both the index and the plugins come
@@ -14,27 +15,36 @@
 //!   tarball or a checkout, because both apply the plugin's own
 //!   `.gitattributes` (`export-ignore`, `export-subst`, line endings). Its
 //!   content hash must equal the index's before a byte reaches the disk.
+//! - **A plugin from a git link** comes the same way, checked as registry CI
+//!   checks one rather than against an index: see [`fetch_link`].
 //! - **An installed plugin** loads only as a copy this device trusts: see
 //!   [`Trusted`]. Plugins sync through the repo, so one can arrive changed.
+//! - **A folder the player added** loads from where it is, and only on this
+//!   device: [`Origins`] keeps the list.
 //!
 //! Every call here waits on the disk or the network: run them off the UI
 //! thread.
 
 mod approvals;
+mod folders;
 mod installed;
+mod link;
 mod trust;
 
 #[cfg(test)]
 mod tests;
 
 pub use approvals::{Approvals, sends_commands};
+pub use folders::AddedFolder;
 pub(crate) use installed::plugin_of;
 pub use installed::{
     FolderCopy, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
+pub use link::{fetch_link, forget_link};
 pub use trust::{Origins, Trusted};
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
+use crate::plugin::check::Failure;
 use crate::plugin::{Plugin, PluginError};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
@@ -48,9 +58,9 @@ use std::path::{Path, PathBuf};
 pub const REGISTRY_URL: &str = "https://github.com/Vyttle-LLC/mudling-plugins.git";
 
 /// The public key the registry's CI signs the index with: 32 bytes in
-/// base64, as `docs/signing.md` prints it. Until it's set, every index is
+/// base64, as `docs/signing.md` prints it. Without one, every index is
 /// refused and the directory lists nothing.
-pub const REGISTRY_PUBLIC_KEY: Option<&str> = None;
+pub const REGISTRY_PUBLIC_KEY: Option<&str> = Some("v00r5VUhmPRYcnxyD/Yir9WgNr2och43fasd1+1frF4=");
 
 const INDEX_BRANCH: &str = "index";
 const INDEX_FILE: &str = "index.json";
@@ -160,6 +170,8 @@ pub enum InstallError {
     },
     /// The files are the index's, but they aren't a plugin with its id.
     NotAPlugin(String),
+    /// A plugin from a link that fails a check registry CI runs.
+    Failed(Failure),
     Disk(String),
 }
 
@@ -171,7 +183,19 @@ impl fmt::Display for InstallError {
                 "what was downloaded doesn't match what the directory signed for, so it wasn't installed",
             ),
             Self::NotAPlugin(why) => write!(f, "it isn't a plugin MUDling can load: {why}"),
+            Self::Failed(failure) => write!(f, "it failed a check: {failure}"),
             Self::Disk(why) => write!(f, "couldn't save it: {why}"),
+        }
+    }
+}
+
+/// A folder too large to be a plugin isn't one; anything else kept it from
+/// being downloaded.
+impl From<GitError> for InstallError {
+    fn from(error: GitError) -> Self {
+        match error {
+            GitError::TooLarge(why) => Self::NotAPlugin(format!("it's too large: {why}")),
+            error => Self::Unreachable(error),
         }
     }
 }
@@ -182,13 +206,24 @@ impl From<PluginError> for InstallError {
     }
 }
 
-/// A plugin downloaded and checked against the index, not yet on the disk.
+/// A plugin downloaded and checked, not yet on the disk.
 #[derive(Clone, Debug)]
 pub struct Fetched {
-    pub entry: Entry,
+    pub source: Source,
     pub commit: Oid,
+    /// Its files' content hash: the index's, or the one computed for a link.
+    pub hash: String,
     pub files: FolderFiles,
     pub plugin: Plugin,
+}
+
+/// Where a fetched plugin came from.
+#[derive(Clone, Debug)]
+pub enum Source {
+    /// Listed in the signed index, and checked against its hash.
+    Directory(Entry),
+    /// A git link the player gave, and checked as registry CI would.
+    Link(String),
 }
 
 /// The registry as this device reads it.
@@ -256,13 +291,9 @@ impl Registry {
         entry: &Entry,
         limit: &Limit,
     ) -> Result<Fetched, InstallError> {
-        let mirror = self.mirror().map_err(InstallError::Unreachable)?;
-        mirror
-            .fetch_commit(index.commit, limit)
-            .map_err(InstallError::Unreachable)?;
-        let files = mirror
-            .folder_files(index.commit, &entry.source)
-            .map_err(InstallError::Unreachable)?;
+        let mirror = self.mirror()?;
+        mirror.fetch_commit(index.commit, limit)?;
+        let files = mirror.folder_files(index.commit, &entry.source)?;
         let found = content_hash(&files);
         if found != entry.hash {
             return Err(InstallError::HashMismatch {
@@ -279,8 +310,9 @@ impl Registry {
             )));
         }
         Ok(Fetched {
-            entry: entry.clone(),
+            source: Source::Directory(entry.clone()),
             commit: index.commit,
+            hash: found,
             files,
             plugin,
         })

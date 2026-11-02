@@ -25,7 +25,7 @@ mod tests;
 
 pub use error::GitError;
 pub use git2::Oid;
-pub use mirror::{FolderFiles, Mirror};
+pub use mirror::{FOLDER_LIMITS, FolderFiles, FolderLimits, Mirror};
 
 use crate::merge;
 use git2::{

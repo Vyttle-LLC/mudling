@@ -1697,6 +1697,35 @@ fn a_plugin_from_another_device_waits_until_this_one_trusts_it() {
 }
 
 #[test]
+fn a_folder_plugin_never_reaches_the_repo_or_another_device() {
+    let world = two_devices();
+    let mine = TempDir::new().unwrap();
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    fs::write(mine.path().join("plugin.toml"), manifest).unwrap();
+    crate::registry::Origins::in_data_folder(&world.mac.data)
+        .add_folder(mine.path())
+        .unwrap();
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", "tells")]);
+
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(world.mac.repo.join("plugins/tells").exists(), "it synced");
+    for device in [&world.mac.repo, &world.ipad.repo, &world.ipad.data] {
+        assert!(
+            !device.join("plugins/mine").exists(),
+            "{}",
+            device.display()
+        );
+    }
+    let on_ipad = crate::registry::Origins::in_data_folder(&world.ipad.data);
+    assert!(on_ipad.added_folders().unwrap().is_empty());
+}
+
+#[test]
 fn a_folder_with_no_record_is_the_player_s_own_only_where_it_was_made() {
     let world = two_devices();
     let made_here = world.mac.data.join("plugins/mine");

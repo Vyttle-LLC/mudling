@@ -278,6 +278,29 @@ const DIRECTORY_TEXT: [&str; 3] = [
     "Tell highlighter, Any game · 1.0.0 · MIT",
     "Updated 4 minutes ago from the community registry.",
 ];
+/// What a screen reader must find on the page that adds a plugin, with a
+/// made-up plugin from a link and two folders, one broken.
+const ADD_PLUGIN_CONTROLS: [&str; 6] = [
+    "Back",
+    "Git link",
+    "Add the plugin at this link",
+    "Choose a plugin folder",
+    "Remove Tell colors",
+    "Remove Prompts",
+];
+const ADD_PLUGIN_TEXT: [&str; 4] = [
+    "Tell colors, https://github.com/someone/tell-colors.git",
+    "my-game, /Users/sample/plugins/my-game · reloaded just now",
+    "Its last reload broke it: text.toml: pattern 2 doesn't compile: unclosed group. The last \
+     working copy keeps running.",
+    "A folder plugin stays on this device.",
+];
+/// What the Plugins page says of where a plugin came from.
+const PLUGINS_SOURCE_TEXT: [&str; 3] = [
+    "From https://github.com/someone/sample-maps.git",
+    "From ~/plugins/sample-colors",
+    "The last working copy keeps running.",
+];
 const APPROVAL_CONTROLS: [&str; 4] = [
     "Cancel",
     "Allow",
@@ -1429,6 +1452,13 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("not found: {missing:?}, {unread:?}"),
         });
 
+        let unread = reads_all(&tree, &PLUGINS_SOURCE_TEXT);
+        checks.push(Check {
+            name: "Plugins says where each added plugin came from, and what broke a reload",
+            passed: opened.is_some() && unread.is_empty(),
+            detail: format!("not found: {unread:?}"),
+        });
+
         let opened = in_window(&measure::open_sample_directory, cx);
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
@@ -1436,6 +1466,17 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         let unread = reads_all(&tree, &DIRECTORY_TEXT);
         checks.push(Check {
             name: "the directory names its search, filters and buttons and reads each plugin",
+            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let opened = in_window(&measure::open_sample_add_plugin, cx);
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &ADD_PLUGIN_CONTROLS);
+        let unread = reads_all(&tree, &ADD_PLUGIN_TEXT);
+        checks.push(Check {
+            name: "adding a plugin names its link field and buttons, and reads each added plugin",
             passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
             detail: format!("not found: {missing:?}, {unread:?}"),
         });

@@ -1,7 +1,7 @@
 //! Every pattern a plugin declares, with how a log can show it matching.
 
-use mudling_core::plugin::points::{EventRule, TableReader};
-use mudling_core::plugin::{Pattern, Plugin, Point};
+use crate::plugin::points::{EventRule, TableReader};
+use crate::plugin::{Pattern, Plugin, Point};
 
 /// One declared pattern.
 pub struct Rule {
