@@ -111,7 +111,7 @@ impl Shell {
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = install.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, cx));
+            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
         }));
     }
 
@@ -126,18 +126,47 @@ impl Shell {
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = reload.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, cx));
+            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, false, cx));
         }));
     }
 
-    fn show_plugins_now(&mut self, now: Result<PluginsNow, String>, cx: &mut Context<Shell>) {
+    /// Takes a plugin installed from the directory out. A session running it
+    /// stops letting it send at once; the rest waits for the next connect.
+    pub(super) fn remove_plugin(&mut self, plugin: PluginId, cx: &mut Context<Shell>) {
+        let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        if let Some(game) = &self.game {
+            game.session.set_approved(plugin.clone(), false);
+        }
+        let host = self.game.as_ref().map(|game| game.target.host.clone());
+        let remove = cx.background_spawn(async move {
+            let launcher = launcher.uninstall(&plugin)?;
+            PluginsNow::read(launcher, host.as_deref())
+        });
+        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
+            let now = remove.await;
+            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
+        }));
+    }
+
+    /// Shows what's installed now. `by_player` says the player changed it,
+    /// so the session running needs a new connect to follow.
+    fn show_plugins_now(
+        &mut self,
+        now: Result<PluginsNow, String>,
+        by_player: bool,
+        cx: &mut Context<Shell>,
+    ) {
         match now {
             Ok(now) => {
+                let refused = now.launcher.refused().to_vec();
                 self.launcher = Some(now.launcher);
                 self.settings.update(cx, |sheet, cx| {
                     sheet.installed(None, now.installed, cx);
+                    sheet.show_refused(refused, cx);
                     if let Some(rows) = now.rows {
-                        sheet.refresh_plugins(rows, cx);
+                        sheet.refresh_plugins(rows, by_player, cx);
                     }
                 });
             }

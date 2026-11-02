@@ -4,6 +4,7 @@
 
 use super::{Fetched, InstallError, content_hash};
 use crate::git::FolderFiles;
+use crate::plugin::Plugin;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,6 +26,16 @@ pub enum Record {
         commit: String,
         hash: String,
     },
+}
+
+const NOT_AS_INSTALLED: &str = "its files aren't the ones the directory signed for, so it \
+     wasn't loaded. Install it again from the directory";
+
+/// An installed plugin that wasn't loaded, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub id: String,
+    pub why: String,
 }
 
 /// The plugins folder of a data folder.
@@ -87,6 +98,45 @@ impl InstalledPlugins {
         remove_folder(&outgoing).map_err(disk)?;
         let record = serde_json::to_vec_pretty(&record).expect("a record serializes");
         super::save(&self.record_path(id), &record).map_err(disk)
+    }
+
+    /// Loads every installed plugin. One from the directory loads only if its
+    /// files still hash to what was installed, so a repo changed by someone
+    /// else can't swap a plugin's code under its name. One with no record is
+    /// the player's own, and loads as it is.
+    pub fn load(&self) -> (Vec<Plugin>, Vec<Refused>) {
+        let mut plugins = Vec::new();
+        let mut refused = Vec::new();
+        for folder in self.plugin_folders() {
+            let id = folder
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            match self
+                .check(&id, &folder)
+                .and_then(|()| Plugin::load(&folder).map_err(|error| error.to_string()))
+            {
+                Ok(plugin) => plugins.push(plugin),
+                Err(why) => refused.push(Refused { id, why }),
+            }
+        }
+        (plugins, refused)
+    }
+
+    /// Whether a plugin's files are the ones its record says were installed.
+    fn check(&self, id: &str, folder: &Path) -> Result<(), String> {
+        let bytes = match fs::read(self.record_path(id)) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("its record couldn't be read: {error}")),
+        };
+        let Ok(Record::Registry { hash, .. }) = serde_json::from_slice(&bytes) else {
+            return Err("its record can't be read".to_owned());
+        };
+        let found = folder_hash(folder).map_err(|error| error.to_string())?;
+        if found != hash {
+            return Err(NOT_AS_INSTALLED.to_owned());
+        }
+        Ok(())
     }
 
     /// Takes a plugin and its record out.

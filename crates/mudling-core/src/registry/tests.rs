@@ -403,3 +403,59 @@ fn the_folder_hash_of_an_installed_plugin_is_the_index_s() {
     let folder = installed.folder().join("tells");
     assert_eq!(folder_hash(&folder).unwrap(), index.plugins[0].hash);
 }
+
+/// `tells` installed from a local registry, in a fresh data folder.
+fn installed_tells() -> (TempDir, InstalledPlugins) {
+    let upstream = Upstream::new();
+    upstream.publish(&upstream.signed("2026-11-02T17:04:31Z", |_| {}), &key(1));
+    let data = TempDir::new().unwrap();
+    let registry = registry(&upstream, &data, Some(&key(1)));
+    let index = registry.refresh(&limit()).unwrap();
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    installed
+        .install(&registry.fetch(&index, &index.plugins[0], &limit()).unwrap())
+        .unwrap();
+    (data, installed)
+}
+
+#[test]
+fn an_installed_plugin_whose_files_changed_under_it_is_not_loaded() {
+    let (_data, installed) = installed_tells();
+    let (plugins, refused) = installed.load();
+    assert_eq!(plugins.len(), 1);
+    assert!(refused.is_empty());
+
+    // As a tampered repo would bring it: same name, other patterns.
+    let swapped = "[[pattern]]\nname = \"tell\"\npattern = '''^.*$'''\n";
+    fs::write(installed.folder().join("tells/text.toml"), swapped).unwrap();
+
+    let (plugins, refused) = installed.load();
+    assert!(plugins.is_empty());
+    assert_eq!(refused[0].id, "tells");
+    assert!(refused[0].why.contains("signed for"), "{}", refused[0].why);
+}
+
+#[test]
+fn a_broken_record_refuses_its_plugin_rather_than_load_it_as_the_player_s_own() {
+    let (_data, installed) = installed_tells();
+    fs::write(installed.folder().join("tells.json"), "not a record").unwrap();
+
+    let (plugins, refused) = installed.load();
+
+    assert!(plugins.is_empty());
+    assert_eq!(refused.len(), 1);
+}
+
+#[test]
+fn a_plugin_folder_with_no_record_is_the_player_s_own_and_loads() {
+    let data = TempDir::new().unwrap();
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    let mine = installed.folder().join("tells");
+    fs::create_dir_all(&mine).unwrap();
+    fs::write(mine.join("plugin.toml"), MANIFEST).unwrap();
+    fs::write(mine.join("text.toml"), PATTERNS).unwrap();
+
+    let (plugins, refused) = installed.load();
+
+    assert_eq!((plugins.len(), refused.len()), (1, 0));
+}

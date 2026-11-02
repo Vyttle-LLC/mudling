@@ -21,7 +21,7 @@ use mudling_core::defaults;
 use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDisabled};
 use mudling_core::plugin::manifest::Permission;
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
-use mudling_core::registry;
+use mudling_core::registry::{self, Refused};
 use mudling_core::stats::Summary;
 
 const SWITCH_WIDTH: Pixels = px(40.);
@@ -71,6 +71,8 @@ pub struct PluginRow {
     pub sending: Sending,
     /// What its hooks ask to do, as the approval says it.
     pub asks: Vec<SharedString>,
+    /// It came from the directory, so the player can take it out.
+    pub removable: bool,
 }
 
 /// Whether a plugin's hooks send commands, and whether the player let them.
@@ -131,6 +133,7 @@ impl PluginRow {
                 false => Sending::No,
             },
             asks: asks_of(plugin),
+            removable: false,
         }
     }
 
@@ -497,58 +500,98 @@ impl SettingsSheet {
     }
 
     /// The line saying whether a plugin may send commands, with its button.
-    fn approval_line(
+    fn actions_line(
         &self,
         row: &PluginRow,
         pane: &mut Pane,
         theme: &Theme,
         cx: &mut Context<SettingsSheet>,
     ) -> Option<AnyElement> {
-        let (words, action) = sending_words(row.sending)?;
-        let approved = row.sending == Sending::Approved;
-        let plugin = row.clone();
-        let button = text_button(
-            SharedString::from(format!("approval-{}", row.id)),
-            action,
-            &pane.stop(cx),
-            theme,
-        )
-        .aria_label(format!("{action}: {words}, {}", row.name))
-        .h(px(26.))
-        .px_2()
-        .text_size(px(13.))
-        .on_click(cx.listener(move |sheet, _, window, cx| {
-            if approved {
-                sheet.set_approved(plugin.id.clone(), false, cx);
-            } else {
-                let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
-                sheet.ask(approval, window, cx);
-            }
-        }));
+        let small = |button: Stateful<Div>| button.h(px(26.)).px_2().text_size(px(13.));
+        let approval = sending_words(row.sending).map(|(words, action)| {
+            let approved = row.sending == Sending::Approved;
+            let plugin = row.clone();
+            let button = small(text_button(
+                SharedString::from(format!("approval-{}", row.id)),
+                action,
+                &pane.stop(cx),
+                theme,
+            ))
+            .aria_label(format!("{action}: {words}, {}", row.name))
+            .on_click(cx.listener(move |sheet, _, window, cx| {
+                if approved {
+                    sheet.set_approved(plugin.id.clone(), false, cx);
+                } else {
+                    let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
+                    sheet.ask(approval, window, cx);
+                }
+            }));
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_color(if approved {
+                    theme.text_muted
+                } else {
+                    theme.warning
+                })
+                .child(words)
+                .child(button)
+        });
+        let remove = row.removable.then(|| {
+            let plugin = row.id.clone();
+            small(text_button(
+                SharedString::from(format!("remove-{}", row.id)),
+                "Remove",
+                &pane.stop(cx),
+                theme,
+            ))
+            .aria_label(format!("Remove {}", row.name))
+            .on_click(cx.listener(move |sheet, _, _, cx| sheet.remove_plugin(plugin.clone(), cx)))
+        });
+        if approval.is_none() && remove.is_none() {
+            return None;
+        }
         let line = div()
             .pt_1()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap_2()
+            .gap_3()
             .text_size(px(13.))
-            .text_color(if approved {
-                theme.text_muted
-            } else {
-                theme.warning
-            })
-            .child(words)
-            .child(button);
+            .children(approval)
+            .children(remove);
         Some(line.into_any_element())
     }
 
-    /// Rows read again, as an install or a sync changed what's installed.
-    /// The player's flips since the session opened still count.
-    pub fn refresh_plugins(&mut self, mut rows: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
+    /// Rows read again, as an install, a removal or a sync changed what's
+    /// installed. The player's flips since the session opened still count,
+    /// and so does a change the player made, which `by_player` says this is.
+    pub fn refresh_plugins(
+        &mut self,
+        mut rows: Vec<PluginRow>,
+        by_player: bool,
+        cx: &mut Context<SettingsSheet>,
+    ) {
         for row in &mut rows {
             let shown = self.plugins.iter().find(|shown| shown.id == row.id);
             row.flips = shown.map_or(0, |shown| shown.flips);
         }
         self.plugins = rows;
+        self.installs_changed |= by_player;
+        cx.notify();
+    }
+
+    /// Installed plugins that weren't loaded, and why.
+    pub fn show_refused(&mut self, refused: Vec<Refused>, cx: &mut Context<SettingsSheet>) {
+        if self.refused != refused {
+            self.refused = refused;
+            cx.notify();
+        }
+    }
+
+    fn remove_plugin(&mut self, plugin: PluginId, cx: &mut Context<SettingsSheet>) {
+        cx.emit(SheetEvent::Remove(plugin));
         cx.notify();
     }
 
@@ -757,6 +800,15 @@ impl SettingsSheet {
             let banner = self.notice_banner(first + number, notice, None, pane, theme, cx);
             pane.row(banner);
         }
+        for refused in &self.refused {
+            let said = format!("{} wasn't loaded: {}.", refused.id, refused.why);
+            pane.row(
+                muted_line(said, theme)
+                    .debug_selector(|| "plugin-refused".to_owned())
+                    .role(Role::Alert)
+                    .text_color(theme.warning),
+            );
+        }
         let browse = text_button(
             "browse-directory",
             "Browse directory",
@@ -830,7 +882,7 @@ impl SettingsSheet {
     ) -> AnyElement {
         let switched_on = row.switched_on(&self.costs, &self.turned_off);
         let elsewhere = row.meant_elsewhere(&self.costs);
-        let approval = self.approval_line(row, pane, theme, cx);
+        let approval = self.actions_line(row, pane, theme, cx);
         let control = match (row.always_on, elsewhere) {
             (true, _) => switch(true, theme).into_any_element(),
             (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),

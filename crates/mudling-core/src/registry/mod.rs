@@ -26,7 +26,7 @@ mod tests;
 
 pub use approvals::{Approvals, fingerprint, sends_commands};
 pub(crate) use installed::plugin_of;
-pub use installed::{InstalledPlugins, PLUGINS_FOLDER, Record, folder_hash};
+pub use installed::{InstalledPlugins, PLUGINS_FOLDER, Record, Refused, folder_hash};
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
 use crate::plugin::{Plugin, PluginError};

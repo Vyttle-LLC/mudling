@@ -250,6 +250,7 @@ mod tests {
             elsewhere: None,
             sending: crate::settings::Sending::No,
             asks: Vec::new(),
+            removable: false,
         }
     }
 

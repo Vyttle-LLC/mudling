@@ -1381,10 +1381,12 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         elsewhere: None,
         sending: Sending::No,
         asks: Vec::new(),
+        removable: false,
     };
     let sender = |name, sending| PluginRow {
         sending,
         asks: sample_asks(),
+        removable: true,
         ..row(name, Layer::Game)
     };
     let mut rows = vec![

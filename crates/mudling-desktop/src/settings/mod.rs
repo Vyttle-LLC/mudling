@@ -38,7 +38,7 @@ use gpui::{
 };
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
-use mudling_core::registry::{Entry, Fetched, Index};
+use mudling_core::registry::{Entry, Fetched, Index, Refused};
 use mudling_core::session::RuleEdit;
 use mudling_core::stats::Summary;
 use mudling_core::store::{InspectorState, RulesState, SettingsState};
@@ -158,6 +158,8 @@ pub enum SheetEvent {
         plugin: PluginId,
         approved: bool,
     },
+    /// Take a plugin installed from the directory out.
+    Remove(PluginId),
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -358,6 +360,11 @@ pub struct SettingsSheet {
     /// The host whose removal is being asked about.
     removing: Option<SharedString>,
     plugins: Vec<PluginRow>,
+    /// The player installed, updated or removed a plugin since the session
+    /// opened, which it won't follow.
+    installs_changed: bool,
+    /// Installed plugins that weren't loaded, and why.
+    refused: Vec<Refused>,
     rules: RulesState,
     logs: logs::LogsPanel,
     form: triggers::Form,
@@ -417,6 +424,8 @@ impl SettingsSheet {
             playing: None,
             removing: None,
             plugins: Vec::new(),
+            installs_changed: false,
+            refused: Vec::new(),
             rules: RulesState::default(),
             logs: logs::LogsPanel::default(),
             form: triggers::Form::new(window, cx),
@@ -564,7 +573,7 @@ impl SettingsSheet {
     /// Whether the player changed a switch for the session running, which
     /// won't follow it.
     pub fn reconnect_to_apply(&self) -> bool {
-        self.plugins.iter().any(|row| row.flips > 0)
+        self.installs_changed || self.plugins.iter().any(|row| row.flips > 0)
     }
 
     #[cfg(test)]
@@ -601,8 +610,10 @@ impl SettingsSheet {
         }
     }
 
+    /// A new session's plugins, which run whatever was installed before it.
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
         self.plugins = plugins;
+        self.installs_changed = false;
         cx.notify();
     }
 
@@ -1956,6 +1967,49 @@ mod tests {
         );
         assert_eq!(said.borrow().len(), 1);
         assert_eq!(sending(cx), Sending::Waiting);
+    }
+
+    #[gpui::test]
+    fn remove_takes_a_plugin_out_and_says_it_applies_at_the_next_connect(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        let removed = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&removed);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::Remove(plugin) = event {
+                    *keep.borrow_mut() = Some(plugin.to_string());
+                }
+            })
+        });
+        assert!(cx.debug_bounds("reconnect-note").is_none());
+
+        click("remove-sample-helper", cx);
+        assert_eq!(removed.borrow().as_deref(), Some("sample-helper"));
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            rows.retain(|row| row.id.as_str() != "sample-helper");
+            sheet.refresh_plugins(rows, true, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("remove-sample-helper").is_none());
+        assert!(cx.debug_bounds("reconnect-note").is_some());
+        assert!(sheet.read_with(cx, |sheet, _| sheet.reconnect_to_apply()));
+    }
+
+    #[gpui::test]
+    fn a_plugin_refused_at_load_says_why_on_the_plugins_page(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let refused = Refused {
+                id: "extras".to_owned(),
+                why: "its files aren't the ones the directory signed for".to_owned(),
+            };
+            sheet.show_refused(vec![refused], cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("plugin-refused").is_some());
     }
 
     #[gpui::test]

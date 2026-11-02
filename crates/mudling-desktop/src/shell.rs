@@ -485,6 +485,7 @@ impl Shell {
                     SheetEvent::SetApproved { plugin, approved } => {
                         shell.set_approved(plugin.clone(), *approved, cx);
                     }
+                    SheetEvent::Remove(plugin) => shell.remove_plugin(plugin.clone(), cx),
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
@@ -765,8 +766,11 @@ impl Shell {
         cx: &mut Context<Shell>,
     ) {
         let logs = launcher.logs();
-        self.settings
-            .update(cx, |sheet, cx| sheet.use_logs(logs, cx));
+        let refused = launcher.refused().to_vec();
+        self.settings.update(cx, |sheet, cx| {
+            sheet.use_logs(logs, cx);
+            sheet.show_refused(refused, cx);
+        });
         self.launcher = Some(launcher);
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(

@@ -95,6 +95,7 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         elsewhere: None,
         sending: Sending::No,
         asks: Vec::new(),
+        removable: false,
     }
 }
 
@@ -103,6 +104,7 @@ fn sample_sender(id: &str, name: &str, sending: Sending) -> PluginRow {
     PluginRow {
         sending,
         asks: measure::sample_asks(),
+        removable: true,
         ..sample_plugin(id, name, Layer::Game, true)
     }
 }

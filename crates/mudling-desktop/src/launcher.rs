@@ -11,7 +11,7 @@ use mudling_core::defaults::detect::{ServerSignals, Suggestion, suggest};
 use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
-use mudling_core::registry::{Approvals, Fetched, InstalledPlugins, Record, Registry};
+use mudling_core::registry::{Approvals, Fetched, InstalledPlugins, Record, Refused, Registry};
 use mudling_core::session::{Credentials, Session, SessionConfig};
 use mudling_core::sync::Syncer;
 use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
@@ -41,6 +41,8 @@ pub struct Launcher {
     own: Vec<Plugin>,
     /// What the data folder had when last read.
     installed: Vec<Plugin>,
+    /// What it had that wasn't loaded, and why.
+    refused: Vec<Refused>,
     /// The command line's `--plugin` folders.
     named: Vec<Plugin>,
     /// The app's own, the installed and the named, each replacing the last.
@@ -73,6 +75,7 @@ impl Launcher {
             data_folder,
             own: plugins.clone(),
             installed: Vec::new(),
+            refused: Vec::new(),
             named: Vec::new(),
             plugins,
             command_line,
@@ -86,10 +89,24 @@ impl Launcher {
         Launcher { named, ..self }.layered()
     }
 
-    /// With the plugins the data folder holds now. Reads the disk.
+    /// With the plugins the data folder holds now, each one from the
+    /// directory checked against its hash. Reads the disk.
     pub fn with_installed(self) -> Launcher {
-        let installed = installed_plugins(&self.data_folder);
-        Launcher { installed, ..self }.layered()
+        let (installed, refused) = InstalledPlugins::in_data_folder(&self.data_folder).load();
+        for refused in &refused {
+            eprintln!("skipping the plugin {}: {}", refused.id, refused.why);
+        }
+        Launcher {
+            installed,
+            refused,
+            ..self
+        }
+        .layered()
+    }
+
+    /// Installed plugins that weren't loaded, and why.
+    pub fn refused(&self) -> &[Refused] {
+        &self.refused
     }
 
     fn layered(self) -> Launcher {
@@ -156,6 +173,26 @@ impl Launcher {
         Ok(launcher)
     }
 
+    /// Takes a plugin installed from the directory out of the data folder,
+    /// with its approval, and returns the launcher without it.
+    pub fn uninstall(&self, plugin: &PluginId) -> Result<Launcher, String> {
+        let could_not = |error: std::io::Error| format!("{plugin} wasn't removed: {error}");
+        InstalledPlugins::in_data_folder(&self.data_folder)
+            .remove(plugin.as_str())
+            .map_err(could_not)?;
+        self.set_approved(plugin, false)?;
+        Ok(self.clone().with_installed())
+    }
+
+    /// Marks what may send commands, and what came from the directory.
+    fn finished_rows(&self, rows: &mut [PluginRow]) {
+        PluginRow::approve(rows, &self.approved());
+        let records = self.records();
+        for row in rows.iter_mut() {
+            row.removable = records.contains_key(row.id.as_str());
+        }
+    }
+
     /// What Settings › Plugins shows for a session on `host`, as saved now.
     pub fn plugin_rows(&self, host: &str) -> Result<Vec<PluginRow>, String> {
         let could_not = |error: persist::Error| format!("couldn't read {host}: {error}");
@@ -166,7 +203,7 @@ impl Launcher {
             .collect();
         let overrides_off = self.overrides_off(host).map_err(could_not)?;
         let mut rows = PluginRow::for_session(&self.plugins, &enabled, &overrides_off, host);
-        PluginRow::approve(&mut rows, &self.approved());
+        self.finished_rows(&mut rows);
         Ok(rows)
     }
 
@@ -253,7 +290,7 @@ impl Launcher {
         let approved = self.approved();
         let mut plugins =
             PluginRow::for_session(&self.plugins, &enabled, &overrides_off, &target.host);
-        PluginRow::approve(&mut plugins, &approved);
+        self.finished_rows(&mut plugins);
         let config = SessionConfig {
             plugins: self.plugins.clone(),
             enabled: enabled.clone(),
@@ -311,7 +348,7 @@ impl Launcher {
             plugin.is_some_and(|plugin| plugin.manifest.matches_server(server))
         };
         let mut plugins = PluginRow::for_session(&self.plugins, &enabled, &overrides_off, host);
-        PluginRow::approve(&mut plugins, &self.approved());
+        self.finished_rows(&mut plugins);
         for row in plugins
             .iter_mut()
             .filter(|row| row.layer == Layer::Override)
@@ -439,21 +476,6 @@ fn replaced(mut plugins: Vec<Plugin>, replacing: Vec<Plugin>) -> Vec<Plugin> {
     plugins.retain(|plugin| !replacing.iter().any(|other| other.id() == plugin.id()));
     plugins.extend(replacing);
     plugins
-}
-
-/// The plugins installed in the data folder, one folder each. One that won't
-/// load is left out, with a line on stderr, so it can't stop the app.
-fn installed_plugins(data_folder: &Path) -> Vec<Plugin> {
-    let installed = InstalledPlugins::in_data_folder(data_folder);
-    installed
-        .plugin_folders()
-        .into_iter()
-        .filter_map(|folder| {
-            Plugin::load(folder)
-                .inspect_err(|error| eprintln!("skipping a plugin: {error}"))
-                .ok()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -709,8 +731,11 @@ mod tests {
         );
         std::fs::write(mine.join("plugin.toml"), manifest).unwrap();
 
-        let plugins = replaced(bundled, installed_plugins(folder.path()));
-        let named: Vec<_> = plugins.iter().filter(|p| p.id().as_str() == game).collect();
+        let launcher = Launcher::new(folder.path().to_owned(), bundled, Vec::new(), || {});
+        let launcher = launcher.with_installed();
+        let named: Vec<_> = (launcher.plugins().iter())
+            .filter(|p| p.id().as_str() == game)
+            .collect();
         assert_eq!(named.len(), 1);
         assert_eq!(named[0].manifest.name, "Mine");
     }
@@ -718,7 +743,11 @@ mod tests {
     #[test]
     fn a_plugin_folder_that_will_not_load_leaves_the_others_installed() {
         let folder = TempDir::new().unwrap();
-        assert!(installed_plugins(folder.path()).is_empty());
+        let installed = || {
+            let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+            launcher.with_installed()
+        };
+        assert!(installed().plugins().is_empty());
 
         let plugins = folder.path().join(PLUGINS_FOLDER);
         let good = plugins.join("good");
@@ -728,8 +757,53 @@ mod tests {
                         license = \"MIT\"\nlayer = \"game\"\n[servers]\nhosts = [\"mud.example\"]\n";
         std::fs::write(good.join("plugin.toml"), manifest).unwrap();
 
-        let installed = installed_plugins(folder.path());
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].id().as_str(), "good");
+        let launcher = installed();
+        assert_eq!(launcher.plugins().len(), 1);
+        assert_eq!(launcher.plugins()[0].id().as_str(), "good");
+        assert_eq!(
+            launcher.refused()[0].id,
+            "broken",
+            "and says why it isn't loaded"
+        );
+    }
+
+    #[test]
+    fn a_directory_plugin_whose_files_changed_under_it_is_refused_and_says_why() {
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let extras = fetched_sender("function on_go() end");
+        let launcher = launcher.install(&extras, false).unwrap();
+
+        // As a tampered repo's sync would leave it: the same name, other code.
+        let patterns = folder.path().join(PLUGINS_FOLDER).join("extras/text.toml");
+        std::fs::write(
+            patterns,
+            "[[pattern]]\nname = \"all\"\npattern = '''.*'''\n",
+        )
+        .unwrap();
+        let launcher = launcher.with_installed();
+
+        assert!(launcher.plugins().is_empty());
+        assert_eq!(launcher.refused()[0].id, "extras");
+    }
+
+    #[test]
+    fn removing_a_plugin_takes_its_approval_with_it() {
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let extras = fetched_sender("function on_go() end");
+        let id = extras.plugin.id().clone();
+        let launcher = launcher.install(&extras, true).unwrap();
+        let rows = launcher.plugin_rows("mud.example").unwrap();
+        assert!(rows.iter().any(|row| row.id == id && row.removable));
+
+        let launcher = launcher.uninstall(&id).unwrap();
+
+        assert!(launcher.plugins().iter().all(|plugin| *plugin.id() != id));
+        let launcher = launcher.install(&extras, false).unwrap();
+        assert!(
+            launcher.approved().is_empty(),
+            "installing it again asks again"
+        );
     }
 }

@@ -288,6 +288,10 @@ impl SettingsSheet {
                     .text_color(theme.error),
             );
         }
+        // An install or update reaches a session only when it opens.
+        if self.installs_changed && self.server.is_some() {
+            pane.row(self.reconnect_note(theme));
+        }
 
         let typed = search.read(cx).content().trim().to_lowercase();
         let installed = &self.directory.installed;

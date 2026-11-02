@@ -252,9 +252,10 @@ const SERVER_PLUGINS_TEXT: [&str; 2] = [
 ];
 
 /// What a screen reader must find on the Plugins page about approvals.
-const PLUGINS_APPROVAL_CONTROLS: [&str; 2] = [
+const PLUGINS_APPROVAL_CONTROLS: [&str; 3] = [
     "Browse directory",
     "Review: Needs your approval to send commands, Sample chat",
+    "Remove Sample helper",
 ];
 const PLUGINS_APPROVAL_TEXT: [&str; 2] =
     ["Sends commands.", "Needs your approval to send commands."];
