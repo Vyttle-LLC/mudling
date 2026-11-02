@@ -175,19 +175,17 @@ impl InstalledPlugins {
             || (!copy.from_directory && self.origins.is_local(&copy.folder).unwrap_or(false))
     }
 
-    /// Trusts the copy in `folder`, as long as it still hashes to `hash`, the
-    /// copy the player was shown. One with no record becomes the player's own.
+    /// Trusts the copy in `folder` that hashes to `hash`, the copy the player
+    /// was shown, and nothing else: one with no record stays as it arrived,
+    /// so a change that lands later, by sync or any other means, waits again.
     pub fn trust(&self, folder: &str, hash: &str) -> Result<(), String> {
         let path = self.folder.join(folder);
         if !is_safe_name(folder) || folder_hash(&path).ok().as_deref() != Some(hash) {
             return Err(CHANGED_SINCE_SHOWN.to_owned());
         }
-        let could_not = |error: io::Error| error.to_string();
-        self.trusted.trust(folder, hash).map_err(could_not)?;
-        if !self.record_path(folder).exists() {
-            self.origins.mark_local(folder).map_err(could_not)?;
-        }
-        Ok(())
+        self.trusted
+            .trust(folder, hash)
+            .map_err(|error| error.to_string())
     }
 
     /// Takes the plugin in `folder` and its record out.

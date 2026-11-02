@@ -444,8 +444,27 @@ fn a_folder_with_no_record_that_sync_wrote_is_not_loaded() {
     assert_eq!(
         installed.load().plugins.len(),
         1,
-        "the player took it as theirs"
+        "the player trusted this copy"
     );
+}
+
+#[test]
+fn a_trusted_copy_with_no_record_that_changes_afterwards_waits_again() {
+    let data = TempDir::new().unwrap();
+    Origins::in_data_folder(data.path())
+        .mark_arrived(["tells"])
+        .unwrap();
+    let installed = recordless_tells(&data);
+    let shown = installed.load().arrived[0].hash.clone();
+    installed.trust("tells", &shown).unwrap();
+
+    // A sync writes the folder right after the player's trust was checked.
+    let swapped = "[[pattern]]\nname = \"tell\"\npattern = '''^.*$'''\n";
+    fs::write(installed.folder().join("tells/text.toml"), swapped).unwrap();
+
+    let loaded = installed.load();
+    assert!(loaded.plugins.is_empty(), "only the copy shown was trusted");
+    assert_eq!(loaded.arrived.len(), 1);
 }
 
 #[test]

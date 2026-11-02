@@ -86,15 +86,6 @@ impl Origins {
         })
     }
 
-    /// The player chose this folder as their own.
-    pub fn mark_local(&self, id: &str) -> io::Result<()> {
-        self.change(|known| {
-            known.arrived.remove(id);
-            known.local.insert(id.to_owned());
-            ((), true)
-        })
-    }
-
     pub fn forget(&self, id: &str) -> io::Result<()> {
         self.change(|known| ((), known.arrived.remove(id) | known.local.remove(id)))
     }
