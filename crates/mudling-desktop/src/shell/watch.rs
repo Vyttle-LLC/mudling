@@ -1,7 +1,7 @@
 //! Watches the plugin folders the player added, so that saving a file in
-//! one reloads it. The OS tells a thread of `notify`'s of each change, and
-//! nothing here runs while nothing changes, so a watched folder costs no
-//! line anything.
+//! one reloads it. The OS reports each change to a thread `notify` runs,
+//! and nothing here runs while nothing changes, so a watched folder adds
+//! nothing to the cost of reading a line.
 
 use super::Shell;
 use futures::StreamExt;

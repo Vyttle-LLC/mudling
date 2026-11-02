@@ -11,7 +11,7 @@ use crate::input::{CommandInput, InputEvent};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, PathPromptOptions, Role, SharedString,
-    Window, div, prelude::*, px,
+    Stateful, Window, div, prelude::*, px,
 };
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
@@ -29,6 +29,7 @@ const CHOOSE_NOTE: &str = "For your own plugin. It reloads when a file in it cha
 const SYNC_NOTE: &str = "A plugin from a link or the directory syncs to your other devices with \
      your data. A folder plugin stays on this device.";
 const CHECKING: &str = "Checking…";
+const WAITS_FOR_CHECK: &str = "Waits until the link being checked is done.";
 
 /// A plugin the player added from a link or a folder.
 #[derive(Clone, Debug, PartialEq)]
@@ -241,8 +242,12 @@ impl SettingsSheet {
             .collect();
         let count = 1 + folders.len();
         let choose = text_button("add-folder", "Choose", &pane.stop(cx), theme)
-            .aria_label("Choose a plugin folder")
-            .on_click(cx.listener(|sheet, _, window, cx| sheet.choose_plugin_folder(window, cx)));
+            .aria_label("Choose a plugin folder");
+        let choose = self.unless_checking(choose, |button| {
+            button.on_click(
+                cx.listener(|sheet, _, window, cx| sheet.choose_plugin_folder(window, cx)),
+            )
+        });
         pane.row(
             card_row(InCard::of(0, count), theme)
                 .flex()
@@ -266,6 +271,21 @@ impl SettingsSheet {
             pane.row(row);
         }
         pane.row(muted_line(SYNC_NOTE, theme).mt_3().text_size(px(13.)));
+    }
+
+    /// `button`, made to work by `working`, unless a link is being checked:
+    /// changing the plugins then would drop the check, so it waits, faded
+    /// and saying why.
+    pub(super) fn unless_checking(
+        &self,
+        button: Stateful<Div>,
+        working: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
+    ) -> Stateful<Div> {
+        if self.add.busy {
+            button.opacity(0.5).aria_description(WAITS_FOR_CHECK)
+        } else {
+            working(button)
+        }
     }
 
     /// A plugin the player added: its name, where from, and Remove.
@@ -294,19 +314,19 @@ impl SettingsSheet {
                 (format!("folder-{}", path.display()), about, problem)
             }
         };
-        let remove = {
+        let remove = text_button(
+            SharedString::from(format!("remove-{key}")),
+            "Remove",
+            &pane.stop(cx),
+            theme,
+        )
+        .aria_label(format!("Remove {}", added.name));
+        let remove = self.unless_checking(remove, |button| {
             let added = added.clone();
-            text_button(
-                SharedString::from(format!("remove-{key}")),
-                "Remove",
-                &pane.stop(cx),
-                theme,
-            )
-            .aria_label(format!("Remove {}", added.name))
-            .on_click(cx.listener(move |sheet, _, window, cx| {
+            button.on_click(cx.listener(move |sheet, _, window, cx| {
                 sheet.remove_added(&added, window, cx);
             }))
-        };
+        });
         let words = row_words(
             SharedString::from(format!("added-{key}")),
             added.name.clone(),

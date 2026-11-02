@@ -630,17 +630,19 @@ impl SettingsSheet {
         });
         let remove = row.removal().map(|purpose| {
             let plugin = row.clone();
-            small(text_button(
+            let button = small(text_button(
                 SharedString::from(format!("remove-{}", row.key())),
                 "Remove",
                 &pane.stop(cx),
                 theme,
             ))
-            .aria_label(format!("Remove {}", row.name))
-            .on_click(cx.listener(move |sheet, _, window, cx| {
-                let confirm = Approval::for_row(&plugin, purpose.clone(), window, cx);
-                sheet.ask(confirm, window, cx);
-            }))
+            .aria_label(format!("Remove {}", row.name));
+            self.unless_checking(button, |button| {
+                button.on_click(cx.listener(move |sheet, _, window, cx| {
+                    let confirm = Approval::for_row(&plugin, purpose.clone(), window, cx);
+                    sheet.ask(confirm, window, cx);
+                }))
+            })
         });
         let approval = status;
         if approval.is_none() && remove.is_none() {

@@ -426,13 +426,22 @@ impl Launcher {
     /// Takes `plugin` out of the data folder from `folder`, the one its row
     /// came from, and returns the launcher without it. Its approval goes
     /// with it if it's the copy that runs: one held back beside that copy
-    /// never had it.
+    /// never had it. So does the mirror of the link it came from, if it did.
     pub fn uninstall(&self, plugin: &PluginId, folder: &str) -> Result<Launcher, String> {
         let could_not = |error: std::io::Error| format!("{plugin} wasn't removed: {error}");
         let ran = self.runs_from_folder(plugin, folder);
+        let link = (self.installed.iter().chain(&self.arrived))
+            .find(|copy| copy.folder == folder)
+            .and_then(|copy| match &copy.record {
+                Some(Record::Link { url, .. }) => Some(url.clone()),
+                _ => None,
+            });
         InstalledPlugins::in_data_folder(&self.data_folder)
             .remove(folder)
             .map_err(could_not)?;
+        if let Some(url) = link {
+            registry::forget_link(&self.data_folder, &url).map_err(could_not)?;
+        }
         if ran {
             self.set_approved(plugin, false)?;
         }

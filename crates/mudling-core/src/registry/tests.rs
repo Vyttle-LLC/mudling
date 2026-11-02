@@ -710,6 +710,10 @@ fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
     assert_eq!(copy.hash, fetched.hash);
     assert!(matches!(&copy.record, Some(Record::Link { url, .. }) if *url == link_of(&upstream)));
     assert!(!copy.from_directory(), "the directory offers it no updates");
+
+    assert_eq!(link_mirrors(&data).len(), 1, "kept for its updates");
+    forget_link(data.path(), &link_of(&upstream)).unwrap();
+    assert!(link_mirrors(&data).is_empty());
 }
 
 #[test]
@@ -750,6 +754,15 @@ fn a_plugin_from_a_link_that_fails_a_check_is_not_installed() {
 
     let installed = InstalledPlugins::in_data_folder(data.path());
     assert!(installed.plugin_folders().is_empty());
+    assert!(link_mirrors(&data).is_empty(), "no mirror is left behind");
+}
+
+/// The mirrors kept for links under `data`.
+fn link_mirrors(data: &TempDir) -> Vec<std::path::PathBuf> {
+    let links = data.path().join(REGISTRY_FOLDER).join("links");
+    fs::read_dir(links)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
 }
 
 /// Bytes that don't compress, so a pack can't shrink them.
@@ -795,6 +808,39 @@ fn a_fetch_past_its_cap_is_stopped() {
     let stopped = mirror.fetch_default_branch(&limit());
 
     assert!(matches!(stopped, Err(GitError::TooLarge(_))), "{stopped:?}");
+}
+
+#[test]
+fn a_link_whose_folders_all_name_one_folder_is_refused_quickly() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let repo = Repository::open_bare(upstream.path()).unwrap();
+    // Ten levels of 16 names for one folder, down to an empty one: 16^10
+    // folders to walk and no file, from a repo of eleven small objects.
+    let mut folder = repo.treebuilder(None).unwrap().write().unwrap();
+    for _ in 0..10 {
+        let mut level = repo.treebuilder(None).unwrap();
+        for name in 0..16 {
+            level.insert(name.to_string(), folder, 0o040_000).unwrap();
+        }
+        folder = level.write().unwrap();
+    }
+    let tip = repo.head().unwrap().peel_to_commit().unwrap();
+    let mut root = repo.treebuilder(Some(&tip.tree().unwrap())).unwrap();
+    root.insert("many", folder, 0o040_000).unwrap();
+    let tree = repo.find_tree(root.write().unwrap()).unwrap();
+    let signature = git2::Signature::now("Test", "test@example.org").unwrap();
+    repo.commit(Some("HEAD"), &signature, &signature, "Many", &tree, &[&tip])
+        .unwrap();
+    let data = TempDir::new().unwrap();
+
+    let started = std::time::Instant::now();
+    let refused = fetch_link(data.path(), &link_of(&upstream), &limit());
+
+    assert!(
+        matches!(&refused, Err(InstallError::NotAPlugin(why)) if why.contains("more than 2000 folders")),
+        "{refused:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[test]

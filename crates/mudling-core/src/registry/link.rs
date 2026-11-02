@@ -8,6 +8,8 @@ use super::{Fetched, InstallError, REGISTRY_FOLDER, Source, content_hash, hex, l
 use crate::git::{GitError, Limit, Mirror};
 use crate::plugin::check;
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Under the registry's folder: a bare mirror for each link.
@@ -30,6 +32,19 @@ pub fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetche
             "there's no link".to_owned(),
         )));
     }
+    let fetched = fetch_into_mirror(data_folder, url, limit);
+    if fetched.is_err() {
+        // What a link that failed left behind is no use to anyone.
+        let _ = forget_link(data_folder, url);
+    }
+    fetched
+}
+
+fn fetch_into_mirror(
+    data_folder: &Path,
+    url: &str,
+    limit: &Limit,
+) -> Result<Fetched, InstallError> {
     let mirror = Mirror::open(&mirror_folder(data_folder, url), url)?.capped(MOST_DOWNLOAD);
     let commit = mirror.fetch_default_branch(limit)?;
     let files = mirror.folder_files(commit, "")?;
@@ -42,6 +57,14 @@ pub fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetche
         files,
         plugin,
     })
+}
+
+/// Deletes the mirror kept for `url`, once nothing installed comes from it.
+pub fn forget_link(data_folder: &Path, url: &str) -> io::Result<()> {
+    match fs::remove_dir_all(mirror_folder(data_folder, url.trim())) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn mirror_folder(data_folder: &Path, url: &str) -> PathBuf {

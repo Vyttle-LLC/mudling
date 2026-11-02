@@ -40,7 +40,7 @@ pub(crate) use installed::plugin_of;
 pub use installed::{
     FolderCopy, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
-pub use link::fetch_link;
+pub use link::{fetch_link, forget_link};
 pub use trust::{Origins, Trusted};
 
 use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};

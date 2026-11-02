@@ -26,6 +26,9 @@ pub type FolderFiles = BTreeMap<String, Vec<u8>>;
 pub struct FolderLimits {
     /// Folders inside folders.
     pub depth: usize,
+    /// Folders in all, counted each time one is visited: git can list one
+    /// folder object under many names, so a small repo can name millions.
+    pub folders: usize,
     pub files: usize,
     pub bytes: u64,
     pub largest_file: u64,
@@ -33,6 +36,7 @@ pub struct FolderLimits {
 
 pub const FOLDER_LIMITS: FolderLimits = FolderLimits {
     depth: 16,
+    folders: 2_000,
     files: 1_000,
     bytes: 8 * MB,
     largest_file: 2 * MB,
@@ -169,6 +173,7 @@ fn collect(repo: &Repository, root: Oid, limits: &FolderLimits) -> Result<Folder
     let mut files = FolderFiles::new();
     let mut bytes = 0;
     let mut folders = vec![(root, String::new(), 0)];
+    let mut visited = 0;
     while let Some((tree, prefix, depth)) = folders.pop() {
         if depth > limits.depth {
             return Err(too_large(format!(
@@ -183,6 +188,13 @@ fn collect(repo: &Repository, root: Oid, limits: &FolderLimits) -> Result<Folder
             let path = format!("{prefix}{name}");
             match (entry.kind(), entry.filemode()) {
                 (Some(ObjectType::Tree), _) => {
+                    visited += 1;
+                    if visited > limits.folders {
+                        return Err(too_large(format!(
+                            "it has more than {} folders",
+                            limits.folders
+                        )));
+                    }
                     folders.push((entry.id(), format!("{path}/"), depth + 1));
                 }
                 (Some(ObjectType::Blob), mode) if mode == i32::from(FileMode::Link) => {
