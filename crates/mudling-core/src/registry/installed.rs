@@ -35,22 +35,30 @@ pub struct Refused {
     pub why: String,
 }
 
-/// A plugin in the data folder whose copy this device doesn't trust, so it
-/// isn't loaded: it arrived by sync, or was put there by hand.
+/// A plugin in the data folder, as read once: everything about it is the
+/// folder's, which needn't be named for the plugin's id.
 #[derive(Clone, Debug)]
-pub struct Arrived {
-    /// Read to show it, never run.
+pub struct FolderCopy {
     pub plugin: Plugin,
+    /// Its folder's name under `plugins/`.
+    pub folder: String,
+    /// The folder's content hash as this device computed it.
     pub hash: String,
+    /// A record beside it says it came from the directory.
+    pub from_directory: bool,
 }
 
 /// What the data folder's plugins came to.
 #[derive(Clone, Debug, Default)]
 pub struct Loaded {
-    pub plugins: Vec<Plugin>,
-    pub arrived: Vec<Arrived>,
+    pub plugins: Vec<FolderCopy>,
+    /// Copies this device doesn't trust: read to show them, never run.
+    pub arrived: Vec<FolderCopy>,
     pub refused: Vec<Refused>,
 }
+
+/// Why a copy wasn't trusted.
+const CHANGED_SINCE_SHOWN: &str = "it changed since you reviewed it, so it wasn't trusted";
 
 /// The plugins folder of a data folder.
 #[derive(Clone, Debug)]
@@ -127,54 +135,72 @@ impl InstalledPlugins {
     /// the player.
     pub fn load(&self) -> Loaded {
         let mut loaded = Loaded::default();
-        for folder in self.plugin_folders() {
-            let id = folder
+        for path in self.plugin_folders() {
+            let folder = path
                 .file_name()
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-            let read = folder_hash(&folder)
+            let read = folder_hash(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|hash| {
-                    let plugin = Plugin::load(&folder).map_err(|error| error.to_string())?;
+                    let plugin = Plugin::load(&path).map_err(|error| error.to_string())?;
                     Ok((plugin, hash))
                 });
-            match read {
-                Ok((plugin, hash)) if self.is_trusted(&id, &hash) => loaded.plugins.push(plugin),
-                Ok((plugin, hash)) => loaded.arrived.push(Arrived { plugin, hash }),
-                Err(why) => loaded.refused.push(Refused { id, why }),
+            let (plugin, hash) = match read {
+                Ok(read) => read,
+                Err(why) => {
+                    loaded.refused.push(Refused { id: folder, why });
+                    continue;
+                }
+            };
+            let from_directory = self.record_path(&folder).exists();
+            let copy = FolderCopy {
+                plugin,
+                folder,
+                hash,
+                from_directory,
+            };
+            if self.is_trusted(&copy) {
+                loaded.plugins.push(copy);
+            } else {
+                loaded.arrived.push(copy);
             }
         }
         loaded
     }
 
-    /// Whether this device trusts the folder `id`, holding `hash`. One whose
-    /// origin can't be read or saved isn't.
-    fn is_trusted(&self, id: &str, hash: &str) -> bool {
-        self.trusted.trusts(id, hash)
-            || (!self.record_path(id).exists() && self.origins.is_local(id).unwrap_or(false))
+    /// Whether this device trusts `copy`. A folder whose origin can't be
+    /// read or saved isn't the player's own.
+    fn is_trusted(&self, copy: &FolderCopy) -> bool {
+        self.trusted.trusts(&copy.folder, &copy.hash)
+            || (!copy.from_directory && self.origins.is_local(&copy.folder).unwrap_or(false))
     }
 
-    /// Trusts the copy of `id` the data folder holds now. One with no record
-    /// becomes the player's own.
-    pub fn trust(&self, id: &str) -> io::Result<()> {
-        let hash = folder_hash(&self.folder.join(id))?;
-        self.trusted.trust(id, &hash)?;
-        if !self.record_path(id).exists() {
-            self.origins.mark_local(id)?;
+    /// Trusts the copy in `folder`, as long as it still hashes to `hash`, the
+    /// copy the player was shown. One with no record becomes the player's own.
+    pub fn trust(&self, folder: &str, hash: &str) -> Result<(), String> {
+        let path = self.folder.join(folder);
+        if !is_safe_name(folder) || folder_hash(&path).ok().as_deref() != Some(hash) {
+            return Err(CHANGED_SINCE_SHOWN.to_owned());
+        }
+        let could_not = |error: io::Error| error.to_string();
+        self.trusted.trust(folder, hash).map_err(could_not)?;
+        if !self.record_path(folder).exists() {
+            self.origins.mark_local(folder).map_err(could_not)?;
         }
         Ok(())
     }
 
-    /// Takes a plugin and its record out.
-    pub fn remove(&self, id: &str) -> io::Result<()> {
-        if !is_safe_name(id) {
+    /// Takes the plugin in `folder` and its record out.
+    pub fn remove(&self, folder: &str) -> io::Result<()> {
+        if !is_safe_name(folder) {
             return Ok(());
         }
-        remove_folder(&self.folder.join(id))?;
-        match fs::remove_file(self.record_path(id)) {
+        remove_folder(&self.folder.join(folder))?;
+        match fs::remove_file(self.record_path(folder)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
-        self.origins.forget(id)
+        self.origins.forget(folder)
     }
 
     /// Where each plugin with a record came from, by id.

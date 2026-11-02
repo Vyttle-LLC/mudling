@@ -1683,7 +1683,8 @@ fn a_plugin_from_another_device_waits_until_this_one_trusts_it() {
         .mac
         .install_plugin("tells", &[("plugin.toml", manifest)]);
     let on_mac = crate::registry::InstalledPlugins::in_data_folder(&world.mac.data);
-    on_mac.trust("tells").unwrap();
+    let shown = on_mac.load().arrived[0].hash.clone();
+    on_mac.trust("tells", &shown).unwrap();
     assert_eq!(on_mac.load().plugins.len(), 1);
     assert_eq!(world.mac.sync().problem, None);
 
@@ -1762,21 +1763,13 @@ fn approvals_never_leave_the_device() {
     world
         .mac
         .install_plugin("extras", &[("plugin.toml", "extras")]);
-    let extras = crate::plugin::Plugin::from_files(|_| {
-        Ok(
-            "id = \"extras\"\nname = \"Extras\"\nversion = \"1.0.0\"\napi = 1\n\
-            license = \"MIT\"\nlayer = \"default\"\n"
-                .to_owned(),
-        )
-    })
-    .unwrap();
+    let approved_copy = "sha256:the-copy-approved-here";
     crate::registry::Approvals::in_data_folder(&world.mac.data)
-        .approve(&extras)
+        .approve("extras", approved_copy)
         .unwrap();
 
     assert_eq!(world.mac.sync().problem, None);
 
     assert!(remote_files(&world.remote).contains(&"extras.json".to_owned()));
-    let fingerprint = crate::registry::fingerprint(&extras);
-    assert!(!remote_ever_held(&world.remote, &fingerprint));
+    assert!(!remote_ever_held(&world.remote, approved_copy));
 }

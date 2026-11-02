@@ -4,8 +4,8 @@
 
 use super::Shell;
 use crate::launcher::Launcher;
-use crate::settings::{Listing, PluginRow, installed_versions};
-use gpui::{AppContext, Context, Window};
+use crate::settings::{Listing, PluginRow};
+use gpui::{AppContext, Context, SharedString, Window};
 use mudling_core::git::Limit;
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
@@ -29,7 +29,7 @@ struct PluginsNow {
 
 impl PluginsNow {
     fn read(launcher: Launcher, host: Option<&str>) -> Result<PluginsNow, String> {
-        let installed = installed_versions(launcher.plugins(), &launcher.records());
+        let installed = launcher.installed_versions();
         let rows = host.map(|host| launcher.plugin_rows(host)).transpose()?;
         Ok(PluginsNow {
             launcher,
@@ -53,10 +53,7 @@ impl Shell {
                 },
                 Err(refused) => Listing::Refused(refused.to_string().into()),
             };
-            (
-                listing,
-                installed_versions(launcher.plugins(), &launcher.records()),
-            )
+            (listing, launcher.installed_versions())
         });
         self.directory_read = Some(cx.spawn(async move |shell, cx| {
             let (listing, installed) = read.await;
@@ -132,9 +129,15 @@ impl Shell {
         }));
     }
 
-    /// Takes a plugin installed from the directory out. A session running it
-    /// stops letting it send at once; the rest waits for the next connect.
-    pub(super) fn remove_plugin(&mut self, plugin: PluginId, cx: &mut Context<Shell>) {
+    /// Takes `plugin` out of the data folder, from `folder`, the one its row
+    /// came from. A session running it stops letting it send at once; the
+    /// rest waits for the next connect.
+    pub(super) fn remove_plugin(
+        &mut self,
+        plugin: PluginId,
+        folder: SharedString,
+        cx: &mut Context<Shell>,
+    ) {
         let Some(launcher) = self.launcher.clone() else {
             return;
         };
@@ -143,7 +146,7 @@ impl Shell {
         }
         let host = self.game.as_ref().map(|game| game.target.host.clone());
         let remove = cx.background_spawn(async move {
-            let launcher = launcher.uninstall(&plugin)?;
+            let launcher = launcher.uninstall(&plugin, &folder)?;
             PluginsNow::read(launcher, host.as_deref())
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
@@ -152,12 +155,13 @@ impl Shell {
         }));
     }
 
-    /// Checks a copy that arrived against the directory's verified index,
-    /// which trusts it if the registry signed for it. If not, asks the
-    /// player, saying why.
+    /// Checks the copy in `folder`, shown with `hash`, against the
+    /// directory's verified index, which trusts it if the registry signed for
+    /// it. If not, and it's still that copy, asks the player, saying why.
     pub(super) fn review_arrival(
         &mut self,
-        plugin: PluginId,
+        folder: SharedString,
+        hash: SharedString,
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
@@ -165,11 +169,12 @@ impl Shell {
             return;
         };
         let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let checking = plugin.clone();
+        let (checking, shown) = (folder.clone(), hash.clone());
         let check = cx.background_spawn(async move {
             let checked = launcher.registry().refresh(&Limit::after(REGISTRY_WAIT));
             let launcher = launcher.with_installed();
-            let why = launcher.is_held_back(&checking).then(|| match checked {
+            let still_held = launcher.is_held_back(&checking, &shown);
+            let why = still_held.then(|| match checked {
                 Ok(_) => format!("{ARRIVED_NOTE} {NOT_SIGNED}"),
                 Err(refused) => {
                     format!("{ARRIVED_NOTE} The directory couldn't vouch for it: {refused}")
@@ -184,7 +189,7 @@ impl Shell {
                     shell.show_plugins_now(Ok(now), why.is_none(), cx);
                     if let Some(why) = why {
                         shell.settings.update(cx, |sheet, cx| {
-                            sheet.ask_to_trust(&plugin, why, window, cx);
+                            sheet.ask_to_trust(&folder, &hash, why, window, cx);
                         });
                     }
                 }
@@ -193,14 +198,20 @@ impl Shell {
         }));
     }
 
-    /// Loads the copy of `plugin` that arrived, as the player chose.
-    pub(super) fn trust_plugin(&mut self, plugin: PluginId, cx: &mut Context<Shell>) {
+    /// Loads the copy in `folder` the player chose, as long as it's still
+    /// the one shown with `hash`.
+    pub(super) fn trust_plugin(
+        &mut self,
+        folder: SharedString,
+        hash: SharedString,
+        cx: &mut Context<Shell>,
+    ) {
         let Some(launcher) = self.launcher.clone() else {
             return;
         };
         let host = self.game.as_ref().map(|game| game.target.host.clone());
         let trust = cx.background_spawn(async move {
-            PluginsNow::read(launcher.trust(&plugin)?, host.as_deref())
+            PluginsNow::read(launcher.trust(&folder, &hash)?, host.as_deref())
         });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = trust.await;

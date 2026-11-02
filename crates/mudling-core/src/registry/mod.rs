@@ -27,10 +27,10 @@ mod trust;
 #[cfg(test)]
 mod tests;
 
-pub use approvals::{Approvals, fingerprint, sends_commands};
+pub use approvals::{Approvals, sends_commands};
 pub(crate) use installed::plugin_of;
 pub use installed::{
-    Arrived, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
+    FolderCopy, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
 pub use trust::{Origins, Trusted};
 

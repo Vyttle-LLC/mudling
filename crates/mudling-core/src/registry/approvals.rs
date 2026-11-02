@@ -2,13 +2,13 @@
 //!
 //! An approval never syncs. It's consent given here, so a plugin that reaches
 //! this device by sync asks again, and nobody who can write to the repo can
-//! grant one. Each is for the plugin's [`fingerprint`]: its permissions and
-//! hooks, the only parts that can send. So a plugin whose hooks change by any
-//! means but an update the player chose here asks again too.
+//! grant one. Each is for one copy of the plugin, by its folder's content
+//! hash: its patterns decide when its hooks run and what text they get, so
+//! a change to any file of it asks again, unless it's an update the player
+//! chose here.
 
 use crate::plugin::Plugin;
 use crate::plugin::manifest::Permission;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -28,7 +28,7 @@ impl Approvals {
         }
     }
 
-    /// Each approved plugin's id, with the fingerprint it was approved at.
+    /// Each approved plugin's id, with the content hash it was approved at.
     fn all(&self) -> BTreeMap<String, String> {
         fs::read(&self.path)
             .ok()
@@ -36,20 +36,14 @@ impl Approvals {
             .unwrap_or_default()
     }
 
-    /// The plugins of `plugins` approved as they are now.
-    pub fn approved<'a>(&self, plugins: impl IntoIterator<Item = &'a Plugin>) -> Vec<&'a Plugin> {
-        let all = self.all();
-        let holds = |plugin: &&Plugin| all.get(plugin.id().as_str()) == Some(&fingerprint(plugin));
-        plugins.into_iter().filter(holds).collect()
+    /// Whether the copy of `id` with content hash `hash` is approved.
+    pub fn is_approved(&self, id: &str, hash: &str) -> bool {
+        self.all().get(id).is_some_and(|approved| approved == hash)
     }
 
-    pub fn is_approved(&self, plugin: &Plugin) -> bool {
-        !self.approved([plugin]).is_empty()
-    }
-
-    pub fn approve(&self, plugin: &Plugin) -> io::Result<()> {
+    pub fn approve(&self, id: &str, hash: &str) -> io::Result<()> {
         let mut all = self.all();
-        all.insert(plugin.id().to_string(), fingerprint(plugin));
+        all.insert(id.to_owned(), hash.to_owned());
         self.save(&all)
     }
 
@@ -70,14 +64,4 @@ impl Approvals {
 /// Whether `plugin`'s hooks may send commands once approved.
 pub fn sends_commands(plugin: &Plugin) -> bool {
     (plugin.manifest.permissions).contains(&Permission::SendCommands)
-}
-
-/// What an approval is for: the plugin's permissions and its hook files.
-pub fn fingerprint(plugin: &Plugin) -> String {
-    let mut hash = Sha256::new();
-    hash.update(format!("{:?}\n", plugin.manifest.permissions));
-    for script in &plugin.scripts {
-        hash.update(format!("{}\0{}\0", script.file, script.source));
-    }
-    format!("sha256:{}", super::hex(&hash.finalize()))
 }

@@ -20,7 +20,7 @@ mod shortcuts;
 mod triggers;
 mod vault;
 
-pub use directory::{Listing, installed_versions};
+pub use directory::Listing;
 pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};
@@ -158,13 +158,24 @@ pub enum SheetEvent {
         plugin: PluginId,
         approved: bool,
     },
-    /// Take a plugin in the data folder out, which the player confirmed.
-    Remove(PluginId),
-    /// Check a copy that arrived against the directory, or else ask the
-    /// player whether to trust it.
-    ReviewArrival(PluginId),
-    /// Load the copy of this plugin the data folder holds, as the player chose.
-    Trust(PluginId),
+    /// Take `plugin` out of the data folder, from `folder`, the one its row
+    /// came from, as the player confirmed.
+    Remove {
+        plugin: PluginId,
+        folder: SharedString,
+    },
+    /// Check the copy in `folder`, shown with `hash`, against the directory,
+    /// or else ask the player whether to trust it.
+    ReviewArrival {
+        folder: SharedString,
+        hash: SharedString,
+    },
+    /// Load the copy in `folder`, as long as it's still the one shown with
+    /// `hash`, as the player chose.
+    Trust {
+        folder: SharedString,
+        hash: SharedString,
+    },
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -1981,8 +1992,8 @@ mod tests {
         let keep = Rc::clone(&removed);
         let _watching = cx.update(|_, cx| {
             cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
-                if let SheetEvent::Remove(plugin) = event {
-                    *keep.borrow_mut() = Some(plugin.to_string());
+                if let SheetEvent::Remove { plugin, folder } = event {
+                    *keep.borrow_mut() = Some(format!("{plugin} from {folder}"));
                 }
             })
         });
@@ -1994,7 +2005,10 @@ mod tests {
         assert!(removed.borrow().is_none());
         click("remove-sample-helper", cx);
         click("approval-allow", cx);
-        assert_eq!(removed.borrow().as_deref(), Some("sample-helper"));
+        assert_eq!(
+            removed.borrow().as_deref(),
+            Some("sample-helper from sample-helper")
+        );
         sheet.update(cx, |sheet, cx| {
             let mut rows = sheet.plugins.clone();
             rows.retain(|row| row.id.as_str() != "sample-helper");
@@ -2015,17 +2029,19 @@ mod tests {
         sheet.update(cx, |sheet, cx| {
             let mut rows = sheet.plugins.clone();
             let arrived = rows.iter_mut().find(|row| row.id.as_str() == "sample-chat");
-            arrived.unwrap().arrived = true;
+            arrived.unwrap().held_back = Some("sha256:shown".into());
             sheet.refresh_plugins(rows, false, cx);
         });
         let said = Rc::new(RefCell::new(Vec::new()));
         let keep = Rc::clone(&said);
         let _watching = cx.update(|_, cx| {
             cx.subscribe(&sheet, move |_, event: &SheetEvent, _| match event {
-                SheetEvent::ReviewArrival(plugin) => {
-                    keep.borrow_mut().push(format!("review {plugin}"))
+                SheetEvent::ReviewArrival { folder, hash } => {
+                    keep.borrow_mut().push(format!("review {folder} {hash}"))
                 }
-                SheetEvent::Trust(plugin) => keep.borrow_mut().push(format!("trust {plugin}")),
+                SheetEvent::Trust { folder, hash } => {
+                    keep.borrow_mut().push(format!("trust {folder} {hash}"))
+                }
                 _ => {}
             })
         });
@@ -2036,21 +2052,42 @@ mod tests {
         );
 
         click("arrival-sample-chat", cx);
-        assert_eq!(*said.borrow(), ["review sample-chat"]);
+        assert_eq!(*said.borrow(), ["review sample-chat sha256:shown"]);
         // The directory didn't vouch for it, so the shell asks the player.
-        let plugin = PluginId::try_from("sample-chat".to_owned()).unwrap();
         sheet.update_in(cx, |sheet, window, cx| {
-            sheet.ask_to_trust(
-                &plugin,
-                "The directory doesn't list this copy.".into(),
-                window,
-                cx,
-            );
+            let why = "The directory doesn't list this copy.".to_owned();
+            sheet.ask_to_trust("sample-chat", "sha256:shown", why, window, cx);
         });
         cx.run_until_parked();
         click("approval-allow", cx);
 
-        assert_eq!(*said.borrow(), ["review sample-chat", "trust sample-chat"]);
+        assert_eq!(
+            *said.borrow(),
+            [
+                "review sample-chat sha256:shown",
+                "trust sample-chat sha256:shown"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_copy_no_longer_shown_is_not_asked_about(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            let arrived = rows.iter_mut().find(|row| row.id.as_str() == "sample-chat");
+            arrived.unwrap().held_back = Some("sha256:newer".into());
+            sheet.refresh_plugins(rows, false, cx);
+        });
+
+        // The review was for the copy shown before a sync replaced it.
+        sheet.update_in(cx, |sheet, window, cx| {
+            let why = "The directory doesn't list this copy.".to_owned();
+            sheet.ask_to_trust("sample-chat", "sha256:shown", why, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("approval").is_none());
     }
 
     #[gpui::test]

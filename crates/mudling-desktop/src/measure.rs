@@ -1381,13 +1381,13 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         elsewhere: None,
         sending: Sending::No,
         asks: Vec::new(),
-        removable: false,
-        arrived: false,
+        folder: None,
+        held_back: None,
     };
-    let sender = |name, sending| PluginRow {
+    let sender = |name: &str, sending| PluginRow {
         sending,
         asks: sample_asks(),
-        removable: true,
+        folder: Some(name.to_lowercase().replace(' ', "-").into()),
         ..row(name, Layer::Game)
     };
     let mut rows = vec![
@@ -1401,8 +1401,8 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         row("Sample colors", Layer::Game),
         sender("Sample chat", Sending::Waiting),
         PluginRow {
-            arrived: true,
-            removable: true,
+            folder: Some("sample-notes".into()),
+            held_back: Some("sha256:sample-notes-from-elsewhere".into()),
             on: false,
             ..row("Sample notes", Layer::Game)
         },

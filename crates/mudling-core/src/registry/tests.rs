@@ -357,34 +357,20 @@ fn installing_again_replaces_the_old_copy_whole() {
     );
 }
 
-/// A plugin that sends commands, with `hook` as its hooks.
-fn sender(hook: &str) -> Plugin {
-    let manifest = "id = \"extras\"\nname = \"Extras\"\nversion = \"1.0.0\"\napi = 1\n\
-        license = \"MIT\"\nlayer = \"default\"\npermissions = [\"send_commands\"]\n\
-        [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"hooks.luau\"]\n";
-    let files: FolderFiles = [
-        ("plugin.toml".to_owned(), manifest.into()),
-        ("text.toml".to_owned(), PATTERNS.into()),
-        ("hooks.luau".to_owned(), hook.into()),
-    ]
-    .into();
-    load_files(&files).unwrap()
-}
-
 #[test]
-fn an_approval_holds_for_the_hooks_it_was_given_for() {
+fn an_approval_holds_for_the_copy_it_was_given_for() {
     let data = TempDir::new().unwrap();
     let approvals = Approvals::in_data_folder(data.path());
-    let approved = sender("function on_tell() end");
-    assert!(sends_commands(&approved));
 
-    approvals.approve(&approved).unwrap();
+    approvals.approve("extras", "sha256:approved").unwrap();
 
-    assert!(approvals.is_approved(&approved));
-    let changed = sender("function on_tell() mud.send('quit') end");
-    assert!(!approvals.is_approved(&changed), "changed hooks ask again");
+    assert!(approvals.is_approved("extras", "sha256:approved"));
+    assert!(
+        !approvals.is_approved("extras", "sha256:changed"),
+        "any change asks again"
+    );
     approvals.take_back("extras").unwrap();
-    assert!(!approvals.is_approved(&approved));
+    assert!(!approvals.is_approved("extras", "sha256:approved"));
 }
 
 #[test]
@@ -454,11 +440,94 @@ fn a_folder_with_no_record_that_sync_wrote_is_not_loaded() {
 
     assert!(loaded.plugins.is_empty());
     assert_eq!(loaded.arrived.len(), 1);
-    installed.trust("tells").unwrap();
+    installed.trust("tells", &loaded.arrived[0].hash).unwrap();
     assert_eq!(
         installed.load().plugins.len(),
         1,
         "the player took it as theirs"
+    );
+}
+
+#[test]
+fn trust_refuses_a_copy_that_changed_after_it_was_shown() {
+    let data = TempDir::new().unwrap();
+    Origins::in_data_folder(data.path())
+        .mark_arrived(["tells"])
+        .unwrap();
+    let installed = recordless_tells(&data);
+    let shown = installed.load().arrived[0].hash.clone();
+
+    // A sync lands while the dialog is open.
+    fs::write(installed.folder().join("tells/text.toml"), "[[pattern]]\n").unwrap();
+
+    assert!(installed.trust("tells", &shown).is_err());
+    assert!(installed.load().plugins.is_empty());
+}
+
+#[test]
+fn trust_and_remove_act_on_the_folder_shown_not_the_one_named_for_the_id() {
+    let data = TempDir::new().unwrap();
+    Origins::in_data_folder(data.path())
+        .mark_arrived(["aa", "zz"])
+        .unwrap();
+    let installed = InstalledPlugins::in_data_folder(data.path());
+    // The repo brings `zz/`, holding plugin `aa`, and `aa/`, holding `bb`.
+    let manifest = |id: &str| {
+        format!(
+            "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\n\
+             license = \"MIT\"\nlayer = \"default\"\n"
+        )
+    };
+    for (folder, id) in [("zz", "aa"), ("aa", "bb")] {
+        fs::create_dir_all(installed.folder().join(folder)).unwrap();
+        fs::write(
+            installed.folder().join(folder).join("plugin.toml"),
+            manifest(id),
+        )
+        .unwrap();
+    }
+    let loaded = installed.load();
+    let shown = (loaded.arrived.iter())
+        .find(|copy| copy.plugin.id().as_str() == "aa")
+        .unwrap();
+    assert_eq!(shown.folder, "zz");
+
+    installed.trust(&shown.folder, &shown.hash).unwrap();
+    let ids: Vec<String> = (installed.load().plugins.iter())
+        .map(|copy| copy.plugin.id().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        ["aa"],
+        "plugin bb, which the player never saw, stays out"
+    );
+
+    installed.remove(&shown.folder).unwrap();
+    assert!(!installed.folder().join("zz").exists());
+    assert!(
+        installed.folder().join("aa").exists(),
+        "the other folder stays"
+    );
+}
+
+#[test]
+fn an_origins_file_that_cannot_be_read_holds_folders_back_and_stays_as_it_is() {
+    let data = TempDir::new().unwrap();
+    let unreadable = b"{\"arrived\": [\"tells\"], broken";
+    fs::write(data.path().join("plugin-origins.json"), unreadable).unwrap();
+    let installed = recordless_tells(&data);
+
+    let loaded = installed.load();
+
+    assert!(loaded.plugins.is_empty(), "not taken for the player's own");
+    assert_eq!(
+        fs::read(data.path().join("plugin-origins.json")).unwrap(),
+        unreadable
+    );
+    assert!(
+        Origins::in_data_folder(data.path())
+            .mark_arrived(["tells"])
+            .is_err()
     );
 }
 
@@ -495,7 +564,7 @@ fn a_tampered_copy_arriving_with_a_matching_record_is_not_loaded() {
     assert_eq!(loaded.arrived[0].plugin.id().as_str(), "tells");
     assert_eq!(loaded.arrived[0].hash, hash);
 
-    installed.trust("tells").unwrap();
+    installed.trust("tells", &hash).unwrap();
     assert_eq!(
         installed.load().plugins.len(),
         1,

@@ -72,11 +72,12 @@ pub struct PluginRow {
     pub sending: Sending,
     /// What its hooks ask to do, as the approval says it.
     pub asks: Vec<SharedString>,
-    /// It's in the data folder, not built in, so the player can take it out.
-    pub removable: bool,
-    /// Its copy arrived in a shape this device doesn't trust, so it isn't
-    /// loaded until the player reviews it.
-    pub arrived: bool,
+    /// Its folder in the data folder, for one the player can take out. A
+    /// folder needn't be named for the plugin it holds.
+    pub folder: Option<SharedString>,
+    /// The content hash of a copy this device doesn't trust, as shown: it
+    /// isn't loaded until the player trusts exactly that copy.
+    pub held_back: Option<SharedString>,
 }
 
 /// Whether a plugin's hooks send commands, and whether the player let them.
@@ -137,8 +138,8 @@ impl PluginRow {
                 false => Sending::No,
             },
             asks: asks_of(plugin),
-            removable: false,
-            arrived: false,
+            folder: None,
+            held_back: None,
         }
     }
 
@@ -332,7 +333,7 @@ enum Status {
 /// A plugin's status, as words and the button that changes it. A copy that
 /// arrived says so first: until it's trusted, nothing else about it counts.
 fn status_words(row: &PluginRow) -> Option<(Status, &'static str, &'static str)> {
-    if row.arrived {
+    if row.held_back.is_some() {
         return Some((Status::Arrived, ARRIVED, "Review"));
     }
     match row.sending {
@@ -363,7 +364,7 @@ fn plugin_row(
         .map(|(_, words, _)| format!(" {words}."))
         .unwrap_or_default();
     let state = match (switched_on, overran) {
-        _ if row.arrived => "Not loaded",
+        _ if row.held_back.is_some() => "Not loaded",
         (true, _) => "On",
         (false, true) => "Turned off · over budget",
         (false, false) => "Off",
@@ -543,7 +544,15 @@ impl SettingsSheet {
             ))
             .aria_label(format!("{action}: {words}, {}", row.name))
             .on_click(cx.listener(move |sheet, _, window, cx| match status {
-                Status::Arrived => cx.emit(SheetEvent::ReviewArrival(plugin.id.clone())),
+                Status::Arrived => {
+                    let (Some(folder), Some(hash)) = (&plugin.folder, &plugin.held_back) else {
+                        return;
+                    };
+                    cx.emit(SheetEvent::ReviewArrival {
+                        folder: folder.clone(),
+                        hash: hash.clone(),
+                    });
+                }
                 Status::Approved => sheet.set_approved(plugin.id.clone(), false, cx),
                 Status::Waiting => {
                     let approval = Approval::for_row(&plugin, Purpose::Review, window, cx);
@@ -561,8 +570,8 @@ impl SettingsSheet {
                 .child(words)
                 .child(button)
         });
-        let remove = row.removable.then(|| {
-            let plugin = row.id.clone();
+        let remove = row.folder.as_ref().map(|folder| {
+            let (plugin, folder) = (row.clone(), folder.clone());
             small(text_button(
                 SharedString::from(format!("remove-{}", row.id)),
                 "Remove",
@@ -571,7 +580,9 @@ impl SettingsSheet {
             ))
             .aria_label(format!("Remove {}", row.name))
             .on_click(cx.listener(move |sheet, _, window, cx| {
-                sheet.confirm_remove(&plugin, window, cx);
+                let purpose = Purpose::Remove(folder.clone());
+                let confirm = Approval::for_row(&plugin, purpose, window, cx);
+                sheet.ask(confirm, window, cx);
             }))
         });
         let approval = status;
@@ -907,7 +918,7 @@ impl SettingsSheet {
         let control = match (row.always_on, elsewhere) {
             (true, _) => switch(true, theme).into_any_element(),
             // Not loaded, so there's nothing to switch until it's trusted.
-            _ if row.arrived => div().w(SWITCH_WIDTH).into_any_element(),
+            _ if row.held_back.is_some() => div().w(SWITCH_WIDTH).into_any_element(),
             (false, Some(_)) => div().w(SWITCH_WIDTH).into_any_element(),
             (false, None) => self
                 .plugin_switch(row, switched_on, pane, theme, cx)

@@ -11,9 +11,7 @@ use mudling_core::defaults::detect::{ServerSignals, Suggestion, suggest};
 use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
-use mudling_core::registry::{
-    Approvals, Arrived, Fetched, InstalledPlugins, Record, Refused, Registry,
-};
+use mudling_core::registry::{Approvals, Fetched, FolderCopy, InstalledPlugins, Refused, Registry};
 use mudling_core::session::{Credentials, Session, SessionConfig};
 use mudling_core::sync::Syncer;
 use mudling_core::vault::{Error as VaultError, Secret, Vault, VaultState};
@@ -41,10 +39,11 @@ pub struct Launcher {
     data_folder: PathBuf,
     /// The app's own plugins.
     own: Vec<Plugin>,
-    /// What the data folder had when last read.
-    installed: Vec<Plugin>,
+    /// What the data folder had when last read, each with its folder and
+    /// the hash this device computed for it.
+    installed: Vec<FolderCopy>,
     /// What it had in a copy this device doesn't trust, so didn't load.
-    arrived: Vec<Arrived>,
+    arrived: Vec<FolderCopy>,
     /// What it had that wouldn't load, and why.
     refused: Vec<Refused>,
     /// The command line's `--plugin` folders.
@@ -115,68 +114,89 @@ impl Launcher {
         &self.refused
     }
 
-    /// Trusts the copy of `plugin` the data folder holds, and returns the
-    /// launcher that loads it.
-    pub fn trust(&self, plugin: &PluginId) -> Result<Launcher, String> {
+    /// Trusts the copy in `folder`, as long as it still hashes to `hash`, the
+    /// copy the player was shown, and returns the launcher that loads it.
+    pub fn trust(&self, folder: &str, hash: &str) -> Result<Launcher, String> {
         InstalledPlugins::in_data_folder(&self.data_folder)
-            .trust(plugin.as_str())
-            .map_err(|error| format!("couldn't trust {plugin}: {error}"))?;
+            .trust(folder, hash)
+            .map_err(|error| format!("couldn't trust the plugin in {folder}: {error}"))?;
         Ok(self.clone().with_installed())
     }
 
-    /// Whether the copy of `plugin` this device holds is held back.
-    pub fn is_held_back(&self, plugin: &PluginId) -> bool {
-        self.arrived
-            .iter()
-            .any(|arrived| arrived.plugin.id() == plugin)
+    /// Whether the copy in `folder` with `hash` is still held back.
+    pub fn is_held_back(&self, folder: &str, hash: &str) -> bool {
+        (self.arrived.iter()).any(|copy| copy.folder == folder && copy.hash == hash)
     }
 
     fn layered(self) -> Launcher {
-        let plugins = replaced(self.own.clone(), self.installed.clone());
+        let installed = self.installed.iter().map(|copy| copy.plugin.clone());
+        let plugins = replaced(self.own.clone(), installed.collect());
         let plugins = replaced(plugins, self.named.clone());
         Launcher { plugins, ..self }
     }
 
+    #[cfg(test)]
     pub fn plugins(&self) -> &[Plugin] {
         &self.plugins
     }
 
+    /// The data folder's copy of `plugin` that runs, if one does: the
+    /// command line's replaces it.
+    fn copy_of(&self, plugin: &PluginId) -> Option<&FolderCopy> {
+        if self.named.iter().any(|named| named.id() == plugin) {
+            return None;
+        }
+        // The last with the id replaces the others, as `replaced` does.
+        self.installed
+            .iter()
+            .rev()
+            .find(|copy| copy.plugin.id() == plugin)
+    }
+
     /// The plugins let to send commands: by the command line, or by the
-    /// player on this device for the hooks they have now.
+    /// player on this device for the copy in the data folder now.
     pub fn approved(&self) -> Vec<PluginId> {
         let approvals = Approvals::in_data_folder(&self.data_folder);
-        let by_player = approvals
-            .approved(&self.plugins)
-            .into_iter()
-            .map(Plugin::id);
+        let by_player = (self.plugins.iter().map(Plugin::id)).filter(|id| {
+            !self.command_line.contains(id)
+                && self
+                    .copy_of(id)
+                    .is_some_and(|copy| approvals.is_approved(id.as_str(), &copy.hash))
+        });
         let mut approved = self.command_line.clone();
-        approved.extend(
-            by_player
-                .filter(|id| !self.command_line.contains(id))
-                .cloned(),
-        );
+        approved.extend(by_player.cloned());
         approved
     }
 
-    /// Lets `plugin` send commands, or takes that back.
+    /// Lets `plugin` send commands, or takes that back. Only a copy in the
+    /// data folder can be approved here: it's approved by its content hash.
     pub fn set_approved(&self, plugin: &PluginId, approved: bool) -> Result<(), String> {
         let approvals = Approvals::in_data_folder(&self.data_folder);
         let could_not = |error: std::io::Error| format!("couldn't save your choice: {error}");
         if !approved {
             return approvals.take_back(plugin.as_str()).map_err(could_not);
         }
-        let found = self.plugins.iter().find(|other| other.id() == plugin);
-        let plugin = found.ok_or_else(|| format!("{plugin} isn't installed"))?;
-        approvals.approve(plugin).map_err(could_not)
+        let copy = (self.copy_of(plugin))
+            .ok_or_else(|| format!("{plugin} isn't installed in the data folder"))?;
+        approvals
+            .approve(plugin.as_str(), &copy.hash)
+            .map_err(could_not)
     }
 
     pub fn registry(&self) -> Registry {
         Registry::new(&self.data_folder)
     }
 
-    /// Where each installed plugin came from, by id.
-    pub fn records(&self) -> BTreeMap<String, Record> {
-        InstalledPlugins::in_data_folder(&self.data_folder).records()
+    /// What's installed, by id, for the directory to offer updates by: the
+    /// hash this device computed for each copy from the directory. A record
+    /// travels with the repo, so its hash isn't one to go by.
+    pub fn installed_versions(&self) -> BTreeMap<String, Option<String>> {
+        (self.plugins.iter().map(Plugin::id))
+            .map(|id| {
+                let copy = self.copy_of(id).filter(|copy| copy.from_directory);
+                (id.to_string(), copy.map(|copy| copy.hash.clone()))
+            })
+            .collect()
     }
 
     /// Puts `fetched` in the data folder and returns the launcher that has
@@ -195,35 +215,31 @@ impl Launcher {
         Ok(launcher)
     }
 
-    /// Takes a plugin installed from the directory out of the data folder,
-    /// with its approval, and returns the launcher without it.
-    pub fn uninstall(&self, plugin: &PluginId) -> Result<Launcher, String> {
+    /// Takes `plugin` out of the data folder from `folder`, the one its row
+    /// came from, with its approval, and returns the launcher without it.
+    pub fn uninstall(&self, plugin: &PluginId, folder: &str) -> Result<Launcher, String> {
         let could_not = |error: std::io::Error| format!("{plugin} wasn't removed: {error}");
         InstalledPlugins::in_data_folder(&self.data_folder)
-            .remove(plugin.as_str())
+            .remove(folder)
             .map_err(could_not)?;
         self.set_approved(plugin, false)?;
         Ok(self.clone().with_installed())
     }
 
-    /// Marks what may send commands and what the data folder holds, which
-    /// the player can remove, and adds a row for each copy held back.
+    /// Marks what may send commands and the folder of each that runs from
+    /// the data folder, which the player can remove, and adds a row for each
+    /// copy held back.
     fn finished_rows(&self, rows: &mut Vec<PluginRow>) {
         PluginRow::approve(rows, &self.approved());
-        let held_back = self.arrived.iter().map(|arrived| PluginRow {
-            arrived: true,
-            ..PluginRow::of(&arrived.plugin, false)
+        for row in rows.iter_mut() {
+            row.folder = (self.copy_of(&row.id)).map(|copy| copy.folder.clone().into());
+        }
+        let held_back = self.arrived.iter().map(|copy| PluginRow {
+            folder: Some(copy.folder.clone().into()),
+            held_back: Some(copy.hash.clone().into()),
+            ..PluginRow::of(&copy.plugin, false)
         });
         rows.extend(held_back);
-        let in_data_folder = |id: &PluginId| {
-            let installed = self.installed.iter().map(Plugin::id);
-            let arrived = self.arrived.iter().map(|arrived| arrived.plugin.id());
-            installed.chain(arrived).any(|other| other == id)
-                && !self.named.iter().any(|named| named.id() == id)
-        };
-        for row in rows.iter_mut() {
-            row.removable = in_data_folder(&row.id);
-        }
     }
 
     /// What Settings › Plugins shows for a session on `host`, as saved now.
@@ -515,7 +531,7 @@ fn replaced(mut plugins: Vec<Plugin>, replacing: Vec<Plugin>) -> Vec<Plugin> {
 mod tests {
     use super::*;
     use crate::settings::Sending;
-    use mudling_core::registry::PLUGINS_FOLDER;
+    use mudling_core::registry::{PLUGINS_FOLDER, Record};
     use mudling_core::vault::{AutoLock, FILE_NAME, MemoryKeyStore};
     use tempfile::TempDir;
 
@@ -829,13 +845,99 @@ mod tests {
         let launcher = launcher.with_installed();
 
         assert!(launcher.plugins().is_empty(), "nothing of it runs");
-        assert!(launcher.is_held_back(&id));
         let rows = launcher.plugin_rows("mud.example").unwrap();
         let row = rows.iter().find(|row| row.id == id).unwrap();
-        assert!(row.arrived && row.removable && !row.on);
+        assert!(!row.on);
+        assert_eq!(row.folder.as_deref(), Some("extras"));
+        let shown = row.held_back.clone().expect("it's held back");
 
-        let launcher = launcher.trust(&id).unwrap();
+        let launcher = launcher.trust("extras", &shown).unwrap();
         assert_eq!(launcher.plugins().len(), 1, "the player trusted this copy");
+    }
+
+    #[test]
+    fn a_trusted_copy_whose_patterns_changed_no_longer_has_its_approval() {
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let extras = fetched_sender("function on_go(event) mud.send(event.captures.x) end");
+        let id = extras.plugin.id().clone();
+        let launcher = launcher.install(&extras, true).unwrap();
+        assert_eq!(launcher.approved(), std::slice::from_ref(&id));
+
+        // Only the patterns change, to feed the hook any text from the server.
+        let patterns = folder.path().join(PLUGINS_FOLDER).join("extras/text.toml");
+        let wide = "[[pattern]]\nname = \"go\"\npattern = '''(?P<x>.*)'''\nhook = \"on_go\"\n";
+        std::fs::write(patterns, wide).unwrap();
+        let held = launcher.with_installed();
+        let rows = held.plugin_rows("mud.example").unwrap();
+        let shown = (rows.iter().find_map(|row| row.held_back.clone())).expect("held back");
+        let launcher = held.trust("extras", &shown).unwrap();
+
+        assert_eq!(launcher.plugins().len(), 1, "trusted, so it runs");
+        assert!(launcher.approved().is_empty(), "but sending asks again");
+    }
+
+    #[test]
+    fn an_update_is_offered_by_the_copy_this_device_holds_not_its_record() {
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let extras = fetched_sender("function on_go() end");
+        let installed_hash = extras.entry.hash.clone();
+        let launcher = launcher.install(&extras, false).unwrap();
+
+        // The repo's record claims a newer copy than the one on the disk.
+        let record = Record::Registry {
+            version: "1.1.0".to_owned(),
+            commit: "0".repeat(40),
+            hash: "sha256:what-the-index-lists-now".to_owned(),
+        };
+        let path = folder.path().join(PLUGINS_FOLDER).join("extras.json");
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let launcher = launcher.with_installed();
+
+        let versions = launcher.installed_versions();
+        assert_eq!(versions.get("extras"), Some(&Some(installed_hash)));
+    }
+
+    #[test]
+    fn trust_and_remove_take_the_folder_shown_not_the_one_named_for_the_id() {
+        let folder = TempDir::new().unwrap();
+        let data = folder.path();
+        mudling_core::registry::Origins::in_data_folder(data)
+            .mark_arrived(["zz", "extras"])
+            .unwrap();
+        // The repo brings `zz/`, holding `extras`, and `extras/`, holding `other`.
+        let plugins = data.join(PLUGINS_FOLDER);
+        let manifest = |id: &str| {
+            format!(
+                "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\n\
+                 license = \"MIT\"\nlayer = \"default\"\n"
+            )
+        };
+        for (name, id) in [("zz", "extras"), ("extras", "other")] {
+            std::fs::create_dir_all(plugins.join(name)).unwrap();
+            std::fs::write(plugins.join(name).join("plugin.toml"), manifest(id)).unwrap();
+        }
+        let launcher = Launcher::new(data.to_owned(), Vec::new(), Vec::new(), || {});
+        let launcher = launcher.with_installed();
+        let rows = launcher.plugin_rows("mud.example").unwrap();
+        let row = rows.iter().find(|row| row.id.as_str() == "extras").unwrap();
+        let (shown_folder, shown) = (row.folder.clone().unwrap(), row.held_back.clone().unwrap());
+        assert_eq!(shown_folder, "zz");
+
+        let launcher = launcher.trust(&shown_folder, &shown).unwrap();
+        let ids: Vec<&str> = (launcher.plugins().iter())
+            .map(|p| p.id().as_str())
+            .collect();
+        assert_eq!(ids, ["extras"], "`other`, never shown, stays out");
+
+        let launcher = launcher.uninstall(&row.id, &shown_folder).unwrap();
+        assert!(!plugins.join("zz").exists());
+        assert!(
+            plugins.join("extras").exists(),
+            "the folder named for the id stays"
+        );
+        assert!(launcher.plugins().is_empty());
     }
 
     #[test]
@@ -846,9 +948,10 @@ mod tests {
         let id = extras.plugin.id().clone();
         let launcher = launcher.install(&extras, true).unwrap();
         let rows = launcher.plugin_rows("mud.example").unwrap();
-        assert!(rows.iter().any(|row| row.id == id && row.removable));
+        let row = rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row.folder.as_deref(), Some("extras"));
 
-        let launcher = launcher.uninstall(&id).unwrap();
+        let launcher = launcher.uninstall(&id, "extras").unwrap();
 
         assert!(launcher.plugins().iter().all(|plugin| *plugin.id() != id));
         let launcher = launcher.install(&extras, false).unwrap();

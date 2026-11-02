@@ -18,7 +18,7 @@ use gpui::{
 };
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
-use mudling_core::registry::{self, Entry, Fetched, Index, Record};
+use mudling_core::registry::{self, Entry, Fetched, Index};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -156,9 +156,15 @@ pub(super) enum Purpose {
     TurnOn(SharedString),
     Review,
     /// Load a copy this device didn't install, which the directory doesn't
-    /// vouch for: the words say why.
-    Trust(SharedString),
-    Remove,
+    /// vouch for: the words say why. It's the one in `folder`, shown with
+    /// `hash`, and nothing else.
+    Trust {
+        why: SharedString,
+        folder: SharedString,
+        hash: SharedString,
+    },
+    /// Take out the plugin in this folder.
+    Remove(SharedString),
 }
 
 /// What the dialog says and offers for its purpose.
@@ -192,7 +198,7 @@ impl Approval {
             Purpose::Install(_) => approval(Some("Install without sending"), "Allow and install"),
             Purpose::TurnOn(_) => approval(Some("Turn on without sending"), "Allow and turn on"),
             Purpose::Review => approval(None, "Allow"),
-            Purpose::Trust(why) => Words {
+            Purpose::Trust { why, .. } => Words {
                 title: format!("Load this copy of {name}?"),
                 lead: Some(why.clone()),
                 shows_asks: !self.asks.is_empty(),
@@ -200,7 +206,7 @@ impl Approval {
                 without: None,
                 with: "Trust this copy",
             },
-            Purpose::Remove => Words {
+            Purpose::Remove(_) => Words {
                 title: format!("Remove {name}?"),
                 lead: None,
                 shows_asks: false,
@@ -528,6 +534,7 @@ impl SettingsSheet {
     }
 
     /// Asks before taking `plugin` out of the data folder.
+    #[cfg(all(test, target_os = "macos"))]
     pub fn confirm_remove(
         &mut self,
         plugin: &PluginId,
@@ -537,23 +544,36 @@ impl SettingsSheet {
         let Some(row) = self.plugins.iter().find(|row| row.id == *plugin) else {
             return;
         };
-        let confirm = Approval::for_row(row, Purpose::Remove, window, cx);
+        let Some(folder) = row.folder.clone() else {
+            return;
+        };
+        let confirm = Approval::for_row(row, Purpose::Remove(folder), window, cx);
         self.ask(confirm, window, cx);
     }
 
-    /// Asks whether to trust the copy of `plugin` that arrived, which the
-    /// directory didn't vouch for, saying `why`.
+    /// Asks whether to trust the copy in `folder` shown with `hash`, which
+    /// the directory didn't vouch for, saying `why`. A row no longer showing
+    /// that copy asks nothing.
     pub fn ask_to_trust(
         &mut self,
-        plugin: &PluginId,
+        folder: &str,
+        hash: &str,
         why: String,
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
-        let Some(row) = self.plugins.iter().find(|row| row.id == *plugin) else {
+        let shown = |row: &&PluginRow| {
+            row.folder.as_deref() == Some(folder) && row.held_back.as_deref() == Some(hash)
+        };
+        let Some(row) = self.plugins.iter().find(shown) else {
             return;
         };
-        let approval = Approval::for_row(row, Purpose::Trust(why.into()), window, cx);
+        let purpose = Purpose::Trust {
+            why: why.into(),
+            folder: folder.to_owned().into(),
+            hash: hash.to_owned().into(),
+        };
+        let approval = Approval::for_row(row, purpose, window, cx);
         self.ask(approval, window, cx);
     }
 
@@ -613,9 +633,11 @@ impl SettingsSheet {
                 self.set_plugin(host, plugin, true, cx);
             }
             Purpose::Review if go_on && send => self.set_approved(plugin, true, cx),
-            Purpose::Trust(_) if go_on => cx.emit(SheetEvent::Trust(plugin)),
-            Purpose::Remove if go_on => cx.emit(SheetEvent::Remove(plugin)),
-            Purpose::TurnOn(_) | Purpose::Review | Purpose::Trust(_) | Purpose::Remove => {}
+            Purpose::Trust { folder, hash, .. } if go_on => {
+                cx.emit(SheetEvent::Trust { folder, hash });
+            }
+            Purpose::Remove(folder) if go_on => cx.emit(SheetEvent::Remove { plugin, folder }),
+            Purpose::TurnOn(_) | Purpose::Review | Purpose::Trust { .. } | Purpose::Remove(_) => {}
         }
         if let Some(back) = approval.return_to {
             window.focus(&back, cx);
@@ -769,22 +791,4 @@ fn about_line(entry: &Entry, theme: &Theme) -> Stateful<Div> {
             line.child(" · ")
                 .child(div().text_color(theme.warning).child(SENDS))
         })
-}
-
-/// What's installed, by id, for the directory: each plugin loaded, with the
-/// hash it was installed at if it came from the directory.
-pub fn installed_versions<'a>(
-    loaded: impl IntoIterator<Item = &'a mudling_core::plugin::Plugin>,
-    records: &BTreeMap<String, Record>,
-) -> BTreeMap<String, Option<String>> {
-    loaded
-        .into_iter()
-        .map(|plugin| {
-            let id = plugin.id().as_str();
-            let hash = records.get(id).map(|record| match record {
-                Record::Registry { hash, .. } => hash.clone(),
-            });
-            (id.to_owned(), hash)
-        })
-        .collect()
 }

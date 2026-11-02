@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 const TRUST_FILE: &str = "plugin-trust.json";
 const ORIGINS_FILE: &str = "plugin-origins.json";
@@ -40,57 +41,62 @@ impl Origins {
         }
     }
 
-    fn known(&self) -> Known {
-        fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, known: &Known) -> io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(known).expect("origins serialize");
-        super::save(&self.path, &bytes)
+    /// Changes what's known, then saves it if `change` says it changed. A
+    /// file that's there but can't be read fails the call and is left as it
+    /// is, so nothing is taken for the player's own, and no arrival is lost.
+    /// Reloads and sync run on different threads, so each change is whole.
+    fn change<T>(&self, change: impl FnOnce(&mut Known) -> (T, bool)) -> io::Result<T> {
+        static CHANGING: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut known = match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Known::default(),
+            Err(error) => return Err(error),
+        };
+        let (result, changed) = change(&mut known);
+        if changed {
+            let bytes = serde_json::to_vec_pretty(&known).expect("origins serialize");
+            super::save(&self.path, &bytes)?;
+        }
+        Ok(result)
     }
 
     /// Whether the folder `id` is the player's own. One never seen before,
     /// and not written by sync, began here, and is remembered as such.
     pub fn is_local(&self, id: &str) -> io::Result<bool> {
-        let mut known = self.known();
-        if known.arrived.contains(id) {
-            return Ok(false);
-        }
-        if known.local.insert(id.to_owned()) {
-            self.save(&known)?;
-        }
-        Ok(true)
+        self.change(|known| {
+            if known.arrived.contains(id) {
+                return (false, false);
+            }
+            (true, known.local.insert(id.to_owned()))
+        })
     }
 
     /// Sync is about to write these plugins' files. Call it before writing,
     /// so a crash between the two can't pass them off as the player's own.
     pub fn mark_arrived<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
-        let mut known = self.known();
-        let mut changed = false;
-        for id in ids {
-            changed |= known.local.remove(id);
-            changed |= known.arrived.insert(id.to_owned());
-        }
-        if changed { self.save(&known) } else { Ok(()) }
+        self.change(|known| {
+            let mut changed = false;
+            for id in ids {
+                changed |= known.local.remove(id);
+                changed |= known.arrived.insert(id.to_owned());
+            }
+            ((), changed)
+        })
     }
 
     /// The player chose this folder as their own.
     pub fn mark_local(&self, id: &str) -> io::Result<()> {
-        let mut known = self.known();
-        known.arrived.remove(id);
-        known.local.insert(id.to_owned());
-        self.save(&known)
+        self.change(|known| {
+            known.arrived.remove(id);
+            known.local.insert(id.to_owned());
+            ((), true)
+        })
     }
 
     pub fn forget(&self, id: &str) -> io::Result<()> {
-        let mut known = self.known();
-        if known.arrived.remove(id) | known.local.remove(id) {
-            self.save(&known)?;
-        }
-        Ok(())
+        self.change(|known| ((), known.arrived.remove(id) | known.local.remove(id)))
     }
 }
 

@@ -485,11 +485,15 @@ impl Shell {
                     SheetEvent::SetApproved { plugin, approved } => {
                         shell.set_approved(plugin.clone(), *approved, cx);
                     }
-                    SheetEvent::Remove(plugin) => shell.remove_plugin(plugin.clone(), cx),
-                    SheetEvent::ReviewArrival(plugin) => {
-                        shell.review_arrival(plugin.clone(), window, cx);
+                    SheetEvent::Remove { plugin, folder } => {
+                        shell.remove_plugin(plugin.clone(), folder.clone(), cx);
                     }
-                    SheetEvent::Trust(plugin) => shell.trust_plugin(plugin.clone(), cx),
+                    SheetEvent::ReviewArrival { folder, hash } => {
+                        shell.review_arrival(folder.clone(), hash.clone(), window, cx);
+                    }
+                    SheetEvent::Trust { folder, hash } => {
+                        shell.trust_plugin(folder.clone(), hash.clone(), cx);
+                    }
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),

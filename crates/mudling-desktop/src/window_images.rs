@@ -95,8 +95,8 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         elsewhere: None,
         sending: Sending::No,
         asks: Vec::new(),
-        removable: false,
-        arrived: false,
+        folder: None,
+        held_back: None,
     }
 }
 
@@ -105,7 +105,7 @@ fn sample_sender(id: &str, name: &str, sending: Sending) -> PluginRow {
     PluginRow {
         sending,
         asks: measure::sample_asks(),
-        removable: true,
+        folder: Some(id.to_owned().into()),
         ..sample_plugin(id, name, Layer::Game, true)
     }
 }
@@ -183,8 +183,8 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
                 sample_sender("sample-extras", "Sample extras", Sending::Approved),
                 sample_sender("sample-chat", "Sample chat", Sending::Waiting),
                 PluginRow {
-                    arrived: true,
-                    removable: true,
+                    folder: Some("sample-notes".into()),
+                    held_back: Some("sha256:sample-notes-from-elsewhere".into()),
                     ..sample_plugin("sample-notes", "Sample notes", Layer::Game, false)
                 },
                 sample_plugin("sample-defaults", "MUDling defaults", Layer::Default, true),
@@ -853,11 +853,11 @@ fn window_images() {
     );
     render("settings-trust-dark", Dark, WIDE, |shell, window, cx| {
         measure::open_sample_section(shell, Section::Plugins, window, cx);
-        let notes = PluginId::try_from("sample-notes".to_owned()).expect("a valid id");
         shell.settings_sheet().update(cx, |sheet, cx| {
             let why = "It arrived from another device in a copy this device didn't \
                        install. The directory doesn't list this copy.";
-            sheet.ask_to_trust(&notes, why.to_owned(), window, cx);
+            let shown = "sha256:sample-notes-from-elsewhere";
+            sheet.ask_to_trust("sample-notes", shown, why.to_owned(), window, cx);
         });
     });
     render("settings-remove-dark", Dark, WIDE, |shell, window, cx| {
