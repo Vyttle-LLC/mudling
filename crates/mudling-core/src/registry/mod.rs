@@ -58,9 +58,9 @@ use std::path::{Path, PathBuf};
 pub const REGISTRY_URL: &str = "https://github.com/Vyttle-LLC/mudling-plugins.git";
 
 /// The public key the registry's CI signs the index with: 32 bytes in
-/// base64, as `docs/signing.md` prints it. Until it's set, every index is
+/// base64, as `docs/signing.md` prints it. Without one, every index is
 /// refused and the directory lists nothing.
-pub const REGISTRY_PUBLIC_KEY: Option<&str> = None;
+pub const REGISTRY_PUBLIC_KEY: Option<&str> = Some("v00r5VUhmPRYcnxyD/Yir9WgNr2och43fasd1+1frF4=");
 
 const INDEX_BRANCH: &str = "index";
 const INDEX_FILE: &str = "index.json";

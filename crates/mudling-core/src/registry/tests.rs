@@ -261,7 +261,47 @@ fn without_a_key_every_index_is_refused_before_the_network() {
     let registry = Registry::at(data.path(), "/nowhere/at/all", None);
 
     assert_eq!(registry.refresh(&limit()), Err(IndexError::NoKey));
-    assert_eq!(REGISTRY_PUBLIC_KEY, None, "set it, and drop this line");
+}
+
+/// The first index the registry's CI published, on its `index` branch.
+const PUBLISHED_INDEX: &[u8] = include_bytes!("testdata/index.json");
+
+#[test]
+fn the_registry_s_published_index_checks_out_with_this_build_s_key() {
+    let data = TempDir::new().unwrap();
+    let registry_key = Registry::new(data.path())
+        .key
+        .expect("this build has the key");
+
+    let index = verify(PUBLISHED_INDEX, &registry_key, None).unwrap();
+
+    assert_eq!(
+        index.commit.to_string(),
+        "a8ee5024e7529c44aaa2aee933feae18b1b234af"
+    );
+    assert_eq!(index.published_at, "2026-11-02T14:30:07Z");
+    assert!(index.plugins.is_empty());
+    let signed_by_another = verify(PUBLISHED_INDEX, &key(1).verifying_key(), None);
+    assert_eq!(signed_by_another, Err(IndexError::Forged));
+}
+
+/// Reaches GitHub, so it runs only when asked:
+/// `cargo test -p mudling-core live_registry -- --ignored`.
+#[test]
+#[ignore = "fetches the real registry"]
+fn the_live_registry_s_index_checks_out() {
+    let data = TempDir::new().unwrap();
+
+    let index = Registry::new(data.path())
+        .refresh(&Limit::after(Duration::from_secs(60)))
+        .unwrap();
+
+    println!(
+        "commit {} published {} with {} plugins",
+        index.commit,
+        index.published_at,
+        index.plugins.len()
+    );
 }
 
 #[test]
