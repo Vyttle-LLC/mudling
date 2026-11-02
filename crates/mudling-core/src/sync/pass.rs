@@ -1,6 +1,6 @@
 //! One sync, start to finish. Everything here runs on the sync thread.
 
-use super::{RepoSettings, Sessions, kill, summary, vault};
+use super::{RepoSettings, Sessions, kill, plugins, summary, vault};
 use crate::git::{self, GitError, Limit, Oid};
 use crate::merge::{self, Retired, Store};
 use crate::persist::SERVERS_FOLDER;
@@ -186,6 +186,9 @@ impl Repository {
             *settings = held;
         }
         self.join_unseen(&views(&stores), settings, sessions, &branch)?;
+        if !plugins::has_seen(&self.data_folder, self.git.branch_tip(&branch)?) {
+            plugins::join(&self.data_folder, self.folder())?;
+        }
 
         self.export(settings, &views(&stores))?;
         kill::point("pass: exported");
@@ -340,6 +343,7 @@ impl Repository {
             }
         }
         self.files.export(settings, &readers)?;
+        plugins::export(&self.data_folder, self.folder())?;
         Ok(())
     }
 
@@ -364,6 +368,7 @@ impl Repository {
             held.release(&moves_landed(stores, merging.retired()));
         }
         landed?;
+        plugins::import(&self.data_folder, self.folder())?;
         // The merge chose between both sides' settings, and the next export
         // would write the old ones back.
         *settings = self.files.settings()?;
@@ -406,6 +411,7 @@ impl Repository {
     fn mark_seen(&self, stores: &[Store<'_>], branch: &str) -> Result<(), Failure> {
         if let Some(tip) = self.git.branch_tip(branch)? {
             merge::mark_seen(stores, tip)?;
+            plugins::mark_seen(&self.data_folder, tip)?;
         }
         Ok(())
     }

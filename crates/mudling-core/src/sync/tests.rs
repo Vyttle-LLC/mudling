@@ -1583,3 +1583,118 @@ fn a_session_opened_while_a_sync_runs_follows_that_syncs_merge() {
     session.quit().wait().unwrap();
     sync.quit().wait();
 }
+
+impl Device {
+    /// Puts a plugin's files in the data folder, as an install does.
+    fn install_plugin(&self, id: &str, files: &[(&str, &str)]) {
+        let folder = self.data.join("plugins").join(id);
+        let _ = fs::remove_dir_all(&folder);
+        for (name, text) in files {
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join(name), text).unwrap();
+        }
+        let record = self.data.join("plugins").join(format!("{id}.json"));
+        fs::write(
+            record,
+            format!("{{\"from\": \"registry\", \"version\": \"{id}\"}}"),
+        )
+        .unwrap();
+    }
+
+    /// Each file of `id` in the data folder, with what it holds.
+    fn plugin(&self, id: &str) -> Vec<(String, String)> {
+        let Ok(entries) = fs::read_dir(self.data.join("plugins").join(id)) else {
+            return Vec::new();
+        };
+        let mut files: Vec<(String, String)> = entries
+            .flatten()
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, fs::read_to_string(entry.path()).unwrap())
+            })
+            .collect();
+        files.sort();
+        files
+    }
+}
+
+#[test]
+fn a_plugin_installed_on_one_device_reaches_the_other_and_so_does_its_removal() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", "tells")]);
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(
+        world.ipad.plugin("tells"),
+        [("plugin.toml".into(), "tells".into())]
+    );
+    assert!(world.ipad.data.join("plugins/tells.json").exists());
+
+    fs::remove_dir_all(world.mac.data.join("plugins/tells")).unwrap();
+    fs::remove_file(world.mac.data.join("plugins/tells.json")).unwrap();
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(world.ipad.plugin("tells").is_empty());
+    assert!(!world.ipad.data.join("plugins/tells.json").exists());
+}
+
+#[test]
+fn two_devices_updating_one_plugin_keep_one_whole_version_of_it() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("tells", &[("a.toml", "1"), ("b.toml", "1")]);
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    world
+        .mac
+        .install_plugin("tells", &[("a.toml", "2"), ("b.toml", "2")]);
+    world
+        .ipad
+        .install_plugin("tells", &[("a.toml", "3"), ("c.toml", "3")]);
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(world.mac.sync().problem, None);
+
+    let kept = world.mac.plugin("tells");
+    let whole = |version: &str, names: [&str; 2]| -> Vec<(String, String)> {
+        names
+            .map(|name| (name.to_owned(), version.to_owned()))
+            .into()
+    };
+    assert!(
+        kept == whole("2", ["a.toml", "b.toml"]) || kept == whole("3", ["a.toml", "c.toml"]),
+        "{kept:?}"
+    );
+    assert_eq!(world.ipad.plugin("tells"), kept);
+}
+
+#[test]
+fn approvals_never_leave_the_device() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("extras", &[("plugin.toml", "extras")]);
+    let extras = crate::plugin::Plugin::from_files(|_| {
+        Ok(
+            "id = \"extras\"\nname = \"Extras\"\nversion = \"1.0.0\"\napi = 1\n\
+            license = \"MIT\"\nlayer = \"default\"\n"
+                .to_owned(),
+        )
+    })
+    .unwrap();
+    crate::registry::Approvals::in_data_folder(&world.mac.data)
+        .approve(&extras)
+        .unwrap();
+
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert!(remote_files(&world.remote).contains(&"extras.json".to_owned()));
+    let fingerprint = crate::registry::fingerprint(&extras);
+    assert!(!remote_ever_held(&world.remote, &fingerprint));
+}

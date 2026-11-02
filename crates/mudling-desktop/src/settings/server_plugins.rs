@@ -248,6 +248,8 @@ mod tests {
             on,
             flips: 0,
             elsewhere: None,
+            sending: crate::settings::Sending::No,
+            asks: Vec::new(),
         }
     }
 

@@ -13,6 +13,7 @@ pub mod merge;
 pub mod net;
 pub mod persist;
 pub mod plugin;
+pub mod registry;
 pub mod replay;
 pub mod repo;
 pub mod scrollback;

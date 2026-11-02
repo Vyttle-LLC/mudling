@@ -4,6 +4,7 @@ use super::records::merge_server;
 use super::rooms::retired_rooms;
 use super::{Error, Retired};
 use crate::git::Files;
+use crate::registry::{self, PLUGINS_FOLDER};
 use crate::repo::format::{
     MANIFEST, SERVERS, SETTINGS, ServerList, ServerRows, check_manifest, is_record_file, json,
     parse,
@@ -45,6 +46,7 @@ pub(super) fn merge_files(
     theirs_newer: bool,
 ) -> Result<Files, Error> {
     let mut merged = file_by_file(base, ours, theirs, theirs_newer);
+    merge_plugins(base, ours, theirs, theirs_newer, &mut merged);
     check_format(ours)?;
 
     let our_servers = servers(ours)?;
@@ -92,6 +94,41 @@ fn file_by_file(base: &Files, ours: &Files, theirs: &Files, theirs_newer: bool) 
             .map(|bytes| (path.clone(), bytes.clone()))
         })
         .collect()
+}
+
+/// Settles each installed plugin whole, its folder and its record together,
+/// so two devices' versions of one plugin never mix file by file.
+fn merge_plugins(
+    base: &Files,
+    ours: &Files,
+    theirs: &Files,
+    theirs_newer: bool,
+    merged: &mut Files,
+) {
+    let plugins: BTreeSet<String> = [base, ours, theirs]
+        .into_iter()
+        .flat_map(Files::keys)
+        .filter_map(|path| plugin_of(path))
+        .collect();
+    for plugin in plugins {
+        let of = |files: &Files| -> Option<Files> {
+            let held: Files = files
+                .iter()
+                .filter(|(path, _)| plugin_of(path).as_ref() == Some(&plugin))
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect();
+            (!held.is_empty()).then_some(held)
+        };
+        let (base, ours, theirs) = (of(base), of(ours), of(theirs));
+        let chosen = three_way(base.as_ref(), ours.as_ref(), theirs.as_ref(), theirs_newer);
+        merged.retain(|path, _| plugin_of(path).as_ref() != Some(&plugin));
+        merged.extend(chosen.cloned().unwrap_or_default());
+    }
+}
+
+/// The installed plugin a path in the repo belongs to.
+fn plugin_of(path: &Path) -> Option<String> {
+    registry::plugin_of(path.strip_prefix(PLUGINS_FOLDER).ok()?)
 }
 
 /// Refuses what a newer MUDling wrote, which this one can't merge.

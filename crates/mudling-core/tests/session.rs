@@ -723,6 +723,56 @@ fn a_detected_game_with_its_plugin_off_runs_no_plugin() {
     session.quit().wait().unwrap();
 }
 
+/// Whether a hook of hearth's sent its command during a replay.
+fn hook_sent(session: &Session) -> bool {
+    terminal(session).iter().any(|line| line == "wave Mira")
+}
+
+/// Hearth's patterns color a line whether or not its hooks may send.
+fn plugin_colored(session: &Session) -> bool {
+    session
+        .stores()
+        .read(|terminal: &Versioned<TerminalState>| {
+            let lines = terminal.value().lines();
+            let said = lines.iter().find(|l| l.plain().starts_with("Mira says"));
+            !said.unwrap().styled().is_empty()
+        })
+}
+
+#[test]
+fn a_plugin_waiting_for_approval_runs_its_patterns_but_not_its_hooks() {
+    let folder = tempfile::tempdir().unwrap();
+    let session = open(SessionConfig {
+        approved: Vec::new(),
+        ..config(folder.path(), 4000)
+    });
+    replay(&session, 256);
+
+    assert!(!hook_sent(&session));
+    assert!(plugin_colored(&session));
+    session.quit().wait().unwrap();
+}
+
+#[test]
+fn approval_given_or_taken_back_applies_from_the_next_line() {
+    let folder = tempfile::tempdir().unwrap();
+    let taken_back = open(config(folder.path(), 4000));
+    taken_back.set_approved(hearth_id(), false);
+    replay(&taken_back, 256);
+    assert!(!hook_sent(&taken_back), "taken back before the game spoke");
+    taken_back.quit().wait().unwrap();
+
+    let folder = tempfile::tempdir().unwrap();
+    let given = open(SessionConfig {
+        approved: Vec::new(),
+        ..config(folder.path(), 4000)
+    });
+    given.set_approved(hearth_id(), true);
+    replay(&given, 256);
+    wait_for("the hook's command", || hook_sent(&given));
+    given.quit().wait().unwrap();
+}
+
 fn room_state(driven: &Driven) -> RoomState {
     driven
         .hub

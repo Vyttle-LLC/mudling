@@ -9,6 +9,8 @@
 //! comes from a core thread; each wake asks for the next frame, and that
 //! frame drains the stores once, so updates apply at most once per frame.
 
+mod directory;
+
 use crate::assets::UI_FONT;
 use crate::character_panel::{CharacterPanel, RefreshCharacter};
 use crate::chat::{self, Chat, CloseFind, column_width};
@@ -304,6 +306,10 @@ pub struct Shell {
     /// The one job running off the UI thread: a session ending, another
     /// opening, a server being saved.
     job: Option<Task<()>>,
+    /// The directory's index being fetched and checked.
+    directory_read: Option<Task<()>>,
+    /// A plugin being fetched or installed, or the installed ones read again.
+    plugin_work: Option<Task<()>>,
     /// What the player asked for while a job ran, to run in turn.
     waiting: VecDeque<Request>,
     /// What the last job ran into, for a window on a game.
@@ -469,6 +475,16 @@ impl Shell {
                         };
                         shell.ask(request, window, cx);
                     }
+                    SheetEvent::OpenDirectory => shell.refresh_directory(cx),
+                    SheetEvent::Fetch { index, entry } => {
+                        shell.fetch_plugin(index.clone(), entry.clone(), window, cx);
+                    }
+                    SheetEvent::Install { fetched, approve } => {
+                        shell.install_plugin(fetched.clone(), *approve, cx);
+                    }
+                    SheetEvent::SetApproved { plugin, approved } => {
+                        shell.set_approved(plugin.clone(), *approved, cx);
+                    }
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
@@ -560,6 +576,8 @@ impl Shell {
             sync: None,
             waiting_for_vault: None,
             job: None,
+            directory_read: None,
+            plugin_work: None,
             waiting: VecDeque::new(),
             trouble: None,
             listed: SavedServers::default(),
@@ -837,6 +855,7 @@ impl Shell {
             link.listed_after = synced;
             // On the job path the launcher's reads always take: never here.
             self.ask(Request::ListServers, window, cx);
+            self.reload_plugins(cx);
         }
     }
 
@@ -988,8 +1007,11 @@ impl Shell {
         if outcome.only_listing {
             if !self.left {
                 self.show_listing(&outcome.saved, cx);
+                // A page that arrives after the sheet closed would take the
+                // keyboard from the game.
+                let sheet_open = self.settings_open;
                 self.settings.update(cx, |sheet, cx| {
-                    if let Some(plugins) = outcome.server_plugins {
+                    if let Some(plugins) = outcome.server_plugins.filter(|_| sheet_open) {
                         sheet.show_server_plugins(plugins, window, cx);
                     }
                     match (outcome.switch, outcome.problem) {
@@ -4869,6 +4891,30 @@ pub mod tests {
         });
         launched.shell.read_with(launched.cx, |shell, cx| {
             assert!(shell.settings.read(cx).on_a_page());
+        });
+    }
+
+    #[gpui::test]
+    fn a_servers_plugins_arriving_after_the_sheet_closed_leave_the_keyboard_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.frames_until("the servers to load", |shell, _| shell.job.is_none());
+        let after_closing = launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            shell
+                .settings
+                .update(cx, |sheet, cx| sheet.select(Section::Servers, cx));
+            shell.ask(Request::ServerPlugins("mud.example".to_owned()), window, cx);
+            shell.close_settings(window, cx);
+            window.focused(cx)
+        });
+        assert!(after_closing.is_some());
+        launched.frames_until("the server's plugins", |shell, _| shell.job.is_none());
+
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            assert!(!shell.settings.read(cx).on_a_page());
+            assert_eq!(window.focused(cx), after_closing);
         });
     }
 
