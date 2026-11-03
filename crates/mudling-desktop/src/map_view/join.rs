@@ -3,21 +3,23 @@
 //! MUDling only ever suggests: a join starts with the player pressing Join.
 
 use super::forget::{self, KeepRoom};
-use super::{MapView, model::JoinNote, model::ReviewPair, model::RoomCopy};
+use super::model::{Description, JoinNote, ReviewPair};
+use super::{MapView, REVIEW_MAP_HEIGHT};
 use crate::room_panel::button;
 use crate::shell::FocusCommandBar;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, App, Context, Div, FontWeight, KeyBinding, MouseButton, Role, SharedString,
-    Stateful, Window, actions, div, prelude::*, px,
+    AnyElement, App, Context, Div, FontWeight, HighlightStyle, KeyBinding, MouseButton, Pixels,
+    Role, SharedString, Stateful, StyledText, Window, actions, div, prelude::*, px,
 };
 use mudling_core::map::{RoomId, RoomPair};
 use mudling_core::session::MapEdit;
 
 /// The key context while focus is in Review, deeper than the dock's Escape.
 const REVIEW_CONTEXT: &str = "MapReview";
-const KEEPS_BOTH: &str = "Joining keeps both copies' links, notes, features and sightings.";
-const READ_THE_SAME: &str = "Same name, zone, description and exits";
+/// Review's columns, in the order the map numbers its copies.
+const COPY_SIDES: [&str; 2] = ["First copy", "Second copy"];
+const COMPARE_LABEL_WIDTH: Pixels = px(92.);
 
 actions!(map_view, [PickRoom, CloseReview]);
 
@@ -31,8 +33,8 @@ pub fn bind_keys(cx: &mut App) {
 
 impl MapView {
     /// Picks the room shown, as the keyboard's way to Shift-click. With a
-    /// second room picked, focus goes to Join. Review has no map to pick
-    /// from and no Join to go to, so it does nothing there.
+    /// second room picked, focus goes to Join. Review's map is for looking,
+    /// with no Join to go to, so it does nothing there.
     pub fn pick_selected(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         let Some(room) = self.model.selection().map(|selection| selection.room) else {
             return;
@@ -47,14 +49,12 @@ impl MapView {
         cx.notify();
     }
 
-    /// Looks for duplicates here and now, as the images and checks need.
-    #[cfg(any(test, target_os = "macos"))]
+    /// Looks for duplicates here and now, as the images, checks and harness need.
     pub fn find_duplicates_now(&mut self, cx: &mut Context<MapView>) {
         self.model.scan_now();
         cx.notify();
     }
 
-    #[cfg(target_os = "macos")]
     pub fn review_sample(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.find_duplicates_now(cx);
         self.open_review(window, cx);
@@ -214,18 +214,16 @@ impl MapView {
         )
     }
 
-    /// Both copies side by side, in the map's place.
-    pub(super) fn review_pane(
+    /// The map framed on both copies, and what tells them apart.
+    pub(super) fn review_pane<M: IntoElement>(
         &self,
         pair: ReviewPair,
+        map: M,
         theme: &Theme,
         cx: &mut Context<MapView>,
-    ) -> impl IntoElement + use<> {
+    ) -> impl IntoElement + use<M> {
         let title = format!("Review duplicates · {} of {}", pair.number, pair.of);
         let rooms = pair.pair;
-        let [first, second] = &pair.copies;
-        let first = copy_card(first, "First copy", theme);
-        let second = copy_card(second, "Second copy", theme);
         div()
             .id("map-review-pane")
             .debug_selector(|| "map-review".to_owned())
@@ -236,7 +234,6 @@ impl MapView {
             .role(Role::Group)
             .aria_label(SharedString::from(title.clone()))
             .size_full()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_3()
@@ -259,51 +256,66 @@ impl MapView {
                             })),
                     ),
             )
-            .child(div().flex().gap_3().child(first).child(second))
+            .child(div().flex_none().h(REVIEW_MAP_HEIGHT).child(map))
+            // Only what's under the map scrolls: the map stays in view.
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(theme.text_muted)
-                    .child(KEEPS_BOTH),
-            )
-            .children(pair.warning.map(|warning| {
-                div()
-                    .id("map-review-warning")
-                    .role(Role::Status)
-                    .aria_label(SharedString::from(warning.clone()))
-                    .text_size(px(13.))
-                    .text_color(theme.map.maze)
-                    .child(warning)
-            }))
-            .child(
-                div()
+                    .id("map-review-details")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .flex()
-                    .flex_wrap()
-                    .gap_2()
+                    .flex_col()
+                    .gap_3()
+                    .child(verdict(&pair, theme))
+                    .child(comparison(&pair, theme))
+                    .child(description(&pair.description, theme))
                     .child(
-                        small_button("map-review-skip", "Skip this pair", theme)
-                            .track_focus(&self.review_first)
-                            .child("Skip")
-                            .on_click(cx.listener(|view, _, _, cx| view.skip_pair(cx))),
+                        div()
+                            .id("map-review-join-note")
+                            .role(Role::Label)
+                            .aria_label(SharedString::from(pair.join_note.clone()))
+                            .text_size(px(12.))
+                            .text_color(theme.text_muted)
+                            .child(pair.join_note),
                     )
-                    .child(
-                        small_button("map-review-different", "Not the same", theme)
-                            .child("Not the same")
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.not_the_same(rooms, window, cx);
-                            })),
-                    )
-                    .child(
-                        small_button("map-review-join", "Join these rooms", theme)
-                            .border_color(theme.accent)
-                            .text_color(theme.accent)
-                            .child("Join these rooms")
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.join(rooms, window, cx);
-                            })),
-                    ),
+                    .child(self.review_actions(rooms, theme, cx))
+                    .children(self.review_note(theme, cx)),
             )
-            .children(self.review_note(theme, cx))
+    }
+
+    fn review_actions(
+        &self,
+        rooms: RoomPair,
+        theme: &Theme,
+        cx: &mut Context<MapView>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                small_button("map-review-skip", "Skip this pair", theme)
+                    .track_focus(&self.review_first)
+                    .child("Skip")
+                    .on_click(cx.listener(|view, _, _, cx| view.skip_pair(cx))),
+            )
+            .child(
+                small_button("map-review-different", "Not the same", theme)
+                    .child("Not the same")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.not_the_same(rooms, window, cx);
+                    })),
+            )
+            .child(
+                small_button("map-review-join", "Join these rooms", theme)
+                    .border_color(theme.accent)
+                    .text_color(theme.accent)
+                    .child("Join these rooms")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.join(rooms, window, cx);
+                    })),
+            )
     }
 
     /// How the last join went, in Review, with Undo right there.
@@ -484,36 +496,149 @@ pub(super) fn small_button(id: &'static str, name: &str, theme: &Theme) -> State
         .text_color(theme.text)
 }
 
-/// One copy of a room, as a card in Review lists it.
-fn copy_card(copy: &RoomCopy, side: &'static str, theme: &Theme) -> impl IntoElement + use<> {
-    let line = |text: String| div().child(text);
-    let name = format!("{side}: {}", copy.name);
+/// The copy's number in its own color, as the map marks it.
+fn copy_mark(index: usize, theme: &Theme) -> Div {
     div()
-        .id(side)
-        .role(Role::Group)
-        .aria_label(SharedString::from(name))
-        .flex_1()
-        .min_w_0()
-        .p_3()
+        .flex_none()
+        .size(px(16.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.map.copies[index])
+        .text_size(px(11.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme.map.on_copy)
+        .child((index + 1).to_string())
+}
+
+/// Where the copies are from each other, its lead in bold.
+fn verdict(pair: &ReviewPair, theme: &Theme) -> impl IntoElement + use<> {
+    let text = SharedString::from(pair.verdict.text());
+    let bold = HighlightStyle {
+        font_weight: Some(FontWeight::SEMIBOLD),
+        color: Some(theme.text),
+        ..HighlightStyle::default()
+    };
+    div()
+        .id("map-review-verdict")
+        .role(Role::Label)
+        .aria_label(text.clone())
+        .text_size(px(13.))
+        .text_color(theme.text_muted)
+        .child(StyledText::new(text).with_highlights([(0..pair.verdict.lead.len(), bold)]))
+}
+
+/// A column per copy and a row per fact. A row that differs is in the
+/// warning color, marked ≠ and said to differ; the rest are dimmed.
+fn comparison(pair: &ReviewPair, theme: &Theme) -> impl IntoElement + use<> {
+    let label_cell = || div().flex_none().w(COMPARE_LABEL_WIDTH);
+    let value_cell = || div().flex_1().min_w_0();
+    let heads = COPY_SIDES.iter().enumerate().map(|(index, side)| {
+        let name = format!("{side}: {}", pair.names[index]);
+        value_cell()
+            .id(*side)
+            .role(Role::Group)
+            .aria_label(SharedString::from(name))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(copy_mark(index, theme))
+            .child(*side)
+    });
+    let rows = pair.rows.iter().enumerate().map(|(index, row)| {
+        let differs = row.differs();
+        let [first, second] = &row.values;
+        let spoken = if differs {
+            format!("{} differs: {first}, {second}", row.label)
+        } else {
+            format!("{}, same in both: {first}", row.label)
+        };
+        let color = if differs {
+            theme.warning
+        } else {
+            theme.text_muted
+        };
+        let label = label_cell()
+            .text_color(theme.text_muted)
+            .child(row.label.clone())
+            .when(differs, |label| {
+                label
+                    .flex()
+                    .gap_1()
+                    .child(div().text_color(theme.warning).child("≠"))
+            });
+        div()
+            .id(("map-review-row", index))
+            .role(Role::Group)
+            .aria_label(SharedString::from(spoken))
+            .flex()
+            .gap_2()
+            .py_1p5()
+            .border_t_1()
+            .border_color(theme.border)
+            .text_color(color)
+            .child(label)
+            .children(
+                row.values
+                    .iter()
+                    .map(|value| value_cell().child(value.clone())),
+            )
+    });
+    div()
         .flex()
         .flex_col()
-        .gap_0p5()
-        .rounded_lg()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .text_size(px(12.))
-        .text_color(theme.text_muted)
+        .text_size(px(13.))
         .child(
             div()
-                .mb_1()
-                .text_size(px(13.))
+                .flex()
+                .gap_2()
+                .pb_1p5()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
-                .child(copy.name.clone()),
+                .child(label_cell())
+                .children(heads),
         )
-        .child(div().text_color(theme.accent).child(READ_THE_SAME))
-        .child(line(copy.mapped.to_owned()))
-        .child(line(copy.held.clone()))
-        .child(line(copy.sightings.clone()))
+        .children(rows)
+}
+
+/// The description once when the copies share it, or each copy's.
+fn description(description: &Description, theme: &Theme) -> impl IntoElement + use<> {
+    let part = |label: String, text: &str| {
+        let text = if text.is_empty() { "Not read" } else { text };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+            .child(text.to_owned())
+    };
+    let parts: Vec<Div> = match description {
+        Description::Same(text) if text.is_empty() => Vec::new(),
+        Description::Same(text) => vec![part("DESCRIPTION · SAME IN BOTH".to_owned(), text)],
+        Description::Different(texts) => (COPY_SIDES.iter().zip(texts))
+            .map(|(side, text)| part(format!("DESCRIPTION · {}", side.to_uppercase()), text))
+            .collect(),
+    };
+    div()
+        .when(!parts.is_empty(), |shown| {
+            shown
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_3()
+                .py_2p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+                .text_size(px(13.))
+                .text_color(theme.text)
+        })
+        .children(parts)
 }

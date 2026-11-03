@@ -5,7 +5,7 @@
 //! last changed at, and handed out as a job for a background thread. Panning,
 //! zooming and walking known rooms ask for no work at all.
 
-use super::camera::Camera;
+use super::camera::{Camera, Region};
 use super::sheet::{Hit, Place, Sheet};
 use mudling_core::map::{
     Direction, Duplicates, GridPoint, JoinDone, MapRoom, RoomId, RoomPair, WalkStep,
@@ -55,47 +55,26 @@ pub enum JoinNote {
     Forgot(String),
 }
 
-/// One room of a pair, as Review words it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RoomCopy {
-    pub name: String,
-    pub mapped: &'static str,
-    pub held: String,
-    pub sightings: String,
-}
-
-impl RoomCopy {
-    fn of(room: &MapRoom, this_device: i64) -> RoomCopy {
-        let notes = room.notes.lines().filter(|line| !line.trim().is_empty());
-        let features: Vec<&str> = room.features.iter().map(String::as_str).collect();
-        let features = match features.len() {
-            0 => "no features".to_owned(),
-            count => format!("{} ({})", counted(count, "feature"), features.join(", ")),
-        };
-        let held = match notes.count() {
-            0 => format!("No notes · {features}"),
-            count => format!("{} · {features}", counted(count, "note")),
-        };
-        RoomCopy {
-            name: room.name.clone(),
-            mapped: if mapper_of(room.id) == this_device {
-                "Mapped on this device"
-            } else {
-                "Mapped on your other device"
-            },
-            held,
-            sightings: match room.sightings.len() {
-                0 => "No sightings".to_owned(),
-                count => counted(count, "sighting"),
-            },
-        }
-    }
-}
+const KEEPS_BOTH: &str = "Joining keeps both copies' links, notes, features and sightings.";
+const NOT_WALKED: &str = "— not walked";
+/// Squares kept clear around the copies when Review frames them.
+const REVIEW_MARGIN: f32 = 1.5;
+/// Review frames two neighbors no closer than the panel's own zoom.
+const REVIEW_MAX_ZOOM: f32 = 1.;
 
 fn counted(count: usize, thing: &str) -> String {
     match count {
         1 => format!("1 {thing}"),
         count => format!("{count} {thing}s"),
+    }
+}
+
+/// "a", "a and b", "a, b and c".
+fn listed(words: &[&str]) -> String {
+    match words {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -110,16 +89,223 @@ fn ways_that_differ(first: &MapRoom, second: &MapRoom) -> Vec<Direction> {
         .collect()
 }
 
+/// Where the copies are from each other, as one sentence under the map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Verdict {
+    /// The part in bold: "4 squares apart", or "In different zones".
+    pub lead: String,
+    pub rest: String,
+}
+
+impl Verdict {
+    pub fn text(&self) -> String {
+        format!("{}{}", self.lead, self.rest)
+    }
+}
+
+/// One line of Review's comparison: a fact about each copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompareRow {
+    pub label: String,
+    pub values: [String; 2],
+}
+
+impl CompareRow {
+    fn new(label: impl Into<String>, values: [String; 2]) -> CompareRow {
+        CompareRow {
+            label: label.into(),
+            values,
+        }
+    }
+
+    pub fn differs(&self) -> bool {
+        self.values[0] != self.values[1]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Description {
+    Same(String),
+    Different([String; 2]),
+}
+
 /// Two copies side by side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewPair {
     pub pair: RoomPair,
-    pub copies: [RoomCopy; 2],
+    pub names: [String; 2],
     /// Which pair this is, from one.
     pub number: usize,
     pub of: usize,
-    /// What a join can't keep both of, in the player's words.
-    pub warning: Option<String>,
+    pub verdict: Verdict,
+    pub rows: Vec<CompareRow>,
+    pub description: Description,
+    /// What a join keeps, and which links it can't keep both of.
+    pub join_note: String,
+}
+
+/// How Review compares two rooms of `map`.
+struct Comparison<'a> {
+    map: &'a MapState,
+    copies: [&'a MapRoom; 2],
+}
+
+impl Comparison<'_> {
+    fn both<T>(&self, fact: impl Fn(&MapRoom) -> T) -> [T; 2] {
+        self.copies.map(fact)
+    }
+
+    fn area_name(&self, room: &MapRoom) -> String {
+        let area = self
+            .map
+            .derived()
+            .and_then(|derived| derived.area(&room.zone));
+        area.map_or_else(|| room.zone.clone(), |area| area.name.name.clone())
+    }
+
+    fn verdict(&self) -> Verdict {
+        let derived = self.map.derived().map(|derived| &**derived);
+        let [(_, first), (_, second)] = self.both(|room| Place::of(room, derived));
+        let [zone, other_zone] = self.both(|room| self.area_name(room));
+        let alike = self.alike();
+        let alike = if alike.is_empty() {
+            String::new()
+        } else {
+            format!(" Same {}.", listed(&alike))
+        };
+        if self.copies[0].zone != self.copies[1].zone {
+            return Verdict {
+                lead: "In different zones".to_owned(),
+                rest: format!(": {zone} and {other_zone}.{alike}"),
+            };
+        }
+        let apart = (first.x - second.x).abs() + (first.y - second.y).abs();
+        let lead = match apart {
+            0 => "On the same square".to_owned(),
+            apart => format!("{} apart", counted(apart as usize, "square")),
+        };
+        let floor = if first.z == second.z {
+            "the same floor"
+        } else {
+            "different floors"
+        };
+        Verdict {
+            lead,
+            rest: format!(" in {zone}, on {floor}.{alike}"),
+        }
+    }
+
+    /// The parts the map tells duplicates by that the copies share.
+    fn alike(&self) -> Vec<&'static str> {
+        let [first, second] = self.copies;
+        [
+            ("name", first.name == second.name),
+            ("zone", first.zone == second.zone),
+            ("description", first.description == second.description),
+            ("exits", first.exit_directions() == second.exit_directions()),
+        ]
+        .into_iter()
+        .filter_map(|(part, same)| same.then_some(part))
+        .collect()
+    }
+
+    fn rows(&self) -> Vec<CompareRow> {
+        let this_device = self.map.joins().this_device;
+        let number = |count: usize| match count {
+            0 => "none".to_owned(),
+            count => count.to_string(),
+        };
+        let mut rows = vec![
+            CompareRow::new("Zone", self.both(|room| self.area_name(room))),
+            CompareRow::new("Exits", self.both(exit_letters)),
+        ];
+        rows.extend(self.ways().map(|way| {
+            let label = format!("{} to", capitalized(way.name()));
+            CompareRow::new(label, self.both(|room| self.leads_to(room, way)))
+        }));
+        rows.extend([
+            CompareRow::new(
+                "Notes",
+                self.both(|room| {
+                    number(room.notes.lines().filter(|l| !l.trim().is_empty()).count())
+                }),
+            ),
+            CompareRow::new("Features", self.both(features)),
+            CompareRow::new("Sightings", self.both(|room| number(room.sightings.len()))),
+            CompareRow::new(
+                "Mapped on",
+                self.both(|room| {
+                    if mapper_of(room.id) == this_device {
+                        "this device".to_owned()
+                    } else {
+                        "your other device".to_owned()
+                    }
+                }),
+            ),
+        ]);
+        rows
+    }
+
+    /// Each way either copy lists or has walked.
+    fn ways(&self) -> impl Iterator<Item = Direction> + '_ {
+        Direction::ALL.into_iter().filter(|way| {
+            (self.copies.iter()).any(|room| room.exits.contains(*way) || room.links.contains(*way))
+        })
+    }
+
+    fn leads_to(&self, room: &MapRoom, way: Direction) -> String {
+        let next = room.links.get_copied(way).and_then(|id| self.map.room(id));
+        next.map_or_else(|| NOT_WALKED.to_owned(), |next| next.name.clone())
+    }
+
+    fn description(&self) -> Description {
+        let [first, second] = self.both(|room| room.description.clone());
+        if first == second {
+            Description::Same(first)
+        } else {
+            Description::Different([first, second])
+        }
+    }
+
+    fn join_note(&self) -> String {
+        let ways = ways_that_differ(self.copies[0], self.copies[1]);
+        if ways.is_empty() {
+            return KEEPS_BOTH.to_owned();
+        }
+        let names: Vec<&str> = ways.iter().map(|way| way.name()).collect();
+        format!(
+            "{KEEPS_BOTH} Where they lead different ways ({}), the newer link stays.",
+            listed(&names)
+        )
+    }
+}
+
+fn exit_letters(room: &MapRoom) -> String {
+    let letters: Vec<&str> = room
+        .exit_directions()
+        .iter()
+        .map(Direction::letter)
+        .collect();
+    if letters.is_empty() {
+        "none".to_owned()
+    } else {
+        letters.join(" ")
+    }
+}
+
+fn features(room: &MapRoom) -> String {
+    if room.features.is_empty() {
+        return "none".to_owned();
+    }
+    let features: Vec<&str> = room.features.iter().map(String::as_str).collect();
+    features.join(", ")
+}
+
+fn capitalized(word: &str) -> String {
+    let mut letters = word.chars();
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
 }
 
 /// A sheet to build, on a cheap clone of the map.
@@ -296,7 +482,8 @@ impl MapModel {
             you.as_ref().map(|you| &you.place) != self.you.as_ref().map(|you| &you.place);
         self.you = you;
         self.following |= moved_on;
-        if self.following {
+        // Review holds the view on its pair, wherever the player goes.
+        if self.following && self.reviewing.is_none() {
             self.look_at_player();
         }
     }
@@ -521,7 +708,6 @@ impl MapModel {
 
     /// Looks on this thread, whatever a look under way would find. For the
     /// images and checks, which can't wait for one.
-    #[cfg(any(test, target_os = "macos"))]
     pub fn scan_now(&mut self) {
         let job = DuplicatesJob {
             key: (self.rooms_changed, self.map.value().joins().not_same.len()),
@@ -592,30 +778,69 @@ impl MapModel {
         self.set_duplicates(found);
     }
 
-    pub fn review_pair(&self) -> Option<ReviewPair> {
+    fn reviewed(&self) -> Option<(usize, RoomPair)> {
         let index = self.reviewing?;
-        let pair = *self.duplicates.pairs.get(index)?;
+        Some((index, *self.duplicates.pairs.get(index)?))
+    }
+
+    /// Both rooms of the pair in Review.
+    fn review_copies(&self) -> Option<[&MapRoom; 2]> {
+        let (_, pair) = self.reviewed()?;
         let map = self.map.value();
-        let (first, second) = (&**map.room(pair.0)?, &**map.room(pair.1)?);
-        let this_device = map.joins().this_device;
-        let ways = ways_that_differ(first, second);
-        let warning = (!ways.is_empty()).then(|| {
-            let names: Vec<&str> = ways.iter().map(|way| way.name()).collect();
-            format!(
-                "Their links differ: {}. The newer one stays for each.",
-                names.join(", ")
-            )
-        });
+        Some([&**map.room(pair.0)?, &**map.room(pair.1)?])
+    }
+
+    pub fn review_pair(&self) -> Option<ReviewPair> {
+        let (index, pair) = self.reviewed()?;
+        let comparison = Comparison {
+            map: self.map.value(),
+            copies: self.review_copies()?,
+        };
         Some(ReviewPair {
             pair,
-            copies: [
-                RoomCopy::of(first, this_device),
-                RoomCopy::of(second, this_device),
-            ],
+            names: comparison.both(|room| room.name.clone()),
             number: index + 1,
             of: self.duplicates.pairs.len(),
-            warning,
+            verdict: comparison.verdict(),
+            rows: comparison.rows(),
+            description: comparison.description(),
+            join_note: comparison.join_note(),
         })
+    }
+
+    /// Where each copy in Review is on the sheet shown, if it's there.
+    pub fn review_squares(&self) -> [Option<(i32, i32)>; 2] {
+        let Some(copies) = self.review_copies() else {
+            return [None, None];
+        };
+        let derived = self.map.value().derived().map(|derived| &**derived);
+        copies.map(|room| {
+            let (place, square) = Place::of(room, derived);
+            (Some(&place) == self.place.as_ref()).then_some((square.x as i32, square.y as i32))
+        })
+    }
+
+    /// Frames the pair in Review in a view of `size` pixels: both copies when
+    /// they share a sheet, or else the first.
+    pub fn look_at_review(&mut self, size: (f32, f32)) {
+        let Some([first, second]) = self.review_copies() else {
+            return;
+        };
+        let derived = self.map.value().derived().map(|derived| &**derived);
+        let (place, a) = Place::of(first, derived);
+        let (other_place, b) = Place::of(second, derived);
+        let b = if other_place == place { b } else { a };
+        let region = Region {
+            west: a.x.min(b.x) as f32 - REVIEW_MARGIN,
+            east: a.x.max(b.x) as f32 + REVIEW_MARGIN,
+            south: a.y.min(b.y) as f32 - REVIEW_MARGIN,
+            north: a.y.max(b.y) as f32 + REVIEW_MARGIN,
+        };
+        self.following = false;
+        self.arriving = false;
+        self.place = Some(place);
+        self.camera.fit(region, size);
+        self.camera.zoom = self.camera.zoom.min(REVIEW_MAX_ZOOM);
     }
 
     // MARK: Picking rooms to join
@@ -762,7 +987,7 @@ impl MapModel {
 mod tests {
     use super::*;
     use crate::map_view::harness::{duplicated_map, grid_map, room, store_of, versioned};
-    use mudling_core::map::{Building, LastJoin, MapChange, MapDoor, Whereabouts};
+    use mudling_core::map::{Building, ExitState, LastJoin, MapChange, MapDoor, Whereabouts};
 
     const VIEW: (f32, f32) = (400., 300.);
 
@@ -1147,7 +1372,11 @@ mod tests {
         model.open_review();
         let first = model.review_pair().expect("there are pairs");
         assert_eq!(first.number, 1);
-        assert_eq!(first.copies[0].mapped, "Mapped on your other device");
+        let mapped = first.rows.iter().find(|row| row.label == "Mapped on");
+        assert_eq!(
+            mapped.map(|row| &row.values[0][..]),
+            Some("your other device")
+        );
 
         model.skip_pair();
         let second = model.review_pair().expect("there are more");
@@ -1168,20 +1397,192 @@ mod tests {
         );
     }
 
+    const FIRST: RoomId = 1 << 40;
+    const SECOND: RoomId = FIRST + 1;
+
+    /// A room that reads like the other copy, at `x`, `y`.
+    fn copy(id: RoomId, x: i64, y: i64) -> MapRoom {
+        let mut copy = room(id, x, y);
+        copy.name = "West Side of the Tree".to_owned();
+        copy.description = "The great tree's western roots break the grass.".to_owned();
+        copy
+    }
+
+    fn named(id: RoomId, name: &str) -> MapRoom {
+        let mut named = room(id, 20, 20);
+        named.name = name.to_owned();
+        named
+    }
+
+    fn exit() -> ExitState {
+        ExitState {
+            state: String::new(),
+            closed: false,
+        }
+    }
+
+    /// What Review says of the first two rooms, among the rest.
+    fn compare<T>(rooms: Vec<MapRoom>, say: impl Fn(&Comparison) -> T) -> T {
+        let map = store_of(rooms, Vec::new());
+        let comparison = Comparison {
+            map: &map,
+            copies: [FIRST, SECOND].map(|id| &**map.room(id).expect("both copies are mapped")),
+        };
+        say(&comparison)
+    }
+
+    fn row(rows: &[CompareRow], label: &str) -> CompareRow {
+        let found = rows.iter().find(|row| row.label == label);
+        found.unwrap_or_else(|| panic!("a {label} row")).clone()
+    }
+
     #[test]
-    fn review_says_what_each_copy_holds() {
-        let mut held = room(1 << 40, 0, 0);
-        held.notes = "Shop by the well\nBeggars at night".to_owned();
+    fn the_verdict_counts_the_squares_between_copies_in_one_zone() {
+        let rooms = vec![copy(FIRST, 0, 0), copy(SECOND, 4, -1)];
+        assert_eq!(
+            compare(rooms, |c| c.verdict()),
+            Verdict {
+                lead: "5 squares apart".to_owned(),
+                rest: " in The Synthetic Reach, on the same floor. \
+                       Same name, zone, description and exits."
+                    .to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_verdict_says_when_copies_are_on_different_floors() {
+        let mut upstairs = copy(SECOND, 1, 0);
+        upstairs.position.z = 1;
+        let verdict = compare(vec![copy(FIRST, 0, 0), upstairs], |c| c.verdict().text());
+        assert_eq!(
+            verdict,
+            "1 square apart in The Synthetic Reach, on different floors. \
+             Same name, zone, description and exits."
+        );
+    }
+
+    #[test]
+    fn the_verdict_names_both_zones_when_they_differ() {
+        let mut elsewhere = copy(SECOND, 0, 0);
+        elsewhere.zone = "The Meadow".to_owned();
+        let (verdict, zone) = compare(vec![copy(FIRST, 0, 0), elsewhere], |c| {
+            (c.verdict().text(), row(&c.rows(), "Zone"))
+        });
+        assert_eq!(
+            verdict,
+            "In different zones: The Synthetic Reach and The Meadow. \
+             Same name, description and exits."
+        );
+        assert!(zone.differs());
+    }
+
+    #[test]
+    fn a_way_to_two_different_rooms_differs_and_the_join_note_names_it() {
+        let (mut first, mut second) = (copy(FIRST, 0, 0), copy(SECOND, 3, 0));
+        for (copy, to) in [(&mut first, 5), (&mut second, 6)] {
+            copy.exits.insert(Direction::North, exit());
+            copy.links.insert(Direction::North, to);
+        }
+        let rooms = vec![
+            first,
+            second,
+            named(5, "Under the Branches"),
+            named(6, "A Grassy Knoll"),
+        ];
+        let (north, exits, note) = compare(rooms, |c| {
+            let rows = c.rows();
+            (row(&rows, "North to"), row(&rows, "Exits"), c.join_note())
+        });
+        assert_eq!(north.values, ["Under the Branches", "A Grassy Knoll"]);
+        assert!(north.differs());
+        assert!(!exits.differs());
+        assert_eq!(
+            note,
+            "Joining keeps both copies' links, notes, features and sightings. \
+             Where they lead different ways (north), the newer link stays."
+        );
+    }
+
+    #[test]
+    fn a_way_walked_from_one_copy_only_reads_not_walked_on_the_other() {
+        let (mut first, mut second) = (copy(FIRST, 0, 0), copy(SECOND, 3, 0));
+        first.exits.insert(Direction::West, exit());
+        first.links.insert(Direction::West, 5);
+        second.exits.insert(Direction::West, exit());
+        let rooms = vec![first, second, named(5, "Edge of the Meadow")];
+        let (west, note) = compare(rooms, |c| (row(&c.rows(), "West to"), c.join_note()));
+        assert_eq!(west.values, ["Edge of the Meadow", NOT_WALKED]);
+        assert!(west.differs());
+        assert_eq!(note, KEEPS_BOTH, "nothing to choose between");
+    }
+
+    #[test]
+    fn rows_compare_what_each_copy_holds() {
+        let mut held = copy(FIRST, 0, 0);
+        held.notes = "Shop by the well\n\nBeggars at night".to_owned();
         held.features.insert("shop".to_owned());
         held.sightings.insert("a pilgrim".to_owned(), Timestamp(1));
+        let rows = compare(vec![held, copy(SECOND, 1, 0)], |c| c.rows());
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Zone",
+                "Exits",
+                "Notes",
+                "Features",
+                "Sightings",
+                "Mapped on"
+            ]
+        );
+        assert_eq!(row(&rows, "Notes").values, ["2", "none"]);
+        assert_eq!(row(&rows, "Features").values, ["shop", "none"]);
+        assert_eq!(row(&rows, "Sightings").values, ["1", "none"]);
+        assert!(!row(&rows, "Mapped on").differs());
+    }
 
-        let copy = RoomCopy::of(&held, 0);
-        assert_eq!(copy.held, "2 notes · 1 feature (shop)");
-        assert_eq!(copy.sightings, "1 sighting");
+    #[test]
+    fn a_description_is_given_once_when_both_copies_read_it() {
+        let rooms = vec![copy(FIRST, 0, 0), copy(SECOND, 1, 0)];
+        assert_eq!(
+            compare(rooms, |c| c.description()),
+            Description::Same("The great tree's western roots break the grass.".to_owned())
+        );
 
-        let bare = RoomCopy::of(&room(1 << 40, 1, 0), 0);
-        assert_eq!(bare.held, "No notes · no features");
-        assert_eq!(bare.sightings, "No sightings");
+        let mut other = copy(SECOND, 1, 0);
+        other.description = "Roots, and more roots.".to_owned();
+        let (description, verdict) = compare(vec![copy(FIRST, 0, 0), other], |c| {
+            (c.description(), c.verdict().text())
+        });
+        assert_eq!(
+            description,
+            Description::Different([
+                "The great tree's western roots break the grass.".to_owned(),
+                "Roots, and more roots.".to_owned(),
+            ])
+        );
+        assert!(verdict.ends_with("Same name, zone and exits."));
+    }
+
+    #[test]
+    fn review_frames_both_copies_and_the_next_pair_reframes() {
+        let mut model = duplicated_model();
+        model.open_review();
+        let in_view = |model: &MapModel| {
+            model.review_squares().map(|square| {
+                let (x, y) = model
+                    .camera()
+                    .to_view(square.map(|(x, y)| (x as f32, y as f32))?, VIEW);
+                Some((0. ..=VIEW.0).contains(&x) && (0. ..=VIEW.1).contains(&y))
+            })
+        };
+        model.look_at_review(VIEW);
+        assert_eq!(in_view(&model), [Some(true), Some(true)]);
+
+        model.skip_pair();
+        model.look_at_review(VIEW);
+        assert_eq!(in_view(&model), [Some(true), Some(true)]);
     }
 
     #[test]

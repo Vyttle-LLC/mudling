@@ -2,8 +2,10 @@
 //!
 //! ```text
 //! mudling-desktop --map-harness [--rooms <n>] [--light | --dark] [--dark-walk]
-//!                 [--measure [--seconds <n>] [--report <path>]]
+//!                 [--duplicates] [--measure [--seconds <n>] [--report <path>]]
 //! ```
+//!
+//! `--duplicates` draws rooms that read alike and opens Review on them.
 //!
 //! `--measure` relaunches with gpui's frame timing on, like the chat's
 //! `--measure`, and drives pan then zoom with every room in view. It writes
@@ -309,7 +311,7 @@ struct Options {
     /// `None` follows the OS.
     appearance: Option<WindowAppearance>,
     dark_walk: bool,
-    /// Rooms that read alike, so the map marks them.
+    /// Rooms that read alike, so the map marks them, with Review open.
     duplicates: bool,
     measure: bool,
     measured_run: bool,
@@ -413,8 +415,12 @@ pub fn run(args: &[String]) -> ExitCode {
             },
             ..WindowOptions::default()
         };
-        let (appearance, measured, seconds) =
-            (options.appearance, options.measured_run, options.seconds);
+        let (appearance, measured, seconds, review) = (
+            options.appearance,
+            options.measured_run,
+            options.seconds,
+            options.duplicates,
+        );
         #[cfg(feature = "shots")]
         let shot = options.shot;
         let opened = cx.open_window(window_options, |window, cx| {
@@ -438,6 +444,12 @@ pub fn run(args: &[String]) -> ExitCode {
         };
         if measured {
             start_driver(window.into(), map.clone(), Duration::from_secs(seconds), cx);
+        } else if review {
+            window
+                .update(cx, |_, window, cx| {
+                    map.update(cx, |map, cx| map.review_sample(window, cx));
+                })
+                .ok();
         }
         #[cfg(feature = "shots")]
         if let Some(shot) = shot {

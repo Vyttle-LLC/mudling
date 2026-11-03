@@ -63,6 +63,10 @@ pub struct MapColors {
     pub selected: Hsla,
     pub heading: Hsla,
     pub muted: Hsla,
+    /// Review's two copies, marked 1 and 2.
+    pub copies: [Hsla; 2],
+    /// A copy's number, on its color.
+    pub on_copy: Hsla,
 }
 
 impl MapColors {
@@ -232,6 +236,8 @@ impl Theme {
                     selected: rgb(PARCHMENT).into(),
                     heading: rgb(PARCHMENT).into(),
                     muted: rgb(0x8A918C).into(),
+                    copies: [rgb(0x7FB3E0).into(), rgb(0xE09A7F).into()],
+                    on_copy: rgb(NIGHT).into(),
                 },
                 choice,
                 background: rgb(NIGHT).into(),
@@ -278,6 +284,8 @@ impl Theme {
                     selected: rgb(0x111A16).into(),
                     heading: rgb(0x111A16).into(),
                     muted: rgb(0x5E625F).into(),
+                    copies: [rgb(0x2B6496).into(), rgb(0xA4492B).into()],
+                    on_copy: rgb(PARCHMENT).into(),
                 },
                 choice,
                 background: rgb(PARCHMENT).into(),
@@ -387,6 +395,9 @@ mod tests {
             }
             assert!(contrast(theme.on_accent, theme.accent) >= 4.5);
             assert!(contrast(theme.on_warning, theme.warning) >= 4.5);
+            for copy in theme.map.copies {
+                assert!(contrast(theme.map.on_copy, copy) >= 4.5, "{appearance:?}");
+            }
         }
     }
 
