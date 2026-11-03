@@ -43,6 +43,7 @@ pub(crate) mod names;
 mod write;
 
 pub use format::AppSettings;
+pub(crate) use write::{TEMP_SUFFIX, write_atomically};
 
 use crate::persist::{self, Batch, Reader};
 use format::{

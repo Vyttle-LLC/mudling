@@ -11,7 +11,8 @@
 //! this device has stay, so an export deletes nothing it hasn't read.
 
 use crate::git::Oid;
-use crate::registry::{Origins, PLUGINS_FOLDER, plugin_of};
+use crate::registry::{Origins, PLUGINS_FOLDER, is_working, plugin_of};
+use crate::repo::{TEMP_SUFFIX, write_atomically};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -19,8 +20,6 @@ use std::path::{Path, PathBuf};
 
 /// The commit the data folder's plugins last matched. Local to the device.
 const SEEN_FILE: &str = "plugins.seen";
-/// A file on its way in: the rename that follows is one step.
-const INCOMING_SUFFIX: &str = ".mudling-tmp";
 
 type Files = BTreeMap<PathBuf, Vec<u8>>;
 
@@ -80,10 +79,10 @@ fn files_in(folder: &Path) -> io::Result<Files> {
     };
     for entry in entries {
         let entry = entry?;
-        let name = PathBuf::from(entry.file_name());
-        if name.to_string_lossy().starts_with('.') {
+        if is_working(&entry.path()) {
             continue;
         }
+        let name = PathBuf::from(entry.file_name());
         collect(&entry.path(), &name, &mut files)?;
     }
     Ok(files)
@@ -95,7 +94,7 @@ fn collect(path: &Path, relative: &Path, files: &mut Files) -> io::Result<()> {
             let entry = entry?;
             collect(&entry.path(), &relative.join(entry.file_name()), files)?;
         }
-    } else if !relative.to_string_lossy().ends_with(INCOMING_SUFFIX) {
+    } else if !relative.to_string_lossy().ends_with(TEMP_SUFFIX) {
         files.insert(relative.to_owned(), fs::read(path)?);
     }
     Ok(())
@@ -109,14 +108,7 @@ fn replace(folder: &Path, files: &Files) -> io::Result<()> {
         if current.get(relative) == Some(bytes) {
             continue;
         }
-        let path = folder.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut incoming = path.clone().into_os_string();
-        incoming.push(INCOMING_SUFFIX);
-        fs::write(&incoming, bytes)?;
-        fs::rename(&incoming, &path)?;
+        write_atomically(&folder.join(relative), bytes)?;
     }
     for relative in current.keys().filter(|path| !files.contains_key(*path)) {
         fs::remove_file(folder.join(relative))?;

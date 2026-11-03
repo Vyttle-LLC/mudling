@@ -3,17 +3,14 @@
 This is API v1, and it's stable: two games from opposite ends of the range
 are written against it alone, [Avatar](../../plugins/avatar), a Merc-derived
 game read mostly from its text, and [Aardwolf](../../plugins/aardwolf), a
-customized ROM read mostly from GMCP. The core holds neither game's names
-for the character or the fight: each plugin's [HUD](#hud) point says where
-its game keeps them.
+customized ROM read mostly from GMCP. The core holds no game's GMCP names
+for the character, the fight, gear or doors: each plugin says where its game
+keeps them.
 
-Additions to come won't break a v1 plugin, as each is a new key or point a
-plugin can leave out:
-
-- **Chat channels**: a point for a game's channels, such as Aardwolf's
-  `comm.channel`.
-- **GMCP requests**: a way for a plugin to send GMCP, such as Aardwolf's
-  `request area`, which brings the area names `room.info` leaves out.
+Additions to API v1 are new keys a plugin can leave out, so every v1 plugin
+loads unchanged. The latest: [channels](#channels) that come as GMCP,
+[GMCP requests](#gmcp-requests), and the Map point's `room_exits` and
+`[area_info]`.
 
 The [cookbook](cookbook.md) works through a real plugin; this page lists what
 there is. A plugin is a folder of TOML with, where patterns aren't enough, a
@@ -62,7 +59,8 @@ mygame/
 
 Every file the manifest names must be inside the folder. Loading checks
 everything, every pattern included, and rejects the plugin at the first
-problem, naming the file and line. A plugin that loads can't fail later because
+problem, naming the file, and the line where the TOML can say it. A plugin that
+loads can't fail later because
 of a bad pattern.
 
 ## `plugin.toml`
@@ -79,7 +77,7 @@ of a bad pattern.
 | `encoding` | no | `"utf-8"` or `"latin-1"`. Only one applies: the highest layer's. |
 | `servers` | for `game` and `override` | The `[servers]` table. A `default` plugin can't have one. |
 | `points` | no | The `[points]` table. |
-| `permissions` | no | What hooks may do. See [Permissions](#permissions). |
+| `permissions` | no | What hooks and GMCP requests may do. See [Permissions](#permissions). |
 | `hooks` | no | The `[hooks]` table. |
 | `fragments` | no | The `[fragments]` table: regex shared by this plugin's patterns. See [Patterns](#patterns). |
 
@@ -184,6 +182,7 @@ Each point is a TOML file named in `[points]`. Use only those you need.
 | --- | --- |
 | `gmcp` | GMCP modules to subscribe to, such as `"Char 1"`, beside the core's own: `Core 1`, `Char 1` and `Room 1`. |
 | `login` | The `[[login]]` list. |
+| `request` | The `[[request]]` list: [GMCP requests](#gmcp-requests). Needs the `send_gmcp` permission. |
 
 <!-- keys: connection.toml [[login]] -->
 | `[[login]]` key | What it is |
@@ -193,6 +192,38 @@ Each point is a TOML file named in `[points]`. Use only those you need.
 
 Each prompt is answered once, because a server that asks for the password twice
 has refused it.
+
+#### GMCP requests
+
+Some games send a message only when asked, as Aardwolf sends an area's name
+in `room.area` after `request area`. A request asks each time a GMCP field's
+value changes, the first value included:
+
+```toml
+# Ask for the area's name in each zone the player enters.
+[[request]]
+send = "request area"
+when = "room.info.zone"
+```
+
+<!-- keys: connection.toml [[request]] -->
+| `[[request]]` key | What it is |
+| --- | --- |
+| `send` | The GMCP message: a package name, then perhaps a space and its data. |
+| `when` | The field whose new value sends it: `"room.info.zone"`. |
+
+A request needs the `send_gmcp` [permission](#permissions), and goes out only
+once the player approves the plugin, as for `send_commands`. It can't carry a
+game command:
+
+- It's only what the TOML says. No hook can send GMCP or change a request.
+- MUDling sends it only inside a GMCP subnegotiation, `IAC SB GMCP … IAC SE`,
+  with any `IAC` in it doubled. A server reads that as GMCP, apart from the
+  lines its command interpreter reads.
+- Loading refuses a `send` that doesn't start with a package name, that holds
+  a line end or any other control character, or that's a `Core` message,
+  which MUDling sends itself to run the connection.
+- The approval shows each request word for word.
 
 ### Commands point
 
@@ -235,6 +266,7 @@ has refused it.
 | `pattern` | Event rules over each finished line: trigger packs, and anything no other point reads. |
 | `color` | The `[[color]]` list: coloring for lines the server sends without any. |
 | `link` | The `[[link]]` list: links and actions in lines. |
+| `channel` | The `[[channel]]` list: [channels](#channels) and other lines of the chat that come as GMCP. |
 
 <!-- keys: text.toml [pager] -->
 | `[pager]` key | What it is |
@@ -261,6 +293,30 @@ has refused it.
 | `pattern` | What to link. |
 | `action` | A command to send or a URL to open, each `{capture}` standing for its text: `"examine {item}"`. |
 | `group` | Links only this named capture, not the whole match. |
+
+#### Channels
+
+A game may send its channels as GMCP instead of text, as Aardwolf does once
+a client subscribes to `Comm 1`. A `[[channel]]` names the field that holds
+the line:
+
+```toml
+# comm.channel { "chan": "gossip", "msg": "You gossip 'Testing'", "player": "Abelinc" }
+[[channel]]
+message = "comm.channel.msg"
+```
+
+<!-- keys: text.toml [[channel]] -->
+| `[[channel]]` key | What it is |
+| --- | --- |
+| `message` | The GMCP field holding the line, perhaps colored with ANSI codes. |
+
+The line is read as a finished line: by every plugin's Text `pattern`,
+`color` and `link` rules, and by the player's triggers, which can color it,
+play a sound or hide it. Then it shows in the chat, after any text the server
+hasn't ended. It may be another player's words, so nothing else reads it: no
+other point's rules, such as the map's or gear's, no table reader, and not
+the login or quiet reads. Nor does a replay, which skips GMCP.
 
 ### HUD
 
@@ -294,6 +350,11 @@ game's plugin names the others.
 A game may send only the fields that changed. A new name keeps the rest of
 the opponent until they change.
 
+Gear reads the sheet too. What an item adds is measured from the stats
+`character` names `str`, `int`, `wis`, `dex`, `con`, `hitroll`, `damroll`
+and `ac`, and the vitals' maximums, around a [wear or remove](#gear)
+message. A game whose `character` names none of them is never measured.
+
 ### Map
 
 <!-- keys: map.toml root -->
@@ -302,11 +363,23 @@ the opponent until they change.
 | `room_identity` | `"gmcp"`, the room number, the default; or `"description"`: name, exits and description. Only one applies: the highest layer's. |
 | `areas` | A table of area names by the game's zone id. |
 | `area_name` | A pattern reading `Room.Info`'s zone where `areas` doesn't name it: the area as `name`, its levels as `low` and `high`. Only one applies: the highest layer's. |
+| `area_info` | The `[area_info]` table: a GMCP message naming an area. Only one applies: the highest layer's. |
+| `room_exits` | The GMCP field listing the room's exits, as `Room.Info`'s do, when a door opens or shuts in place: `"Char.Status.room_exits"`. Only one applies: the highest layer's. |
 | `exits` | Event rules: the line lists the room's exits, and its description follows. |
 | `failed_move` | Event rules: the game refused a move. |
 | `darkness` | Event rules: the room is too dark to see. |
 | `flee` | Event rules: a flee, the way captured as `dir`. |
 | `maze` | The `[[maze]]` list: rooms whose exits don't hold still. |
+
+<!-- keys: map.toml [area_info] -->
+| `[area_info]` key | What it is |
+| --- | --- |
+| `zone` | The field with the area's zone id, as `Room.Info`'s zone gives it: `"room.area.id"`. |
+| `name` | The field with its name, in the same message: `"room.area.name"`. |
+
+A name the game sends this way stands for its zone from then on, over
+`areas` and `area_name`. A game that sends it only when asked needs a
+[GMCP request](#gmcp-requests).
 
 <!-- keys: map.toml [[maze]] -->
 | `[[maze]]` key | What it is |
@@ -358,7 +431,7 @@ do so cheaply: every row counts against its budget.
 | Key | What it is |
 | --- | --- |
 | `aggro` | Event rules: a mob attacks on sight, captured as `name`. |
-| `room_title` | Rules that turn a room title into a mob name, captured as `name`. They read titles, not lines, so they can't name a hook. The highest layer's rule that matches wins. |
+| `room_title` | Rules that turn a room title into a mob name, captured as `name`. Each rule needs a `name` key as well, for its event. They read titles, not lines, so they can't name a hook. The highest layer's rule that matches wins. |
 
 ### UI
 
@@ -389,7 +462,7 @@ global function as a rule's or reader's `hook`:
 
 ```lua
 function on_welcome(event)
-	mud.store("character", "name", event.captures.name)
+    mud.store("character", "name", event.captures.name)
 end
 ```
 
@@ -426,8 +499,9 @@ its top level, as it loads, goes nowhere.
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
 | `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from where it came: the directory, or the same link. A plugin from anywhere else with the same id asks again, and says what it replaces. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
+| `send_gmcp` | The Connection point's [GMCP requests](#gmcp-requests). They don't go out until the plugin's approved, which works just as it does for `send_commands`, and the approval lists each one. A plugin can ask for both; one approval covers both. |
 
-A plugin with no hooks needs no permissions.
+A plugin with no hooks and no GMCP requests needs no permissions.
 
 ### State
 
@@ -509,7 +583,9 @@ It runs the line pipeline, the plugin host beside the built-in defaults, and
 your hooks, with the pager answered and the plugin approved. It has no
 connection, so `mud.state` returns `nil` and GMCP is skipped. `area_name` and
 `room_title` read GMCP, so they show as `skipped`. The commands' rate limit is
-off, because a log doesn't arrive at the pace it was sent.
+off, because a log doesn't arrive at the pace it was sent. A log holds no GA or
+EOR, so a table reader with no `end` pattern ends in `.cut` rather than `.end`,
+unless the plugin declares a `[[prompt]]` shape.
 
 ### Output
 
@@ -518,7 +594,7 @@ Each line starts with a fixed word, or is indented under a `caught` line, and a
 
 | Line | Meaning |
 | --- | --- |
-| `plugin <id> <version>` | It loaded. |
+| `plugin <id> <version>` | Its manifest and patterns loaded. Its hooks start once the replay does, so a `fail load` can still follow. |
 | `log <file>: <n> lines` | A replay starts. |
 | `caught <n> <place>#<i> [<event>]` | The `i`th pattern of that list matched `n` lines. Up to three follow, indented, each with its captures. `0` is no failure: a log needn't reach every pattern. |
 | `skipped <place>#<i>: <why>` | A log can't show this pattern. |

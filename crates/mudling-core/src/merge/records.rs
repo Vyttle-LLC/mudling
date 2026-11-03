@@ -40,13 +40,8 @@ struct Merger {
 
 impl Merger {
     fn new(ours: Vec<Tombstone>, theirs: Vec<Tombstone>) -> Merger {
-        let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
-        for Tombstone { key, deleted: at } in ours.into_iter().chain(theirs) {
-            let newest = deleted.entry(key).or_default();
-            *newest = at.max(*newest);
-        }
         Merger {
-            deleted,
+            deleted: newest_deletes(&ours, &theirs),
             kept: BTreeSet::new(),
         }
     }
@@ -121,6 +116,16 @@ impl Merger {
             .map(|(key, deleted)| Tombstone { key, deleted })
             .collect()
     }
+}
+
+/// When each key was last deleted, on either side.
+pub(super) fn newest_deletes(ours: &[Tombstone], theirs: &[Tombstone]) -> BTreeMap<Key, Timestamp> {
+    let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
+    for tombstone in ours.iter().chain(theirs) {
+        let newest = deleted.entry(tombstone.key.clone()).or_default();
+        *newest = tombstone.deleted.max(*newest);
+    }
+    deleted
 }
 
 /// Whether `record` beats `other`. Equal times fall to the record's bytes, so

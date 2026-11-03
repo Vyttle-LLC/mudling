@@ -9,7 +9,8 @@
 //!
 //! The rules a plugin declares for wearing and removing say when gear moved,
 //! and their `item` capture what moved. What an item does is measured from
-//! `Char.Status` around that moment, as hooks can't see it in time.
+//! the character's stats around that moment, read from GMCP where the HUD
+//! point says, as hooks can't see it in time.
 //!
 //! A character's gear sets are theirs, and show only once this connection has
 //! named them. While one goes on, [`GearWatch`] holds what its plan expects.
@@ -26,8 +27,6 @@ use crate::store::{
     CHARACTER_NAME, CarriedBag, CarriedItem, CharactersState, GearState, ItemsState, StoreHub,
     Versioned, VitalsState, WornItem,
 };
-use crate::telnet::gmcp;
-use serde_json::Value as Json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -63,20 +62,8 @@ const ITEM_CAPTURE: &str = "item";
 /// in captures the item.
 const DID_NOT_FIT: &str = ".did_not_fit";
 const NOT_CARRIED: &str = ".not_carried";
-const STATUS: &str = "Char.Status";
-const VITALS: &str = "Char.Vitals";
-
-fn is(package: &str, name: &str) -> bool {
-    package.eq_ignore_ascii_case(name)
-}
-
-fn number(value: &Json) -> Option<i64> {
-    match value {
-        Json::Number(number) => number.as_i64(),
-        Json::String(text) => text.trim().parse().ok(),
-        _ => None,
-    }
-}
+/// What a sheet key is filed under in the characters store.
+const SHEET: &str = "character.";
 
 fn text(value: &Value) -> Option<&str> {
     match value {
@@ -831,28 +818,28 @@ impl GearKeeper {
         self.changed = true;
     }
 
-    /// Reads a GMCP message for what gear changed. The game answers a gear
-    /// command with one `Char.Status`, so the first with a gear stat settles
-    /// the change: waiting longer would catch a spell wearing off.
+    /// Reads what one GMCP message changed for gear: the vitals, and the
+    /// sheet's values as the HUD point read them, by their characters store
+    /// keys. The game answers a gear command with one message, so the first
+    /// with a gear stat on the sheet settles the change: waiting longer would
+    /// catch a spell wearing off.
     pub(super) fn gmcp(
         &mut self,
-        package: &str,
-        json: &str,
+        vitals_changed: bool,
+        sheet: &BTreeMap<String, Value>,
         watch: &mut GearWatch,
         hub: &StoreHub,
         saving: &mut Saving<'_>,
     ) {
-        if is(package, VITALS) {
+        if vitals_changed {
             watch.note_stats(vital_maximums(hub));
-        } else if is(package, STATUS)
-            && let Some(values) = gmcp::from_json::<BTreeMap<String, Json>>(json)
-        {
-            let stats = (values.iter())
-                .filter(|(key, _)| GEAR_STATS.contains(&key.as_str()))
-                .filter_map(|(key, value)| Some((key.clone(), number(value)?)));
-            if watch.note_stats(stats) {
-                self.finish_change(watch, saving);
-            }
+        }
+        let stats = GEAR_STATS.iter().filter_map(|stat| {
+            let value = sheet.get(&format!("{SHEET}{stat}")).and_then(whole)?;
+            Some(((*stat).to_owned(), value))
+        });
+        if watch.note_stats(stats) {
+            self.finish_change(watch, saving);
         }
     }
 
@@ -956,7 +943,7 @@ fn vital_maximums(hub: &StoreHub) -> Vec<(String, i64)> {
 fn stats_now(reported: &StatMap, hub: &StoreHub) -> StatMap {
     let read = hub.read(|characters: &Versioned<CharactersState>| {
         let characters = &characters.value().0;
-        let known = |key: &&str| characters.get(&format!("character.{key}")).and_then(whole);
+        let known = |key: &&str| characters.get(&format!("{SHEET}{key}")).and_then(whole);
         let found = GEAR_STATS.iter().filter_map(|key| {
             let value = known(key)?;
             Some(((*key).to_owned(), value))

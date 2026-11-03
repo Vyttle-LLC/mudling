@@ -4,7 +4,9 @@
 use super::*;
 use crate::defaults::commands::parse_speedwalk;
 use crate::persist::{Batch, Database, Timestamp, Writer};
+use crate::plugin::points::{AreaInfo, GmcpField};
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
 const FIELDS: &str = "The Fields";
 const CAVES: &str = "The Caves";
@@ -63,6 +65,26 @@ impl MapRules for TestRules {
     fn exits_line(&self, line: &str) -> bool {
         line.starts_with("Ways out:")
     }
+
+    fn room_exits(&self) -> Option<&GmcpField> {
+        Some(&DOORS)
+    }
+
+    fn area_info(&self) -> Option<&AreaInfo> {
+        Some(&AREA)
+    }
+}
+
+/// Where the made-up game lists the exits when a door changes in place.
+static DOORS: LazyLock<GmcpField> = LazyLock::new(|| field("Char.Doors.exits"));
+/// Where it names an area.
+static AREA: LazyLock<AreaInfo> = LazyLock::new(|| AreaInfo {
+    zone: field("Area.Named.zone"),
+    name: field("Area.Named.title"),
+});
+
+fn field(path: &str) -> GmcpField {
+    GmcpField::try_from(path.to_owned()).expect("a field")
 }
 
 fn text_map() -> LiveMap {
@@ -1626,11 +1648,45 @@ fn a_door_closing_in_place_shows_without_a_room_info() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["n"]);
     let now = walk.now();
-    walk.map.gmcp("Char.Status", r#"{"hp": "12"}"#, now);
+    walk.map.gmcp("Char.Doors", r#"{"hp": "12"}"#, now);
     assert!(!walk.current().exits.get(Direction::North).unwrap().closed);
     walk.map
-        .gmcp("Char.Status", r#"{"room_exits": {"North": "C"}}"#, now);
+        .gmcp("Char.Status", r#"{"exits": {"North": "C"}}"#, now);
+    assert!(
+        !walk.current().exits.get(Direction::North).unwrap().closed,
+        "only where the rules say"
+    );
+    walk.map
+        .gmcp("Char.Doors", r#"{"exits": {"North": "C"}}"#, now);
     assert!(walk.current().exits.get(Direction::North).unwrap().closed);
+}
+
+#[test]
+fn an_area_the_game_names_is_called_by_its_name() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A meadow", "hedge", &["e"], "");
+    walk.map.commit(walk.now());
+    assert_eq!(walk.map.derived().areas[0].name.name, "hedge");
+
+    let now = walk.now();
+    walk.map.gmcp(
+        "Area.Named",
+        r#"{"zone": "hedge", "title": "\u001b[1;32mThe Hedgerow\u001b[0m"}"#,
+        now,
+    );
+    let commit = walk.map.commit(walk.now()).expect("the name is a change");
+    let derived = commit.change.derived.expect("with the areas");
+    assert_eq!(derived.areas[0].name.name, "The Hedgerow");
+    assert!(
+        walk.map.commit(walk.now()).is_none(),
+        "the same name again is no change"
+    );
+    walk.map.gmcp(
+        "Area.Named",
+        r#"{"zone": "hedge", "title": "The Hedgerow"}"#,
+        now,
+    );
+    assert!(walk.map.commit(walk.now()).is_none());
 }
 
 #[test]

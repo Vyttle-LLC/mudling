@@ -34,8 +34,8 @@
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
 use super::points::{
-    Capture, HookName, LinkRule, MapSignal, Pager, Pattern, Point, Points, RoomIdentity,
-    TableReader,
+    AreaInfo, Capture, GmcpField, HookName, LinkRule, MapSignal, Pager, Pattern, Point, Points,
+    RoomIdentity, TableReader,
 };
 use crate::ansi::{Span, Style};
 use crate::line::{Encoding, Line, Link, Pending};
@@ -112,6 +112,8 @@ pub struct Settings {
     pub room_identity: Option<RoomIdentity>,
     pub pager: Option<Pager>,
     pub area_name: Option<Pattern>,
+    pub room_exits: Option<GmcpField>,
+    pub area_info: Option<AreaInfo>,
 }
 
 impl Settings {
@@ -371,7 +373,35 @@ impl PluginHost {
             self.end_tables(line, sink);
         }
         self.read_tables(line, start, sink);
+        let coloring = self.act_on_matches(line, start, None, sink);
+        self.lines_read += 1;
+        if let Some(started) = started {
+            self.line_cost.record(started.elapsed());
+            self.sample_costs(&line.plain()[start..]);
+        }
+        coloring
+    }
 
+    /// A line of the chat that came as GMCP, such as a channel's: only the
+    /// Text point's patterns, the colors and the triggers read it. Another
+    /// player's words mustn't move the map, change gear or touch a table, as
+    /// a rule of those points matching them would.
+    pub fn read_channel_line(&mut self, line: &Line, sink: &mut impl PluginSink) -> Vec<Span> {
+        self.triggered.clear();
+        (self.compiled.lines.matcher).matching(line.plain(), &mut self.matched);
+        self.act_on_matches(line, 0, Some(Point::Text), sink)
+    }
+
+    /// Acts on the rules that matched `line` from byte `start`: events, of
+    /// `only`'s point if it says, coloring and triggers.
+    fn act_on_matches(
+        &mut self,
+        line: &Line,
+        start: usize,
+        only: Option<Point>,
+        sink: &mut impl PluginSink,
+    ) -> Vec<Span> {
+        let text = &line.plain()[start..];
         let lines = &self.compiled.lines;
         let mut coloring = Vec::new();
         for &id in &self.matched {
@@ -384,6 +414,9 @@ impl PluginHost {
                     hook,
                     map_signal,
                 } => {
+                    if only.is_some_and(|only| only != *point) {
+                        continue;
+                    }
                     let Some(captures) = rule.pattern.captures(text) else {
                         continue;
                     };
@@ -421,11 +454,6 @@ impl PluginHost {
                 Action::Trigger { index } => self.triggered.push(*index),
                 Action::Color { .. } | Action::Prompt | Action::TableStart { .. } => {}
             }
-        }
-        self.lines_read += 1;
-        if let Some(started) = started {
-            self.line_cost.record(started.elapsed());
-            self.sample_costs(text);
         }
         coloring
     }
@@ -1005,6 +1033,12 @@ fn settings(plugins: &[&Plugin]) -> Settings {
         pager: last(plugins, |plugin| plugin.points.text.as_ref()?.pager.clone()),
         area_name: last(plugins, |plugin| {
             plugin.points.map.as_ref()?.area_name.clone()
+        }),
+        room_exits: last(plugins, |plugin| {
+            plugin.points.map.as_ref()?.room_exits.clone()
+        }),
+        area_info: last(plugins, |plugin| {
+            plugin.points.map.as_ref()?.area_info.clone()
         }),
     }
 }

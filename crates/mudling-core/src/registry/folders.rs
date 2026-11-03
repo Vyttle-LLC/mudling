@@ -3,6 +3,7 @@
 //! A reload that breaks it leaves the last copy that loaded running, and
 //! says why.
 
+use super::ApprovedCopy;
 use crate::persist::Timestamp;
 use crate::plugin::Plugin;
 use std::path::{Path, PathBuf};
@@ -50,7 +51,7 @@ impl AddedFolder {
     /// What an approval of it is kept by. It's the player's own folder on
     /// this device, so it's approved by where it is, not by its content,
     /// which changes with every save.
-    pub fn approval_key(&self) -> String {
-        format!("folder:{}", self.path.display())
+    pub fn approval_key(&self) -> ApprovedCopy {
+        ApprovedCopy::Folder(self.path.clone())
     }
 }

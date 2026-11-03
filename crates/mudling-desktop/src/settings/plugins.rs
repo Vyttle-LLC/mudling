@@ -9,7 +9,8 @@
 use super::appearance::toggled;
 use super::directory::{Approval, InCard, Purpose, card_row};
 use super::{
-    Page, Pane, SettingsSheet, SheetEvent, control, muted_line, section_heading, text_button,
+    Page, Pane, SettingsSheet, SheetEvent, control, muted_line, problem_line, section_heading,
+    text_button,
 };
 use crate::assets::{Icon, UI_FONT};
 use crate::theme::Theme;
@@ -22,7 +23,7 @@ use mudling_core::plugin::luau::{DisabledReason, OVERRUNS_TO_TURN_OFF, PluginDis
 use mudling_core::plugin::manifest::Permission;
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId, ServerInfo};
 use mudling_core::registry::{self, Refused};
-use mudling_core::stats::Summary;
+use mudling_core::stats::{LINE_BUDGET_US, PLUGIN_BUDGET_US, Summary};
 use std::path::PathBuf;
 
 const SWITCH_WIDTH: Pixels = px(40.);
@@ -31,9 +32,6 @@ const SWITCH_KNOB: Pixels = px(16.);
 const APPLIES_NEXT: &str = "Your changes take effect the next time you connect to this server.";
 const NO_SESSION: &str = "Connect to a server to see its plugins.";
 const NOT_MEASURED: &str = "Costs show here once a few hundred lines have been read.";
-/// PRD §6: one line with all its plugins, and what any one of them may add.
-const LINE_BUDGET_US: f64 = 20.;
-const PLUGIN_BUDGET_US: f64 = 5.;
 /// Room for a cost like "12.3 µs".
 const COST_WIDTH: Pixels = px(64.);
 const LAYERS_NOTE: &str = "Your overrides win over the game plugin, which wins over the defaults.";
@@ -41,6 +39,9 @@ const OVERRAN: &str = " One of its hooks ran past its time limit three times thi
 const SENDS_COMMANDS: &str = "Sends commands";
 const NEEDS_APPROVAL: &str = "Needs your approval to send commands";
 const ONLY_WITH_ENABLE: &str = "Sends commands only when MUDling starts with --enable";
+const SENDS_GMCP: &str = "Asks the game for data";
+const NEEDS_APPROVAL_GMCP: &str = "Needs your approval to ask the game for data";
+const ONLY_WITH_ENABLE_GMCP: &str = "Asks the game for data only when MUDling starts with --enable";
 const ARRIVED: &str = "Arrived from another device";
 const SENDS_ASK: &str =
     "send commands to the game, which show in the chat like yours and are rate-limited";
@@ -57,9 +58,10 @@ pub struct PluginRow {
     pub id: PluginId,
     pub name: SharedString,
     pub layer: Layer,
-    /// "1.0.0 · MIT", until manifests carry a description.
-    pub version: SharedString,
-    /// The triggers and aliases it brings, as [`rule_counts`] says them.
+    /// Its version and license, "1.0.0 · MIT", until manifests carry a
+    /// description.
+    pub detail: SharedString,
+    /// The triggers and aliases it brings, as [`rule_words`] says them.
     pub holds: SharedString,
     /// Built in, so there's no turning it off.
     pub always_on: bool,
@@ -101,23 +103,43 @@ pub enum Sending {
     OnlyWithEnable,
 }
 
-/// What `plugin`'s permissions let its hooks do, in the approval's words.
-pub fn asks_of(plugin: &Plugin) -> Vec<SharedString> {
-    let mut asks: Vec<SharedString> = Vec::new();
-    for permission in &plugin.manifest.permissions {
-        let said = match permission {
-            Permission::SendCommands => SENDS_ASK.into(),
-            Permission::ReadState => READS_ASK.into(),
-            Permission::WriteStore(store) => format!("keep its own notes in the store \"{store}\""),
-        };
-        asks.push(said.into());
-    }
+/// What `plugin`'s permissions let it do, in the approval's words. Each GMCP
+/// request is said as it goes out.
+fn asks_of(plugin: &Plugin) -> Vec<SharedString> {
     // Sending first, as it's what the player is asked about.
-    asks.sort_by_key(|ask| ask != SENDS_ASK);
-    asks
+    let (mut sending, mut others): (Vec<SharedString>, Vec<SharedString>) = Default::default();
+    for permission in &plugin.manifest.permissions {
+        match permission {
+            Permission::SendCommands => sending.insert(0, SENDS_ASK.into()),
+            Permission::SendGmcp => {
+                let requests = plugin.points.connection.iter().flat_map(|c| &c.requests);
+                sending.extend(requests.map(|request| {
+                    let when = &request.when;
+                    format!(
+                        "send the game \"{}\" over GMCP, not as a command, each time {}'s {} changes",
+                        request.send, when.package, when.key
+                    )
+                    .into()
+                }));
+            }
+            Permission::ReadState => others.push(READS_ASK.into()),
+            Permission::WriteStore(store) => {
+                others.push(format!("keep its own notes in the store \"{store}\"").into());
+            }
+        }
+    }
+    sending.append(&mut others);
+    sending
 }
 
 impl PluginRow {
+    /// Whether what it sends once approved includes commands, which matter
+    /// most, so its approval speaks of them; otherwise it sends only GMCP
+    /// requests.
+    pub fn sends_commands(&self) -> bool {
+        self.asks.first().is_some_and(|ask| ask == SENDS_ASK)
+    }
+
     /// Marks those of `rows` in `approved` as let to send.
     pub fn approve(rows: &mut [PluginRow], approved: &[PluginId]) {
         for row in rows.iter_mut().filter(|row| approved.contains(&row.id)) {
@@ -139,13 +161,13 @@ impl PluginRow {
             id: plugin.id().clone(),
             name: manifest.name.clone().into(),
             layer: plugin.layer(),
-            version: format!("{} · {}", manifest.version, manifest.license).into(),
-            holds: rule_counts(triggers, aliases).into(),
+            detail: format!("{} · {}", manifest.version, manifest.license).into(),
+            holds: rule_words(triggers, aliases).into(),
             always_on: false,
             on,
             flips: 0,
             elsewhere: None,
-            sending: match registry::sends_commands(plugin) {
+            sending: match registry::needs_approval(plugin) {
                 true => Sending::Waiting,
                 false => Sending::No,
             },
@@ -221,7 +243,18 @@ impl PluginRow {
     /// nothing here knows that name.
     fn switched_on(&self, costs: &[PluginCost], turned_off: &[PluginDisabled]) -> bool {
         let came_on = self.layer == Layer::Override && self.flips == 0 && self.is_running(costs);
-        (self.on || came_on) && !turned_off.iter().any(|off| off.plugin == self.id)
+        (self.on || came_on) && !self.overran(turned_off)
+    }
+
+    /// Whether the core turned it off for running past its time limit.
+    fn overran(&self, turned_off: &[PluginDisabled]) -> bool {
+        turned_off.iter().any(|off| off.plugin == self.id)
+    }
+
+    /// Whether the player's flips leave its switch other than the session
+    /// opened with: each one turns it the other way.
+    pub fn is_switched(&self) -> bool {
+        self.flips % 2 == 1
     }
 
     fn is_running(&self, costs: &[PluginCost]) -> bool {
@@ -251,7 +284,7 @@ pub(super) fn micros(cost: f64) -> String {
 }
 
 /// "2 triggers, 1 alias".
-pub(super) fn rule_counts(triggers: usize, aliases: usize) -> String {
+pub(super) fn rule_words(triggers: usize, aliases: usize) -> String {
     let plural = |count: usize, one: &str, many: &str| match count {
         1 => format!("1 {one}"),
         count => format!("{count} {many}"),
@@ -377,16 +410,30 @@ fn status_words(row: &PluginRow) -> Option<(Status, &'static str, Option<&'stati
     if row.held_back.is_some() {
         return Some((Status::Arrived, ARRIVED, Some("Review")));
     }
+    let commands = row.sends_commands();
+    let words = |for_commands, for_gmcp| if commands { for_commands } else { for_gmcp };
     match row.sending {
         Sending::No => None,
-        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, Some("Take back"))),
-        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, Some("Review"))),
-        Sending::OnlyWithEnable => Some((Status::OnlyWithEnable, ONLY_WITH_ENABLE, None)),
+        Sending::Approved => Some((
+            Status::Approved,
+            words(SENDS_COMMANDS, SENDS_GMCP),
+            Some("Take back"),
+        )),
+        Sending::Waiting => Some((
+            Status::Waiting,
+            words(NEEDS_APPROVAL, NEEDS_APPROVAL_GMCP),
+            Some("Review"),
+        )),
+        Sending::OnlyWithEnable => Some((
+            Status::OnlyWithEnable,
+            words(ONLY_WITH_ENABLE, ONLY_WITH_ENABLE_GMCP),
+            None,
+        )),
     }
 }
 
-/// A plugin's row. `approval` is the line saying whether it may send
-/// commands, with its button.
+/// A plugin's row. `actions` is the line with its trust, sending and Remove
+/// buttons.
 #[allow(clippy::too_many_arguments)]
 fn plugin_row(
     row: &PluginRow,
@@ -395,12 +442,12 @@ fn plugin_row(
     cost: Option<f64>,
     elsewhere: Option<&SharedString>,
     control: AnyElement,
-    approval: Option<AnyElement>,
+    actions: Option<AnyElement>,
     theme: &Theme,
 ) -> Div {
     let mut about = match elsewhere {
-        Some(servers) => format!("For {servers} · Version {}", row.version),
-        None => format!("Version {}", row.version),
+        Some(servers) => format!("For {servers} · Version {}", row.detail),
+        None => format!("Version {}", row.detail),
     };
     if let Some(source) = &row.source {
         about.push_str(&format!(" · {source}"));
@@ -480,7 +527,7 @@ fn plugin_row(
                                 .child(broken)
                         })),
                 )
-                .children(approval),
+                .children(actions),
         )
         .child(
             div()
@@ -531,8 +578,7 @@ impl SettingsSheet {
     ) -> impl IntoElement + use<> {
         let plugin = row.clone();
         // The core's list is of the session running, not of any other server.
-        let overran = self.page_host() == self.server
-            && self.turned_off.iter().any(|off| off.plugin == row.id);
+        let overran = self.page_host() == self.server && row.overran(&self.turned_off);
         let on = on && !overran;
         let state = if on { "on" } else { "off" };
         let id = SharedString::from(format!("switch-{}", row.key()));
@@ -644,8 +690,7 @@ impl SettingsSheet {
                 }))
             })
         });
-        let approval = status;
-        if approval.is_none() && remove.is_none() {
+        if status.is_none() && remove.is_none() {
             return None;
         }
         let line = div()
@@ -655,7 +700,7 @@ impl SettingsSheet {
             .items_center()
             .gap_3()
             .text_size(px(13.))
-            .children(approval)
+            .children(status)
             .children(remove);
         Some(line.into_any_element())
     }
@@ -755,11 +800,9 @@ impl SettingsSheet {
     /// Why the last switch wasn't saved.
     pub(super) fn switch_problem_line(&self, theme: &Theme) -> Option<Stateful<Div>> {
         self.switch_problem.clone().map(|problem| {
-            muted_line(problem, theme)
+            problem_line(problem, theme)
                 .debug_selector(|| "switch-problem".to_owned())
-                .role(Role::Alert)
                 .mt_2()
-                .text_color(theme.error)
         })
     }
 
@@ -973,7 +1016,7 @@ impl SettingsSheet {
     ) -> AnyElement {
         let switched_on = row.switched_on(&self.costs, &self.turned_off);
         let elsewhere = row.meant_elsewhere(&self.costs);
-        let approval = self.actions_line(row, pane, theme, cx);
+        let actions = self.actions_line(row, pane, theme, cx);
         let control = match (row.always_on, elsewhere) {
             (true, _) => switch(true, theme).into_any_element(),
             // Not loaded, so there's nothing to switch until it's trusted.
@@ -986,11 +1029,11 @@ impl SettingsSheet {
         plugin_row(
             row,
             switched_on,
-            self.turned_off.iter().any(|off| off.plugin == row.id),
+            row.overran(&self.turned_off),
             row.cost(&self.costs),
             elsewhere,
             control,
-            approval,
+            actions,
             theme,
         )
         .into_any_element()
@@ -1148,9 +1191,35 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_sending_only_gmcp_requests_waits_and_says_each_one() {
+        let asker = Plugin::from_files(|file| {
+            Ok(match file {
+                "plugin.toml" => A_GAME.replace(
+                    "\n\n[servers]",
+                    "\npermissions = [\"send_gmcp\"]\n\
+                     [points]\nconnection = \"connection.toml\"\n[servers]",
+                ),
+                _ => "[[request]]\nsend = \"request area\"\nwhen = \"room.info.zone\"\n".to_owned(),
+            })
+        })
+        .unwrap();
+        let row = PluginRow::of(&asker, true);
+        assert_eq!(row.sending, Sending::Waiting);
+        assert!(!row.sends_commands());
+        assert_eq!(
+            row.asks,
+            [
+                "send the game \"request area\" over GMCP, not as a command, each time room.info's zone changes"
+            ]
+        );
+        let (_, words, _) = status_words(&row).unwrap();
+        assert_eq!(words, NEEDS_APPROVAL_GMCP);
+    }
+
+    #[test]
     fn rule_counts_read_as_words() {
-        assert_eq!(rule_counts(2, 1), "2 triggers, 1 alias");
-        assert_eq!(rule_counts(1, 0), "1 trigger, 0 aliases");
+        assert_eq!(rule_words(2, 1), "2 triggers, 1 alias");
+        assert_eq!(rule_words(1, 0), "1 trigger, 0 aliases");
     }
 
     #[test]

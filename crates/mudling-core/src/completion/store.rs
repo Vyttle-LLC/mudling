@@ -79,16 +79,11 @@ impl HistoryWriter {
 }
 
 fn write_atomically(path: &Path, commands: &[String]) -> io::Result<()> {
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder)?;
-    }
     let json = serde_json::to_string(&HistoryFile {
         commands: commands.to_vec(),
     })
     .map_err(io::Error::other)?;
-    let partial = path.with_extension("json.tmp");
-    std::fs::write(&partial, json)?;
-    std::fs::rename(&partial, path)
+    crate::repo::write_atomically(path, json.as_bytes())
 }
 
 #[cfg(test)]

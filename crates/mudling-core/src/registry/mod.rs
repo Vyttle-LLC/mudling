@@ -34,12 +34,12 @@ mod trust;
 #[cfg(test)]
 mod tests;
 
-pub use approvals::{Approvals, sends_commands};
+pub use approvals::{Approvals, ApprovedCopy, needs_approval};
 pub use folders::AddedFolder;
-pub(crate) use installed::plugin_of;
 pub use installed::{
     FolderCopy, InstalledPlugins, Loaded, PLUGINS_FOLDER, Record, Refused, folder_hash,
 };
+pub(crate) use installed::{is_working, plugin_of};
 pub use link::{fetch_link, forget_link};
 pub use trust::{Origins, Trusted};
 
@@ -47,7 +47,8 @@ use crate::git::{FolderFiles, GitError, Limit, Mirror, Oid};
 use crate::plugin::check::Failure;
 use crate::plugin::{Plugin, PluginError};
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
@@ -55,7 +56,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// The registry's repo, which every device fetches from.
-pub const REGISTRY_URL: &str = "https://github.com/Vyttle-LLC/mudling-plugins.git";
+const REGISTRY_URL: &str = "https://github.com/Vyttle-LLC/mudling-plugins.git";
 
 /// The public key the registry's CI signs the index with: 32 bytes in
 /// base64, as `docs/signing.md` prints it. Without one, every index is
@@ -109,6 +110,10 @@ pub struct Games {
 impl Entry {
     pub fn sends_commands(&self) -> bool {
         self.permissions.iter().any(|p| p == "send_commands")
+    }
+
+    pub fn sends_gmcp(&self) -> bool {
+        self.permissions.iter().any(|p| p == "send_gmcp")
     }
 
     /// The game it's for, as the player knows it, or `None` for any game.
@@ -246,7 +251,7 @@ impl Registry {
     }
 
     /// A registry at `url`, trusted with `key`: for tests and a local copy.
-    pub fn at(data_folder: &Path, url: &str, key: Option<VerifyingKey>) -> Registry {
+    fn at(data_folder: &Path, url: &str, key: Option<VerifyingKey>) -> Registry {
         Registry {
             folder: data_folder.join(REGISTRY_FOLDER),
             url: url.to_owned(),
@@ -270,7 +275,7 @@ impl Registry {
         let seen = self.newest_seen(&key);
         let index = verify(&bytes, &key, seen.as_deref())?;
         let keep = |error: io::Error| IndexError::Malformed(format!("couldn't keep it: {error}"));
-        save(&self.folder.join(INDEX_FILE), &bytes).map_err(keep)?;
+        crate::repo::write_atomically(&self.folder.join(INDEX_FILE), &bytes).map_err(keep)?;
         // A copy the registry signed for is one this device can run.
         self.trusted.trust_index(&index.plugins).map_err(keep)?;
         Ok(index)
@@ -325,7 +330,7 @@ impl Registry {
 
 /// Reads an index file in the order `docs/index-format.md` sets: the
 /// signature over `signed`'s exact bytes first, and only then what it says.
-pub fn verify(file: &[u8], key: &VerifyingKey, seen: Option<&str>) -> Result<Index, IndexError> {
+fn verify(file: &[u8], key: &VerifyingKey, seen: Option<&str>) -> Result<Index, IndexError> {
     #[derive(Deserialize)]
     struct Outer {
         signed: String,
@@ -420,12 +425,17 @@ fn load_files(files: &FolderFiles) -> Result<Plugin, PluginError> {
     })
 }
 
-/// Writes `bytes` whole or not at all.
-fn save(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)?;
-    fs::rename(temporary, path)
+/// What the JSON file at `path` holds, or the default if it's missing or
+/// can't be read.
+fn read_json<T: DeserializeOwned + Default>(path: &Path) -> T {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Writes `value` to `path` as JSON, whole or not at all.
+fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
+    crate::repo::write_atomically(path, &bytes)
 }

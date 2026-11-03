@@ -25,6 +25,7 @@
 //!
 //! [`PluginEvent`]: crate::plugin::PluginEvent
 
+mod channels;
 mod engine;
 mod game;
 mod gear;
@@ -33,6 +34,7 @@ mod latency;
 mod login;
 mod map_rules;
 mod quiet;
+mod requests;
 mod sheet;
 mod values;
 
@@ -86,7 +88,7 @@ pub struct SessionConfig {
     pub enabled: Vec<PluginId>,
     /// The overrides the player turned off for this server.
     pub overrides_off: Vec<PluginId>,
-    /// Plugins the player allowed to send commands.
+    /// Plugins the player allowed to send commands and GMCP requests.
     pub approved: Vec<PluginId>,
     /// For auto-login, when a plugin names the login prompts.
     pub credentials: Option<Credentials>,

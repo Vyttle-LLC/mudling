@@ -270,7 +270,7 @@ impl SettingsSheet {
     fn close_draft(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         self.form.draft = None;
         self.form.problem = None;
-        window.focus(&self.tabs[self.section as usize], cx);
+        self.focus_tab(self.section, window, cx);
         cx.notify();
     }
 

@@ -5,6 +5,10 @@ room_identity = "description"
 # Room.Info's zone, as the `area` fragment in plugin.toml reads it.
 area_name = '''^{area}$'''
 
+# A door opened or shut in place brings no Room.Info: Char.Status lists the
+# room's exits again, as Room.Info does, `"room_exits": {"North": "C"}`.
+room_exits = "Char.Status.room_exits"
+
 # "[Exits: north up]": the room's description follows it, which tells apart
 # rooms that share a name and exits.
 [[exits]]

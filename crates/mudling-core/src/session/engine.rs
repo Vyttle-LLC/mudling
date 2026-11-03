@@ -2,6 +2,7 @@
 //! stores, database writes and bytes to send out. [`crate::session::Session`]
 //! runs it on a core thread. A replay or a benchmark can drive it directly.
 
+use super::channels;
 use super::game::GameFeed;
 use super::gear::{Filing, GearKeeper, GearWatch, Saving};
 use super::inventory::{self, Inventory};
@@ -9,6 +10,7 @@ use super::latency::Latency;
 use super::login::Login;
 use super::map_rules::PluginRules;
 use super::quiet::{Moment, QuietReads, Seen};
+use super::requests::Requested;
 use super::sheet::Sheet;
 use super::values::{self, HubView};
 use super::{GearEdit, MapEdit, RuleEdit, SessionConfig, SessionError, Typing};
@@ -101,6 +103,7 @@ struct Link {
     overrun_notices: Vec<(PluginId, String)>,
     mssp_name: Option<String>,
     gmcp_enabled: bool,
+    requested: Requested,
 }
 
 /// Hook outputs, on their way from the hook worker to the core thread.
@@ -363,6 +366,7 @@ impl Engine {
             overrun_notices: Vec::new(),
             mssp_name: None,
             gmcp_enabled: false,
+            requested: Requested::default(),
         });
         self.logs.connection_started();
         self.settings.connection = ConnectionStatus::Connecting;
@@ -947,8 +951,8 @@ impl Engine {
         self.publish_settings();
     }
 
-    /// Approves `plugin` to send commands, or takes that back, for this
-    /// connection and any after it in the session.
+    /// Approves `plugin` to send commands and GMCP requests, or takes that
+    /// back, for this connection and any after it in the session.
     pub fn set_approved(&mut self, plugin: PluginId, approved: bool) {
         if let Some(link) = &mut self.link {
             link.hooks.set_approved(&plugin, approved);
@@ -1382,6 +1386,12 @@ impl Engine {
             self.gear.bags_changed(&link.inventory);
         }
         let plugins = &self.plugins;
+        if link.gmcp_enabled {
+            let approved = &self.config.approved;
+            for request in link.requested.due(plugins, approved, package, json) {
+                gmcp::encode(&request.package, &request.data, &mut self.output);
+            }
+        }
         let fields = (self.game_fields).get(plugins.generation(), || GameFields::of(plugins));
         let heard = link.game.read(package, json, fields);
         // The first room means the character is in the game. Asking for the
@@ -1407,7 +1417,7 @@ impl Engine {
                 self.keep_character_value(key, value, now);
             }
             self.hub
-                .write::<CharactersState>(CharactersState(heard.character));
+                .write::<CharactersState>(CharactersState(heard.character.clone()));
         }
         if let Some(target) = heard.target {
             self.hub.write::<TargetState>(target);
@@ -1419,6 +1429,7 @@ impl Engine {
         let fields = self
             .hud_fields
             .get((plugins.generation(), learned), || hud.fields(plugins));
+        let mut vitals_changed = false;
         if fields
             .values()
             .any(|field| field.package.eq_ignore_ascii_case(package))
@@ -1426,6 +1437,7 @@ impl Engine {
         {
             let vitals = hud::values(fields, package, &message).into_iter().collect();
             self.hub.write::<VitalsState>(VitalsState(vitals));
+            vitals_changed = true;
         }
         let affects_field = self
             .affects_field
@@ -1444,7 +1456,14 @@ impl Engine {
                 now,
                 batch: &mut self.batch,
             };
-            (self.gear).gmcp(package, json, &mut link.gear, &self.hub, &mut saving);
+            let (gear, hub) = (&mut self.gear, &self.hub);
+            gear.gmcp(
+                vitals_changed,
+                &heard.character,
+                &mut link.gear,
+                hub,
+                &mut saving,
+            );
         }
         if !heard.mobs.is_empty() {
             self.map.note_sightings(&heard.mobs, now);
@@ -1452,7 +1471,36 @@ impl Engine {
         if package.eq_ignore_ascii_case("Core.Hello") {
             self.game_signal_arrived(now);
         }
+        for line in channels::lines(&self.plugins, package, json) {
+            self.read_channel_line(&line);
+        }
         self.read_pending(now);
+    }
+
+    /// Reads a line of the chat that came as GMCP with the Text point's
+    /// patterns, the colors and the triggers, and shows it. Its events go
+    /// only to the hooks: the map, gear, tables and quiet reads never see it.
+    /// Text the server hasn't ended shows first, as it came first.
+    fn read_channel_line(&mut self, line: &Line) {
+        self.show_pending();
+        let mut events = Vec::new();
+        let coloring = self.plugins.read_channel_line(line, &mut events);
+        let response = self.trigger_response();
+        if let Some(link) = &mut self.link {
+            events.into_iter().for_each(|event| link.hooks.event(event));
+        }
+        self.sounds.extend(response.sounds);
+        if response.hides {
+            return;
+        }
+        let shown = match coloring.is_empty() {
+            true => line.clone(),
+            false => line.colored(&coloring),
+        };
+        self.show(match response.color {
+            Some(color) => shown.highlighted(0, color.style()),
+            None => shown,
+        });
     }
 
     /// The server named its game, perhaps. That can suggest a game plugin,

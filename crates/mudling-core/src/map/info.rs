@@ -4,11 +4,10 @@
 use super::geometry::{DirMap, Direction};
 use super::rules::MapRules;
 use crate::ansi::{self, AnsiParser};
+use crate::plugin::points::AreaInfo;
 use crate::telnet::gmcp;
 use serde_json::Value;
 
-/// Char.Status's key for the room's exits.
-pub(super) const ROOM_EXITS: &str = "room_exits";
 /// Char.Items's location for what lies in the room.
 const ROOM_LOCATION: &str = "room";
 /// Char.Items's type for a fountain.
@@ -50,12 +49,24 @@ fn exits(value: Option<&Value>, rules: &dyn MapRules) -> DirMap<ExitInfo> {
         .unwrap_or_default()
 }
 
-/// The room's exits in a Char.Status, sent when a door changes in place.
-/// `None` when it doesn't list them.
-pub(super) fn status_exits(json: &str, rules: &dyn MapRules) -> Option<DirMap<ExitInfo>> {
-    let status: Value = gmcp::from_json(json)?;
-    let listed = status.get(ROOM_EXITS)?;
+/// The room's exits at `key` of a message, sent when a door changes in
+/// place. `None` when it doesn't list them.
+pub(super) fn listed_exits(
+    json: &str,
+    key: &str,
+    rules: &dyn MapRules,
+) -> Option<DirMap<ExitInfo>> {
+    let message: Value = gmcp::from_json(json)?;
+    let listed = message.get(key)?;
     Some(exits(Some(listed), rules))
+}
+
+/// The zone and name at `info`'s fields of a message naming an area.
+pub(super) fn named_area(json: &str, info: &AreaInfo) -> Option<(String, String)> {
+    let message: Value = gmcp::from_json(json)?;
+    let text = |key: &str| Some(plain(message.get(key)?.as_str()?).trim().to_owned());
+    let (zone, name) = (text(&info.zone.key)?, text(&info.name.key)?);
+    (!zone.is_empty() && !name.is_empty()).then_some((zone, name))
 }
 
 /// The room lines of the mobs in a Room.Players or Room.AddPlayer. Mobs are

@@ -68,6 +68,8 @@ pub struct LiveMap {
     derived_shape: u64,
     derived: Option<Arc<Derived>>,
     area_names: HashMap<String, AreaName>,
+    /// The game named an area since the last commit.
+    areas_renamed: bool,
     joins: Arc<JoinFacts>,
     /// Pairs newly answered "Not the same", to write at the next commit.
     answered: Vec<RoomPair>,
@@ -234,6 +236,7 @@ impl LiveMap {
             derived_shape: 0,
             derived: None,
             area_names: HashMap::new(),
+            areas_renamed: false,
             joins,
             answered: Vec::new(),
             #[cfg(test)]
@@ -256,24 +259,49 @@ impl LiveMap {
             self.tracker.move_failed(now);
         } else if is("Room.Players") || is("Room.AddPlayer") {
             self.note_sightings(&info::mob_titles(json), now);
-        } else if is("Char.Status") {
-            self.status(json);
         } else if is("Char.Items.List") || is("Char.Items.Add") {
             self.items_here(json);
         }
+        self.doors_changed(package, json);
+        self.area_named(package, json);
         None
     }
 
-    /// A door changed in place, which brings no Room.Info.
-    fn status(&mut self, json: &str) {
-        // Most Char.Status are vitals: don't parse them for this.
-        if !json.contains(info::ROOM_EXITS) {
+    /// A door changed in place, which brings no Room.Info: the exits are
+    /// listed where the plugin's `room_exits` says.
+    fn doors_changed(&mut self, package: &str, json: &str) {
+        let rules = &*self.rules;
+        let Some(field) = rules.room_exits().filter(|field| field.is_in(package)) else {
+            return;
+        };
+        // The message may be mostly vitals: don't parse it for this.
+        if !json.contains(field.key.as_str()) {
             return;
         }
-        if let Some(exits) = info::status_exits(json, &*self.rules) {
+        if let Some(exits) = info::listed_exits(json, &field.key, rules) {
             let exits = exit_states(&exits);
             self.tracker
                 .update_current_rooms(|room| room.note_exits(exits.clone()));
+        }
+    }
+
+    /// The game named an area, in the message the plugin's `area_info` says.
+    /// Its name stands for the zone from now on.
+    fn area_named(&mut self, package: &str, json: &str) {
+        let Some(info) = self
+            .rules
+            .area_info()
+            .filter(|info| info.zone.is_in(package))
+        else {
+            return;
+        };
+        let Some((zone, name)) = info::named_area(json, info) else {
+            return;
+        };
+        let named = AreaName { name, levels: None };
+        if self.area_names.get(&zone) != Some(&named) {
+            self.area_names.insert(zone, named);
+            self.areas_renamed = true;
         }
     }
 
@@ -763,11 +791,16 @@ impl LiveMap {
         }
         self.committed = layout.clone();
         self.committed_whereabouts = whereabouts;
+        let renamed = std::mem::take(&mut self.areas_renamed);
+        if renamed {
+            self.shape += 1;
+        }
         let changed = !change.rooms.is_empty()
             || !change.removed.is_empty()
             || change.whereabouts.is_some()
             || !change.marks.is_empty()
-            || change.joins.is_some();
+            || change.joins.is_some()
+            || renamed;
         if !changed && batch.is_empty() {
             return None;
         }
@@ -775,7 +808,7 @@ impl LiveMap {
             self.revision += 1;
         }
         change.revision = self.revision;
-        if !change.rooms.is_empty() || !change.removed.is_empty() {
+        if !change.rooms.is_empty() || !change.removed.is_empty() || renamed {
             change.derived = Some(self.shared_derived());
         }
         Some(Commit { change, batch })

@@ -90,7 +90,7 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         id: PluginId::try_from(id.to_owned()).expect("the id is valid"),
         name: name.to_owned().into(),
         layer,
-        version: "1.0.0 · MIT".into(),
+        detail: "1.0.0 · MIT".into(),
         holds: "".into(),
         always_on: false,
         on,

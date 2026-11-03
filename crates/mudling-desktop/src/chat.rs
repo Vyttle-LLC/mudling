@@ -91,10 +91,15 @@ pub fn handle_keys(root: Div, chat: &Entity<Chat>, cx: &App) -> Div {
 /// How wide the chat column has to be to show [`MIN_COLUMNS`] of the chosen
 /// chat font on one row each.
 pub fn min_column_width(cx: &App) -> Pixels {
+    (column_advance(cx) * MIN_COLUMNS).ceil() + COLUMN_PADDING * 2.
+}
+
+/// How wide a column of the chosen chat font is.
+fn column_advance(cx: &App) -> Pixels {
     let text = cx.text_system();
     let choice = cx.global::<Theme>().choice;
     let advance = text.ch_advance(text.resolve_font(&font(choice.font)), choice.chat_size());
-    (advance.unwrap_or_default() * MIN_COLUMNS).ceil() + COLUMN_PADDING * 2.
+    advance.unwrap_or_default()
 }
 
 /// How wide the chat column grows: its reading width, or more if the chosen
@@ -151,6 +156,8 @@ pub struct Chat {
     #[cfg(test)]
     lines_drawn: usize,
     #[cfg(test)]
+    lines_cut: usize,
+    #[cfg(test)]
     lines_measured: std::cell::Cell<usize>,
 }
 
@@ -181,6 +188,8 @@ impl Chat {
             #[cfg(test)]
             lines_drawn: 0,
             #[cfg(test)]
+            lines_cut: 0,
+            #[cfg(test)]
             lines_measured: std::cell::Cell::new(0),
         }
     }
@@ -193,6 +202,12 @@ impl Chat {
     #[cfg(test)]
     pub fn lines_drawn(&self) -> usize {
         self.lines_drawn
+    }
+
+    /// Drawn lines only partly laid out, as only part of them shows.
+    #[cfg(test)]
+    pub fn lines_cut(&self) -> usize {
+        self.lines_cut
     }
 
     #[cfg(test)]
@@ -414,6 +429,17 @@ impl Chat {
         let known_heights = &mut self.known_heights;
         #[cfg(test)]
         let lines_measured = &self.lines_measured;
+        let lay_out = |line: &Line,
+                       number: u64,
+                       reach: usize,
+                       window: &mut Window,
+                       cx: &mut Context<Chat>| {
+            let mut element =
+                render_line(line, number, found, items, reader_listens, &theme, reach)
+                    .into_any_element();
+            let line_size = element.layout_as_root(space, window, cx);
+            (element, line_size)
+        };
         let measure = |index: usize, window: &mut Window, cx: &mut Context<Chat>| {
             #[cfg(test)]
             lines_measured.set(lines_measured.get() + 1);
@@ -421,11 +447,7 @@ impl Chat {
                 .get(index)
                 .expect("placed lines are in the scrollback");
             let line = shown(line, prompts_shown).expect("it isn't only a prompt");
-            let number = evicted + index as u64;
-            let mut element =
-                render_line(&line, number, found, items, reader_listens, &theme).into_any_element();
-            let line_size = element.layout_as_root(space, window, cx);
-            (element, line_size)
+            lay_out(&line, evicted + index as u64, usize::MAX, window, cx)
         };
         // Placing a line can ask for its height more than once.
         let mut measured = HashMap::new();
@@ -458,22 +480,46 @@ impl Chat {
                 over.contains(&line.origin) && over.contains(&line.bottom_right())
             })
         };
+        let strip = Strip {
+            column: column_advance(cx),
+            row: theme.choice.chat_line_height(),
+        };
+        #[cfg(test)]
+        let mut lines_cut = 0;
         let mut y = bounds.top() + placement.top;
         let drawn: Vec<AnyElement> = placement
             .lines
             .filter_map(|index| {
+                let number = evicted + index as u64;
                 let height = match measured.get(&index) {
                     Some((_, line_size)) => line_size.height,
-                    None => *known_heights.get(&(evicted + index as u64))?,
+                    None => *known_heights.get(&number)?,
                 };
                 let origin = point(bounds.left(), y);
                 y += height;
-                if is_covered(Bounds::new(origin, size(bounds.size.width, height))) {
+                let at = Bounds::new(origin, size(bounds.size.width, height));
+                if is_covered(at) {
                     return None;
                 }
-                let (mut element, _) = measured
-                    .remove(&index)
-                    .unwrap_or_else(|| measure(index, window, cx));
+                let cut = || {
+                    let over = covered?;
+                    let line = shown(lines.get(index)?, prompts_shown)?;
+                    let reach = strip.reach(&line, at, over)?;
+                    Some((line, reach))
+                };
+                let (mut element, _) = match measured.remove(&index) {
+                    Some(laid_out) => laid_out,
+                    None => match cut() {
+                        Some((line, reach)) => {
+                            #[cfg(test)]
+                            {
+                                lines_cut += 1;
+                            }
+                            lay_out(&line, number, reach, window, cx)
+                        }
+                        None => measure(index, window, cx),
+                    },
+                };
                 element.prepaint_at(origin, window, cx);
                 Some(element)
             })
@@ -481,6 +527,7 @@ impl Chat {
         #[cfg(test)]
         {
             self.lines_drawn = drawn.len();
+            self.lines_cut = lines_cut;
         }
         drawn
     }
@@ -575,9 +622,43 @@ fn drawn_len(line: &Line) -> usize {
     line.plain().trim_end_matches(' ').len().max(painted_end)
 }
 
+/// The chat font's row and column, to tell what of a line shows beside
+/// something over it.
+struct Strip {
+    row: Pixels,
+    column: Pixels,
+}
+
+impl Strip {
+    /// How many bytes of `line`, drawn at `at`, to lay out when `over` hides
+    /// all of it but a strip at its left, as the settings sheet does at a large
+    /// chat size or in a narrow window. `None` for all of it: it wraps, shows
+    /// past `over` too, or has a character that may not take one column.
+    fn reach(&self, line: &Line, at: Bounds<Pixels>, over: Bounds<Pixels>) -> Option<usize> {
+        let in_strip = self.column > Pixels::ZERO
+            && at.size.height <= self.row
+            && over.top() <= at.top()
+            && at.bottom() <= over.bottom()
+            && at.left() < over.left();
+        if !in_strip || line.kind() == LineKind::Command {
+            return None;
+        }
+        let text = &line.plain()[..drawn_len(line)];
+        let one_column_each = text
+            .bytes()
+            .all(|byte| byte == b' ' || byte.is_ascii_graphic());
+        // A column to spare on each side, for a glyph reaching past its own.
+        let hidden_columns = ((over.right() - at.left()) / self.column).floor() as usize;
+        let shown_columns = ((over.left() - at.left()) / self.column).ceil() as usize + 1;
+        (one_column_each && shown_columns < text.len() && text.len() < hidden_columns)
+            .then_some(shown_columns)
+    }
+}
+
 /// One line, with what `found` found in it highlighted and the items it names
 /// underlined, each with a tooltip. The words are worked out on hover, or for
 /// every line in view only when `reader_listens`, as a screen reader needs them.
+/// Only its first `reach` bytes are laid out.
 fn render_line(
     line: &Line,
     number: u64,
@@ -585,8 +666,10 @@ fn render_line(
     items: &ItemsState,
     reader_listens: bool,
     theme: &Theme,
+    reach: usize,
 ) -> impl IntoElement {
-    let drawn = drawn_len(line);
+    let whole = drawn_len(line);
+    let drawn = whole.min(reach);
     let highlights = line.styled().iter().map(|span| {
         let style = HighlightStyle {
             color: span.style.fg.map(|c| theme.ansi(c)),
@@ -610,8 +693,14 @@ fn render_line(
         found.paint(line.plain(), drawn, number, theme)
     });
     let text = SharedString::from(line.plain()[..drawn].to_owned());
-    let mentions: Vec<(Range<usize>, String)> = (items.matcher.find(&text).into_iter())
-        .map(|mention| (mention.range, mention.item.to_owned()))
+    // Found in the whole line, so a name the reach cuts stays underlined.
+    let mentions: Vec<(Range<usize>, String)> = (items.matcher.find(&line.plain()[..whole]))
+        .into_iter()
+        .filter(|mention| mention.range.start < drawn)
+        .map(|mention| {
+            let shown = mention.range.start..mention.range.end.min(drawn);
+            (shown, mention.item.to_owned())
+        })
         .collect();
     let underlined = mentions.iter().map(|(range, _)| {
         let style = HighlightStyle {
@@ -962,6 +1051,41 @@ mod tests {
             window.refresh();
         });
         cx.run_until_parked();
+    }
+
+    /// As the settings sheet does at the largest chat size, or in a narrow
+    /// window: it hides all of every line but the start.
+    #[gpui::test]
+    fn a_line_covered_but_for_its_start_lays_out_only_that(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_window(cx, 0);
+        let long_lines = || server_lines((0..100).map(|n| format!("{n:03} {}", "-".repeat(70))));
+        chat.update(cx, |chat, cx| chat.apply(&long_lines(), cx));
+        cx.run_until_parked();
+        let in_view = chat.read_with(cx, |chat, _| chat.lines_drawn());
+        let room = cx.update(|window, _| window.viewport_size());
+        let frame_covered_from = |left: Pixels, right: Pixels, cx: &mut VisualTestContext| {
+            let over = Bounds::from_corners(point(left, px(0.)), point(right, room.height));
+            chat.update(cx, |chat, cx| {
+                chat.set_covered(Some(over));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            // The first frame covered measures the lines; the next draws them.
+            chat.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            chat.read_with(cx, |chat, _| (chat.lines_drawn(), chat.lines_cut()))
+        };
+
+        let middle = room.width / 2.;
+        assert_eq!(
+            frame_covered_from(middle, room.width, cx),
+            (in_view, in_view)
+        );
+        assert_eq!(
+            frame_covered_from(middle, middle + px(20.), cx),
+            (in_view, 0),
+            "each line shows past it too"
+        );
     }
 
     #[gpui::test]

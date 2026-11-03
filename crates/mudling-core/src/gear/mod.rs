@@ -20,8 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-/// The GMCP `Char.Status` keys gear can change. They name the protocol's
-/// fields, not one game's: a game that sends none of them is measured never.
+/// The stats gear can change, by MUDling's names for them. Each is a
+/// character sheet key, read where a plugin's HUD point says, but the last
+/// three: the vital maximums. A game whose plugin names none of them is
+/// measured never.
 pub const GEAR_STATS: [&str; 11] = [
     "str",
     "int",
