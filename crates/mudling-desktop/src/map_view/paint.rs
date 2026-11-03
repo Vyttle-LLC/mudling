@@ -12,10 +12,12 @@
 
 use super::camera::{Camera, Region, SQUARE};
 use super::sheet::{Link, Sheet, Tile, TileKind};
+use crate::assets::UI_FONT;
 use crate::theme::MapColors;
 use gpui::{
-    BorderStyle, Bounds, ContentMask, Corners, Edges, Hsla, Path, PathBuilder, Pixels, Point,
-    Window, fill, point, px, quad, size, transparent_black,
+    App, BorderStyle, Bounds, ContentMask, Corners, Edges, Font, FontWeight, Hsla, Path,
+    PathBuilder, Pixels, Point, SharedString, TextAlign, TextRun, Window, fill, font, point, px,
+    quad, size, transparent_black,
 };
 use mudling_core::map::{Direction, RoomId};
 use std::collections::HashSet;
@@ -30,6 +32,8 @@ const ARROW_SHARE: f32 = 0.16;
 const PIP_SHARE: f32 = 0.13;
 /// Below this, in pixels, a room is a plain square.
 const DETAILED_ROOM: f32 = 8.;
+/// The least side, in pixels, of a copy's numbered mark.
+const MIN_COPY_MARK: f32 = 18.;
 /// How far past the view to look: rooms overhang their squares, and rings
 /// overhang rooms.
 const MARGIN: f32 = 1.;
@@ -43,6 +47,8 @@ pub struct Scene {
     pub marked: Arc<HashSet<RoomId>>,
     /// Squares of the rooms picked to join.
     pub picked: Vec<(i32, i32)>,
+    /// Squares of Review's two copies, when they're on this sheet.
+    pub copies: [Option<(i32, i32)>; 2],
     pub colors: MapColors,
 }
 
@@ -67,7 +73,7 @@ impl Frame<'_> {
     }
 }
 
-pub fn paint(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window) {
+pub fn paint(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
     let square = scene.camera.square_size();
     let frame = Frame {
         scene,
@@ -107,6 +113,13 @@ pub fn paint(scene: &Scene, bounds: Bounds<Pixels>, window: &mut Window) {
             }
             for square in &scene.picked {
                 paint_pick(&frame, *square, window);
+            }
+        });
+        window.paint_layer(bounds, |window| {
+            for (index, square) in scene.copies.iter().enumerate() {
+                if let Some(square) = square {
+                    paint_copy(&frame, *square, index, window, cx);
+                }
             }
         });
     });
@@ -308,6 +321,36 @@ fn paint_pick(frame: &Frame, square: (i32, i32), window: &mut Window) {
     let radius = corner(frame.room) + 1.;
     let color = frame.scene.colors.you;
     window.paint_quad(framed(ring, transparent_black(), color, 2., radius));
+}
+
+/// One of Review's copies: a square in its own color, with its number, big
+/// enough to read however far out the map is.
+fn paint_copy(frame: &Frame, square: (i32, i32), index: usize, window: &mut Window, cx: &mut App) {
+    let colors = &frame.scene.colors;
+    let side = (frame.room + 6.).max(MIN_COPY_MARK);
+    let mark = frame.around(frame.at(square), side);
+    let color = colors.copies[index];
+    window.paint_quad(framed(mark, color, color, 0., corner(side)));
+    let number = SharedString::from((index + 1).to_string());
+    let font_size = px(side * 0.6);
+    let run = TextRun {
+        len: number.len(),
+        font: Font {
+            weight: FontWeight::BOLD,
+            ..font(UI_FONT)
+        },
+        color: colors.on_copy,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(number, font_size, &[run], None);
+    let origin = mark.center() - point(line.width / 2., font_size * 0.6);
+    // A number that can't be drawn still leaves its colored square.
+    line.paint(origin, font_size * 1.2, TextAlign::Left, None, window, cx)
+        .ok();
 }
 
 fn paint_selection(frame: &Frame, square: (i32, i32), window: &mut Window) {

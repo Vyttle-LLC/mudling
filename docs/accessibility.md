@@ -10,7 +10,7 @@ cargo run --release -p mudling-desktop -- --synthetic --ax-check
 ```
 
 `--ax-check` (macOS) runs the window off screen, never taking focus, walks it
-through 52 stops (every panel, the HUD in each place, every settings section,
+through 54 stops (every panel, the HUD in each place, every settings section,
 page and question it can reach without a real game) and prints a JSON report.
 It exits 1 if a check fails. It checks two ways:
 
@@ -27,13 +27,13 @@ It exits 1 if a check fails. It checks two ways:
 
 | | |
 |---|---|
-| Stops | 52 |
-| Elements, rows folded together (the inventory below) | 155 |
-| Controls seen in the audit's tree dumps, counting each row's copy (48 stops) | 1,127 |
+| Stops | 54 |
+| Elements, rows folded together (the inventory below) | 163 |
+| Controls seen in the audit's tree dumps, counting each row's copy (48 stops, before the update card) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
-| Gaps found | 16 |
-| Gaps fixed | 16 |
-| Checks in `--ax-check`, before and after | 80 and 97 |
+| Gaps found | 18 |
+| Gaps fixed | 18 |
+| Checks in `--ax-check`, before and after (with the update card's two) | 82 and 100 |
 
 ## Gaps found and fixed
 
@@ -41,6 +41,8 @@ It exits 1 if a check fails. It checks two ways:
 |---|---|
 | The trigger, alias and Logs switches were all named "…, on", so an off switch said "on" | Switches are named for what they turn on; on or off is their state |
 | Plugin switches said on or off twice, in the name and the state | Named for the plugin alone |
+| Check for updates, the same | Named "Check for updates" |
+| Restart to update's question was a plain box, not a dialog | An alert dialog named "Restart to update?" |
 | HUD meters read "3,120/4,300" | They read "3,120 of 4,300" |
 | The HUD's top strip drew the opponent as text no screen reader could reach | It's a label, read with its health |
 | Tab and Shift-Tab skipped the hotbar: its chips and Add a chip held focus handles that weren't tab stops | They are tab stops, between the left panel and the command bar |
@@ -127,7 +129,7 @@ control with several rows, one per item or rule, is one line here.
 | Duplicates line | Status (live) | *n* rooms look like duplicates | named |
 | Review duplicates | Button | Review duplicates | named |
 | Review | Group | Skip this pair, Not the same, Join these rooms, Close Review | named, focus |
-| Both copies | Group | First copy…, Second copy… | named |
+| Both copies, side by side over the map | Group | First copy…, Second copy… | named |
 | Pick a room to join | Button, toggled | Pick *room* to join | named |
 | Picked | Status (live) | *n* rooms picked | named |
 | Join the rooms picked, Clear the rooms picked | Button | *same* | named |
@@ -245,6 +247,14 @@ control with several rows, one per item or rule, is one line here.
 | Clear chat logs | Button | Clear chat logs | named |
 | Pin, Export a log | Button, Pin toggled | Pin chat log of *server, when*; Export … | named |
 | **Data & sync:** Sync now, Hide history, Stop syncing | Button | *same* | named |
+| Update card, on top of the sheet | Group, Heading | MUDling *version* is ready | named |
+| Its notes | List of ListItems | What's new; *each change* | named |
+| Release notes, Later, Restart to update | Button | *same* | named |
+| Settings, with an update waiting | Button | Settings, MUDling *version* is ready | named |
+| Check for updates | Switch | Check for updates | named |
+| Check now | Button | Check now | named |
+| When it checks, last checked | Label | *words* | named |
+| Restart's question | AlertDialog with Heading, Buttons | Restart to update?; *what restarting does*; Cancel, Restart | named, focus |
 | **Vault:** Reveal, Change, Remove | Button | Reveal / Change / Remove the password for *character on server* | named |
 | Its question | Buttons | Keep the password for…, Remove the password for… | named |
 | Add a password | Button | Add a password | named |

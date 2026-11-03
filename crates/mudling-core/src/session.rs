@@ -114,7 +114,7 @@ impl SessionConfig {
             credentials: None,
             sync: None,
             client_name: "MUDling".to_owned(),
-            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            client_version: crate::build_version().to_owned(),
             hook_limits: HookLimits::default(),
         }
     }

@@ -1,4 +1,4 @@
-//! Keeps [`Appearance`] and the player's sync and vault choices across
+//! Keeps [`Appearance`] and the player's sync, vault and update choices across
 //! launches, as rows in the core's `meta` table. Settings belong to the
 //! device, not a server, so the rows live in a database of their own, outside
 //! the folder of server databases.
@@ -8,6 +8,7 @@
 
 use crate::hud::HudPlacement;
 use crate::theme::{Appearance, CHAT_FONTS, ThemeChoice};
+use crate::update::UpdateChoices;
 use mudling_core::persist::{self, Batch, Database, Meta, Timestamp, Writer};
 use mudling_core::repo::AppSettings;
 use mudling_core::vault::AutoLock;
@@ -18,6 +19,7 @@ const FOLDER: &str = "app";
 const DATABASE: &str = "desktop";
 const APPEARANCE_KEY: &str = "desktop.appearance";
 const SYNC_KEY: &str = "desktop.sync";
+const UPDATES_KEY: &str = "desktop.updates";
 
 /// The row's JSON. A field it lacks keeps its default.
 #[derive(Serialize, Deserialize)]
@@ -168,6 +170,7 @@ pub struct SavedSettings {
     writer: Writer,
     /// What was kept when this opened.
     sync_choices: SyncChoices,
+    update_choices: UpdateChoices,
 }
 
 impl SavedSettings {
@@ -183,10 +186,14 @@ impl SavedSettings {
         let sync_choices = row(SYNC_KEY)
             .and_then(|row| serde_json::from_str(&row.value).ok())
             .unwrap_or_default();
+        let update_choices = row(UPDATES_KEY)
+            .and_then(|row| serde_json::from_str(&row.value).ok())
+            .unwrap_or_default();
         let writer = database.writer()?;
         let saved = SavedSettings {
             writer,
             sync_choices,
+            update_choices,
         };
         Ok((saved, appearance))
     }
@@ -205,6 +212,16 @@ impl SavedSettings {
     pub fn save_sync(&self, choices: &SyncChoices) {
         let value = serde_json::to_string(choices).expect("the row serializes");
         self.save_row(SYNC_KEY, value);
+    }
+
+    pub fn update_choices(&self) -> UpdateChoices {
+        self.update_choices.clone()
+    }
+
+    /// Queues `choices`, the same way.
+    pub fn save_updates(&self, choices: &UpdateChoices) {
+        let value = serde_json::to_string(choices).expect("the row serializes");
+        self.save_row(UPDATES_KEY, value);
     }
 
     fn save_row(&self, key: &str, value: String) {

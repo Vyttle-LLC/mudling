@@ -29,7 +29,7 @@ use gpui::{
 pub use join::{PickRoom, bind_keys};
 use model::ScanStep;
 pub use model::{MapModel, Selection, Walk};
-use mudling_core::map::RoomId;
+use mudling_core::map::{RoomId, RoomPair};
 use mudling_core::session::MapEdit;
 use mudling_core::store::{Diff, MapState, Versioned};
 pub use sheet::Pip;
@@ -48,6 +48,8 @@ const ZOOM_STEP: f32 = 1.25;
 const ZOOM_KEY_SIZE: Pixels = px(26.);
 /// The least height the map keeps in the panel, whatever sits under it.
 const MIN_SURFACE: Pixels = px(120.);
+/// The map's height over Review's comparison.
+const REVIEW_MAP_HEIGHT: Pixels = px(200.);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapLayout {
@@ -80,6 +82,8 @@ pub struct MapView {
     forget: forget::Forgetting,
     /// Review was open at the last draw, so a join may just have ended it.
     review_open: bool,
+    /// The pair Review last framed the map on, and the map's size then.
+    framed: Option<(RoomPair, (f32, f32))>,
     /// A timer will ask about duplicates again.
     scan_waiting: bool,
 }
@@ -113,6 +117,7 @@ impl MapView {
             undo_button: cx.focus_handle().tab_stop(true),
             forget: forget::Forgetting::new(cx),
             review_open: false,
+            framed: None,
             scan_waiting: false,
         };
         view.start_work(cx);
@@ -240,7 +245,9 @@ impl MapView {
         let Some(press) = self.press.take() else {
             return;
         };
-        if press.dragged > px(CLICK_SLOP) {
+        // Review's map is for looking: a click there would take away its
+        // note and Undo, and Review has no Join for picked rooms.
+        if press.dragged > px(CLICK_SLOP) || self.model.reviewing() {
             return;
         }
         let point = self.in_view(event.position);
@@ -283,28 +290,28 @@ impl MapView {
         cx.notify();
     }
 
-    fn map_surface(&self, colors: MapColors, cx: &mut Context<MapView>) -> impl IntoElement {
+    fn map_surface(
+        &self,
+        colors: MapColors,
+        cx: &mut Context<MapView>,
+    ) -> impl IntoElement + use<> {
         let theme = *cx.global::<Theme>();
-        let model = &self.model;
-        let scene = paint::Scene {
-            sheet: model.sheet().clone(),
-            camera: model.camera(),
-            you: model.you(),
-            selected: model
-                .selection()
-                .and_then(|selection| model.sheet().square_of(selection.room)),
-            marked: model.marked().clone(),
-            picked: (model.picks().iter())
-                .filter_map(|room| model.sheet().square_of(*room))
-                .collect(),
-            colors,
-        };
-        let bounds = self.bounds.clone();
+        let view = cx.entity().downgrade();
+        // The scene is taken once the map's bounds are known, so Review can
+        // frame its pair in the size it's about to paint.
         let surface = canvas(
-            |_, _, _| {},
-            move |painted, _, window, _| {
-                bounds.set(painted);
-                paint::paint(&scene, painted, window);
+            move |painted, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.bounds.set(painted);
+                    view.frame_review(cx);
+                    view.scene(colors)
+                })
+                .ok()
+            },
+            move |painted, scene, window, cx| {
+                if let Some(scene) = scene {
+                    paint::paint(&scene, painted, window, cx);
+                }
             },
         )
         .size_full();
@@ -330,13 +337,55 @@ impl MapView {
                 )
                 .on_scroll(cx.listener(Self::scrolled))
                 .on_pinch(cx.listener(Self::pinched))
-                .child(self.legend(colors, cx))
-                .children(self.pill(&theme, cx)),
+                // Review's map is short, and its pane says what the pill would.
+                .when(!self.model.reviewing(), |frame| {
+                    frame
+                        .child(self.legend(colors, cx))
+                        .children(self.pill(&theme, cx))
+                }),
+        }
+    }
+
+    /// Frames the pair in Review when it comes up or the map changes size,
+    /// and otherwise leaves the player to pan and zoom from there.
+    fn frame_review(&mut self, cx: &mut Context<Self>) {
+        let Some(pair) = self.model.reviewed_pair() else {
+            self.framed = None;
+            return;
+        };
+        let size = self.view_size();
+        if self.framed == Some((pair, size)) {
+            return;
+        }
+        self.model.look_at_review(size);
+        self.framed = Some((pair, size));
+        self.start_work(cx);
+    }
+
+    /// What the map paints this frame.
+    fn scene(&self, colors: MapColors) -> paint::Scene {
+        let model = &self.model;
+        let square_of = |room: RoomId| model.sheet().square_of(room);
+        paint::Scene {
+            sheet: model.sheet().clone(),
+            camera: model.camera(),
+            you: model.you(),
+            selected: model
+                .selection()
+                .and_then(|selection| square_of(selection.room)),
+            marked: model.marked().clone(),
+            picked: model
+                .picks()
+                .iter()
+                .filter_map(|room| square_of(*room))
+                .collect(),
+            copies: model.review_squares(),
+            colors,
         }
     }
 
     /// The inset's + over −, in its bottom-right corner.
-    fn zoom_keys(&self, theme: &Theme, cx: &mut Context<MapView>) -> impl IntoElement {
+    fn zoom_keys(&self, theme: &Theme, cx: &mut Context<MapView>) -> impl IntoElement + use<> {
         let key = |id: &'static str, name: &'static str, label: &'static str, factor: f32| {
             button(id, name.into(), theme)
                 .size(ZOOM_KEY_SIZE)
@@ -445,7 +494,7 @@ impl MapView {
 
     /// The canvas's two entries, then what only some sheets have. Clicking
     /// "You" brings the view back to the player.
-    fn legend(&self, colors: MapColors, cx: &mut Context<MapView>) -> impl IntoElement {
+    fn legend(&self, colors: MapColors, cx: &mut Context<MapView>) -> impl IntoElement + use<> {
         let sheet = self.model.sheet();
         let entry = |mark: gpui::Div, label: &'static str| {
             div()
@@ -569,9 +618,12 @@ impl Render for MapView {
                         .debug_selector(|| "map-surface".to_owned())
                         .flex_1()
                         .min_h(MIN_SURFACE)
-                        .map(|slot| match review {
-                            Some(pair) => slot.child(self.review_pane(pair, &theme, cx)),
-                            None => slot.child(self.map_surface(colors, cx)),
+                        .map(|slot| {
+                            let map = self.map_surface(colors, cx);
+                            match review {
+                                Some(pair) => slot.child(self.review_pane(pair, map, &theme, cx)),
+                                None => slot.child(map),
+                            }
                         }),
                 )
                 .children(selected.and_then(|room| self.room_actions(room, &theme, cx)))
@@ -946,6 +998,56 @@ mod tests {
         });
     }
 
+    /// Whether each of Review's numbered marks is painted inside the map.
+    fn copies_in_view(view: &Entity<MapView>, cx: &mut VisualTestContext) -> [bool; 2] {
+        view.read_with(cx, |view, _| {
+            let size = view.view_size();
+            view.model.review_squares().map(|square| {
+                square.is_some_and(|(x, y)| {
+                    let (x, y) = view.model.camera().to_view((x as f32, y as f32), size);
+                    (0. ..=size.0).contains(&x) && (0. ..=size.1).contains(&y)
+                })
+            })
+        })
+    }
+
+    #[gpui::test]
+    fn review_keeps_the_map_framed_on_both_copies(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        click_on("Review duplicates", cx);
+
+        assert!(cx.debug_bounds("map-review").is_some());
+        let map = view.read_with(cx, |view, _| view.bounds.get());
+        assert!(map.size.height > px(0.) && map.size.height <= REVIEW_MAP_HEIGHT);
+        assert_eq!(copies_in_view(&view, cx), [true, true]);
+
+        // A pan is the player's own, and the next pair frames afresh.
+        view.update(cx, |view, cx| {
+            view.model.pan((2_000., 0.));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(copies_in_view(&view, cx), [false, false]);
+        click_on("Skip this pair", cx);
+        assert_eq!(copies_in_view(&view, cx), [true, true]);
+    }
+
+    #[gpui::test]
+    fn a_short_window_keeps_reviews_actions_and_both_copies_in_view(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let short = gpui::size(px(480.), px(340.));
+        cx.simulate_resize(short);
+        cx.run_until_parked();
+        click_on("Review duplicates", cx);
+
+        for action in ["Skip this pair", "Not the same", "Join these rooms"] {
+            let bounds = cx.debug_bounds(action).expect("Review offers it");
+            assert!(bounds.size.height > px(0.), "{action} has room");
+            assert!(bounds.bottom() <= short.height, "{action} is in the window");
+        }
+        assert_eq!(copies_in_view(&view, cx), [true, true]);
+    }
+
     #[gpui::test]
     fn review_says_how_a_join_went_and_offers_undo_there(cx: &mut TestAppContext) {
         let (view, cx) = duplicated_view(cx);
@@ -968,6 +1070,32 @@ mod tests {
             [MapEdit::Join { .. }, MapEdit::UndoJoin { .. }]
         ));
         assert!(cx.debug_bounds("map-review-note").is_none());
+    }
+
+    #[gpui::test]
+    fn a_click_on_reviews_map_keeps_undo_and_picks_nothing(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        click_on("Review duplicates", cx);
+        click_on("Join these rooms", cx);
+        answer(&view, 1, joined(), cx);
+
+        let on_a_copy = view.read_with(cx, |view, _| {
+            let (x, y) = view.model.review_squares()[0].expect("the first copy is shown");
+            let at = view
+                .model
+                .camera()
+                .to_view((x as f32, y as f32), view.view_size());
+            view.bounds.get().origin + point(px(at.0), px(at.1))
+        });
+        cx.simulate_click(on_a_copy, Modifiers::none());
+        cx.simulate_click(on_a_copy, Modifiers::shift());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("Undo the join").is_some());
+        view.read_with(cx, |view, _| {
+            assert!(view.model.picks().is_empty());
+            assert!(view.model.selection().is_none());
+        });
     }
 
     #[gpui::test]

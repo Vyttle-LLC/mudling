@@ -1,5 +1,6 @@
 //! "Where to today?": what the window shows with no game. A card for each
-//! saved character, adding a server, and Quick connect.
+//! saved character, adding a server, and Quick connect, under an update
+//! that's ready.
 //!
 //! It only draws and validates. What it asks for, it emits, and the shell does
 //! off the UI thread. Nothing here runs while the player reads it.
@@ -7,6 +8,7 @@
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::input::{CommandInput, InputEvent};
 use crate::launcher::Target;
+use crate::settings::UpdateAsk;
 use crate::theme::Theme;
 use crate::title_bar::{FocusNextControl, runestone_mark};
 use gpui::{
@@ -224,6 +226,7 @@ fn quiet_line(id: &'static str, role: Role, text: impl Into<SharedString>) -> St
 pub enum EmptyStateEvent {
     Connect(Target),
     Add(Target),
+    Update(UpdateAsk),
 }
 
 pub struct EmptyState {
@@ -237,6 +240,8 @@ pub struct EmptyState {
     add_error: Option<&'static str>,
     /// What went wrong that isn't about what's typed.
     problem: Option<SharedString>,
+    /// The version of the update that's ready, unless Later put it off.
+    update: Option<SharedString>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -266,8 +271,69 @@ impl EmptyState {
             adding: false,
             add_error: None,
             problem: None,
+            update: None,
             _subscriptions: [quick_typed, address_typed],
         }
+    }
+
+    pub fn show_update(&mut self, version: Option<SharedString>, cx: &mut Context<EmptyState>) {
+        if version != self.update {
+            self.update = version;
+            cx.notify();
+        }
+    }
+
+    /// The update that's ready: Restart, or it goes in on quitting.
+    fn render_update(&self, theme: &Theme, cx: &mut Context<EmptyState>) -> Option<Stateful<Div>> {
+        let title = format!("MUDling {} is ready", self.update.as_ref()?);
+        let later = text_button("empty-update-later", "Later", false, theme).on_click(
+            cx.listener(|_, _, _, cx| cx.emit(EmptyStateEvent::Update(UpdateAsk::Later))),
+        );
+        let restart = text_button("empty-update-restart", "Restart", false, theme)
+            .border_color(theme.accent)
+            .text_color(theme.accent)
+            .on_click(
+                cx.listener(|_, _, _, cx| cx.emit(EmptyStateEvent::Update(UpdateAsk::Restart))),
+            );
+        Some(
+            div()
+                .id("empty-update")
+                .debug_selector(|| "empty-update".to_owned())
+                .role(Role::Group)
+                .aria_label(title.clone())
+                .w_full()
+                .mb_2()
+                .px_4()
+                .py_3()
+                .flex()
+                .items_center()
+                .gap_4()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.accent)
+                .bg(theme.surface_raised)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            quiet_line("empty-update-title", Role::Heading, title)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(15.)),
+                        )
+                        .child(
+                            quiet_line(
+                                "empty-update-when",
+                                Role::Label,
+                                "Restart now, or it goes in when you quit.",
+                            )
+                            .text_size(px(13.))
+                            .text_color(theme.text_muted),
+                        ),
+                )
+                .child(later)
+                .child(restart),
+        )
     }
 
     pub fn show(&mut self, saved: &SavedServers, cx: &mut Context<EmptyState>) {
@@ -614,6 +680,7 @@ impl Render for EmptyState {
                 .text_size(px(15.))
                 .text_color(theme.text_muted),
             )
+            .children(self.render_update(&theme, cx))
             .child(div().w_full().flex().flex_col().gap_2().children(cards))
             .child(
                 div()
