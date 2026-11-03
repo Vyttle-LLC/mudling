@@ -181,8 +181,9 @@ pub struct Theme {
     pub on_accent: Hsla,
     /// What can't be taken back, such as Kill.
     pub danger: Hsla,
-    /// A stat that would go up, or down.
+    /// A change for the better; armor counts down.
     pub better: Hsla,
+    /// A change for the worse.
     pub worse: Hsla,
     pub placeholder: Hsla,
     /// Words that say what went wrong.

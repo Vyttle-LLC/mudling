@@ -53,20 +53,22 @@ fn in_order(stats: impl IntoIterator<Item = String>) -> Vec<String> {
     stats
 }
 
+/// "AC −1 (better)": one stat's change.
+fn stat_words(stat: &str, value: i64) -> String {
+    format!(
+        "{} {}{}",
+        label(stat),
+        signed(value),
+        armor_note(stat, value)
+    )
+}
+
 /// "Str +1 · AC −1 (better)", or nothing when nothing changed.
 pub fn stat_changes(effects: &StatMap) -> Option<String> {
     let stats = effects.iter().filter(|(_, value)| **value != 0);
     let parts: Vec<String> = in_order(stats.map(|(stat, _)| stat.clone()))
         .iter()
-        .map(|stat| {
-            let value = effects[stat];
-            format!(
-                "{} {}{}",
-                label(stat),
-                signed(value),
-                armor_note(stat, value)
-            )
-        })
+        .map(|stat| stat_words(stat, effects[stat]))
         .collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -179,13 +181,7 @@ impl Marked {
                 self.push(" ");
             }
             let value = compared.changes[stat];
-            let words = format!(
-                "{} {}{}",
-                label(stat),
-                signed(value),
-                armor_note(stat, value)
-            );
-            self.push_marked(&words, is_better(stat, value));
+            self.push_marked(&stat_words(stat, value), is_better(stat, value));
         }
         if !compared.known {
             self.push(" (worn stats unknown)");
@@ -210,7 +206,7 @@ pub fn line(stats: &ItemStats) -> String {
             let base = stat_changes(&reading.base);
             let added = stat_changes(&added_total(reading));
             let added = added.map_or_else(String::new, |added| format!(", enchanted {added}"));
-            let base = base.as_deref().unwrap_or("No stat changes");
+            let base = base.as_deref().unwrap_or(NO_STAT_CHANGES);
             format!("{base}{added} (identified)")
         }
         ItemStats::Measured(effects) => {
@@ -234,10 +230,7 @@ pub fn line(stats: &ItemStats) -> String {
                 source.push_str("; likely enchanted, may be better");
             }
             let seen = ranges(estimate);
-            format!(
-                "{} ({source})",
-                seen.as_deref().unwrap_or("No stat changes")
-            )
+            format!("{} ({source})", seen.as_deref().unwrap_or(NO_STAT_CHANGES))
         }
     }
 }
