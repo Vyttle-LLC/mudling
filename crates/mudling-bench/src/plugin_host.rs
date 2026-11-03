@@ -17,14 +17,12 @@ use crate::HEAP_BYTES;
 use mudling_core::line::{Line, LinePipeline};
 use mudling_core::plugin::points::Text;
 use mudling_core::plugin::{DEFAULT_COST_SAMPLING, Plugin, PluginEvent, PluginHost, PluginSink};
-use mudling_core::stats::Summary;
+use mudling_core::stats::{LINE_BUDGET_US, PLUGIN_BUDGET_US, Summary};
 use serde::Serialize;
 use std::fmt::Write;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-const LINE_BUDGET_US: f64 = 20.0;
-pub(crate) const PLUGIN_BUDGET_US: f64 = 5.0;
 const MIN_LINES: usize = 100_000;
 const PLUGINS: usize = 6;
 const MANY_PLUGINS: usize = 20;

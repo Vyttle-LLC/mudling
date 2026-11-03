@@ -26,11 +26,12 @@
 //! Auto-login awaits [`Vault::password`]; dropping the future stops the wait.
 //!
 //! ```no_run
-//! use mudling_core::vault::{AutoLock, EntryKey, OsKeyStore, Vault};
+//! use mudling_core::vault::{AutoLock, EntryKey, FILE_NAME, OsKeyStore, Vault};
+//! use std::path::Path;
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), mudling_core::vault::Error> {
-//! let path = Vault::default_path().expect("the OS has a data folder");
+//! let path = Path::new("/path/to/data").join(FILE_NAME);
 //! let vault = Vault::open(path, Arc::new(OsKeyStore), AutoLock::default());
 //! vault.unlock_with_password("a long and unusual passphrase".into()).await?;
 //! let entry = EntryKey::new("mud.example.org", "Fikus");
@@ -146,12 +147,6 @@ pub struct Vault {
 }
 
 impl Vault {
-    /// Where `secrets.vault` lives when there's no repo.
-    pub fn default_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("com", "Vyttle", "MUDling")
-            .map(|dirs| dirs.data_dir().join(FILE_NAME))
-    }
-
     /// Starts the vault's thread, locked. The file needn't exist yet.
     pub fn open(path: PathBuf, key_store: Arc<dyn KeyStore>, auto_lock: AutoLock) -> Self {
         Self::with_kdf(path, key_store, auto_lock, KdfParams::DEFAULT)
@@ -335,6 +330,7 @@ impl Vault {
     }
 
     /// Locks, and removes this device's cached key.
+    #[cfg(test)]
     pub async fn forget_device(&self) -> Result<(), Error> {
         self.call(Worker::forget_device).await
     }

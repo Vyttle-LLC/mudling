@@ -3,10 +3,11 @@
 //! reads and watches a folder, off the UI thread; this page shows what it
 //! hands over, and lists what the player added, with Remove.
 
-use super::directory::{Approval, Downloaded, InCard, Purpose, card_row};
+use super::directory::{Approval, Downloaded, InCard, Purpose, card_line};
 use super::plugins::broken_reload;
-use super::{Page, Pane, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
-use crate::assets::UI_FONT;
+use super::{
+    Page, Pane, SettingsSheet, SheetEvent, muted_line, problem_line, section_heading, text_button,
+};
 use crate::input::{CommandInput, InputEvent};
 use crate::theme::Theme;
 use gpui::{
@@ -202,12 +203,7 @@ impl SettingsSheet {
         ));
         pane.leading = Some(back.into_any_element());
         if let Some(problem) = self.add.problem.clone() {
-            pane.row(
-                muted_line(problem, theme)
-                    .debug_selector(|| "add-problem".to_owned())
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            );
+            pane.row(problem_line(problem, theme).debug_selector(|| "add-problem".to_owned()));
         }
         if self.installs_changed && self.server.is_some() {
             pane.row(self.reconnect_note(theme));
@@ -236,12 +232,7 @@ impl SettingsSheet {
         };
         let count = 1 + links.len();
         pane.row(
-            card_row(InCard::of(0, count), theme)
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .py_3()
+            card_line(InCard::of(0, count), theme)
                 .child(div().flex_1().min_w_0().child(field))
                 .child(add),
         );
@@ -266,13 +257,7 @@ impl SettingsSheet {
             )
         });
         pane.row(
-            card_row(InCard::of(0, count), theme)
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_4()
-                .py_3()
-                .font_family(UI_FONT)
+            card_line(InCard::of(0, count), theme)
                 .child(row_words(
                     "add-folder-words",
                     CHOOSE.into(),
@@ -351,15 +336,7 @@ impl SettingsSheet {
             problem,
             theme,
         );
-        card_row(at, theme)
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .font_family(UI_FONT)
-            .child(words)
-            .child(remove)
+        card_line(at, theme).child(words).child(remove)
     }
 
     /// Fills the page with made-up additions, as the design draws it: for

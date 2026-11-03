@@ -4,8 +4,10 @@
 //! A switch is saved for that server at once. A session reads its plugins when
 //! it opens, so on the server being played it takes effect at the next connect.
 
-use super::plugins::{PluginRow, cost_label, rule_counts};
-use super::{Page, Pane, Section, SettingsSheet, muted_line, section_heading, text_button};
+use super::plugins::{PluginRow, cost_label, micros, rule_words};
+use super::{
+    Page, Pane, Section, SettingsSheet, muted_line, problem_line, section_heading, text_button,
+};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{Context, FontWeight, Role, SharedString, Stateful, div, prelude::*, px};
@@ -121,13 +123,13 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let about: SharedString = match row.layer {
-            _ if row.always_on => format!("{} · {ALWAYS_ON}", row.version).into(),
-            Layer::Override => format!("{} · {}", row.holds, row.version).into(),
-            _ => row.version.clone(),
+            _ if row.always_on => format!("{} · {ALWAYS_ON}", row.detail).into(),
+            Layer::Override => format!("{} · {}", row.holds, row.detail).into(),
+            _ => row.detail.clone(),
         };
         let cost = self.page_cost(row);
         let said = match cost {
-            Some(cost) => format!("{}, {about}, {cost:.1} µs a line", row.name),
+            Some(cost) => format!("{}, {about}, {} a line", row.name, micros(cost)),
             None => format!("{}, {about}", row.name),
         };
         let words = div()
@@ -165,11 +167,7 @@ impl SettingsSheet {
         pane.leading = Some(back.into_any_element());
         pane.row(muted_line(LAYERS_NOTE, theme));
         if let Some(problem) = self.servers_problem.clone() {
-            pane.row(
-                muted_line(problem, theme)
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            );
+            pane.row(problem_line(problem, theme));
         }
         if let Some(problem) = self.switch_problem_line(theme) {
             pane.row(problem);
@@ -215,7 +213,7 @@ impl SettingsSheet {
         pane.row(rows);
 
         pane.row(section_heading("Your overrides", theme));
-        let rules = rule_counts(page.triggers, page.aliases);
+        let rules = rule_words(page.triggers, page.aliases);
         let words = div()
             .id("server-rules")
             .role(Role::Label)
@@ -242,7 +240,7 @@ mod tests {
             id: PluginId::try_from(id.to_owned()).unwrap(),
             name: id.to_owned().into(),
             layer: Layer::Game,
-            version: "1.0.0 · MIT".into(),
+            detail: "1.0.0 · MIT".into(),
             holds: "".into(),
             always_on: false,
             on,

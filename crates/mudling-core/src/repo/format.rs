@@ -62,26 +62,18 @@ pub(super) const IGNORED: [&str; 7] = [
 pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 
 /// The only [`Meta`] keys that sync besides the notepad, which has a file of
-/// its own. The rest stay on the device: the room this device last stood in,
-/// and the id prefix and next id that set its rooms' ids apart from other
-/// devices'. Saved versions of the map stay too, since their rows hold ids a
-/// union may have retired; a restore reaches other devices as the rows it
-/// changes, and as tombstones for the rooms it drops.
+/// its own; a key ending in a dot is a family. The rest stay on the device:
+/// the room it last stood in, the id prefix and next id that set its rooms
+/// apart, and saved versions of the map, whose rows hold ids a union may have
+/// retired.
 ///
-/// A key ending in a dot is a family. [`JOINED`] travels because a join has to
-/// reach every device and last, unlike a tombstone: it's how a copy of the
-/// retired room finds its way to the kept room, however late it turns up.
-/// [`NOT_SAME`] travels because the player's answer holds for the map, and no
-/// device should ask it again.
-///
-/// What a game's plugin learns about an item travels as its name and its
-/// keyword (`plugin.gear.name.` and `plugin.gear.keyword.`), since a device
-/// that hasn't met the item can use them. Its slots and the plugin's other
-/// words are rows (`item_facts`) or aren't the player's. `plugin.gear.holds.`
-/// and `plugin.gear.verb.` stay: the plugin says them again on every
-/// connection, so a copy from another device is only ever stale. They stay out
-/// by name, so no wider `plugin.gear.` is listed here, and `.keywords.`, which
-/// an older version moved to rows, can't match `.keyword.`.
+/// [`JOINED`] travels because a join must reach every device and last: it's
+/// how a late copy of the retired room finds the kept one. [`NOT_SAME`]
+/// travels because the player's answer holds for the map. An item's name and
+/// keyword travel, since a device that hasn't met the item can use them.
+/// `plugin.gear.holds.` and `plugin.gear.verb.` stay, as the plugin says them
+/// again each connection, so they're left out by name rather than by a wider
+/// `plugin.gear.`.
 const SYNCED_META: [&str; 6] = [
     ISLANDS,
     HOTBAR_META,

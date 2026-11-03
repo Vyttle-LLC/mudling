@@ -48,7 +48,6 @@ impl Batch {
         self
     }
 
-    /// Forgets tombstones from before `before`.
     pub fn forget_tombstones(&mut self, before: Timestamp) -> &mut Batch {
         self.changes.push(Change::ForgetTombstones(before));
         self
@@ -86,7 +85,6 @@ impl Batch {
         self.changes.is_empty()
     }
 
-    /// Adds `later`'s changes after these.
     pub(crate) fn extend(&mut self, later: Batch) {
         self.changes.extend(later.changes);
     }

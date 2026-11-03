@@ -12,6 +12,7 @@ use mudling_core::plugin::luau::{
 };
 use mudling_core::plugin::manifest::API_VERSION;
 use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost};
+use mudling_core::stats::PLUGIN_BUDGET_US;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
@@ -283,6 +284,7 @@ fn the_limits_are_the_code_s() {
             "| Overruns in a session before the plugin is turned off | {OVERRUNS_TO_TURN_OFF} |"
         ),
         format!("| `api` | yes | The API version: `{API_VERSION}`. |"),
+        format!("| Added per line at p99, per plugin | {PLUGIN_BUDGET_US} µs |"),
     ];
     for row in rows {
         assert!(reference.contains(&row), "the reference doesn't say: {row}");

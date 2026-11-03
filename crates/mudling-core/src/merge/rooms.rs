@@ -36,7 +36,7 @@
 //! join is undone, so anything that turns up for the retired room moves
 //! whenever it arrives.
 
-use super::records::outranks;
+use super::records::{newest_deletes, outranks};
 use crate::map::{CURRENT_ROOM, RoomId, UNNUMBERED_IDS, follow_joins, join_record, joins_in};
 use crate::persist::{
     Batch, Change, Key, Keyed, MapRows, Meta, Record, RoomNote, Timestamp, Tombstone,
@@ -89,11 +89,7 @@ pub(super) fn unite_rooms(ours: &mut ServerRows, theirs: &mut ServerRows, base_n
 /// kept room from before the join was about that room's row, not this one.
 fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &[RoomNote]) {
     let mut joins = standing_joins(ours, theirs);
-    let mut deleted: BTreeMap<Key, Timestamp> = BTreeMap::new();
-    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
-        let newest = deleted.entry(tombstone.key.clone()).or_default();
-        *newest = tombstone.deleted.max(*newest);
-    }
+    let deleted = newest_deletes(&ours.tombstones, &theirs.tombstones);
     let holders: BTreeMap<RoomId, RoomId> = joins.iter().map(|(id, (to, _))| (*id, *to)).collect();
     let held = room_ids(ours).into_iter().chain(room_ids(theirs));
     let held: HashSet<RoomId> = held.collect();
@@ -135,13 +131,7 @@ fn carry_out_joins(ours: &mut ServerRows, theirs: &mut ServerRows, base_notes: &
 /// room that holds it now and when the player joined it. A record an undo
 /// tombstoned no longer counts.
 fn standing_joins(ours: &ServerRows, theirs: &ServerRows) -> BTreeMap<RoomId, (RoomId, Timestamp)> {
-    let mut deleted: BTreeMap<&str, Timestamp> = BTreeMap::new();
-    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
-        if let Key::Meta(key) = &tombstone.key {
-            let newest = deleted.entry(key.as_str()).or_default();
-            *newest = tombstone.deleted.max(*newest);
-        }
-    }
+    let deleted = newest_deletes(&ours.tombstones, &theirs.tombstones);
     let mut newest: BTreeMap<RoomId, &Meta> = BTreeMap::new();
     for row in ours.meta.iter().chain(&theirs.meta) {
         let Some((retired, ..)) = join_record(row) else {
@@ -159,7 +149,7 @@ fn standing_joins(ours: &ServerRows, theirs: &ServerRows) -> BTreeMap<RoomId, (R
         }
     }
     newest.retain(|_, row| {
-        let at = deleted.get(row.key.as_str());
+        let at = deleted.get(&Key::Meta(row.key.clone()));
         at.is_none_or(|deleted| *deleted <= row.updated)
     });
     let records = newest.values().filter_map(|row| join_record(row));
@@ -677,14 +667,12 @@ fn room_ids(rows: &ServerRows) -> HashSet<RoomId> {
 }
 
 fn room_deletes(ours: &ServerRows, theirs: &ServerRows) -> HashMap<RoomId, Timestamp> {
-    let mut deleted = HashMap::new();
-    for tombstone in ours.tombstones.iter().chain(&theirs.tombstones) {
-        if let Key::Room(id) = tombstone.key {
-            let newest = deleted.entry(id).or_default();
-            *newest = tombstone.deleted.max(*newest);
-        }
-    }
-    deleted
+    let deleted = newest_deletes(&ours.tombstones, &theirs.tombstones);
+    let rooms = deleted.into_iter().filter_map(|(key, at)| match key {
+        Key::Room(id) => Some((id, at)),
+        _ => None,
+    });
+    rooms.collect()
 }
 
 /// The rooms with no game number, grouped by what makes them that room.

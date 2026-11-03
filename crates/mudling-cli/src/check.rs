@@ -6,7 +6,7 @@ use mudling_core::plugin::Plugin;
 use mudling_core::plugin::check::{
     self, Caught, EXPECTED_EXTENSION, Failure, LOG_EXTENSION, Read, TESTS_FOLDER,
 };
-use mudling_core::replay as logs;
+use mudling_core::replay::load_logs;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,7 +35,7 @@ pub fn run(folder: &Path, mode: &Mode) -> Result<bool, String> {
         println!("fail {}", check::no_tests());
     }
     for log in &logs {
-        let lines = logs::load_logs(std::slice::from_ref(log))
+        let lines = load_logs(std::slice::from_ref(log))
             .map_err(|error| format!("couldn't read {}: {error}", log.display()))?;
         if lines.is_empty() {
             return Err(format!("{} has no server text", log.display()));

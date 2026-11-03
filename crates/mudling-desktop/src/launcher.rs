@@ -15,8 +15,8 @@ use mudling_core::logs::Logs;
 use mudling_core::persist;
 use mudling_core::plugin::{Layer, Plugin, PluginId, ServerInfo};
 use mudling_core::registry::{
-    self, AddedFolder, Approvals, Fetched, FolderCopy, InstalledPlugins, Origins, Record, Refused,
-    Registry, Source,
+    self, AddedFolder, Approvals, ApprovedCopy, Fetched, FolderCopy, InstalledPlugins, Origins,
+    Record, Refused, Registry, Source,
 };
 use mudling_core::session::{Credentials, Session, SessionConfig};
 use mudling_core::sync::{Syncer, is_within};
@@ -39,6 +39,10 @@ impl fmt::Display for Target {
         write!(f, "{}:{}", self.host, self.port)
     }
 }
+
+/// Each plugin that runs, by id, with the hash of its copy if that came from
+/// the directory: what the directory offers updates by.
+pub type InstalledVersions = BTreeMap<String, Option<String>>;
 
 #[derive(Clone)]
 pub struct Launcher {
@@ -188,12 +192,9 @@ impl Launcher {
         if let Some((added, plugin)) =
             forgotten.and_then(|added| Some((added, added.plugin.as_ref()?)))
         {
-            let approvals = Approvals::in_data_folder(&self.data_folder);
-            if approvals.is_approved(plugin.id().as_str(), &added.approval_key()) {
-                approvals
-                    .take_back(plugin.id().as_str())
-                    .map_err(could_not)?;
-            }
+            Approvals::in_data_folder(&self.data_folder)
+                .take_back(plugin.id().as_str(), &added.approval_key())
+                .map_err(could_not)?;
         }
         let mut launcher = self.clone();
         launcher.added.retain(|added| added.path != folder);
@@ -251,10 +252,10 @@ impl Launcher {
     /// What the player's approval of the copy of `plugin` that runs is kept
     /// by, if they can give one here: the command line's and the app's own
     /// send commands only with `--enable`.
-    fn approval_key(&self, plugin: &PluginId) -> Option<String> {
+    fn approval_key(&self, plugin: &PluginId) -> Option<ApprovedCopy> {
         match self.runs_from(plugin) {
             Runs::Added(added) => Some(added.approval_key()),
-            Runs::Installed(copy) => Some(copy.hash.clone()),
+            Runs::Installed(copy) => Some(ApprovedCopy::Installed(copy.hash.clone())),
             Runs::CommandLine | Runs::InApp => None,
         }
     }
@@ -284,18 +285,23 @@ impl Launcher {
         approved
     }
 
-    /// Lets `plugin` send commands, or takes that back. A copy in the data
-    /// folder is approved by its content hash, a folder the player added by
-    /// where it is.
+    /// Lets the copy of `plugin` that runs send commands, or takes that back.
+    /// A copy in the data folder is approved by its content hash, a folder
+    /// the player added by where it is.
     pub fn set_approved(&self, plugin: &PluginId, approved: bool) -> Result<(), String> {
         let approvals = Approvals::in_data_folder(&self.data_folder);
         let could_not = |error: std::io::Error| format!("couldn't save your choice: {error}");
-        if !approved {
-            return approvals.take_back(plugin.as_str()).map_err(could_not);
+        let Some(key) = self.approval_key(plugin) else {
+            return match approved {
+                true => Err(format!("{plugin} can send commands only with --enable")),
+                false => Ok(()),
+            };
+        };
+        match approved {
+            true => approvals.approve(plugin.as_str(), &key),
+            false => approvals.take_back(plugin.as_str(), &key),
         }
-        let key = (self.approval_key(plugin))
-            .ok_or_else(|| format!("{plugin} can send commands only with --enable"))?;
-        approvals.approve(plugin.as_str(), &key).map_err(could_not)
+        .map_err(could_not)
     }
 
     pub fn registry(&self) -> Registry {
@@ -311,7 +317,7 @@ impl Launcher {
     /// What's installed, by id, for the directory to offer updates by: the
     /// hash this device computed for each copy from the directory. A record
     /// travels with the repo, so its hash isn't one to go by.
-    pub fn installed_versions(&self) -> BTreeMap<String, Option<String>> {
+    pub fn installed_versions(&self) -> InstalledVersions {
         (self.plugins.iter().map(Plugin::id))
             .map(|id| {
                 let hash = match self.runs_from(id) {
@@ -424,26 +430,29 @@ impl Launcher {
     }
 
     /// Takes `plugin` out of the data folder from `folder`, the one its row
-    /// came from, and returns the launcher without it. Its approval goes
-    /// with it if it's the copy that runs: one held back beside that copy
-    /// never had it. So does the mirror of the link it came from, if it did.
+    /// came from, and returns the launcher without it. That copy's approval
+    /// goes with it: one held back never had one, so a copy running beside
+    /// it keeps its own. So does the mirror of the link it came from, if
+    /// it did, as far as it can: the plugin is gone either way.
     pub fn uninstall(&self, plugin: &PluginId, folder: &str) -> Result<Launcher, String> {
         let could_not = |error: std::io::Error| format!("{plugin} wasn't removed: {error}");
-        let ran = self.runs_from_folder(plugin, folder);
-        let link = (self.installed.iter().chain(&self.arrived))
-            .find(|copy| copy.folder == folder)
-            .and_then(|copy| match &copy.record {
-                Some(Record::Link { url, .. }) => Some(url.clone()),
-                _ => None,
-            });
+        let copy = (self.installed.iter().chain(&self.arrived)).find(|copy| copy.folder == folder);
+        let link = copy.and_then(|copy| match &copy.record {
+            Some(Record::Link { url, .. }) => Some(url.clone()),
+            _ => None,
+        });
         InstalledPlugins::in_data_folder(&self.data_folder)
             .remove(folder)
             .map_err(could_not)?;
-        if let Some(url) = link {
-            registry::forget_link(&self.data_folder, &url).map_err(could_not)?;
+        if let Some(copy) = copy {
+            Approvals::in_data_folder(&self.data_folder)
+                .take_back(plugin.as_str(), &ApprovedCopy::Installed(copy.hash.clone()))
+                .map_err(could_not)?;
         }
-        if ran {
-            self.set_approved(plugin, false)?;
+        if let Some(url) = link
+            && let Err(error) = registry::forget_link(&self.data_folder, &url)
+        {
+            eprintln!("couldn't delete the copy of {url} kept for updates: {error}");
         }
         Ok(self.clone().with_installed())
     }
@@ -487,10 +496,7 @@ impl Launcher {
     pub fn plugin_rows(&self, host: &str) -> Result<Vec<PluginRow>, String> {
         let could_not = |error: persist::Error| format!("couldn't read {host}: {error}");
         let saved = persist::enabled_plugins(&self.data_folder, host).map_err(could_not)?;
-        let enabled: Vec<PluginId> = (self.plugins.iter().map(Plugin::id))
-            .filter(|plugin| saved.iter().any(|id| id == plugin.as_str()))
-            .cloned()
-            .collect();
+        let enabled = self.ids_in(&saved);
         let overrides_off = self.overrides_off(host).map_err(could_not)?;
         let mut rows = PluginRow::for_session(&self.plugins, &enabled, &overrides_off, host);
         self.finished_rows(&mut rows);
@@ -565,18 +571,9 @@ impl Launcher {
             persist::save_enabled_plugins(&self.data_folder, &target.host, &saved)
                 .map_err(could_not)?;
         }
-        let enabled: Vec<PluginId> = self
-            .plugins
-            .iter()
-            .map(Plugin::id)
-            .filter(|plugin| {
-                self.command_line.contains(plugin) || saved.iter().any(|id| id == plugin.as_str())
-            })
-            .cloned()
-            .collect();
-        let overrides_off = self
-            .overrides_off(&target.host)
-            .map_err(|error| format!("couldn't open {target}: {error}"))?;
+        saved.extend(self.command_line.iter().map(|id| id.as_str().to_owned()));
+        let enabled = self.ids_in(&saved);
+        let overrides_off = self.overrides_off(&target.host).map_err(could_not)?;
         let approved = self.approved();
         let mut plugins =
             PluginRow::for_session(&self.plugins, &enabled, &overrides_off, &target.host);
@@ -604,10 +601,17 @@ impl Launcher {
     }
 
     fn overrides_off(&self, host: &str) -> Result<Vec<PluginId>, persist::Error> {
-        let off = persist::overrides_off(&self.data_folder, host)?;
-        let turned_off = |plugin: &&PluginId| off.iter().any(|id| id == plugin.as_str());
-        let ids = self.plugins.iter().map(Plugin::id).filter(turned_off);
-        Ok(ids.cloned().collect())
+        Ok(self.ids_in(&persist::overrides_off(&self.data_folder, host)?))
+    }
+
+    /// The ids of the plugins here that `listed` names: a saved list can
+    /// name one that's gone.
+    fn ids_in(&self, listed: &[String]) -> Vec<PluginId> {
+        let named = |plugin: &&PluginId| listed.iter().any(|id| id == plugin.as_str());
+        (self.plugins.iter().map(Plugin::id))
+            .filter(named)
+            .cloned()
+            .collect()
     }
 
     /// What Settings shows of `host`'s plugins. `suggested` and `running` are
@@ -622,10 +626,7 @@ impl Launcher {
     ) -> Result<ServerPlugins, String> {
         let could_not = |error: persist::Error| format!("couldn't read {host}: {error}");
         let saved = persist::enabled_plugins(&self.data_folder, host).map_err(could_not)?;
-        let enabled: Vec<PluginId> = (self.plugins.iter().map(Plugin::id))
-            .filter(|plugin| saved.iter().any(|id| id == plugin.as_str()))
-            .cloned()
-            .collect();
+        let enabled = self.ids_in(&saved);
         let overrides_off = self.overrides_off(host).map_err(could_not)?;
         let (triggers, aliases) =
             persist::rule_counts(&self.data_folder, host).map_err(could_not)?;
@@ -1346,6 +1347,57 @@ mod tests {
         let launcher = launcher.reload_folder(mine.path());
 
         assert_eq!(launcher.approved(), [id]);
+    }
+
+    #[test]
+    fn a_folder_with_an_installed_plugin_s_id_has_an_approval_of_its_own() {
+        let data = TempDir::new().unwrap();
+        let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let extras = fetched_sender("function on_go() end");
+        let id = extras.plugin.id().clone();
+        let launcher = launcher.install(&extras, true).unwrap();
+        let mine = players_folder(&fetched_sender("function on_go() mud.send('wave') end"));
+        let launcher = launcher.add_folder(mine.path(), None).unwrap();
+        assert!(launcher.runs_from_added(&id, mine.path()));
+        assert!(
+            launcher.approved().is_empty(),
+            "the folder asks for its own"
+        );
+
+        launcher.set_approved(&id, true).unwrap();
+        let launcher = launcher.forget_folder(mine.path()).unwrap();
+
+        assert!(launcher.runs_from_folder(&id, "extras"));
+        assert_eq!(
+            launcher.approved(),
+            [id],
+            "the installed copy keeps its own"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_plugin_is_removed_even_when_its_mirror_cannot_be() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = TempDir::new().unwrap();
+        let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        let mut linked = fetched_sender("function on_go() end");
+        linked.source = Source::Link("https://example.org/extras.git".to_owned());
+        let id = linked.plugin.id().clone();
+        let launcher = launcher.install(&linked, true).unwrap();
+        let links = data.path().join("registry/links");
+        std::fs::create_dir_all(&links).unwrap();
+        // Nothing in here can be looked up, so the link's mirror can't go.
+        let locked = |mode| std::fs::set_permissions(&links, PermissionsExt::from_mode(mode));
+        locked(0o000).unwrap();
+
+        let removed = launcher.uninstall(&id, "extras");
+        locked(0o755).unwrap();
+
+        let launcher = removed.unwrap();
+        assert!(launcher.plugins().is_empty());
+        let launcher = launcher.install(&linked, false).unwrap();
+        assert!(launcher.approved().is_empty(), "its approval went with it");
     }
 
     #[test]

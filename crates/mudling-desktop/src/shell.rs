@@ -15,7 +15,7 @@ mod watch;
 use crate::assets::UI_FONT;
 use crate::character_panel::{CharacterPanel, RefreshCharacter};
 use crate::chat::{self, Chat, CloseFind, column_width};
-use crate::dock::{self, Dock, DockState, Side, Slot, fit_docks};
+use crate::dock::{self, Dock, DockState, Side, Slot, cached_unless_reader, fit_docks};
 use crate::empty_state::{EmptyState, EmptyStateEvent};
 use crate::find_panel::{self, FindPanel};
 use crate::gear_panel::GearPanel;
@@ -309,14 +309,18 @@ pub struct Shell {
     job: Option<Task<()>>,
     /// The directory's index being fetched and checked.
     directory_read: Option<Task<()>>,
-    /// A plugin being fetched or installed, or the installed ones read again.
-    plugin_work: Option<Task<()>>,
+    /// A plugin from the directory being fetched and checked.
+    plugin_fetch: Option<Task<()>>,
     /// A link being fetched and checked.
     link_check: Option<Task<()>>,
+    /// A copy held back being checked against the directory.
+    arrival_check: Option<Task<()>>,
+    /// The change to the plugins running off the UI thread, and those
+    /// waiting to run in turn.
+    plugin_work: Option<Task<()>>,
+    plugin_changes: VecDeque<directory::PluginChange>,
     /// The plugin folders the player added, watched for changes.
     folder_watch: Option<watch::FolderWatch>,
-    /// Those of them a change is being read from.
-    folder_reload: Option<Task<()>>,
     /// What the player asked for while a job ran, to run in turn.
     waiting: VecDeque<Request>,
     /// What the last job ran into, for a window on a game.
@@ -599,10 +603,12 @@ impl Shell {
             waiting_for_vault: None,
             job: None,
             directory_read: None,
-            plugin_work: None,
+            plugin_fetch: None,
             link_check: None,
+            arrival_check: None,
+            plugin_work: None,
+            plugin_changes: VecDeque::new(),
             folder_watch: None,
-            folder_reload: None,
             waiting: VecDeque::new(),
             trouble: None,
             listed: SavedServers::default(),
@@ -2093,7 +2099,7 @@ impl Shell {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "macos"))]
     pub fn show_sample_problems(&self, settings: &SettingsState, cx: &mut Context<Shell>) {
         self.show_problems(settings, cx);
     }
@@ -2314,9 +2320,8 @@ impl Render for Shell {
             window.viewport_size().width,
             cx,
         );
-        let reader_listens = window.is_a11y_active();
         // A screen reader reads the lines the chat draws, seen or not.
-        let covered = (self.settings_open && !reader_listens)
+        let covered = (self.settings_open && !window.is_a11y_active())
             .then(|| hidden_under_sheet(window.viewport_size()));
         self.chat.update(cx, |chat, _| chat.set_covered(covered));
         let theme = *cx.global::<Theme>();
@@ -2443,18 +2448,9 @@ impl Render for Shell {
             .children(hud_at(HudPlacement::TopStrip).filter(|_| !on_empty_state))
             .child(body)
             .when(self.settings_open, |shell_view| {
-                // The chat draws every frame, and the sheet only when it changes.
-                let sheet = if reader_listens {
-                    // A cached view leaves its nodes out of the accessibility
-                    // tree, so a screen reader gets the sheet drawn afresh.
-                    self.settings.clone().into_any_element()
-                } else {
-                    let over_the_window = StyleRefinement::default().absolute().size_full();
-                    self.settings
-                        .clone()
-                        .cached(over_the_window)
-                        .into_any_element()
-                };
+                let over_the_window = StyleRefinement::default().absolute().size_full();
+                let sheet =
+                    cached_unless_reader(self.settings.clone().into(), over_the_window, window);
                 shell_view.child(deferred(sheet).with_priority(SHEET_PRIORITY))
             })
     }
@@ -5576,6 +5572,65 @@ pub mod tests {
         let said = shell.read_with(cx, |shell, cx| shell.settings.read(cx).repo_refusal());
         assert_eq!(said, None, "a good choice clears the refusal");
         syncer.quit().wait();
+    }
+
+    /// A plugin with the id `id`, fetched as if from a link.
+    fn fetched(id: &str) -> Arc<mudling_core::registry::Fetched> {
+        let manifest = format!(
+            "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\n\
+             license = \"MIT\"\nlayer = \"default\"\n"
+        );
+        let files: mudling_core::git::FolderFiles =
+            [("plugin.toml".to_owned(), manifest.into_bytes())].into();
+        let plugin = Plugin::from_files(|name| {
+            let bytes = (files.get(name)).ok_or_else(|| std::io::Error::other(name.to_owned()))?;
+            Ok(String::from_utf8(bytes.clone()).unwrap())
+        })
+        .unwrap();
+        Arc::new(mudling_core::registry::Fetched {
+            hash: mudling_core::registry::content_hash(&files),
+            source: mudling_core::registry::Source::Link(format!("https://example.org/{id}.git")),
+            commit: mudling_core::git::Oid::ZERO_SHA1,
+            files,
+            plugin,
+        })
+    }
+
+    #[gpui::test]
+    fn plugin_changes_made_at_once_each_take_effect_in_turn(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let data = TempDir::new().unwrap();
+        let launcher = Launcher::new(data.path().to_owned(), Vec::new(), Vec::new(), || {});
+        shell.update_in(cx, |shell, window, cx| {
+            shell.use_launcher(launcher, window, cx);
+        });
+        let installed = |shell: &Shell| -> Vec<String> {
+            let versions = shell.launcher.as_ref().unwrap().installed_versions();
+            versions.into_keys().collect()
+        };
+        let settled = |shell: &Shell, _: &App| shell.plugin_work.is_none();
+
+        shell.update(cx, |shell, cx| {
+            shell.install_plugin(fetched("first"), false, cx);
+            shell.install_plugin(fetched("second"), false, cx);
+        });
+        applied_until(&shell, cx, "both installed", settled);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| installed(shell)),
+            ["first", "second"]
+        );
+
+        // An install, then a removal before it ends.
+        shell.update(cx, |shell, cx| {
+            shell.install_plugin(fetched("third"), false, cx);
+            let third = PluginId::try_from("third".to_owned()).unwrap();
+            shell.remove_plugin(third, "third".into(), cx);
+        });
+        applied_until(&shell, cx, "the third removed", settled);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| installed(shell)),
+            ["first", "second"]
+        );
     }
 
     #[gpui::test]

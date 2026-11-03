@@ -4,6 +4,11 @@ use serde::Serialize;
 use std::fmt;
 use std::time::Duration;
 
+/// PRD §6: a line read with all its plugins, at p99.
+pub const LINE_BUDGET_US: f64 = 20.0;
+/// PRD §6: what any one plugin may add to a line, at p99.
+pub const PLUGIN_BUDGET_US: f64 = 5.0;
+
 /// A summary of samples, in microseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Summary {

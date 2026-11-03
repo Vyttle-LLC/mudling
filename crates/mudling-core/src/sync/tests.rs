@@ -1793,8 +1793,9 @@ fn approvals_never_leave_the_device() {
         .mac
         .install_plugin("extras", &[("plugin.toml", "extras")]);
     let approved_copy = "sha256:the-copy-approved-here";
+    let copy = crate::registry::ApprovedCopy::Installed(approved_copy.to_owned());
     crate::registry::Approvals::in_data_folder(&world.mac.data)
-        .approve("extras", approved_copy)
+        .approve("extras", &copy)
         .unwrap();
 
     assert_eq!(world.mac.sync().problem, None);

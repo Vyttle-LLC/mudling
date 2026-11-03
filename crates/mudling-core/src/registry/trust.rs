@@ -62,8 +62,7 @@ impl Origins {
         };
         let (result, changed) = change(&mut known);
         if changed {
-            let bytes = serde_json::to_vec_pretty(&known).expect("origins serialize");
-            super::save(&self.path, &bytes)?;
+            super::write_json(&self.path, &known)?;
         }
         Ok(result)
     }
@@ -125,10 +124,7 @@ impl Trusted {
 
     /// Each plugin's id, with the hashes trusted for it.
     fn all(&self) -> BTreeMap<String, BTreeSet<String>> {
-        fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        super::read_json(&self.path)
     }
 
     pub fn trusts(&self, id: &str, hash: &str) -> bool {
@@ -165,7 +161,6 @@ impl Trusted {
         if !added {
             return Ok(());
         }
-        let bytes = serde_json::to_vec_pretty(&all).expect("trusted hashes serialize");
-        super::save(&self.path, &bytes)
+        super::write_json(&self.path, &all)
     }
 }
