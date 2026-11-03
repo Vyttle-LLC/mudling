@@ -18,8 +18,14 @@ pub enum Mode {
     OwnTests { update: bool },
 }
 
+/// Setting this skips the cost a line, which depends on how fast the machine
+/// is. The command's own tests set it to test everything else; a timing test
+/// leaves it unset.
+const SKIP_COST_VARIABLE: &str = "MUDLING_SKIP_COST_CHECK";
+
 /// Whether the plugin passed; an error means the command couldn't run.
 pub fn run(folder: &Path, mode: &Mode) -> Result<bool, String> {
+    let judge_cost = std::env::var_os(SKIP_COST_VARIABLE).is_none();
     let plugin = match Plugin::load(folder) {
         Ok(plugin) => plugin,
         Err(error) => return Ok(failed_to_load(error.into())),
@@ -41,8 +47,8 @@ pub fn run(folder: &Path, mode: &Mode) -> Result<bool, String> {
             return Err(format!("{} has no server text", log.display()));
         }
         println!("log {}: {} lines", log.display(), lines.len());
-        let (replay, cost) = match check::replay_and_measure(&plugin, &lines) {
-            Ok(results) => results,
+        let replay = match check::replay(&plugin, &lines) {
+            Ok(replay) => replay,
             Err(error) => return Ok(failed_to_load(error.into())),
         };
         print_caught(&replay.caught);
@@ -51,11 +57,17 @@ pub fn run(folder: &Path, mode: &Mode) -> Result<bool, String> {
             println!("fail {failure}");
         }
         passed &= hooks.is_empty();
-        if cost.within_budget() {
-            println!("cost {cost}");
-        } else {
-            println!("fail {}", Failure::Budget(cost.to_string()));
-            passed = false;
+        if judge_cost {
+            let cost = match check::measure_cost(&plugin, &lines) {
+                Ok(cost) => cost,
+                Err(error) => return Ok(failed_to_load(error.into())),
+            };
+            if cost.within_budget() {
+                println!("cost {cost}");
+            } else {
+                println!("fail {}", Failure::Budget(cost.to_string()));
+                passed = false;
+            }
         }
         if let Mode::OwnTests { update } = mode {
             passed &= compare(log, &replay.transcript, *update)?;

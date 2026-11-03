@@ -1,3 +1,6 @@
+# Correctness only: what a pull request must not break. Anything that judges
+# speed runs daily instead (daily.yml), where a slow runner can't block a
+# merge. docs/ci.md says which is which.
 name: CI
 
 on:
@@ -26,6 +29,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --release -- -D warnings
 
   build:
+    # The name keeps "bench" from before the benchmark moved to daily.yml, so
+    # a ruleset's required checks by this name still report.
     name: Build, test and bench (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -40,62 +45,14 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --release
-      - run: cargo test --workspace
+      # Correctness only: the timing tests are ignored here and run daily.
+      # --no-fail-fast, so one failing test binary can't hide the others.
+      - run: cargo test --workspace --no-fail-fast
       # Reads the window's accessibility tree from inside the app, as
       # VoiceOver would see it; exits non-zero if a check fails.
       - name: Accessibility check (macOS)
         if: runner.os == 'macOS'
         run: ./target/release/mudling-desktop --synthetic --ax-check
-      # The committed synthetic fixture: session logs hold other players' chat
-      # and are never committed. This records the numbers and gates none of
-      # them. GitHub's shared runners read up to 4× over PRD §6's budgets and
-      # vary 2× from one run to the next, so a budget means nothing here. The
-      # budgets are held locally: `mudling-bench --check` on a quiet machine,
-      # before each phase's pull request. What CI gates is the comparison with
-      # the base branch, below, which runs both builds in turns on one machine.
-      # This step fails only if the benchmark itself can't run.
-      - name: Replay benchmark (records the numbers)
-        run: cargo run --release -p mudling-bench -- --json bench-report.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bench-report-${{ matrix.os }}
-          path: bench-report.json
-          if-no-files-found: ignore
-
-  # Fails a pull request that loses more than 10% against its base. Both builds
-  # run in this job, on this machine, in turns: see the bench's compare.rs.
-  bench-regression:
-    name: Benchmark against the base branch
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The pull request that adds this job has no comparable base: its base
-      # times a different plugin set. Every later one does.
-      - name: Compare with the base branch
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git fetch --depth=1 origin "$BASE_SHA"
-          git worktree add ../base "$BASE_SHA"
-          if [ ! -f ../base/crates/mudling-bench/src/compare.rs ]; then
-            echo "The base predates the comparison: nothing to compare."
-            exit 0
-          fi
-          cargo build --release -p mudling-bench --manifest-path ../base/Cargo.toml --target-dir target
-          cp target/release/mudling-bench ../base-bench
-          # A lasting slow spell can beat one comparison, not a second.
-          cargo run --release -p mudling-bench -- compare ../base-bench --json bench-compare.json ||
-            cargo run --release -p mudling-bench -- compare ../base-bench --json bench-compare.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bench-compare
-          path: bench-compare.json
-          if-no-files-found: ignore
 
   # Keeps the core mobile-ready (PRD §4 goal 5): mudling-ffi builds for the
   # device and the simulator, as an XCFramework with Swift bindings.

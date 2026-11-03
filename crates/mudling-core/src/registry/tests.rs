@@ -26,6 +26,12 @@ fn limit() -> Limit {
     Limit::after(Duration::from_secs(30))
 }
 
+/// The tests here fetch without judging a plugin's cost a line, which depends
+/// on how fast the machine is; `timing_a_link_is_judged_on_its_cost` doesn't.
+fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetched, InstallError> {
+    link::fetch_link_except_cost(data_folder, url, limit)
+}
+
 /// A registry repo with `tells` on `main`, and its signed index on `index`.
 struct Upstream {
     folder: TempDir,
@@ -764,6 +770,15 @@ fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
     assert_eq!(link_mirrors(&data).len(), 1, "kept for its updates");
     forget_link(data.path(), &link_of(&upstream)).unwrap();
     assert!(link_mirrors(&data).is_empty());
+}
+
+#[test]
+#[ignore = "timing: runs daily"]
+fn timing_a_link_is_judged_on_its_cost() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let data = TempDir::new().unwrap();
+    let fetched = super::fetch_link(data.path(), &link_of(&upstream), &limit());
+    assert!(fetched.is_ok(), "{:?}", fetched.err());
 }
 
 #[test]

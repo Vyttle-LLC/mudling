@@ -686,6 +686,17 @@ fn claiming_names_who_claimed_a_line_and_how() {
 
 #[test]
 fn a_pathological_pattern_cannot_hang_the_host() {
+    read_the_near_miss();
+}
+
+#[test]
+#[ignore = "timing: runs daily"]
+fn timing_a_pathological_pattern_costs_the_host_under_a_second() {
+    assert!(read_the_near_miss() < Duration::from_secs(1));
+}
+
+/// How long the host took to read a line the patterns almost match.
+fn read_the_near_miss() -> Duration {
     let text = "[[pattern]]\nname = \"slow\"\npattern = '''^(a+)+$'''\n\n\
         [[color]]\npattern = '''(x+x+)+y'''\nfg = 1\n";
     let tiny = plugin(&[
@@ -699,11 +710,7 @@ fn a_pathological_pattern_cannot_hang_the_host() {
     let mut sent = Vec::new();
     assert!(host.read_line(&line(&near_miss), &mut sent).is_empty());
     assert!(sent.is_empty());
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
+    started.elapsed()
 }
 
 fn with_points(points: &str) -> String {

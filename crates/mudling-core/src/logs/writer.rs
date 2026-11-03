@@ -270,7 +270,18 @@ mod tests {
     }
 
     #[test]
-    fn a_stuck_disk_drops_lines_and_says_so_without_holding_the_session() {
+    fn a_stuck_disk_drops_lines_and_says_so() {
+        push_to_a_stuck_disk();
+    }
+
+    #[test]
+    #[ignore = "timing: runs daily"]
+    fn timing_a_stuck_disk_doesnt_hold_the_session() {
+        assert!(push_to_a_stuck_disk() < Duration::from_secs(2));
+    }
+
+    /// Fills a stuck disk's spool twice over; returns how long the pushes took.
+    fn push_to_a_stuck_disk() -> Duration {
         let (go, stuck) = sync_channel(0);
         let wrote = Arc::default();
         let disk = StuckDisk {
@@ -287,13 +298,14 @@ mod tests {
         let troubles: Vec<_> = (0..2 * SPOOL_BYTES / line.len())
             .filter_map(|_| writer.push(&[&line]))
             .collect();
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let pushing = started.elapsed();
         assert_eq!(troubles, [Trouble::FellBehind], "said once");
 
         drop(go);
         writer.close().unwrap().join().unwrap();
         let wrote = String::from_utf8(wrote.lock().unwrap().clone()).unwrap();
         assert!(wrote.contains("writes dropped"), "the log says so too");
+        pushing
     }
 
     #[test]

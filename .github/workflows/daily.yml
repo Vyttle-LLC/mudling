@@ -1,0 +1,162 @@
+# Everything that judges speed, once a day on main. GitHub's shared runners
+# read up to 4× over PRD §6's budgets and vary 2× from one run to the next,
+# so no absolute number is gated here: the benchmark is recorded, and what
+# fails the run is a comparison of two builds measured in turns on one
+# machine, or a timing test that failed every attempt. A red run is
+# GitHub's own failure notice for a scheduled workflow, sent only to the user
+# who created it or last changed the cron line below; others see it on the
+# Actions tab. docs/ci.md says how to run all of it locally.
+name: Daily performance
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The committed synthetic fixture: session logs hold other players' chat and
+  # are never committed. This records the numbers and gates none of them; it
+  # fails only if the benchmark itself can't run.
+  bench:
+    name: Replay benchmark (${{ matrix.os }})
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gpui's Linux libraries (X11 and Wayland)
+        if: runner.os == 'Linux'
+        run: scripts/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --locked -p mudling-bench -- --json bench-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-report-${{ matrix.os }}
+          path: bench-report.json
+          if-no-files-found: ignore
+
+  # Fails when main's tip loses more than 10% against the commit the previous
+  # daily run measured, or against the latest release when there is none. Both
+  # builds run in this job, on this machine, in turns: see the bench's
+  # compare.rs.
+  compare:
+    name: Benchmark against the last measured commit
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to reach the base commit and the release tags.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Find the commit to compare with
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The previous daily run that finished, pass or fail: a regression
+          # fails one run, not every run after it. This run hasn't finished.
+          base=$(gh run list --workflow daily.yml --branch main --limit 20 \
+            --json headSha,conclusion \
+            --jq 'map(select(.conclusion == "success" or .conclusion == "failure")) | first | .headSha // empty')
+          if [ -z "$base" ]; then
+            base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null |
+              xargs -r git rev-list -n 1) || base=""
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "Comparing with: ${base:-nothing}"
+      - name: Compare with it
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            echo "::notice::No earlier daily run or release to compare with."
+            exit 0
+          fi
+          if [ "$BASE_SHA" = "$(git rev-parse HEAD)" ]; then
+            echo "::notice::main hasn't moved since the last measurement."
+            exit 0
+          fi
+          git worktree add ../base "$BASE_SHA"
+          if [ ! -f ../base/crates/mudling-bench/src/compare.rs ]; then
+            echo "::notice::The base predates the comparison: nothing to compare."
+            exit 0
+          fi
+          cargo build --release -p mudling-bench --manifest-path ../base/Cargo.toml --target-dir target
+          cp target/release/mudling-bench ../base-bench
+          # A lasting slow spell can beat one comparison, not a second.
+          cargo run --release --locked -p mudling-bench -- compare ../base-bench --json bench-compare.json ||
+            cargo run --release --locked -p mudling-bench -- compare ../base-bench --json bench-compare.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-compare
+          path: bench-compare.json
+          if-no-files-found: ignore
+
+  # The tests that judge speed, marked `#[ignore = "timing: runs daily"]` and
+  # named `timing_…`. `--ignored timing_` picks those and leaves the tests
+  # ignored for other reasons (a GPU, the live registry, child processes).
+  timing-tests:
+    name: Timing tests (${{ matrix.os }})
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gpui's Linux libraries (X11 and Wayland)
+        if: runner.os == 'Linux'
+        run: scripts/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@v2
+      # One slow spell can fail a timing test; a test fails the run only if it
+      # fails all three attempts. Later attempts rerun only the tests that
+      # failed, so a quiet moment is all one needs.
+      - name: Run the timing tests (best of three)
+        shell: bash
+        run: |
+          pending=(timing_)
+          for attempt in 1 2 3; do
+            echo "::group::Attempt $attempt"
+            if cargo test --workspace --no-fail-fast --locked -- --ignored "${pending[@]}" 2>&1 | tee attempt.log; then
+              status=0
+            else
+              status=1
+            fi
+            echo "::endgroup::"
+            cat attempt.log >> timing-tests.log
+            [ "$status" = 0 ] && exit 0
+            # A loop, not mapfile: the macOS runners' bash is 3.2.
+            failed=()
+            while IFS= read -r name; do
+              failed+=("$name")
+            done < <(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' attempt.log | sort -u)
+            [ "${#failed[@]}" -gt 0 ] || exit 1 # A build error, not a slow spell.
+            pending=(--exact "${failed[@]}")
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: timing-tests-${{ matrix.os }}
+          path: timing-tests.log
+          if-no-files-found: ignore

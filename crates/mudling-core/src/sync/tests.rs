@@ -878,7 +878,20 @@ fn a_hanging_credential_helper_is_given_up_on_and_says_so() {
 
 #[cfg(unix)]
 #[test]
-fn quit_lets_go_of_a_hanging_helper_after_about_two_seconds() {
+fn quit_lets_go_of_a_hanging_helper() {
+    quit_with_a_hanging_helper();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "timing: runs daily"]
+fn timing_quit_lets_go_of_a_hanging_helper_after_about_two_seconds() {
+    assert!(quit_with_a_hanging_helper() < QUIT_WAIT + Duration::from_secs(1));
+}
+
+/// Quits a syncer whose git helper hangs; returns how long the quit took.
+#[cfg(unix)]
+fn quit_with_a_hanging_helper() -> Duration {
     let folder = TempDir::new().unwrap();
     let remote = folder.path().join("remote.git");
     Repository::init_bare(&remote).unwrap();
@@ -898,9 +911,10 @@ fn quit_lets_go_of_a_hanging_helper_after_about_two_seconds() {
 
     let began = Instant::now();
     sync.quit().wait();
+    let quitting = began.elapsed();
 
-    assert!(began.elapsed() < QUIT_WAIT + Duration::from_secs(1));
     assert!(device.holds_file("The Meadow.json"), "committed first");
+    quitting
 }
 
 #[test]

@@ -28,13 +28,33 @@ const MOST_DOWNLOAD: u64 = 16 * 1024 * 1024;
 /// same sandbox as `mudling plugin test`'s, sending nothing anywhere. Takes
 /// seconds: run it off the UI thread.
 pub fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetched, InstallError> {
+    fetch(data_folder, url, limit, true)
+}
+
+/// [`fetch_link`] without judging the plugin's cost a line, which depends on
+/// how fast the machine is: for tests of everything else a link must pass.
+#[cfg(test)]
+pub(super) fn fetch_link_except_cost(
+    data_folder: &Path,
+    url: &str,
+    limit: &Limit,
+) -> Result<Fetched, InstallError> {
+    fetch(data_folder, url, limit, false)
+}
+
+fn fetch(
+    data_folder: &Path,
+    url: &str,
+    limit: &Limit,
+    judge_cost: bool,
+) -> Result<Fetched, InstallError> {
     let url = url.trim();
     if url.is_empty() {
         return Err(InstallError::Unreachable(GitError::Failed(
             "there's no link".to_owned(),
         )));
     }
-    let fetched = fetch_into_mirror(data_folder, url, limit);
+    let fetched = fetch_into_mirror(data_folder, url, limit, judge_cost);
     // What a link that failed left behind is no use to anyone, unless a
     // plugin installed from it is kept up to date from there.
     if fetched.is_err() && !InstalledPlugins::in_data_folder(data_folder).has_link(url) {
@@ -47,12 +67,18 @@ fn fetch_into_mirror(
     data_folder: &Path,
     url: &str,
     limit: &Limit,
+    judge_cost: bool,
 ) -> Result<Fetched, InstallError> {
     let mirror = Mirror::open(&mirror_folder(data_folder, url), url)?.capped(MOST_DOWNLOAD);
     let commit = mirror.fetch_default_branch(limit)?;
     let files = mirror.folder_files(commit, "")?;
     let plugin = load_files(&files)?;
-    check::own_tests(&plugin, &files).map_err(InstallError::Failed)?;
+    let checked = if judge_cost {
+        check::own_tests(&plugin, &files)
+    } else {
+        check::own_tests_except_cost(&plugin, &files)
+    };
+    checked.map_err(InstallError::Failed)?;
     Ok(Fetched {
         source: Source::Link(url.to_owned()),
         commit,

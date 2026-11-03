@@ -13,11 +13,26 @@ struct Run {
     stderr: String,
 }
 
+/// Runs the command without judging a plugin's cost a line, which depends on
+/// how fast the machine is.
 fn mudling(args: &[&str]) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_mudling"))
-        .args(args)
-        .output()
-        .expect("the binary runs");
+    run_mudling(args, false)
+}
+
+/// Runs the command as an author does, judging cost too: for timing tests.
+fn mudling_judging_cost(args: &[&str]) -> Run {
+    run_mudling(args, true)
+}
+
+fn run_mudling(args: &[&str], judge_cost: bool) -> Run {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mudling"));
+    command.args(args);
+    if judge_cost {
+        command.env_remove("MUDLING_SKIP_COST_CHECK");
+    } else {
+        command.env("MUDLING_SKIP_COST_CHECK", "1");
+    }
+    let output = command.output().expect("the binary runs");
     Run {
         code: output.status.code().expect("it exits by itself"),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -189,8 +204,11 @@ fn a_hook_that_raises_an_error_fails() {
     assert_fails(&run, "write_store:elsewhere");
 }
 
+// Whether 100 catch-all patterns cost more than the budget depends on the
+// machine's speed.
 #[test]
-fn a_plugin_over_its_line_budget_fails() {
+#[ignore = "timing: runs daily"]
+fn timing_a_plugin_over_its_line_budget_fails() {
     let (_parent, plugin) = scaffolded();
     let rules: String = (0..100)
         .map(|rule| format!("[[pattern]]\nname = \"slow-{rule}\"\npattern = '''(?<all>.*)'''\n\n"))
@@ -201,7 +219,9 @@ fn a_plugin_over_its_line_budget_fails() {
         "function on_welcome(event) end\n",
     )
     .unwrap();
-    let run = test_log(&plugin, "Bo waves to the crowd in the square.\n");
+    let log = plugin.join("chatter.txt");
+    fs::write(&log, "Bo waves to the crowd in the square.\n").unwrap();
+    let run = mudling_judging_cost(&["plugin", "test", text(&plugin), "--log", text(&log)]);
     assert_fails(&run, "fail budget: +");
 }
 
@@ -242,9 +262,20 @@ fn a_plugin_with_no_tests_fails() {
 }
 
 #[test]
-fn the_avatar_plugin_passes_the_command_registry_ci_runs() {
+fn the_avatar_plugin_passes_its_own_tests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = test_plugin(&root.join("plugins/avatar"));
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert!(run.stdout.ends_with("passed\n"), "{}", run.stdout);
+}
+
+// The registry's CI judges the cost a line too.
+#[test]
+#[ignore = "timing: runs daily"]
+fn timing_the_avatar_plugin_passes_the_command_registry_ci_runs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let avatar = root.join("plugins/avatar");
+    let run = mudling_judging_cost(&["plugin", "test", text(&avatar)]);
     assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
     assert!(run.stdout.ends_with("passed\n"), "{}", run.stdout);
 }

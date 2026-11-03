@@ -82,16 +82,15 @@ impl From<PluginError> for Failure {
     }
 }
 
-/// Replays `lines` through `plugin` and measures its cost a line. An error
-/// means the plugin can't run at all.
-pub fn replay_and_measure(
-    plugin: &Plugin,
-    lines: &[String],
-) -> Result<(Replay, Cost), PluginError> {
-    Ok((
-        replay::replay(plugin, lines)?,
-        budget::measure(plugin, lines)?,
-    ))
+/// Replays `lines` through `plugin`. An error means the plugin can't run at
+/// all.
+pub fn replay(plugin: &Plugin, lines: &[String]) -> Result<Replay, PluginError> {
+    replay::replay(plugin, lines)
+}
+
+/// Measures `plugin`'s cost a line over `lines`.
+pub fn measure_cost(plugin: &Plugin, lines: &[String]) -> Result<Cost, PluginError> {
+    budget::measure(plugin, lines)
 }
 
 /// What the hooks did wrong in `replay`.
@@ -130,6 +129,16 @@ pub fn compare(file: &str, expected: Option<&str>, transcript: &[String]) -> Opt
 /// as `mudling plugin test` does with no log given. The first failure says
 /// why it didn't pass.
 pub fn own_tests(plugin: &Plugin, files: &FolderFiles) -> Result<(), Failure> {
+    check_own_tests(plugin, files, true)
+}
+
+/// [`own_tests`] without the cost a line, which depends on how fast the
+/// machine is: for tests of everything else a plugin must pass.
+pub fn own_tests_except_cost(plugin: &Plugin, files: &FolderFiles) -> Result<(), Failure> {
+    check_own_tests(plugin, files, false)
+}
+
+fn check_own_tests(plugin: &Plugin, files: &FolderFiles, judge_cost: bool) -> Result<(), Failure> {
     let logs: Vec<(&String, &Vec<u8>)> = (files.iter())
         .filter(|(path, _)| is_test_log(path))
         .collect();
@@ -144,12 +153,15 @@ pub fn own_tests(plugin: &Plugin, files: &FolderFiles) -> Result<(), Failure> {
         if lines.is_empty() {
             return Err(Failure::Tests(format!("{path} has no server text")));
         }
-        let (replay, cost) = replay_and_measure(plugin, &lines)?;
+        let replay = replay(plugin, &lines)?;
         if let Some(failure) = hook_failures(&replay).into_iter().next() {
             return Err(failure);
         }
-        if !cost.within_budget() {
-            return Err(Failure::Budget(cost.to_string()));
+        if judge_cost {
+            let cost = measure_cost(plugin, &lines)?;
+            if !cost.within_budget() {
+                return Err(Failure::Budget(cost.to_string()));
+            }
         }
         let expected_path = expected_path(path);
         let expected = (files.get(&expected_path)).map(|bytes| String::from_utf8_lossy(bytes));
