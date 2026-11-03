@@ -403,7 +403,7 @@ impl Plugin {
                 commands: point::<Commands>(load(Point::Commands)?)?,
                 text: point_checked(load(Point::Text)?, Text::validate)?,
                 hud: point::<Hud>(load(Point::Hud)?)?,
-                map: point::<Map>(load(Point::Map)?)?,
+                map: point_checked(load(Point::Map)?, Map::validate)?,
                 character: point::<Character>(load(Point::Character)?)?,
                 gear: point::<Gear>(load(Point::Gear)?)?,
                 mobs: point_checked(load(Point::Mobs)?, Mobs::validate)?,

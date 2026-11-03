@@ -1406,7 +1406,7 @@ impl Engine {
                 self.keep_character_value(key, value, now);
             }
             self.hub
-                .write::<CharactersState>(CharactersState(heard.character));
+                .write::<CharactersState>(CharactersState(heard.character.clone()));
         }
         if let Some(target) = heard.target {
             self.hub.write::<TargetState>(target);
@@ -1418,6 +1418,7 @@ impl Engine {
         let fields = self
             .hud_fields
             .get((plugins.generation(), learned), || hud.fields(plugins));
+        let mut vitals_changed = false;
         if fields
             .values()
             .any(|field| field.package.eq_ignore_ascii_case(package))
@@ -1425,6 +1426,7 @@ impl Engine {
         {
             let vitals = hud::values(fields, package, &message).into_iter().collect();
             self.hub.write::<VitalsState>(VitalsState(vitals));
+            vitals_changed = true;
         }
         let affects_field = self
             .affects_field
@@ -1443,7 +1445,14 @@ impl Engine {
                 now,
                 batch: &mut self.batch,
             };
-            (self.gear).gmcp(package, json, &mut link.gear, &self.hub, &mut saving);
+            let (gear, hub) = (&mut self.gear, &self.hub);
+            gear.gmcp(
+                vitals_changed,
+                &heard.character,
+                &mut link.gear,
+                hub,
+                &mut saving,
+            );
         }
         if !heard.mobs.is_empty() {
             self.map.note_sightings(&heard.mobs, now);

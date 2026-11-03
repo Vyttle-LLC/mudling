@@ -34,8 +34,8 @@
 use super::manifest::{Plugin, PluginError, PluginId, Problem};
 use super::matcher::{DfaCache, Matcher};
 use super::points::{
-    Capture, HookName, LinkRule, MapSignal, Pager, Pattern, Point, Points, RoomIdentity,
-    TableReader,
+    AreaInfo, Capture, GmcpField, HookName, LinkRule, MapSignal, Pager, Pattern, Point, Points,
+    RoomIdentity, TableReader,
 };
 use crate::ansi::{Span, Style};
 use crate::line::{Encoding, Line, Link, Pending};
@@ -112,6 +112,8 @@ pub struct Settings {
     pub room_identity: Option<RoomIdentity>,
     pub pager: Option<Pager>,
     pub area_name: Option<Pattern>,
+    pub room_exits: Option<GmcpField>,
+    pub area_info: Option<AreaInfo>,
 }
 
 impl Settings {
@@ -1005,6 +1007,12 @@ fn settings(plugins: &[&Plugin]) -> Settings {
         pager: last(plugins, |plugin| plugin.points.text.as_ref()?.pager.clone()),
         area_name: last(plugins, |plugin| {
             plugin.points.map.as_ref()?.area_name.clone()
+        }),
+        room_exits: last(plugins, |plugin| {
+            plugin.points.map.as_ref()?.room_exits.clone()
+        }),
+        area_info: last(plugins, |plugin| {
+            plugin.points.map.as_ref()?.area_info.clone()
         }),
     }
 }

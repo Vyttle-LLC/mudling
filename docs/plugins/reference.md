@@ -294,6 +294,11 @@ game's plugin names the others.
 A game may send only the fields that changed. A new name keeps the rest of
 the opponent until they change.
 
+Gear reads the sheet too. What an item adds is measured from the stats
+`character` names `str`, `int`, `wis`, `dex`, `con`, `hitroll`, `damroll`
+and `ac`, and the vitals' maximums, around a [wear or remove](#gear)
+message. A game whose `character` names none of them is never measured.
+
 ### Map
 
 <!-- keys: map.toml root -->
@@ -302,11 +307,23 @@ the opponent until they change.
 | `room_identity` | `"gmcp"`, the room number, the default; or `"description"`: name, exits and description. Only one applies: the highest layer's. |
 | `areas` | A table of area names by the game's zone id. |
 | `area_name` | A pattern reading `Room.Info`'s zone where `areas` doesn't name it: the area as `name`, its levels as `low` and `high`. Only one applies: the highest layer's. |
+| `area_info` | The `[area_info]` table: a GMCP message naming an area. Only one applies: the highest layer's. |
+| `room_exits` | The GMCP field listing the room's exits, as `Room.Info`'s do, when a door opens or shuts in place: `"Char.Status.room_exits"`. Only one applies: the highest layer's. |
 | `exits` | Event rules: the line lists the room's exits, and its description follows. |
 | `failed_move` | Event rules: the game refused a move. |
 | `darkness` | Event rules: the room is too dark to see. |
 | `flee` | Event rules: a flee, the way captured as `dir`. |
 | `maze` | The `[[maze]]` list: rooms whose exits don't hold still. |
+
+<!-- keys: map.toml [area_info] -->
+| `[area_info]` key | What it is |
+| --- | --- |
+| `zone` | The field with the area's zone id, as `Room.Info`'s zone gives it: `"room.area.id"`. |
+| `name` | The field with its name, in the same message: `"room.area.name"`. |
+
+A name the game sends this way stands for its zone from then on, over
+`areas` and `area_name`. A game that sends it only when asked needs a
+[GMCP request](#gmcp-requests).
 
 <!-- keys: map.toml [[maze]] -->
 | `[[maze]]` key | What it is |

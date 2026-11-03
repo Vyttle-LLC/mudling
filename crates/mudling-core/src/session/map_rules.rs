@@ -4,7 +4,7 @@
 
 use crate::map::{AreaName, MapRules, MobNamer, RoomIdentity};
 use crate::plugin::PluginHost;
-use crate::plugin::points::{self, Maze, Pattern};
+use crate::plugin::points::{self, AreaInfo, GmcpField, Maze, Pattern};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -15,6 +15,8 @@ pub(super) struct PluginRules {
     areas: BTreeMap<String, String>,
     area_name: Option<Pattern>,
     mazes: Vec<Maze>,
+    room_exits: Option<GmcpField>,
+    area_info: Option<AreaInfo>,
     /// Highest layer first: the first to name a title wins.
     room_titles: Arc<[Pattern]>,
 }
@@ -29,6 +31,8 @@ impl PluginRules {
             areas: BTreeMap::new(),
             area_name: host.settings().area_name.clone(),
             mazes: Vec::new(),
+            room_exits: host.settings().room_exits.clone(),
+            area_info: host.settings().area_info.clone(),
             room_titles: room_titles(host),
         };
         for (_, map) in host.declared(|points| points.map.as_ref()) {
@@ -98,6 +102,14 @@ impl MapRules for PluginRules {
             name: zone.to_owned(),
             levels: None,
         })
+    }
+
+    fn room_exits(&self) -> Option<&GmcpField> {
+        self.room_exits.as_ref()
+    }
+
+    fn area_info(&self) -> Option<&AreaInfo> {
+        self.area_info.as_ref()
     }
 
     fn maze_room(&self, zone: &str, room: &str) -> bool {

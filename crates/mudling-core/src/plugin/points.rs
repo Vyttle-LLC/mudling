@@ -447,6 +447,38 @@ impl TryFrom<String> for HookName {
     }
 }
 
+/// A field of a GMCP message: the package, then the key after the last `.`,
+/// as in `"Char.Status.room_exits"`. The package matches in any case.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GmcpField {
+    pub package: String,
+    pub key: String,
+}
+
+impl GmcpField {
+    /// Whether the field is in a message of `package`.
+    pub fn is_in(&self, package: &str) -> bool {
+        self.package.eq_ignore_ascii_case(package)
+    }
+}
+
+impl TryFrom<String> for GmcpField {
+    type Error = String;
+
+    fn try_from(path: String) -> Result<GmcpField, String> {
+        match path.rsplit_once('.') {
+            Some((package, key)) if !package.is_empty() && !key.is_empty() => Ok(GmcpField {
+                package: package.to_owned(),
+                key: key.to_owned(),
+            }),
+            _ => Err(format!(
+                "`{path}` isn't a GMCP field: write the package, then the key, as in \"Char.Status.str\""
+            )),
+        }
+    }
+}
+
 /// A pattern that emits a named event, its named captures as the data.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -793,6 +825,32 @@ pub struct Map {
     /// Rooms whose exits don't hold still.
     #[serde(default, rename = "maze")]
     pub mazes: Vec<Maze>,
+    /// The field listing the room's exits, as Room.Info's do, when a door
+    /// changes in place. Only one applies: the highest layer's.
+    pub room_exits: Option<GmcpField>,
+    /// The message naming an area. Only one applies: the highest layer's.
+    pub area_info: Option<AreaInfo>,
+}
+
+/// A GMCP message naming an area: its zone id, as Room.Info's zone gives
+/// it, and its name. Both fields are in the one message.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreaInfo {
+    pub zone: GmcpField,
+    pub name: GmcpField,
+}
+
+impl Map {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match &self.area_info {
+            Some(AreaInfo { zone, name }) if !zone.is_in(&name.package) => Err(format!(
+                "`area_info`'s fields must be in one message: `zone` is in {}, `name` in {}",
+                zone.package, name.package
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// A maze: the rooms of an area with these names, or with none listed, the

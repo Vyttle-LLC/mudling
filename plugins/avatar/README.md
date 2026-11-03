@@ -27,7 +27,7 @@ replaces it.
 | `commands.toml` | Verbs, door commands and the rules for an item's keyword. No separator and no speedwalk: one command a line. |
 | `character.toml` | The background commands, the character's tables, and the messages about skills. |
 | `gear.toml` | The 15 slots in the game's order, the gear tables, and the wear, remove and put messages. |
-| `map.toml` | Rooms known by description, the zone's format, the exits line, failed moves, darkness, flees and the maze. |
+| `map.toml` | Rooms known by description, the zone's format, where `Char.Status` lists a door that changed, the exits line, failed moves, darkness, flees and the maze. |
 | `mobs.toml` | Aggression, and a mob's name from its room title. |
 | `hud.toml` | Where the game lists affects, and where `Char.Status` and `Char.Vitals` keep the character sheet's values and the opponent. |
 
@@ -193,8 +193,9 @@ it was, and it's dropped:
 | `read` | the keywords; last |
 
 What's measured, from the character's stats around a wear or remove message,
-is the core's: hooks don't see `Char.Status`. It uses each rule's `item`
-capture, so a game's wear and remove rules need one.
+is the core's: hooks don't see `Char.Status`. It reads the stats where
+`hud.toml`'s `[character]` says, and uses each rule's `item` capture, so a
+game's wear and remove rules need one.
 
 ## Not covered, and why
 
