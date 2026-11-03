@@ -5,3 +5,5 @@ shell on `mudling-core`, through the UniFFI bindings in `crates/mudling-ffi`.
 
 Empty until the iOS release (PRD §14, Phase 9). Until then, CI builds the core
 for iOS from Phase 1 on, so it stays mobile-ready.
+
+`MUDling.entitlements` signs the macOS release build; its Keychain access group lets the vault keep this device's copy of its key behind Touch ID.

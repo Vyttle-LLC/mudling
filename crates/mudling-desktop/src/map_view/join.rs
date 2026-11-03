@@ -2,13 +2,14 @@
 //! hand. The model decides what's shown; this draws it and tells the session.
 //! MUDling only ever suggests: a join starts with the player pressing Join.
 
+use super::forget::{self, KeepRoom};
 use super::{MapView, model::JoinNote, model::ReviewPair, model::RoomCopy};
 use crate::room_panel::button;
 use crate::shell::FocusCommandBar;
 use crate::theme::Theme;
 use gpui::{
-    App, Context, Div, FontWeight, KeyBinding, MouseButton, Role, SharedString, Stateful, Window,
-    actions, div, prelude::*, px,
+    AnyElement, App, Context, Div, FontWeight, KeyBinding, MouseButton, Role, SharedString,
+    Stateful, Window, actions, div, prelude::*, px,
 };
 use mudling_core::map::{RoomId, RoomPair};
 use mudling_core::session::MapEdit;
@@ -24,6 +25,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(secondary!("shift-j"), PickRoom, None),
         KeyBinding::new("escape", CloseReview, Some(REVIEW_CONTEXT)),
+        KeyBinding::new("escape", KeepRoom, Some(forget::QUESTION_CONTEXT)),
     ]);
 }
 
@@ -86,7 +88,7 @@ impl MapView {
     }
 
     /// Takes focus to a control that's still there.
-    fn focus_what_remains(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
+    pub(super) fn focus_what_remains(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         if self.model.reviewing() {
             window.focus(&self.review_first, cx);
         } else if self.model.duplicates().pairs.is_empty() {
@@ -314,6 +316,7 @@ impl MapView {
         let (text, color, undo) = match note {
             JoinNote::Joined { label, .. } => (label.clone(), theme.text, true),
             JoinNote::Failed(error) => (failed(error), theme.error, false),
+            JoinNote::Forgot(_) => return None,
         };
         Some(
             div()
@@ -339,7 +342,8 @@ impl MapView {
             .on_click(cx.listener(|view, _, _, cx| view.undo(cx)))
     }
 
-    /// The pill over the map: what's picked, or how the last join went.
+    /// The pill over the map: what's picked, how the last join went, or
+    /// which room was forgotten.
     pub(super) fn pill(
         &self,
         theme: &Theme,
@@ -349,6 +353,9 @@ impl MapView {
         let (text, hint): (String, Option<&str>) = match (picks, self.model.join_note()) {
             (0, Some(JoinNote::Joined { label, .. })) => (label.clone(), None),
             (0, Some(JoinNote::Failed(error))) => (failed(error), None),
+            (0, Some(JoinNote::Forgot(name))) => {
+                (format!("Forgot {name}"), Some("walk in to map it again"))
+            }
             (0, None) => return None,
             (1, _) => ("1 room picked".to_owned(), Some("Pick one more")),
             (count, _) => (format!("{count} rooms picked"), None),
@@ -411,6 +418,10 @@ impl MapView {
                         .text_color(theme.text_muted)
                         .child(
                             div()
+                                .debug_selector({
+                                    let text = text.clone();
+                                    move || text
+                                })
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
                                 .child(text),
@@ -421,29 +432,41 @@ impl MapView {
         )
     }
 
-    /// What can be done with the room shown: the keyboard's way in, and the
-    /// way for anyone who'd rather press a button than hold Shift.
+    /// What can be done with the room shown: pick it to join, for anyone
+    /// who'd rather press a button than hold Shift, or forget it.
     pub(super) fn room_actions(
         &self,
         room: RoomId,
         theme: &Theme,
         cx: &mut Context<MapView>,
-    ) -> Option<impl IntoElement + use<>> {
-        if !self.model.can_pick(room) || self.model.reviewing() {
+    ) -> Option<AnyElement> {
+        if self.model.reviewing() {
             return None;
         }
-        let picked = self.model.picks().contains(&room);
-        let name = self.model.room_name(room).unwrap_or("this room");
-        let label = format!("Pick {name} to join");
+        let name = self.model.room_name(room)?;
+        if let Some(question) = self.forget_question(room, name, theme, cx) {
+            return Some(question.into_any_element());
+        }
+        let pick = self.model.can_pick(room).then(|| {
+            let picked = self.model.picks().contains(&room);
+            small_button("map-pick", &format!("Pick {name} to join"), theme)
+                .aria_toggled(picked.into())
+                .child(if picked { "Picked" } else { "Pick to join" })
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.pick_selected(window, cx);
+                }))
+        });
+        let forget = self.forget_button(room, name, theme, cx);
         Some(
-            div().flex().flex_none().justify_end().pt_2().child(
-                small_button("map-pick", &label, theme)
-                    .aria_toggled(picked.into())
-                    .child(if picked { "Picked" } else { "Pick to join" })
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.pick_selected(window, cx);
-                    })),
-            ),
+            div()
+                .flex()
+                .flex_none()
+                .justify_end()
+                .gap_2()
+                .pt_2()
+                .children(pick)
+                .child(forget)
+                .into_any_element(),
         )
     }
 }
@@ -453,7 +476,7 @@ fn failed(error: &str) -> String {
     format!("The map didn't change: {error}")
 }
 
-fn small_button(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {
+pub(super) fn small_button(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {
     button(id, SharedString::from(name.to_owned()), theme)
         .px_2p5()
         .py_1()

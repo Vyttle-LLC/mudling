@@ -23,10 +23,8 @@ pub(super) fn take_in(
     files: &repo::Repo,
 ) -> Result<Option<Vec<u8>>, crate::merge::Error> {
     let local_path = file_in(data_folder);
-    let local = match fs::read(&local_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(repo::Error::io(&local_path, error).into()),
+    let Some(local) = repo::Repo::new(data_folder).read_if_present(Path::new(FILE_NAME))? else {
+        return Ok(None);
     };
     let held = files.read_if_present(Path::new(FILE_NAME))?;
     let merged = match held {
@@ -64,11 +62,8 @@ pub(super) fn bring_home(
     repo_folder: &Path,
     data_folder: &Path,
 ) -> Result<(), crate::merge::Error> {
-    let source = file_in(repo_folder);
-    let held = match fs::read(&source) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(repo::Error::io(&source, error).into()),
+    let Some(held) = repo::Repo::new(repo_folder).read_if_present(Path::new(FILE_NAME))? else {
+        return Ok(());
     };
     let home = repo::Repo::new(data_folder);
     let local = home.read_if_present(Path::new(FILE_NAME))?;

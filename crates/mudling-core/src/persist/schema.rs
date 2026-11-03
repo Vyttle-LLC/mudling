@@ -72,7 +72,8 @@ CREATE TABLE rooms (
 );
 
 -- A room's exits as the game lists them now, links explored, and doorways
--- seen are kept apart: a link or a doorway outlives the room's listing.
+-- seen are kept apart: a doorway, its link, and any link while the map is
+-- unsure where the player is, outlive the room's listing.
 CREATE TABLE exits (
     room_id   INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
     direction TEXT NOT NULL,

@@ -12,6 +12,7 @@ use mudling_core::plugin::luau::{
 };
 use mudling_core::plugin::manifest::API_VERSION;
 use mudling_core::plugin::{Plugin, PluginError, PluginEvent, PluginHost};
+use mudling_core::stats::PLUGIN_BUDGET_US;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
@@ -22,13 +23,14 @@ use std::sync::Arc;
 const UNKNOWN: &str = "not_a_key";
 const MANIFEST: &str = "id = \"probe\"\nname = \"Probe\"\nversion = \"1.0.0\"\napi = 1\n\
                         license = \"MIT\"\nlayer = \"game\"\n";
-const EVERY_KEY_TABLE: [&str; 25] = [
+const EVERY_KEY_TABLE: [&str; 28] = [
     "plugin.toml root",
     "plugin.toml [servers]",
     "plugin.toml [points]",
     "plugin.toml [hooks]",
     "connection.toml root",
     "connection.toml [[login]]",
+    "connection.toml [[request]]",
     "commands.toml root",
     "commands.toml [speedwalk]",
     "commands.toml [[alias]]",
@@ -39,8 +41,10 @@ const EVERY_KEY_TABLE: [&str; 25] = [
     "text.toml [[pattern]]",
     "text.toml [[color]]",
     "text.toml [[link]]",
+    "text.toml [[channel]]",
     "hud.toml root",
     "map.toml root",
+    "map.toml [area_info]",
     "map.toml [[maze]]",
     "character.toml root",
     "character.toml [[command]]",
@@ -280,6 +284,7 @@ fn the_limits_are_the_code_s() {
             "| Overruns in a session before the plugin is turned off | {OVERRUNS_TO_TURN_OFF} |"
         ),
         format!("| `api` | yes | The API version: `{API_VERSION}`. |"),
+        format!("| Added per line at p99, per plugin | {PLUGIN_BUDGET_US} µs |"),
     ];
     for row in rows {
         assert!(reference.contains(&row), "the reference doesn't say: {row}");

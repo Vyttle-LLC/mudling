@@ -40,7 +40,10 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 sha2 = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1", features = ["keychain"] }
+apple-native-keyring-store = { version = "1", features = ["keychain", "protected"] }
+# Already in the tree through the store above: its error codes tell a
+# cancelled Touch ID prompt from a failure.
+security-framework = "3.7"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["protected"] }

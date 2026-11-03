@@ -401,16 +401,36 @@ fn installing_again_replaces_the_old_copy_whole() {
 fn an_approval_holds_for_the_copy_it_was_given_for() {
     let data = TempDir::new().unwrap();
     let approvals = Approvals::in_data_folder(data.path());
+    let approved = ApprovedCopy::Installed("sha256:approved".to_owned());
 
-    approvals.approve("extras", "sha256:approved").unwrap();
+    approvals.approve("extras", &approved).unwrap();
 
-    assert!(approvals.is_approved("extras", "sha256:approved"));
+    assert!(approvals.is_approved("extras", &approved));
+    let changed = ApprovedCopy::Installed("sha256:changed".to_owned());
     assert!(
-        !approvals.is_approved("extras", "sha256:changed"),
+        !approvals.is_approved("extras", &changed),
         "any change asks again"
     );
-    approvals.take_back("extras").unwrap();
-    assert!(!approvals.is_approved("extras", "sha256:approved"));
+    approvals.take_back("extras", &changed).unwrap();
+    assert!(approvals.is_approved("extras", &approved), "not that copy");
+    approvals.take_back("extras", &approved).unwrap();
+    assert!(!approvals.is_approved("extras", &approved));
+}
+
+#[test]
+fn a_folder_and_an_installed_copy_with_one_id_keep_their_own_approvals() {
+    let data = TempDir::new().unwrap();
+    let approvals = Approvals::in_data_folder(data.path());
+    let installed = ApprovedCopy::Installed("sha256:approved".to_owned());
+    let folder = ApprovedCopy::Folder("/Users/me/extras".into());
+
+    approvals.approve("extras", &installed).unwrap();
+    approvals.approve("extras", &folder).unwrap();
+    assert!(approvals.is_approved("extras", &installed));
+
+    approvals.take_back("extras", &folder).unwrap();
+    assert!(approvals.is_approved("extras", &installed));
+    assert!(!approvals.is_approved("extras", &folder));
 }
 
 #[test]
@@ -590,6 +610,36 @@ fn an_origins_file_that_cannot_be_read_holds_folders_back_and_stays_as_it_is() {
     );
 }
 
+/// A pipe as `text.toml` gives each read the next copy, as a sync replacing
+/// the file between two reads would.
+#[cfg(unix)]
+#[test]
+fn what_loads_is_the_copy_that_was_hashed() {
+    let data = TempDir::new().unwrap();
+    let installed = recordless_tells(&data);
+    let patterns = installed.folder().join("tells/text.toml");
+    fs::remove_file(&patterns).unwrap();
+    let made = std::process::Command::new("mkfifo").arg(&patterns).status();
+    assert!(made.unwrap().success());
+    let later = PATTERNS.replace("tells you", "says");
+    let writer = patterns.clone();
+    // The pause lets the first reader see the end of its copy. Once that
+    // read is the only one, this is left blocked on the second.
+    std::thread::spawn(move || {
+        fs::write(&writer, PATTERNS).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        fs::write(&writer, later).unwrap();
+    });
+
+    let copy = installed.load().plugins.remove(0);
+
+    let mut hashed = folder_of(&[("plugin.toml", MANIFEST.into())], "");
+    hashed.insert("text.toml".to_owned(), PATTERNS.into());
+    assert_eq!(copy.hash, content_hash(&hashed));
+    let text = copy.plugin.points.text.unwrap();
+    assert!(text.patterns[0].pattern.is_match("Bob tells you hi"));
+}
+
 #[test]
 fn a_copy_this_device_installed_loads() {
     let (_data, installed) = installed_tells();
@@ -714,6 +764,27 @@ fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
     assert_eq!(link_mirrors(&data).len(), 1, "kept for its updates");
     forget_link(data.path(), &link_of(&upstream)).unwrap();
     assert!(link_mirrors(&data).is_empty());
+}
+
+#[test]
+fn an_installed_link_keeps_its_mirror_when_fetching_it_again_fails() {
+    let upstream = plugin_repo(&new_plugin_files());
+    let data = TempDir::new().unwrap();
+    let fetched = fetch_link(data.path(), &link_of(&upstream), &limit()).unwrap();
+    InstalledPlugins::in_data_folder(data.path())
+        .install(&fetched)
+        .unwrap();
+
+    let mut broken = new_plugin_files();
+    broken[4].1 = b"event text nothing\n".to_vec();
+    commit(
+        &Repository::open_bare(upstream.path()).unwrap(),
+        "refs/heads/trunk",
+        &broken,
+    );
+    assert!(fetch_link(data.path(), &link_of(&upstream), &limit()).is_err());
+
+    assert_eq!(link_mirrors(&data).len(), 1, "still kept for its updates");
 }
 
 #[test]

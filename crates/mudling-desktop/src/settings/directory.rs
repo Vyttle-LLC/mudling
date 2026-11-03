@@ -8,10 +8,12 @@
 use super::add_plugin::AddedPlugin;
 use super::plugins::{PluginRow, Sending};
 use super::{
-    Page, Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, text_button,
+    Page, Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line,
+    problem_line, text_button,
 };
 use crate::assets::UI_FONT;
 use crate::input::CommandInput;
+use crate::launcher::InstalledVersions;
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Role, SharedString,
@@ -20,7 +22,6 @@ use gpui::{
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
 use mudling_core::registry::{self, Entry, Fetched, Index};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,6 +30,8 @@ const CHECKING: &str = "Checking the community directory…";
 const NOTHING_MATCHES: &str = "No plugin matches.";
 const EMPTY: &str = "The directory lists no plugins yet.";
 const SENDS: &str = "sends commands";
+const SENDS_GMCP: &str = "asks the game for data";
+const WAITS_FOR_INSTALL: &str = "Waits until the plugin being installed is done.";
 const ANY_GAME: &str = "Any game";
 const CANT_REACH: &str =
     "It can't read your files or reach the network. You can take this back on the Plugins page.";
@@ -67,9 +70,7 @@ enum Filter {
 /// The page's state, kept while the sheet lives so the search survives.
 pub(super) struct DirectoryPane {
     listing: Listing,
-    /// What's installed here, by id, with its hash if it came from the
-    /// directory.
-    installed: BTreeMap<String, Option<String>>,
+    installed: InstalledVersions,
     search: Entity<CommandInput>,
     filter: Filter,
     /// The plugin being fetched or installed.
@@ -83,7 +84,7 @@ impl DirectoryPane {
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         DirectoryPane {
             listing: Listing::default(),
-            installed: BTreeMap::new(),
+            installed: InstalledVersions::new(),
             search,
             filter: Filter::default(),
             busy: None,
@@ -100,7 +101,7 @@ enum Offer {
     Installed,
 }
 
-fn offer(entry: &Entry, installed: &BTreeMap<String, Option<String>>) -> Offer {
+fn offer(entry: &Entry, installed: &InstalledVersions) -> Offer {
     match installed.get(&entry.id) {
         None => Offer::Install,
         Some(Some(hash)) if *hash != entry.hash => Offer::Update,
@@ -112,10 +113,19 @@ fn offer(entry: &Entry, installed: &BTreeMap<String, Option<String>>) -> Offer {
 fn entry_about(entry: &Entry) -> String {
     let game = entry.game().unwrap_or(ANY_GAME);
     let mut about = format!("{game} · {} · {}", entry.version, entry.license);
-    if entry.sends_commands() {
-        about.push_str(&format!(" · {SENDS}"));
+    if let Some(sends) = sends(entry) {
+        about.push_str(&format!(" · {sends}"));
     }
     about
+}
+
+/// What it sends the game once approved, said as a warning.
+fn sends(entry: &Entry) -> Option<&'static str> {
+    if entry.sends_commands() {
+        Some(SENDS)
+    } else {
+        entry.sends_gmcp().then_some(SENDS_GMCP)
+    }
 }
 
 /// Where a row sits in its card, which decides its corners and borders. Each
@@ -152,12 +162,25 @@ pub(super) fn card_row(at: InCard, theme: &Theme) -> Div {
         .when(bottom, |row| row.border_b_1().rounded_b_lg())
 }
 
+/// A row of a card laid out as a line: its words, then what it does.
+pub(super) fn card_line(at: InCard, theme: &Theme) -> Div {
+    card_row(at, theme)
+        .flex()
+        .items_center()
+        .gap_3()
+        .px_4()
+        .py_3()
+        .font_family(UI_FONT)
+}
+
 /// What the sheet asks before a plugin changes: approval for one that sends
-/// commands, trust for a copy that arrived, or a removal.
+/// commands or GMCP requests, trust for a copy that arrived, or a removal.
 pub(super) struct Approval {
     plugin: PluginId,
     name: SharedString,
     asks: Vec<SharedString>,
+    /// It sends commands, not only GMCP requests.
+    sends_commands: bool,
     purpose: Purpose,
     /// Where the keyboard goes back to.
     return_to: Option<FocusHandle>,
@@ -208,7 +231,10 @@ impl Approval {
     fn words(&self) -> Words {
         let name = &self.name;
         let approval = |without, with| Words {
-            title: format!("Let {name} send commands?"),
+            title: match self.sends_commands {
+                true => format!("Let {name} send commands?"),
+                false => format!("Let {name} ask the game for data?"),
+            },
             lead: None,
             shows_asks: true,
             footer: CANT_REACH,
@@ -261,6 +287,7 @@ impl Approval {
             plugin: row.id.clone(),
             name: row.name.clone(),
             asks: row.asks.clone(),
+            sends_commands: row.sends_commands(),
             purpose,
             return_to: window.focused(cx),
         }
@@ -279,6 +306,7 @@ impl Approval {
             plugin,
             name,
             asks: Vec::new(),
+            sends_commands: false,
             purpose,
             return_to: window.focused(cx),
         }
@@ -298,7 +326,7 @@ impl SettingsSheet {
     pub fn show_directory(
         &mut self,
         listing: Listing,
-        installed: BTreeMap<String, Option<String>>,
+        installed: InstalledVersions,
         cx: &mut Context<SettingsSheet>,
     ) {
         self.directory.listing = listing;
@@ -306,7 +334,8 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A plugin downloaded and checked. One that sends commands asks first,
+    /// A plugin downloaded and checked. One that sends commands or GMCP
+    /// requests asks first,
     /// unless it's an update of an approved copy from where that came from.
     pub fn fetched(
         &mut self,
@@ -320,7 +349,7 @@ impl SettingsSheet {
                 fetched,
                 keeps_approval: false,
                 replaces,
-            }) if registry::sends_commands(&fetched.plugin) => {
+            }) if registry::needs_approval(&fetched.plugin) => {
                 let row = PluginRow::of(&fetched.plugin, false);
                 let purpose = Purpose::Install {
                     fetched,
@@ -339,20 +368,26 @@ impl SettingsSheet {
 
     /// What's installed now, after a change to it, and what was added from
     /// links and folders.
-    pub fn installed(
+    pub fn show_installed(
         &mut self,
-        installed: BTreeMap<String, Option<String>>,
+        installed: InstalledVersions,
         added: Vec<AddedPlugin>,
         cx: &mut Context<SettingsSheet>,
     ) {
-        self.plugin_work_ended(None);
         self.directory.installed = installed;
         self.show_added(added, cx);
         cx.notify();
     }
 
-    pub fn install_failed(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
-        self.plugin_work_ended(Some(problem.into()));
+    /// An install ended, with `problem` if it failed.
+    pub fn install_ended(&mut self, problem: Option<String>, cx: &mut Context<SettingsSheet>) {
+        self.plugin_work_ended(problem.map(Into::into));
+        cx.notify();
+    }
+
+    /// A change the player made to the plugins failed, for this reason.
+    pub fn show_plugin_problem(&mut self, problem: String, cx: &mut Context<SettingsSheet>) {
+        self.show_problem_here(Some(problem.into()));
         cx.notify();
     }
 
@@ -361,6 +396,11 @@ impl SettingsSheet {
     /// its own end: [`SettingsSheet::link_checked`].
     fn plugin_work_ended(&mut self, problem: Option<SharedString>) {
         self.directory.busy = None;
+        self.show_problem_here(problem);
+    }
+
+    /// Shows `problem` on the page the player is on, or clears it.
+    fn show_problem_here(&mut self, problem: Option<SharedString>) {
         match self.page {
             Page::AddPlugin => self.add.problem = problem,
             _ => self.directory.problem = problem,
@@ -403,10 +443,7 @@ impl SettingsSheet {
             }
             Listing::Refused(why) => {
                 pane.row(
-                    muted_line(why, theme)
-                        .debug_selector(|| "directory-refused".to_owned())
-                        .role(Role::Alert)
-                        .text_color(theme.error),
+                    problem_line(why, theme).debug_selector(|| "directory-refused".to_owned()),
                 );
                 return;
             }
@@ -419,10 +456,7 @@ impl SettingsSheet {
         self.fill_filters(&index, pane, theme, cx);
         if let Some(problem) = self.directory.problem.clone() {
             pane.row(
-                muted_line(problem, theme)
-                    .debug_selector(|| "directory-problem".to_owned())
-                    .role(Role::Alert)
-                    .text_color(theme.error),
+                problem_line(problem, theme).debug_selector(|| "directory-problem".to_owned()),
             );
         }
         // An install or update reaches a session only when it opens.
@@ -567,8 +601,7 @@ impl SettingsSheet {
                     Offer::Update => format!("Update to {}", entry.version),
                     _ => "Install".to_owned(),
                 };
-                let (entry, index) = (entry.clone(), index.clone());
-                text_button(
+                let button = text_button(
                     SharedString::from(format!("directory-get-{}", entry.id)),
                     label,
                     &pane.stop(cx),
@@ -576,22 +609,21 @@ impl SettingsSheet {
                 )
                 .aria_label(format!("{} {}", offer_verb(&offered), entry.name))
                 .text_color(theme.accent)
-                .border_color(theme.accent)
-                .on_click(cx.listener(move |sheet, _, _, cx| {
-                    sheet.get(entry.clone(), index.clone(), cx);
-                }))
+                .border_color(theme.accent);
+                // One install at a time: what it may replace and keep is read
+                // from the plugins as they were before it.
+                if self.directory.busy.is_some() {
+                    button.opacity(0.5).aria_description(WAITS_FOR_INSTALL)
+                } else {
+                    let (entry, index) = (entry.clone(), index.clone());
+                    button.on_click(cx.listener(move |sheet, _, _, cx| {
+                        sheet.get(entry.clone(), index.clone(), cx);
+                    }))
+                }
                 .into_any_element()
             }
         };
-        card_row(at, theme)
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_4()
-            .py_3()
-            .font_family(UI_FONT)
-            .child(words)
-            .child(action)
+        card_line(at, theme).child(words).child(action)
     }
 
     /// Asks whether the session's `plugin` may send commands.
@@ -861,7 +893,7 @@ fn offer_verb(offered: &Offer) -> &'static str {
     }
 }
 
-/// A row's smaller line, with "sends commands" in the warning color.
+/// A row's smaller line, with what it sends in the warning color.
 fn about_line(entry: &Entry, theme: &Theme) -> Stateful<Div> {
     let game = entry.game().unwrap_or(ANY_GAME);
     div()
@@ -871,8 +903,8 @@ fn about_line(entry: &Entry, theme: &Theme) -> Stateful<Div> {
         .text_size(px(13.))
         .text_color(theme.text_muted)
         .child(format!("{game} · {} · {}", entry.version, entry.license))
-        .when(entry.sends_commands(), |line| {
+        .when_some(sends(entry), |line, sends| {
             line.child(" · ")
-                .child(div().text_color(theme.warning).child(SENDS))
+                .child(div().text_color(theme.warning).child(sends))
         })
 }

@@ -6,15 +6,15 @@
 </p>
 
 **MUDling** is a touch-first, open-source MUD client. A mudling is a small
-creature of living mud — and MUD is where it lives: exits become a D-pad,
-the things in the room become tappable, and commands compose by touch
+creature of living mud — and MUD is where it lives: exits become words to
+tap, the things in the room become tappable, and commands compose by touch
 instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
 
 > Early days. The headless core is here: the connection layer (telnet, GMCP,
 > MCCP2), line pipeline, plugin host with Luau hooks, versioned stores, map,
 > persistence and completion, with the Avatar game plugin on top. The desktop
 > shell plays on it: a gpui window that opens saved servers, with a chat you
-> can search and read back through, a Room panel with a D-pad, a hotbar of
+> can search and read back through, a Room panel with its exits and a small map you can zoom, a hotbar of
 > commands, the character's HUD, and settings for plugins, triggers, aliases
 > and shortcuts. It is built for the keyboard and screen readers as well as
 > the mouse. [docs/phase-0-spike.md](docs/phase-0-spike.md) records the spike

@@ -3997,6 +3997,7 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.11.1",

@@ -181,6 +181,10 @@ pub struct Theme {
     pub on_accent: Hsla,
     /// What can't be taken back, such as Kill.
     pub danger: Hsla,
+    /// A change for the better; armor counts down.
+    pub better: Hsla,
+    /// A change for the worse.
+    pub worse: Hsla,
     pub placeholder: Hsla,
     /// Words that say what went wrong.
     pub error: Hsla,
@@ -251,6 +255,8 @@ impl Theme {
                 accent_hover: rgb(MOSS_BRIGHT).into(),
                 on_accent: rgb(NIGHT).into(),
                 danger: rgb(ANSI_ON_NIGHT[9]).into(),
+                better: rgb(MOSS_BRIGHT).into(),
+                worse: rgb(ANSI_ON_NIGHT[9]).into(),
                 placeholder: rgb(0x8A928D).into(),
                 error: rgb(ANSI_ON_NIGHT[9]).into(),
                 warning: rgb(0xE5C04F).into(),
@@ -297,6 +303,8 @@ impl Theme {
                 accent_hover: rgb(MOSS_DIM).into(),
                 on_accent: rgb(PARCHMENT).into(),
                 danger: rgb(ANSI_ON_PARCHMENT[1]).into(),
+                better: rgb(ANSI_ON_PARCHMENT[2]).into(),
+                worse: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 placeholder: rgb(0x636C67).into(),
                 error: rgb(ANSI_ON_PARCHMENT[1]).into(),
                 warning: rgb(0x7A5A0B).into(),
@@ -376,6 +384,8 @@ mod tests {
                     theme.text_muted,
                     theme.accent,
                     theme.danger,
+                    theme.better,
+                    theme.worse,
                     theme.placeholder,
                     theme.warning,
                 ] {

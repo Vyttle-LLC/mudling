@@ -15,8 +15,8 @@ use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::chat::min_column_width;
 use crate::theme::Theme;
 use gpui::{
-    AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role, SharedString,
-    Stateful, StyleRefinement, Window, deferred, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role,
+    SharedString, Stateful, StyleRefinement, Window, deferred, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
 
@@ -136,6 +136,16 @@ fn shared_widths(left: Pixels, right: Pixels, room: Pixels) -> (Pixels, Pixels) 
         (left - from_wider - from_both, right - from_both)
     } else {
         (left - from_both, right - from_wider - from_both)
+    }
+}
+
+/// `view`, drawn only when it changes, as the chat beside it draws every
+/// frame. A cached view leaves its nodes out of the accessibility tree, so
+/// a screen reader always gets it drawn afresh.
+pub fn cached_unless_reader(view: AnyView, style: StyleRefinement, window: &Window) -> AnyElement {
+    match window.is_a11y_active() {
+        true => view.into_any_element(),
+        false => view.cached(style).into_any_element(),
     }
 }
 
@@ -448,13 +458,9 @@ impl Dock {
             .find(|(slot, _)| *slot == self.selected)
             .map(|(_, view)| view.clone());
         let content = match view {
-            // A cached view leaves its nodes out of the accessibility tree,
-            // so a screen reader always gets the panel drawn afresh.
-            Some(view) if window.is_a11y_active() => view.into_any_element(),
-            // The chat draws every frame, and a panel only when it changes.
-            Some(view) => view
-                .cached(StyleRefinement::default().size_full())
-                .into_any_element(),
+            Some(view) => {
+                cached_unless_reader(view, StyleRefinement::default().size_full(), window)
+            }
             None => div()
                 .flex()
                 .flex_col()

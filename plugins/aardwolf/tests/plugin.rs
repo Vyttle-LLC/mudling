@@ -1,8 +1,9 @@
-//! The plugin itself: it loads, it's Aardwolf's, it asks for nothing, and it
-//! passes the checks a plugin added from a link must.
+//! The plugin itself: it loads, it's Aardwolf's, it asks only to send GMCP,
+//! and it passes the checks a plugin added from a link must.
 
 use mudling_core::git::FolderFiles;
 use mudling_core::plugin::check;
+use mudling_core::plugin::manifest::Permission;
 use mudling_core::plugin::{Layer, PluginHost, ServerInfo};
 use mudling_plugin_aardwolf::{load, plugin_dir};
 use std::fs;
@@ -22,9 +23,9 @@ fn loads_as_aardwolfs_game_plugin() {
 }
 
 #[test]
-fn needs_no_hooks_and_no_permissions() {
+fn needs_no_hooks_and_asks_only_to_send_gmcp() {
     let plugin = load();
-    assert!(plugin.manifest.permissions.is_empty());
+    assert_eq!(plugin.manifest.permissions, [Permission::SendGmcp]);
     assert!(plugin.manifest.hooks.files.is_empty());
 }
 

@@ -251,6 +251,16 @@ pub enum Permission {
     WriteStore(String),
     /// Send commands to the game; needs the player's approval at install.
     SendCommands,
+    /// Send the GMCP messages the Connection point's `[[request]]` list
+    /// declares; needs the player's approval as `SendCommands` does.
+    SendGmcp,
+}
+
+impl Permission {
+    /// Whether the player approves it before it takes effect.
+    pub fn needs_approval(&self) -> bool {
+        matches!(self, Permission::SendCommands | Permission::SendGmcp)
+    }
 }
 
 impl TryFrom<String> for Permission {
@@ -260,12 +270,13 @@ impl TryFrom<String> for Permission {
         match permission.as_str() {
             "read_state" => Ok(Permission::ReadState),
             "send_commands" => Ok(Permission::SendCommands),
+            "send_gmcp" => Ok(Permission::SendGmcp),
             other => match other.strip_prefix("write_store:") {
                 Some(store) if !store.trim().is_empty() => {
                     Ok(Permission::WriteStore(store.to_owned()))
                 }
                 _ => Err(format!(
-                    "`{permission}` isn't a permission: use \"read_state\", \"write_store:<name>\" or \"send_commands\""
+                    "`{permission}` isn't a permission: use \"read_state\", \"write_store:<name>\", \"send_commands\" or \"send_gmcp\""
                 )),
             },
         }
@@ -403,7 +414,7 @@ impl Plugin {
                 commands: point::<Commands>(load(Point::Commands)?)?,
                 text: point_checked(load(Point::Text)?, Text::validate)?,
                 hud: point::<Hud>(load(Point::Hud)?)?,
-                map: point::<Map>(load(Point::Map)?)?,
+                map: point_checked(load(Point::Map)?, Map::validate)?,
                 character: point::<Character>(load(Point::Character)?)?,
                 gear: point::<Gear>(load(Point::Gear)?)?,
                 mobs: point_checked(load(Point::Mobs)?, Mobs::validate)?,
@@ -413,6 +424,18 @@ impl Plugin {
         points.validate().map_err(|problem| {
             PluginError::invalid(files.character.as_deref().unwrap_or_default(), problem)
         })?;
+        let requests = points.connection.iter().flat_map(|point| &point.requests);
+        if let Some(request) = requests.into_iter().next()
+            && !manifest.permissions.contains(&Permission::SendGmcp)
+        {
+            return Err(PluginError::invalid(
+                files.connection.as_deref().unwrap_or_default(),
+                format!(
+                    "the request `{}` needs the `send_gmcp` permission in plugin.toml",
+                    request.send
+                ),
+            ));
+        }
         let mut scripts = Vec::with_capacity(manifest.hooks.files.len());
         for file in &manifest.hooks.files {
             let source = read_file(&mut read, file)?;

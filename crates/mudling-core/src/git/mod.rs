@@ -1,7 +1,8 @@
 //! Embedded git: libgit2 with everything vendored, so sync works with nothing
 //! installed and no system `git` is ever run (PRD §10).
 //!
-//! [`Repo`] offers what sync needs and no more. It holds the repo for its
+//! [`Repo`] offers what sync needs, and plain forms of fetch and push with no
+//! [`Limit`] for tests and [`crate::merge`]'s example. It holds the repo for its
 //! whole life, so one sync thread should own it. Every step is safe to repeat:
 //! a failure is a typed [`GitError`] and loses nothing, and a crash between
 //! steps leaves the repo valid.
@@ -25,7 +26,7 @@ mod tests;
 
 pub use error::GitError;
 pub use git2::Oid;
-pub use mirror::{FOLDER_LIMITS, FolderFiles, FolderLimits, Mirror};
+pub use mirror::{FolderFiles, Mirror};
 
 use crate::merge;
 use git2::{
@@ -175,7 +176,7 @@ impl Limit {
         }
     }
 
-    pub fn is_up(&self) -> bool {
+    pub(crate) fn is_up(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || Instant::now() >= self.deadline
     }
 }
@@ -316,13 +317,12 @@ impl Repo {
         on_own_thread(self.repo.path().to_owned(), limit, work)
     }
 
-    /// Whether the repo has a remote of this name.
     pub fn has_remote(&self, remote: &str) -> bool {
         self.repo.find_remote(remote).is_ok()
     }
 
     /// Where the last fetch from `remote` saw `branch`.
-    pub fn tracked_tip(&self, remote: &str, branch: &str) -> Result<Option<Oid>> {
+    fn tracked_tip(&self, remote: &str, branch: &str) -> Result<Option<Oid>> {
         self.tip(&tracking_ref(remote, branch))
     }
 

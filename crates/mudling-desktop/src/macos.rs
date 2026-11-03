@@ -19,6 +19,9 @@ use crate::stream;
 use gpui::{App, AsyncApp, Context, Entity, Window, px};
 use mudling_core::logs::{Kind, LogFile};
 use mudling_core::persist::{self, Timestamp};
+use mudling_core::plugin::PluginId;
+use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
+use mudling_core::store::SettingsState;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{MainThreadMarker, Message, class, msg_send, sel};
@@ -239,6 +242,9 @@ const PLUGINS_TEXT: [&str; 2] = ["MUDling defaults, Built in: On", "a line"];
 
 /// What a screen reader must find on the Plugins page.
 const PLUGINS_CONTROLS: [&str; 2] = ["Inspector", "Sample game, on"];
+/// What a plugin turned off for overrunning says, and the buttons it offers.
+const OVERRUN_TEXT: [&str; 1] = ["Sample game was turned off."];
+const OVERRUN_CONTROLS: [&str; 2] = ["Details", "Turn on again"];
 const INSPECTOR_CONTROLS: [&str; 2] = ["Back", "Clear"];
 /// A row reads as the line, who claimed it, then the time.
 const INSPECTOR_TEXT: [&str; 2] = [
@@ -408,7 +414,7 @@ const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to
 /// The Gear tab on its sample: the views, a carried item's actions, the lists.
 const GEAR_CONTROLS: [&str; 5] = [
     "Worn",
-    "Carrying",
+    "Carrying · 10",
     "Wear a small necklace",
     "More about a small necklace",
     "Items named in chat",
@@ -438,8 +444,10 @@ const GEAR_EDITOR_CONTROLS: [&str; 11] = [
 ];
 /// What the editor's preview reads as one stop.
 const GEAR_PREVIEW_START: &str = "Wearing it now would send: remove 1204883";
-/// What the sample's level lock says, on the row, to a screen reader.
-const GEAR_LOCKED_ROW: &str = "a copper bracelet, Glowing, Humming, Needs level 7";
+/// What the sample's level lock says, on the row, to a screen reader, with
+/// the row's stats and what wearing it would change.
+const GEAR_LOCKED_ROW: &str =
+    "a copper bracelet, Glowing, Humming, Needs level 7, AC −2 → wrist empty";
 /// What the tooltip over the sample's item says.
 const GEAR_TIP: &str = "AC −1 (better) (estimate from 1 copy)";
 
@@ -503,6 +511,9 @@ const PICK_CONTROLS: [&str; 3] = [
     "Clear the rooms picked",
     "Pick Square 1, 1 to join",
 ];
+const FORGET_ROOM: &str = "Forget room Square 1, 1";
+/// The question's Cancel, then its Forget.
+const FORGET_CONTROLS: [&str; 2] = ["Keep Square 1, 1", "Forget Square 1, 1"];
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// The Character tab on its sample, by accessibility role and name.
 const CHARACTER_CONTROLS: [(&str, &str); 2] = [
@@ -1284,6 +1295,51 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: picked.len() == 1,
             detail: format!("{} element(s)", picked.len()),
         });
+        let unnamed = missing(&[FORGET_ROOM], &tree);
+        checks.push(Check {
+            name: "the room shown has a named Forget room",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.forget_sample(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&FORGET_CONTROLS, &tree);
+        checks.push(Check {
+            name: "forgetting a room asks with named Cancel and Forget",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the question takes focus, on Cancel",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == FORGET_CONTROLS[0]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map().update(cx, |map, cx| map.keep_room(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "keeping the room takes focus back to Forget room",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == FORGET_ROOM),
+            detail: format!("{focused:?}"),
+        });
 
         in_window(
             &|shell, window, cx| {
@@ -1322,25 +1378,27 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         );
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let missing: Vec<_> = SETTINGS_CONTROLS
-            .into_iter()
-            .filter(|name| {
+        let named_in = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
+            let unnamed = |name: &&'static str| {
                 let named = |e: &AxElement| e.title.as_deref() == Some(*name);
                 tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
-            })
-            .collect();
+            };
+            names.iter().copied().filter(unnamed).collect()
+        };
+        let reads_all = |tree: &Option<AxElement>, texts: &[&'static str]| -> Vec<&'static str> {
+            let unread = |text: &&'static str| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            };
+            texts.iter().copied().filter(unread).collect()
+        };
+        let missing = named_in(&tree, &SETTINGS_CONTROLS);
         checks.push(Check {
             name: "the settings sheet names its sections and controls",
             passed: opened.is_some() && missing.is_empty(),
             detail: format!("not found: {missing:?}"),
         });
-        let unread: Vec<_> = SETTINGS_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &SETTINGS_TEXT);
         checks.push(Check {
             name: "the settings sheet's text reaches the tree",
             passed: unread.is_empty(),
@@ -1363,39 +1421,20 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         );
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let missing: Vec<_> = LOGS_CONTROLS
-            .into_iter()
-            .filter(|name| {
-                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
-                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
-            })
-            .collect();
+        let missing = named_in(&tree, &LOGS_CONTROLS);
         checks.push(Check {
             name: "the Logs section names its switches, pin, export and clear",
             passed: on_logs.is_some() && missing.is_empty(),
             detail: format!("not found: {missing:?}"),
         });
 
-        let named_in = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
-            let unnamed = |name: &&'static str| {
-                let named = |e: &AxElement| e.title.as_deref() == Some(*name);
-                tree.as_ref().is_none_or(|tree| tree.find(named).is_empty())
-            };
-            names.iter().copied().filter(unnamed).collect()
-        };
         let opened = in_window(
             &|shell, window, cx| measure::open_sample_section(shell, Section::Plugins, window, cx),
             cx,
         );
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
-        let unread: Vec<_> = PLUGINS_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &PLUGINS_TEXT);
         checks.push(Check {
             name: "Plugins reads out its layers and what they cost",
             passed: opened.is_some() && unread.is_empty(),
@@ -1410,6 +1449,30 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         let opened = in_window(
             &|shell, window, cx| {
+                measure::open_sample_section(shell, Section::Plugins, window, cx);
+                let overran = SettingsState {
+                    turned_off: vec![PluginDisabled {
+                        plugin: PluginId::try_from("sample-game".to_owned()).expect("a good id"),
+                        reason: DisabledReason::Overran(3),
+                    }],
+                    ..SettingsState::default()
+                };
+                shell.show_sample_problems(&overran, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &OVERRUN_CONTROLS);
+        let unread = reads_all(&tree, &OVERRUN_TEXT);
+        checks.push(Check {
+            name: "a plugin turned off for overrunning says so, with Details and Turn on again",
+            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let opened = in_window(
+            &|shell, window, cx| {
                 measure::open_sample_inspector(shell, &measure::sample_inspected(), window, cx);
             },
             cx,
@@ -1417,13 +1480,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
         let missing = named_in(&tree, &INSPECTOR_CONTROLS);
-        let unread: Vec<_> = INSPECTOR_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &INSPECTOR_TEXT);
         let focused = app_focus(cx);
         checks.push(Check {
             name: "the Inspector reads each line, who claimed it, then the time",
@@ -1440,26 +1497,13 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         cx.background_executor().timer(pause).await;
         let tree = window_tree();
         let missing = named_in(&tree, &SERVER_PLUGINS_CONTROLS);
-        let unread: Vec<_> = SERVER_PLUGINS_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &SERVER_PLUGINS_TEXT);
         checks.push(Check {
             name: "a server's plugins name their switches and read their overrides",
             passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
             detail: format!("not found: {missing:?}, {unread:?}"),
         });
 
-        let reads_all = |tree: &Option<AxElement>, texts: &[&'static str]| -> Vec<&'static str> {
-            let unread = |text: &&'static str| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            };
-            texts.iter().copied().filter(unread).collect()
-        };
         let opened = in_window(
             &|shell, window, cx| measure::open_sample_section(shell, Section::Plugins, window, cx),
             cx,
@@ -1531,13 +1575,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: opened.is_some() && missing.is_empty(),
             detail: format!("not found: {missing:?}"),
         });
-        let unread: Vec<_> = DATA_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &DATA_TEXT);
         checks.push(Check {
             name: "Data & sync's text reaches the tree",
             passed: unread.is_empty(),
@@ -1609,13 +1647,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             passed: reached_empty_state.is_some() && missing.is_empty(),
             detail: format!("not found: {missing:?}"),
         });
-        let unread: Vec<_> = EMPTY_STATE_TEXT
-            .into_iter()
-            .filter(|text| {
-                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
-                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
-            })
-            .collect();
+        let unread = reads_all(&tree, &EMPTY_STATE_TEXT);
         checks.push(Check {
             name: "the empty state's text reaches the tree",
             passed: unread.is_empty(),

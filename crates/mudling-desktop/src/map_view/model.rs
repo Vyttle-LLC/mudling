@@ -47,11 +47,12 @@ pub enum ScanStep {
     WaitFor(Duration),
 }
 
-/// The note over the map after a join.
+/// The note over the map after a join, or after forgetting the room named.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JoinNote {
     Joined { label: String, created: Timestamp },
     Failed(String),
+    Forgot(String),
 }
 
 /// One room of a pair, as Review words it.
@@ -326,6 +327,11 @@ impl MapModel {
 
     pub fn zoom(&mut self, factor: f32, anchor: (f32, f32), size: (f32, f32)) {
         self.camera.zoom_at(factor, anchor, size);
+    }
+
+    /// Zooms about the middle of the view, so a followed player stays there.
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.camera.zoom_by(factor);
     }
 
     /// Fits the sheet in a view of `size` pixels.
@@ -674,6 +680,16 @@ impl MapModel {
         self.picks.clear();
     }
 
+    /// The session has been asked to forget `room`, so nothing here holds it.
+    pub fn await_forget(&mut self, room: RoomId) {
+        self.join_note = self
+            .room_name(room)
+            .map(|name| JoinNote::Forgot(name.to_owned()));
+        self.picks.retain(|picked| *picked != room);
+        self.selection = None;
+        self.walk_for = None;
+    }
+
     pub fn joining(&self) -> Option<RoomPair> {
         self.joining
     }
@@ -838,6 +854,15 @@ mod tests {
 
         model.follow();
         assert_ne!(model.camera().center, panned);
+    }
+
+    #[test]
+    fn zooming_about_the_middle_keeps_following_the_player() {
+        let mut model = grid_model();
+        model.zoom_by(1.25);
+        move_to(&mut model, 5, 2);
+        let (square, _) = model.you().expect("the player is on this sheet");
+        assert_eq!(model.camera().center, (square.0 as f32, square.1 as f32));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! `plugins/<id>.json` beside it saying where it came from. The folder is a
 //! plugin's files exactly as fetched, so its content hash still holds.
 
-use super::{Fetched, InstallError, Origins, Source, Trusted, content_hash};
+use super::{Fetched, InstallError, Origins, Source, Trusted, content_hash, load_files};
 use crate::git::FolderFiles;
 use crate::plugin::Plugin;
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,8 @@ impl InstalledPlugins {
         }
     }
 
-    pub fn folder(&self) -> &Path {
+    #[cfg(test)]
+    pub(super) fn folder(&self) -> &Path {
         &self.folder
     }
 
@@ -144,8 +145,7 @@ impl InstalledPlugins {
         }
         fs::rename(&incoming, &target).map_err(disk)?;
         remove_folder(&outgoing).map_err(disk)?;
-        let record = serde_json::to_vec_pretty(&record).expect("a record serializes");
-        super::save(&self.record_path(id), &record).map_err(disk)
+        super::write_json(&self.record_path(id), &record).map_err(disk)
     }
 
     /// Loads every installed plugin this device trusts: a copy whose content
@@ -159,13 +159,7 @@ impl InstalledPlugins {
             let folder = path
                 .file_name()
                 .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-            let read = folder_hash(&path)
-                .map_err(|error| error.to_string())
-                .and_then(|hash| {
-                    let plugin = Plugin::load(&path).map_err(|error| error.to_string())?;
-                    Ok((plugin, hash))
-                });
-            let (plugin, hash) = match read {
+            let (plugin, hash) = match read_copy(&path) {
                 Ok(read) => read,
                 Err(why) => {
                     loaded.refused.push(Refused { id: folder, why });
@@ -173,12 +167,11 @@ impl InstalledPlugins {
                 }
             };
             let has_record = self.record_path(&folder).exists();
-            let record = has_record.then(|| self.record(&folder)).flatten();
             let copy = FolderCopy {
                 plugin,
-                folder,
                 hash,
-                record,
+                record: self.record(&folder),
+                folder,
             };
             if self.is_trusted(&copy, has_record) {
                 loaded.plugins.push(copy);
@@ -222,15 +215,35 @@ impl InstalledPlugins {
         self.origins.forget(folder)
     }
 
+    /// Whether a plugin installed here says it came from `url`.
+    pub(super) fn has_link(&self, url: &str) -> bool {
+        let folders = self.plugin_folders();
+        let mut names = folders.iter().filter_map(|path| path.file_name()?.to_str());
+        names.any(|folder| {
+            matches!(self.record(folder), Some(Record::Link { url: from, .. }) if from == url)
+        })
+    }
+
     /// What the record beside `folder` says, if it can be read.
     fn record(&self, folder: &str) -> Option<Record> {
-        let bytes = fs::read(self.record_path(folder)).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        super::read_json(&self.record_path(folder))
     }
 
     fn record_path(&self, id: &str) -> PathBuf {
         self.folder.join(format!("{id}.{RECORD_EXTENSION}"))
     }
+}
+
+/// The plugin in `folder` and its content hash, both from one read of its
+/// files, so what loads is what was hashed even while sync writes there.
+fn read_copy(folder: &Path) -> Result<(Plugin, String), String> {
+    let mut files = FolderFiles::new();
+    read_files(folder, "", &mut files).map_err(|error| error.to_string())?;
+    let plugin = load_files(&files).map_err(|mut error| {
+        error.source = folder.join(&error.source).display().to_string();
+        error.to_string()
+    })?;
+    Ok((plugin, content_hash(&files)))
 }
 
 /// A folder's content hash, as it is on the disk now.
@@ -299,7 +312,8 @@ pub(crate) fn plugin_of(relative: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn is_working(path: &Path) -> bool {
+/// Whether `path` is a plugin folder being written, or one on its way out.
+pub(crate) fn is_working(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(WORKING_PREFIX))

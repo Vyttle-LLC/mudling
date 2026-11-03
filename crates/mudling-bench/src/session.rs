@@ -25,7 +25,6 @@
 //! - **Cold start:** the session opened on that map's database, as far as
 //!   connected: no socket, so no network time.
 
-use crate::plugin_host::PLUGIN_BUDGET_US;
 use crate::{HEAP_BYTES, heap_mb, verdict};
 use mudling_core::defaults::triggers::{Highlight, TriggerRule};
 use mudling_core::logs::{LogSettings, Logs};
@@ -33,7 +32,8 @@ use mudling_core::map::Mark;
 use mudling_core::persist::{Batch, Database, MobMark, SERVERS_FOLDER, Timestamp};
 use mudling_core::plugin::{Layer, Plugin};
 use mudling_core::session::{Engine, RuleEdit, SessionConfig, Typing};
-use mudling_core::stats::Summary;
+pub use mudling_core::stats::LINE_BUDGET_US;
+use mudling_core::stats::{PLUGIN_BUDGET_US, Summary};
 use mudling_core::store::{InspectorState, StoreHub, Stores};
 use mudling_core::telnet::command::{GA, IAC};
 use mudling_core::telnet::{Bytes, gmcp};
@@ -43,7 +43,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const LINE_BUDGET_US: f64 = 20.0;
 pub const MOVE_BUDGET_US: f64 = 1_000.0;
 const MEMORY_BUDGET_MB: f64 = 200.0;
 const COLD_START_BUDGET_US: f64 = 300_000.0;

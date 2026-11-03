@@ -71,10 +71,15 @@ impl Camera {
         self.center.1 += dy / square;
     }
 
+    /// Zooms by `factor`, keeping the middle square where it is.
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
     /// Zooms by `factor`, keeping the square under `anchor` where it is.
     pub fn zoom_at(&mut self, factor: f32, anchor: (f32, f32), size: (f32, f32)) {
         let held = self.to_grid(anchor, size);
-        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom_by(factor);
         let moved = self.to_grid(anchor, size);
         self.center.0 += held.0 - moved.0;
         self.center.1 += held.1 - moved.1;

@@ -635,3 +635,28 @@ fn notes_stay_notes_and_come_back_in_the_next_session() {
     assert_eq!(marks, [Mark::Gear]);
     again.finish();
 }
+
+#[test]
+fn a_forgotten_room_leaves_the_map_and_stays_gone_next_session() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut played = Played::plain(folder.path());
+    played.in_a_room();
+    played.engine.edit_map(
+        MapEdit::Note {
+            room: 1,
+            text: "wrongly mapped".to_owned(),
+        },
+        NOW,
+    );
+    played.engine.settle(NOW);
+    assert!(played.room().is_some());
+
+    played.engine.edit_map(MapEdit::Forget { room: 1 }, NOW);
+    played.engine.settle(NOW);
+
+    assert!(played.room().is_none(), "views get the map without it");
+    played.finish();
+    let again = Played::plain(folder.path());
+    assert!(again.room().is_none(), "its rows were deleted");
+    again.finish();
+}

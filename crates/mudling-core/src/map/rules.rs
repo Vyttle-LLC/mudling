@@ -5,6 +5,7 @@
 use super::geometry::Direction;
 use super::info::RoomInfo;
 use super::mobs::MobNamer;
+use crate::plugin::points::{AreaInfo, GmcpField};
 
 /// How rooms are told apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +101,17 @@ pub trait MapRules: Send {
     /// Whether an exit's state, as Room.Info gives it, is a closed door.
     fn closed_door(&self, state: &str) -> bool {
         state.eq_ignore_ascii_case("c") || state.eq_ignore_ascii_case("closed")
+    }
+
+    /// The GMCP field listing the room's exits, as Room.Info's do, when a
+    /// door changes in place without a Room.Info.
+    fn room_exits(&self) -> Option<&GmcpField> {
+        None
+    }
+
+    /// The GMCP message naming an area.
+    fn area_info(&self) -> Option<&AreaInfo> {
+        None
     }
 
     /// Whether a room's environment is indoors, so it may belong to a

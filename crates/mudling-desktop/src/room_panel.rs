@@ -8,7 +8,6 @@
 //! shell sends it, the same way as a typed line.
 
 use crate::assets::HEADING_FONT;
-use crate::dpad;
 use crate::find_panel::marked_label;
 use crate::theme::Theme;
 use gpui::{
@@ -177,6 +176,9 @@ impl EventEmitter<MarkMob> for RoomPanel {}
 
 pub struct RoomPanel {
     focus_handle: FocusHandle,
+    /// Where the keyboard lands in the panel: the first way out, not the
+    /// map's zoom keys above it.
+    first_exit: FocusHandle,
     verbs: Verbs,
     place: Option<Place>,
     doubt: Option<&'static str>,
@@ -192,6 +194,7 @@ impl RoomPanel {
     pub fn new(verbs: Verbs, cx: &mut Context<RoomPanel>) -> RoomPanel {
         RoomPanel {
             focus_handle: cx.focus_handle(),
+            first_exit: cx.focus_handle().tab_stop(true),
             verbs,
             place: None,
             doubt: None,
@@ -253,9 +256,17 @@ impl RoomPanel {
         cx.notify();
     }
 
-    /// Moves the keyboard to the panel's first button, or to the panel itself
-    /// when it has none.
+    /// Moves the keyboard to the first exit, or else to the panel's first
+    /// button, or to the panel itself when it has none.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<RoomPanel>) {
+        if self
+            .place
+            .as_ref()
+            .is_some_and(|place| !place.exits.is_empty())
+        {
+            window.focus(&self.first_exit, cx);
+            return;
+        }
         window.focus(&self.focus_handle, cx);
         window.focus_next(cx);
         if !self.focus_handle.contains_focused(window, cx) {
@@ -347,47 +358,38 @@ impl RoomPanel {
             .children(self.map.clone())
     }
 
+    /// The ways out as one line of words, a dot between each.
     fn render_exits(
         &self,
         exits: &[Exit],
         theme: &Theme,
         cx: &mut Context<RoomPanel>,
     ) -> impl IntoElement {
-        let chips = exits.iter().map(|exit| {
-            let exit = *exit;
-            let word = exit.direction.name();
-            button(("exit", exit.direction as usize), exit.action(), theme)
-                .h(BUTTON_HEIGHT)
-                .px_3()
-                .gap_1()
-                .text_color(theme.text)
-                .on_click(cx.listener(move |panel, event, window, cx| {
-                    panel.send(exit.command(), event, window, cx);
-                }))
-                .child(word)
-                .when(exit.closed, |chip| {
-                    chip.child(div().text_color(theme.text_muted).child("· closed"))
-                })
-        });
+        let mut words = Vec::new();
+        for (index, exit) in exits.iter().enumerate() {
+            if index > 0 {
+                words.push(
+                    div()
+                        .text_color(theme.placeholder)
+                        .child("·")
+                        .into_any_element(),
+                );
+            }
+            let word = exit_word(*exit, theme, cx)
+                .when(index == 0, |word| word.track_focus(&self.first_exit));
+            words.push(word.into_any_element());
+        }
         div()
             .id("exits")
             .role(Role::Group)
             .aria_label("Exits")
             .flex()
-            .gap_3()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .content_start()
-                    .gap_2()
-                    .child(section_label("EXITS", theme))
-                    .children(chips.collect::<Vec<_>>()),
-            )
-            .child(dpad::render(exits, theme, cx))
+            .flex_wrap()
+            .items_baseline()
+            .gap_x(px(10.))
+            .gap_y_1()
+            .child(section_label("EXITS", theme))
+            .children(words)
     }
 
     fn render_occupants(&self, theme: &Theme, cx: &mut Context<RoomPanel>) -> impl IntoElement {
@@ -616,6 +618,37 @@ fn verb_button(
             panel.send(command.clone(), event, window, cx);
         }))
         .child(label)
+}
+
+/// An exit as a plain word the keyboard can reach and press. It underlines
+/// under the pointer, and when the keyboard moved focus there.
+fn exit_word(exit: Exit, theme: &Theme, cx: &mut Context<RoomPanel>) -> Stateful<Div> {
+    let word = exit.direction.name();
+    let (text, color) = if exit.closed {
+        (format!("{word} (closed)"), theme.text_muted)
+    } else {
+        (word.to_owned(), theme.accent)
+    };
+    let name = exit.action();
+    div()
+        .id(("exit", exit.direction as usize))
+        .debug_selector({
+            let name = name.clone();
+            move || name.to_string()
+        })
+        .role(Role::Button)
+        .aria_label(name)
+        .focusable()
+        .tab_stop(true)
+        .flex_none()
+        .cursor_pointer()
+        .text_color(color)
+        .hover(|style| style.underline())
+        .focus_visible(|style| style.underline())
+        .on_click(cx.listener(move |panel, event, window, cx| {
+            panel.send(exit.command(), event, window, cx);
+        }))
+        .child(text)
 }
 
 /// A button the keyboard can reach and press. It shows its focus only when
@@ -903,19 +936,27 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_dpad_lights_only_the_real_exits(cx: &mut TestAppContext) {
+    fn only_the_real_exits_are_listed_and_each_sends_its_move(cx: &mut TestAppContext) {
         let (panel, cx, sent) = panel_window(cx);
         fill(&panel, cx);
-        for lit in ["dpad-north", "dpad-south", "dpad-east"] {
-            assert!(cx.debug_bounds(lit).is_some(), "{lit}");
+        for real in ["Go north", "Go south", "Open the door and go east"] {
+            assert!(cx.debug_bounds(real).is_some(), "{real}");
         }
-        for dark in ["dpad-west", "dpad-up", "dpad-down"] {
-            assert!(cx.debug_bounds(dark).is_none(), "{dark}");
+        for missing in ["Go west", "Go up", "Go down"] {
+            assert!(cx.debug_bounds(missing).is_none(), "{missing}");
         }
 
-        let east = cx.debug_bounds("dpad-east").unwrap().center();
+        let east = cx
+            .debug_bounds("Open the door and go east")
+            .unwrap()
+            .center();
         cx.simulate_click(east, Modifiers::none());
         assert_eq!(*sent.borrow(), [("[e]".to_owned(), false)]);
+
+        panel.update_in(cx, |panel, window, cx| panel.focus(window, cx));
+        cx.run_until_parked();
+        press_key("enter", cx);
+        assert_eq!(sent.borrow().last(), Some(&("north".to_owned(), true)));
     }
 
     #[gpui::test]

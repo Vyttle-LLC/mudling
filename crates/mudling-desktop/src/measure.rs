@@ -63,6 +63,7 @@ use crate::chat::{COLUMN_WIDTH, Chat};
 use crate::dock::{Dock, DockState, Side, Slot};
 use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
+use crate::launcher::InstalledVersions;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
 use crate::settings::{Listing, PluginRow, Section, Sending, ServerPlugins, SuggestedPlugin};
@@ -1182,8 +1183,9 @@ struct FrameReport {
 const SAMPLE_HOST: &str = "mud.example";
 const SAMPLE_VAULT_CHARACTER: &str = "Sample";
 
-/// Opens the sheet on `section`, with Data & sync and Vault full of made-up
-/// rows. They run on no repo and no vault, so nothing of the player's is read.
+/// Opens the sheet on `section`, with Data & sync, Vault, Logs and Plugins
+/// full of made-up rows. They run on no repo and no vault, so nothing of the
+/// player's is read.
 pub fn open_sample_section(
     shell: &mut Shell,
     section: Section,
@@ -1248,7 +1250,7 @@ pub const SAMPLE_WAITING: &str = "sample-chat";
 
 /// A made-up index, four minutes old, as the design draws it: one plugin
 /// with an update, one installed, and two not.
-pub fn sample_directory() -> (Listing, BTreeMap<String, Option<String>>) {
+pub fn sample_directory() -> (Listing, InstalledVersions) {
     let entry = |id: &str, name: &str, game: Option<&str>, version: &str, license: &str| Entry {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -1311,7 +1313,7 @@ pub fn open_sample_inspector(
             clear: false,
             lines: lines.to_vec(),
         };
-        sheet.show_inspected(&change, cx);
+        sheet.show_inspected(&change, window, cx);
     });
 }
 
@@ -1386,7 +1388,7 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         id: PluginId::try_from(name.to_lowercase().replace(' ', "-")).expect("the id is valid"),
         name: name.to_owned().into(),
         layer,
-        version: "1.0.0 · MIT".into(),
+        detail: "1.0.0 · MIT".into(),
         holds: "".into(),
         always_on: false,
         on: true,

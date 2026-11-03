@@ -5,8 +5,12 @@ use crate::measure::{sample_items, sample_items_with_sets};
 use crate::room_panel::press_key;
 use crate::theme::Theme;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance, size};
+use mudling_core::gear::{Estimate, Reading};
+use mudling_core::persist::{Batch, Identification, Timestamp};
+use mudling_core::plugin::luau::Value;
 use mudling_core::session::GearEdit;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 fn carried<'a>(rows: &'a [Row], name: &str) -> &'a Row {
@@ -16,17 +20,92 @@ fn carried<'a>(rows: &'a [Row], name: &str) -> &'a Row {
 }
 
 #[test]
-fn every_slot_shows_in_the_plugins_order_with_the_empty_ones() {
-    let rows = worn_rows(&sample_items());
+fn whats_worn_shows_in_the_plugins_order_and_the_empty_slots_fold_into_one_line() {
+    let items = sample_items();
+    let rows = worn_rows(&items);
     let slots: Vec<&str> = rows.iter().filter_map(|row| row.slot.as_deref()).collect();
-    assert_eq!(
-        slots,
-        ["light", "finger", "neck", "body", "head", "legs", "feet"]
-    );
+    assert_eq!(slots, ["light", "neck", "body"]);
     assert_eq!(rows[0].name, "a bright ball of light");
-    assert_eq!(rows[1].name, "Empty");
-    assert!(rows[1].is_empty_slot());
-    assert_eq!(rows[2].flags, ["Glowing"]);
+    assert_eq!(rows[1].tags, ["Glowing"]);
+    assert_eq!(empty_slots(&items), ["finger", "head", "legs", "feet"]);
+}
+
+#[test]
+fn a_slot_listed_with_nothing_in_it_counts_as_empty() {
+    let mut items = sample_items();
+    let mut worn = items.worn.to_vec();
+    worn.push(WornItem {
+        slot: "head".to_owned(),
+        item: String::new(),
+        copy: None,
+    });
+    items.worn = worn.into();
+    assert_eq!(worn_rows(&items).len(), 3);
+    assert_eq!(empty_slots(&items), ["finger", "head", "legs", "feet"]);
+}
+
+#[test]
+fn a_worn_row_says_its_stats_without_where_theyre_from() {
+    let rows = worn_rows(&sample_items());
+    assert_eq!(rows[0].line.text, "Stats unknown");
+    assert_eq!(rows[1].line.text, "AC −1");
+    assert_eq!(
+        rows[1].label(),
+        "neck, an amulet of the moon, Glowing, AC −1"
+    );
+}
+
+fn reading(base: &[(&str, i64)], added: &[(&str, i64)]) -> ItemStats {
+    let stats = |pairs: &[(&str, i64)]| pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
+    ItemStats::Identified(Box::new(Identification {
+        id: "1".to_owned(),
+        item_name: "a ring".to_owned(),
+        copy_id: None,
+        keywords: "ring".to_owned(),
+        item_type: "armor".to_owned(),
+        flags: Vec::new(),
+        level: None,
+        quality: None,
+        base: stats(base),
+        added: [("enchant".to_owned(), stats(added))].into(),
+        details: Vec::new(),
+        updated: Timestamp(0),
+    }))
+}
+
+#[test]
+fn the_worn_total_adds_up_what_is_known_and_counts_what_isnt() {
+    let identified = reading(&[("str", 1), ("ac", -2)], &[("ac", -1)]);
+    let measured = ItemStats::Measured([("hitroll".to_owned(), 2)].into());
+    let estimated = ItemStats::Estimated(Estimate {
+        ranges: [
+            ("damroll".to_owned(), 4..=6),
+            ("str".to_owned(), 2..=2),
+            ("ac".to_owned(), -1..=-1),
+        ]
+        .into(),
+        copies: 2,
+        is_measured: false,
+        any_magic: false,
+        likely_enchanted: false,
+    });
+    let worn = [
+        Some(identified),
+        Some(measured),
+        Some(estimated),
+        None,
+        None,
+    ];
+    assert_eq!(
+        worn_total(worn).unwrap(),
+        "Worn total · Str +3 · Hit +2 · Dam +4 to +6 · AC −4 · 2 unknown"
+    );
+    let cancelled = [Some(reading(&[("str", 1)], &[("str", -1)]))];
+    assert_eq!(
+        worn_total(cancelled).unwrap(),
+        "Worn total · No stat changes"
+    );
+    assert_eq!(worn_total([]), None, "nothing worn, no line");
 }
 
 #[test]
@@ -53,9 +132,9 @@ fn a_second_ring_shows_as_a_second_row_of_its_slot() {
     };
     items.worn = vec![ring("a pink ring"), ring("a jade ring")].into();
     let rows = worn_rows(&items);
-    assert_eq!(rows[1].name, "a pink ring");
-    assert_eq!(rows[2].name, "a jade ring");
-    assert_eq!(rows[2].slot.as_deref(), Some("finger"));
+    assert_eq!(rows[0].name, "a pink ring");
+    assert_eq!(rows[1].name, "a jade ring");
+    assert_eq!(rows[1].slot.as_deref(), Some("finger"));
 }
 
 #[test]
@@ -64,7 +143,7 @@ fn copies_are_one_row_with_a_count_and_what_of_them_is_in_use() {
     let lights = carried(&rows, "a bright ball of light");
     assert_eq!(lights.count, 5);
     assert_eq!(lights.counted_name(), "a bright ball of light ×5");
-    assert_eq!(lights.flags, ["1 in use as your light"]);
+    assert_eq!(lights.line.text, "Stats unknown · 1 worn");
 }
 
 #[test]
@@ -76,7 +155,7 @@ fn a_level_lock_shows_and_takes_the_first_action_away() {
     assert_eq!(bracelet.more[0].name, "Wear");
     assert_eq!(
         bracelet.label(),
-        "a copper bracelet, Glowing, Humming, Needs level 7"
+        "a copper bracelet, Glowing, Humming, Needs level 7, AC −2 → wrist empty"
     );
 
     let rows = carried_rows(&sample_items(), Some(7));
@@ -121,6 +200,68 @@ fn what_is_carried_compares_with_what_is_worn_in_its_slot() {
     );
     let tooth = carried(&rows, "an alligator tooth");
     assert_eq!(tooth.known.len(), 1, "nothing's held to compare with");
+}
+
+/// The marked words of `row`'s second line, each with whether it's a gain.
+fn marks(row: &Row) -> Vec<(&str, bool)> {
+    (row.line.marks.iter())
+        .map(|(range, better)| (&row.line.text[range.clone()], *better))
+        .collect()
+}
+
+#[test]
+fn a_carried_row_says_what_wearing_it_would_change_or_that_its_slot_is_empty() {
+    let mut items = sample_items();
+    let rows = carried_rows(&items, Some(2));
+    let necklace = carried(&rows, "a small necklace");
+    assert_eq!(necklace.line.text, "Wis +1 · AC −1 → Wis +1");
+    assert_eq!(marks(necklace), [("Wis +1", true)]);
+    let tooth = carried(&rows, "an alligator tooth");
+    assert_eq!(tooth.line.text, "Hit +1 → held empty");
+    assert_eq!(carried(&rows, "a small boat").line.text, "Stats unknown");
+
+    let mut worn = items.worn.to_vec();
+    worn.push(WornItem {
+        slot: "held".to_owned(),
+        item: "(Glowing) an alligator tooth".to_owned(),
+        copy: None,
+    });
+    items.worn = worn.into();
+    let rows = carried_rows(&items, Some(2));
+    let orb = carried(&rows, "orb of knowledge");
+    assert_eq!(orb.line.text, "Int +2 → Int +2 Hit −1");
+    assert_eq!(marks(orb), [("Int +2", true), ("Hit −1", false)]);
+    assert!(orb.label().ends_with("Int +2 → Int +2 Hit −1"));
+    let tooth = carried(&rows, "an alligator tooth");
+    assert_eq!(tooth.line.text, "Hit +1 · 1 worn");
+}
+
+/// A stone charm, AC −3, against the sample's amulet, AC −1, on the neck.
+#[test]
+fn armor_going_down_is_a_gain() {
+    let mut items = sample_items();
+    let (now, mut batch) = (Timestamp(0), Batch::new());
+    let mut book = (*items.book).clone();
+    let charm = ItemRef {
+        name: "a stone charm",
+        copy: None,
+    };
+    let reading = Reading {
+        keywords: "charm".to_owned(),
+        base: [("ac".to_owned(), -3)].into(),
+        ..Reading::default()
+    };
+    book.learn(reading, charm, now, &mut batch);
+    book.learn_slot("neck", charm.name, now, &mut batch);
+    items.book = Arc::new(book);
+    items.carried = vec![CarriedItem {
+        id: "30".to_owned(),
+        name: charm.name.to_owned(),
+    }]
+    .into();
+    let rows = carried_rows(&items, Some(2));
+    assert_eq!(rows[0].line.text, "AC −3 → AC −2 (better)");
+    assert_eq!(marks(&rows[0]), [("AC −2 (better)", true)]);
 }
 
 #[test]
@@ -175,6 +316,54 @@ fn a_button_sends_through_the_shell_and_never_while_echo_is_off(cx: &mut TestApp
     click_on("Wear a small necklace", cx);
     assert_eq!(sent.borrow().len(), 1);
     assert!(panel.read_with(cx, |panel, _| panel.notes().contains(&LOCKED_NOTE)));
+}
+
+fn at_level(level: f64) -> CharactersState {
+    CharactersState(BTreeMap::from([(
+        CHARACTER_LEVEL.to_owned(),
+        Value::Number(level),
+    )]))
+}
+
+#[gpui::test]
+fn a_locked_row_shows_its_level_and_no_first_action(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx);
+    panel.update(cx, |panel, cx| panel.show_character(&at_level(2.), cx));
+    cx.run_until_parked();
+    let index = panel.read_with(cx, |panel, _| {
+        (panel.carried.iter())
+            .position(|row| row.name == "a copper bracelet")
+            .unwrap()
+    });
+    let lock = format!("gear-lock-{index}");
+    assert!(
+        cx.debug_bounds(Box::leak(lock.clone().into_boxed_str()))
+            .is_some()
+    );
+    assert!(cx.debug_bounds("Wear a copper bracelet").is_none());
+
+    panel.update(cx, |panel, cx| panel.show_character(&at_level(7.), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(Box::leak(lock.into_boxed_str())).is_none());
+    assert!(cx.debug_bounds("Wear a copper bracelet").is_some());
+}
+
+#[gpui::test]
+fn the_worn_view_adds_up_whats_worn_and_lists_the_empty_slots(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx);
+    panel.update(cx, |panel, cx| panel.show_worn(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("gear-total").is_some());
+    assert!(cx.debug_bounds("gear-empty-slots").is_some());
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.total.clone()).unwrap(),
+        "Worn total · AC −1 · 2 unknown"
+    );
+
+    panel.update(cx, |panel, cx| panel.show_carrying(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("gear-total").is_none());
+    assert!(cx.debug_bounds("gear-empty-slots").is_none());
 }
 
 /// The panel on its sets, in the Worn view.

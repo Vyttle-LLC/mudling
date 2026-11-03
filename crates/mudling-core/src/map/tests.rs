@@ -4,7 +4,9 @@
 use super::*;
 use crate::defaults::commands::parse_speedwalk;
 use crate::persist::{Batch, Database, Timestamp, Writer};
+use crate::plugin::points::{AreaInfo, GmcpField};
 use std::collections::BTreeSet;
+use std::sync::LazyLock;
 
 const FIELDS: &str = "The Fields";
 const CAVES: &str = "The Caves";
@@ -63,6 +65,26 @@ impl MapRules for TestRules {
     fn exits_line(&self, line: &str) -> bool {
         line.starts_with("Ways out:")
     }
+
+    fn room_exits(&self) -> Option<&GmcpField> {
+        Some(&DOORS)
+    }
+
+    fn area_info(&self) -> Option<&AreaInfo> {
+        Some(&AREA)
+    }
+}
+
+/// Where the made-up game lists the exits when a door changes in place.
+static DOORS: LazyLock<GmcpField> = LazyLock::new(|| field("Char.Doors.exits"));
+/// Where it names an area.
+static AREA: LazyLock<AreaInfo> = LazyLock::new(|| AreaInfo {
+    zone: field("Area.Named.zone"),
+    name: field("Area.Named.title"),
+});
+
+fn field(path: &str) -> GmcpField {
+    GmcpField::try_from(path.to_owned()).expect("a field")
 }
 
 fn text_map() -> LiveMap {
@@ -378,13 +400,19 @@ fn a_rooms_description_comes_from_the_text_before_its_room_info() {
 }
 
 #[test]
-fn links_stay_when_a_room_later_lists_fewer_exits() {
+fn a_doorway_keeps_its_link_when_the_room_later_lists_fewer_exits() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["e", "w"]);
     walk.go("e", "A study", &["w"]);
     walk.go("w", "A hall", &["e", "w"]);
+    let now = walk.now();
+    walk.map.sent("look", now);
+    walk.map.room_info(
+        &info("A hall", FIELDS, "field", &[("e", "C"), ("w", "O")]),
+        now,
+    );
     walk.go("w", "A yard", &["e"]);
-    // Back in: the way east is gone from the listing now (shut and hidden).
+    // Back in: the door east is gone from the listing now (shut and hidden).
     walk.go("e", "A hall", &["w"]);
     assert_eq!(walk.count(), 3);
     let hall = walk.current();
@@ -392,6 +420,79 @@ fn links_stay_when_a_room_later_lists_fewer_exits() {
     assert_eq!(
         hall.links.get_copied(Direction::East),
         Some(walk.id_of("A study"))
+    );
+}
+
+/// ```text
+///             Tree
+///              │ (its way south really leads east)
+///     Pond ── Meadow ── Meadow
+///                         │
+///                       Rocks
+/// ```
+///
+/// Two meadows of one name, their text unread, so only their exits tell
+/// them apart. The tree's crooked path takes the player into the east
+/// meadow while the map follows its link into the west one, which takes on
+/// the east one's exits; the move south then gives the west meadow a path
+/// the game never lists there.
+#[test]
+fn a_sure_revisit_drops_a_path_the_room_no_longer_lists() {
+    let meadow = "Southern Meadow";
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    let west = walk.current().id;
+    walk.go("e", meadow, &["w", "s"]);
+    let east = walk.current().id;
+    walk.go("s", "Rocks", &["n"]);
+    let rocks = walk.current().id;
+    walk.go("n", meadow, &["w", "s"]);
+    walk.go("w", meadow, &["n", "e", "w"]);
+    walk.go("n", "A tree", &["s"]);
+    walk.go("s", meadow, &["w", "s"]);
+    assert_eq!(walk.current().id, west, "the crooked path fooled the map");
+    walk.go("s", "Rocks", &["n"]);
+    assert!(
+        walk.map
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
+    );
+    let now = walk.now();
+    let (_folder, database, writer) = saved(&mut walk.map, now);
+
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    assert!(!walk.map.whereabouts().unsure);
+    assert_eq!(walk.current().id, west);
+    assert!(!walk.current().links.contains(Direction::South));
+    assert!(
+        walk.map
+            .rooms()
+            .all(|room| room.links.get_copied(Direction::North) != Some(west)),
+        "no room south of the west meadow links back to it"
+    );
+    let east_south = walk
+        .map
+        .room(east)
+        .unwrap()
+        .links
+        .get_copied(Direction::South);
+    assert_eq!(east_south, Some(rocks), "the east meadow's path stays");
+
+    writer
+        .submit(walk.map.commit(walk.now()).unwrap().batch)
+        .unwrap();
+    writer.flush().unwrap();
+    let reopened = reopened(&database);
+    assert!(
+        !reopened
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
     );
 }
 
@@ -773,6 +874,49 @@ fn copies_of_one_crossroads_that_never_meet_are_not_a_maze() {
     assert_eq!(layout.len(), 3);
 }
 
+/// A maze's squares list different exits, and it shows only the last one's,
+/// so a sure visit drops none of its ways in or out, from either side.
+#[test]
+fn a_maze_keeps_its_links_when_its_last_square_lists_fewer_exits() {
+    let mut layout = layout::Layout::new(1);
+    let (clearing, maze, hill) = (1, 2, 3);
+    layout.insert(crossroads(clearing, 0));
+    let mut last_square = MapRoom {
+        maze: true,
+        ..crossroads(maze, 1)
+    };
+    last_square
+        .exits
+        .retain(|direction, _| direction == Direction::East);
+    layout.insert(last_square);
+    layout.insert(MapRoom::empty(hill));
+    layout.update(clearing, |room| room.links.insert(Direction::North, maze));
+    layout.update(maze, |room| {
+        room.links.insert(Direction::South, clearing);
+        room.links.insert(Direction::West, hill);
+    });
+    layout.update(hill, |room| room.links.insert(Direction::East, maze));
+
+    layout.drop_unlisted_links(maze);
+    layout.drop_unlisted_links(hill);
+
+    let maze_room = layout.room(maze).unwrap();
+    assert_eq!(maze_room.links.get_copied(Direction::South), Some(clearing));
+    assert_eq!(maze_room.links.get_copied(Direction::West), Some(hill));
+    assert_eq!(
+        layout
+            .room(clearing)
+            .unwrap()
+            .links
+            .get_copied(Direction::North),
+        Some(maze)
+    );
+    assert!(
+        !layout.room(hill).unwrap().links.contains(Direction::East),
+        "the hill lists no way east, so its own path goes"
+    );
+}
+
 #[test]
 fn a_maze_message_makes_the_room_one_square() {
     let mut walk = Walk::new(text_map());
@@ -957,6 +1101,229 @@ fn an_off_grid_return_reuses_the_described_room() {
     assert_eq!(walk.count(), 5);
     assert_eq!(walk.current().id, start);
     assert_eq!(walk.tangled(), 0);
+}
+
+const CAMP: &str = "A camp";
+const CAMPFIRE: &str = "An old man camps here.";
+const TREE: &str = "Inside the tree";
+const TRUNK: &str = "A hollow trunk.";
+
+/// A camp with a tree east of it:
+///
+/// ```text
+///     Hill
+///      │
+///     Path ── Camp ── Tree
+/// ```
+fn mapped_camp() -> Walk {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A path", FIELDS, &["e", "n"], "A worn path.");
+    walk.go_described("e", CAMP, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    walk.go_described("w", CAMP, &["e", "w"], CAMPFIRE);
+    walk
+}
+
+/// The camp and its tree mapped twice, as the player's map had the Meadow:
+/// the copies alike in name, description and exits.
+///
+/// ```text
+///     Hill ── Camp₂ ── Tree₂
+///      │
+///     Path ── Camp₁ ── Tree₁
+/// ```
+fn camp_mapped_twice() -> Walk {
+    let mut walk = mapped_camp();
+    walk.go_described("w", "A path", &["e", "n"], "A worn path.");
+    walk.go_described("n", "A hill", &["s", "e"], "A grassy hill.");
+    walk.go_described("e", CAMP, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    walk
+}
+
+/// A move the game refuses in words the rules don't know, then a look.
+fn refused_then_look(walk: &mut Walk, direction: &str) {
+    let now = walk.now();
+    walk.map.sent(direction, now);
+    walk.map.sent("look", now);
+}
+
+/// Rooms of the area drawn on islands of their own, away from the first.
+fn on_islands(walk: &Walk, zone: &str) -> usize {
+    walk.map
+        .rooms()
+        .filter(|room| room.zone == zone && room.position.x.abs() >= 500)
+        .count()
+}
+
+#[test]
+fn a_room_shown_again_while_a_move_waits_is_not_mapped_twice() {
+    let mut walk = mapped_camp();
+    let camp = walk.current().id;
+    refused_then_look(&mut walk, "e");
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], CAMPFIRE);
+    assert_eq!(walk.current().id, camp);
+    assert_eq!(walk.count(), 3);
+    assert_eq!(walk.tangled(), 0);
+
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    assert_eq!(walk.current().id, walk.id_of(TREE));
+    assert_eq!(walk.count(), 3);
+}
+
+#[test]
+fn a_recall_into_a_room_mapped_twice_starts_no_island() {
+    let mut walk = camp_mapped_twice();
+    walk.arrive_in("A temple", CAVES, &["n"], "Incense hangs in the air.");
+    let rooms = walk.count();
+    // Recalled, and the Room.Info comes before the room's text.
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], "");
+    refused_then_look(&mut walk, "e");
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+
+    assert_eq!(walk.count(), rooms, "no third camp or tree");
+    assert_eq!(on_islands(&walk, FIELDS), 0);
+    let camps = walk.map.rooms().filter(|room| room.name == CAMP).count();
+    assert_eq!(camps, 2, "the saved copies are both left as they are");
+}
+
+#[test]
+fn a_room_added_before_its_description_folds_into_the_known_room_it_is() {
+    // Two shades told apart by their descriptions; the cool one's path east
+    // was mapped into a barn of the caves.
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A path", FIELDS, &["e", "n"], "A worn path.");
+    walk.go_described("e", "In shade", &CROSSROADS, "Cool shade.");
+    let cool = walk.current().id;
+    let now = walk.now();
+    walk.map.sent("e", now);
+    walk.arrive_in("A barn", CAVES, &["w"], "Hay everywhere.");
+    walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
+    walk.go_described("w", "A path", &["e", "n"], "A worn path.");
+    walk.go_described("n", "A hill", &["s", "e"], "A grassy hill.");
+    walk.go_described("e", "In shade", &CROSSROADS, "Warm shade.");
+    let warm = walk.current().id;
+    walk.go_described("e", "A pond", &["w"], "Still water.");
+    walk.arrive_in("A temple", CAVES, &["n"], "Incense hangs in the air.");
+    let rooms = walk.count();
+
+    // Recalled before the room's text: neither shade's path east fits what
+    // the player finds there, so the map starts a new shade on an island.
+    walk.arrive_in("In shade", FIELDS, &CROSSROADS, "");
+    walk.go_described("e", "A field", &["w"], "Wildflowers.");
+    assert!(walk.map.whereabouts().unsure);
+    assert_eq!(walk.count(), rooms + 2);
+    assert_eq!(on_islands(&walk, FIELDS), 2);
+
+    // Back west, the description says which shade it was.
+    walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
+    assert!(!walk.map.whereabouts().unsure);
+    assert_eq!(walk.current().id, cool);
+    assert_eq!(
+        walk.count(),
+        rooms + 1,
+        "the new shade folded into the cool one"
+    );
+    let field = walk.map.room(walk.id_of("A field")).unwrap();
+    assert_eq!(field.links.get_copied(Direction::West), Some(cool));
+    // The field came along from the island, to the cool shade's east.
+    let cool_room = walk.map.room(cool).unwrap();
+    assert_eq!(field.position, cool_room.position + GridPoint::new(1, 0, 0));
+    assert_eq!(on_islands(&walk, FIELDS), 0);
+    assert!(
+        walk.map.room(warm).is_some(),
+        "the warm shade only looks alike"
+    );
+}
+
+const MEADOW: &str = "A meadow";
+
+/// Where a meadow of a five-by-five field opens: every way but off its
+/// edges. Rows count south from the north edge.
+fn field_exits(x: i64, y: i64) -> Vec<&'static str> {
+    let mut exits = Vec::new();
+    for (direction, open) in [("s", y < 4), ("n", y > 0), ("e", x < 4), ("w", x > 0)] {
+        if open {
+            exits.push(direction);
+        }
+    }
+    exits
+}
+
+/// Five rows of five meadows, walked back and forth from the northwest, so
+/// the walk ends in the southeast corner. `description` says how each reads.
+fn mapped_field(description: impl Fn(i64, i64) -> String) -> Walk {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A road", FIELDS, &["e"], "A dusty road.");
+    walk.go_described("e", MEADOW, &field_exits(0, 0), &description(0, 0));
+    for y in 0..5 {
+        for step in 1..5 {
+            let (direction, x) = if y % 2 == 0 {
+                ("e", step)
+            } else {
+                ("w", 4 - step)
+            };
+            walk.go_described(direction, MEADOW, &field_exits(x, y), &description(x, y));
+        }
+        if y < 4 {
+            let x = 4 - 4 * (y % 2);
+            walk.go_described("s", MEADOW, &field_exits(x, y + 1), &description(x, y + 1));
+        }
+    }
+    walk
+}
+
+/// A loop through the field's middle from its southeast corner: each move
+/// with the meadow it leads to.
+const FIELD_LOOP: [(&str, i64, i64); 12] = [
+    ("n", 4, 3),
+    ("w", 3, 3),
+    ("w", 2, 3),
+    ("n", 2, 2),
+    ("n", 2, 1),
+    ("e", 3, 1),
+    ("s", 3, 2),
+    ("w", 2, 2),
+    ("w", 1, 2),
+    ("s", 1, 3),
+    ("e", 2, 3),
+    ("e", 3, 3),
+];
+
+/// Walks the loop, checking that the map follows each move a square at a
+/// time and adds no room.
+fn walk_the_field_loop(walk: &mut Walk, description: impl Fn(i64, i64) -> String) {
+    let rooms = walk.count();
+    for (direction, x, y) in FIELD_LOOP {
+        let before = walk.position();
+        walk.go_described(direction, MEADOW, &field_exits(x, y), &description(x, y));
+        let moved = Direction::parse(direction).unwrap().offset();
+        assert_eq!(walk.position(), before + moved, "{direction} to {x},{y}");
+        assert_eq!(walk.count(), rooms);
+    }
+}
+
+#[test]
+fn walking_a_field_of_rooms_alike_in_everything_stays_on_its_map() {
+    let grass = |_: i64, _: i64| "Tall grass sways.".to_owned();
+    let mut walk = mapped_field(grass);
+    walk_the_field_loop(&mut walk, grass);
+    assert_eq!(on_islands(&walk, FIELDS), 0);
+}
+
+#[test]
+fn a_look_after_a_refused_move_leaves_nothing_waiting() {
+    let grass = |x: i64, y: i64| format!("Grass at {x},{y}.");
+    let mut walk = mapped_field(grass);
+    let corner = walk.current().id;
+    // West is the way the walk came in, so the map knows where it leads.
+    refused_then_look(&mut walk, "w");
+    walk.arrive_in(MEADOW, FIELDS, &field_exits(4, 4), &grass(4, 4));
+    assert_eq!(walk.current().id, corner);
+
+    walk_the_field_loop(&mut walk, grass);
+    assert_eq!(walk.map.pending_commands(), 0);
 }
 
 // MARK: Buildings and straightening
@@ -1281,11 +1648,45 @@ fn a_door_closing_in_place_shows_without_a_room_info() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["n"]);
     let now = walk.now();
-    walk.map.gmcp("Char.Status", r#"{"hp": "12"}"#, now);
+    walk.map.gmcp("Char.Doors", r#"{"hp": "12"}"#, now);
     assert!(!walk.current().exits.get(Direction::North).unwrap().closed);
     walk.map
-        .gmcp("Char.Status", r#"{"room_exits": {"North": "C"}}"#, now);
+        .gmcp("Char.Status", r#"{"exits": {"North": "C"}}"#, now);
+    assert!(
+        !walk.current().exits.get(Direction::North).unwrap().closed,
+        "only where the rules say"
+    );
+    walk.map
+        .gmcp("Char.Doors", r#"{"exits": {"North": "C"}}"#, now);
     assert!(walk.current().exits.get(Direction::North).unwrap().closed);
+}
+
+#[test]
+fn an_area_the_game_names_is_called_by_its_name() {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A meadow", "hedge", &["e"], "");
+    walk.map.commit(walk.now());
+    assert_eq!(walk.map.derived().areas[0].name.name, "hedge");
+
+    let now = walk.now();
+    walk.map.gmcp(
+        "Area.Named",
+        r#"{"zone": "hedge", "title": "\u001b[1;32mThe Hedgerow\u001b[0m"}"#,
+        now,
+    );
+    let commit = walk.map.commit(walk.now()).expect("the name is a change");
+    let derived = commit.change.derived.expect("with the areas");
+    assert_eq!(derived.areas[0].name.name, "The Hedgerow");
+    assert!(
+        walk.map.commit(walk.now()).is_none(),
+        "the same name again is no change"
+    );
+    walk.map.gmcp(
+        "Area.Named",
+        r#"{"zone": "hedge", "title": "The Hedgerow"}"#,
+        now,
+    );
+    assert!(walk.map.commit(walk.now()).is_none());
 }
 
 #[test]

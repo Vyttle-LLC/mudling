@@ -13,10 +13,11 @@
 //! `take_secret` wipes it.
 
 use super::appearance::toggled;
+use super::logs::switch_row;
 use super::saved::LockAfter;
 use super::{
-    Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, section_heading,
-    text_button,
+    Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, question_line,
+    section_heading, text_button,
 };
 use crate::assets::UI_FONT;
 use crate::input::{CommandInput, InputEvent};
@@ -26,8 +27,8 @@ use gpui::{
     div, prelude::*, px,
 };
 use mudling_core::vault::{
-    DeviceCache, EntryKey, Error, KeepPassword, RecoveryKey, RecoveryKeyIssued, Secret, Vault,
-    VaultState,
+    DEVICE_KEY_GUARDED, DeviceCache, EntryKey, Error, KeepPassword, RecoveryKey, RecoveryKeyIssued,
+    Secret, Vault, VaultState,
 };
 use std::collections::VecDeque;
 use std::future::Future;
@@ -41,14 +42,34 @@ const NOT_CREATED: &str = "Set a master password to keep your server passwords i
 const LOCKED: &str = "The vault is locked.";
 const NOTHING_SAVED: &str = "No saved passwords yet.";
 const WORKING: &str = "Working…";
-/// What auto-lock does today, said exactly: Touch ID or Face ID gating hasn't
-/// arrived, so the device's copy of the key opens the vault with no prompt.
-const AUTO_LOCK_TODAY: &str = "Locking takes the vault's key out of memory. This device keeps its \
-                               own copy, so Unlock on this device and auto-login open the vault \
-                               again without asking. Until Touch ID or Face ID guards that copy, \
-                               locking doesn't stop someone using this computer. A password already \
+/// What auto-lock does today, said exactly.
+const AUTO_LOCK_TODAY: &str = "Locking takes the vault's key out of memory. A password already \
                                used to log in to a game stays in this app's memory as plain text \
                                after a lock, for as long as that game's session is open.";
+const KEEP_ON_DEVICE: &str = "Keep a copy of the key on this device";
+/// Only a macOS release build guards the device's copy of the key; anywhere
+/// else that copy opens the vault with no prompt.
+const DEVICE_COPY: &str = if DEVICE_KEY_GUARDED {
+    GUARDED_COPY
+} else {
+    UNGUARDED_COPY
+};
+const GUARDED_COPY: &str = "Only Touch ID, or your login password, opens this device's copy, so \
+                            Unlock on this device and auto-login ask first. Cancel, and the vault \
+                            stays locked until you use the master password.";
+#[cfg(target_os = "macos")]
+const UNGUARDED_COPY: &str = "This development build doesn't guard this device's copy with Touch \
+                              ID, so Unlock on this device and auto-login open the vault again \
+                              without asking, and locking doesn't stop someone using this \
+                              computer. Turn the copy off to have every unlock take the master \
+                              password.";
+#[cfg(not(target_os = "macos"))]
+const UNGUARDED_COPY: &str = "MUDling on Windows and Linux doesn't guard this device's copy, so \
+                              Unlock on this device and auto-login open the vault again without \
+                              asking, and locking doesn't stop someone using this computer. Turn \
+                              the copy off to have every unlock take the master password.";
+const NO_DEVICE_COPY: &str = "This device keeps no copy, so every unlock, auto-login's too, takes \
+                              the master password or the recovery key.";
 const NEW_MASTER_NOTE: &str = "A new master password protects future commits only. Old copies of \
                                the vault in git history still open with the old one, so if it \
                                may have leaked, change your passwords on the servers too. You'll \
@@ -77,6 +98,10 @@ fn words(error: &Error) -> String {
             warning: Some(warning),
         } => format!("That master password is too weak: {warning}"),
         Error::NotCached => "This device has no key saved. Use the master password.".to_owned(),
+        Error::Cancelled => {
+            "Unlocking on this device was cancelled. Use the master password, or try again."
+                .to_owned()
+        }
         Error::ChangedDuringSave => {
             "The vault changed while saving, usually from a sync. Nothing was lost, so try again."
                 .to_owned()
@@ -211,6 +236,7 @@ pub(super) struct VaultPane {
     entries: Vec<EntryKey>,
     stranded: usize,
     lock_after: LockAfter,
+    keep_on_device: bool,
     form: Option<Form>,
     fields: Fields,
     revealed: Option<Revealed>,
@@ -242,6 +268,7 @@ impl VaultPane {
             entries: Vec::new(),
             stranded: 0,
             lock_after: LockAfter::default(),
+            keep_on_device: true,
             form: None,
             fields: Fields::new(window, cx),
             revealed: None,
@@ -269,6 +296,7 @@ impl SettingsSheet {
         &mut self,
         vault: Vault,
         lock_after: LockAfter,
+        keep_on_device: bool,
         window: &mut Window,
         cx: &mut Context<SettingsSheet>,
     ) {
@@ -277,6 +305,7 @@ impl SettingsSheet {
         self.vault.state = state;
         self.vault.vault = Some(vault);
         self.vault.lock_after = lock_after;
+        self.vault.keep_on_device = keep_on_device;
         self.vault_state_changed(state, window, cx);
     }
 
@@ -360,7 +389,7 @@ impl SettingsSheet {
     /// keeps the keyboard. A focused stop means the sheet is on the screen.
     fn keep_focus_in_sheet(&self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         if self.a_stop_of_the_section_has_focus(window) {
-            window.focus(&self.tabs[Section::Vault as usize], cx);
+            self.focus_tab(Section::Vault, window, cx);
         }
     }
 
@@ -642,6 +671,26 @@ impl SettingsSheet {
         }
     }
 
+    fn toggle_keep_on_device(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        let Some(vault) = self.vault.vault.clone().filter(|_| !self.vault.busy) else {
+            return;
+        };
+        let keep = !self.vault.keep_on_device;
+        self.vault.keep_on_device = keep;
+        cx.emit(SheetEvent::KeepKeyOnDevice(keep));
+        let chosen = vault.set_keep_on_device(keep);
+        self.vault_job(
+            chosen,
+            |sheet, saved, _, _| {
+                if let Some(saved) = saved {
+                    sheet.cached(saved);
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
     /// Asks the vault to look at its file again if it had none: the file
     /// lands after sync names its new place, or arrives with a pull. Locking
     /// a vault with no key only reads the file.
@@ -703,7 +752,7 @@ impl SettingsSheet {
         };
         self.vault.removing = None;
         // This stop goes with the question.
-        window.focus(&self.tabs[Section::Vault as usize], cx);
+        self.focus_tab(Section::Vault, window, cx);
         self.vault_job(
             async move { vault.remove_password(entry).await },
             |sheet, _, _, cx| sheet.list_vault(cx),
@@ -856,11 +905,7 @@ impl SettingsSheet {
                 "{host} is waiting to log in. Unlock the vault, or close settings to connect \
                  without logging in."
             );
-            pane.row(
-                muted_line(waiting, theme)
-                    .role(Role::Alert)
-                    .text_color(theme.text),
-            );
+            pane.row(question_line(waiting, theme));
         }
         if let Some(problem) = self.vault.problem.clone() {
             pane.row(
@@ -925,7 +970,7 @@ impl SettingsSheet {
             |sheet, window, cx| {
                 sheet.vault.recovery = None;
                 // This stop goes with the key.
-                window.focus(&sheet.tabs[Section::Vault as usize], cx);
+                sheet.focus_tab(Section::Vault, window, cx);
                 cx.notify();
             },
         );
@@ -977,14 +1022,16 @@ impl SettingsSheet {
             cx,
             Self::unlock_master,
         );
-        let here = Self::vault_button(
-            "vault-unlock-here",
-            "Unlock on this device",
-            pane,
-            theme,
-            cx,
-            Self::unlock_here,
-        );
+        let here = self.vault.keep_on_device.then(|| {
+            Self::vault_button(
+                "vault-unlock-here",
+                "Unlock on this device",
+                pane,
+                theme,
+                cx,
+                Self::unlock_here,
+            )
+        });
         let recovery = Self::vault_button(
             "vault-use-recovery",
             "Use the recovery key",
@@ -999,7 +1046,7 @@ impl SettingsSheet {
                 .flex()
                 .gap_2()
                 .child(unlock)
-                .child(here)
+                .children(here)
                 .child(recovery),
         );
     }
@@ -1084,7 +1131,7 @@ impl SettingsSheet {
             |sheet, window, cx| {
                 sheet.close_vault_form(cx);
                 // This stop goes with the form.
-                window.focus(&sheet.tabs[Section::Vault as usize], cx);
+                sheet.focus_tab(Section::Vault, window, cx);
                 cx.notify();
             },
         )
@@ -1261,6 +1308,21 @@ impl SettingsSheet {
                 .children(segments),
         );
         pane.row(muted_line(AUTO_LOCK_TODAY, theme));
+        let keep = self.vault.keep_on_device;
+        let row = switch_row(
+            "vault-keep-on-device".to_owned(),
+            KEEP_ON_DEVICE,
+            keep,
+            Self::toggle_keep_on_device,
+            pane,
+            theme,
+            cx,
+        );
+        pane.row(row);
+        pane.row(muted_line(
+            if keep { DEVICE_COPY } else { NO_DEVICE_COPY },
+            theme,
+        ));
         let lock = Self::vault_button("vault-lock", "Lock now", pane, theme, cx, Self::lock_vault);
         pane.row(div().pb_2().flex().child(lock));
     }
@@ -1506,7 +1568,7 @@ mod tests {
         shell.update_in(cx, |shell, window, cx| {
             shell.open_settings(window, cx);
             shell.settings_sheet().update(cx, |sheet, cx| {
-                sheet.use_vault(handle, LockAfter::Never, window, cx);
+                sheet.use_vault(handle, LockAfter::Never, true, window, cx);
                 sheet.select(Section::Vault, cx);
             });
         });
@@ -1649,6 +1711,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn turning_the_device_copy_off_removes_it_and_unlock_on_this_device(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        assert!(open.cx.debug_bounds("vault-unlock-here").is_some());
+        open.unlock();
+
+        open.click("vault-keep-on-device");
+        open.until("the copy removed", |pane| {
+            !pane.keep_on_device && !pane.busy
+        });
+        open.click("vault-lock");
+        open.until("the lock", |pane| pane.state == VaultState::Locked);
+
+        assert!(open.cx.debug_bounds("vault-unlock-here").is_none());
+        assert!(matches!(
+            futures::executor::block_on(open.vault.unlock_from_device()),
+            Err(Error::NotCached)
+        ));
+    }
+
+    #[gpui::test]
     fn a_password_reveal_cut_off_by_a_lock_never_shows_after_the_next_unlock(
         cx: &mut TestAppContext,
     ) {
@@ -1785,7 +1867,7 @@ mod tests {
         let sheet = open.sheet();
         open.cx.update(|window, cx| {
             sheet.update(cx, |sheet, cx| {
-                sheet.use_vault(handle, LockAfter::Never, window, cx);
+                sheet.use_vault(handle, LockAfter::Never, true, window, cx);
             });
         });
         open.until("no vault", |pane| pane.state == VaultState::NotCreated);

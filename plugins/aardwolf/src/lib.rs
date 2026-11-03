@@ -10,6 +10,8 @@ use mudling_core::plugin::{PendingKind, Plugin, PluginEvent, PluginHost};
 use mudling_core::replay::{self, Event};
 use mudling_core::session::{Engine, SessionConfig, Typing};
 use mudling_core::store::{Store, StoreHub, Versioned};
+use mudling_core::telnet::command::{IAC, WILL};
+use mudling_core::telnet::option::GMCP;
 use mudling_core::telnet::{Bytes, gmcp};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -54,10 +56,12 @@ pub fn events(log: &str) -> Vec<PluginEvent> {
     events
 }
 
-/// A session with the plugin on, fed a session log: its text as the server's
-/// bytes, and its `[GMCP]` notes as GMCP messages.
+/// A session with the plugin on and approved, fed a session log: its text as
+/// the server's bytes, and its `[GMCP]` notes as GMCP messages, once the
+/// server has turned GMCP on.
 pub struct Played {
     hub: Arc<StoreHub>,
+    sent: Vec<u8>,
     _engine: Engine,
     _folder: tempfile::TempDir,
 }
@@ -69,6 +73,7 @@ impl Played {
         let plugin = load();
         let config = SessionConfig {
             enabled: vec![plugin.id().clone()],
+            approved: vec![plugin.id().clone()],
             plugins: vec![plugin],
             ..SessionConfig::new(folder.path(), "aardwolf.test", 23)
         };
@@ -76,6 +81,9 @@ impl Played {
         let mut engine = Engine::open(config, Arc::clone(&hub), typing)
             .unwrap_or_else(|error| panic!("{error}"));
         engine.start_connection().expect("the plugin's hooks load");
+        let will_gmcp = Bytes::from_static(&[IAC, WILL, GMCP]);
+        engine.receive(will_gmcp, Timestamp(0)).expect("no MCCP");
+        let mut sent = engine.take_output();
         for event in replay::events(&unix(log)) {
             let bytes = match event {
                 Event::Text(text) => text.into_bytes(),
@@ -89,12 +97,19 @@ impl Played {
             let now = Timestamp(0);
             engine.receive(Bytes::from(bytes), now).expect("no MCCP");
             engine.settle(now);
+            sent.extend(engine.take_output());
         }
         Played {
             hub,
+            sent,
             _engine: engine,
             _folder: folder,
         }
+    }
+
+    /// Everything the client sent the server.
+    pub fn sent(&self) -> &[u8] {
+        &self.sent
     }
 
     /// What the store `S` holds now.

@@ -4,7 +4,10 @@
 //! shell feeds it `SyncState`, so it only draws and asks: everything that
 //! touches the disk runs off the UI thread.
 
-use super::{Pane, Section, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
+use super::{
+    Pane, Section, SettingsSheet, SheetEvent, muted_line, problem_line, question_line,
+    section_heading, text_button,
+};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{
@@ -71,7 +74,7 @@ impl DataPane {
 const AGO_STEP: Duration = Duration::from_secs(60);
 
 /// How this device signs in, as the player reads it (PRD §10).
-pub(super) fn sign_in_words(sign_in: SignIn) -> String {
+fn sign_in_words(sign_in: SignIn) -> String {
     let device = if cfg!(target_os = "macos") {
         "this Mac"
     } else {
@@ -92,7 +95,7 @@ pub(super) fn sign_in_words(sign_in: SignIn) -> String {
 }
 
 /// The last sync, as the player reads it.
-pub(super) fn last_sync_words(last_sync: Option<Timestamp>, now: Timestamp) -> String {
+fn last_sync_words(last_sync: Option<Timestamp>, now: Timestamp) -> String {
     last_sync.map_or(NOT_SYNCED_YET.to_owned(), |at| {
         format!("Last synced {}.", ago(at, now))
     })
@@ -267,20 +270,10 @@ impl SettingsSheet {
             return;
         }
         if let Some(problem) = self.data.sync.problem.clone() {
-            pane.row(
-                muted_line(problem, theme)
-                    .debug_selector(|| "sync-problem".to_owned())
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            );
+            pane.row(problem_line(problem, theme).debug_selector(|| "sync-problem".to_owned()));
         }
         if let Some(refused) = self.data.refused.clone() {
-            pane.row(
-                muted_line(refused, theme)
-                    .debug_selector(|| "repo-refused".to_owned())
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            );
+            pane.row(problem_line(refused, theme).debug_selector(|| "repo-refused".to_owned()));
         }
         pane.row(section_heading("Repo", theme));
         match self.data.repo.clone() {
@@ -381,16 +374,12 @@ impl SettingsSheet {
     /// The question's first stop is Keep syncing, so Tab reaches the choice
     /// that changes nothing first.
     fn fill_stop_question(&self, pane: &mut Pane, theme: &Theme, cx: &mut Context<SettingsSheet>) {
-        pane.row(
-            muted_line(STOP_QUESTION, theme)
-                .role(Role::Alert)
-                .text_color(theme.text),
-        );
+        pane.row(question_line(STOP_QUESTION, theme));
         let keep = text_button("keep-sync", "Keep syncing", &pane.stop(cx), theme).on_click(
             cx.listener(|sheet, _, window, cx| {
                 sheet.data.asking_to_stop = false;
                 // This stop goes with the question.
-                window.focus(&sheet.tabs[Section::Data as usize], cx);
+                sheet.focus_tab(Section::Data, window, cx);
                 cx.notify();
             }),
         );
@@ -398,7 +387,7 @@ impl SettingsSheet {
             .on_click(cx.listener(|sheet, _, window, cx| {
                 sheet.data.asking_to_stop = false;
                 // This stop goes with the question.
-                window.focus(&sheet.tabs[Section::Data as usize], cx);
+                sheet.focus_tab(Section::Data, window, cx);
                 cx.emit(SheetEvent::ClearRepo);
                 cx.notify();
             }));
@@ -420,11 +409,10 @@ impl SettingsSheet {
                     pane.row(muted_line(line, theme));
                 }
             }
-            Err(problem) => pane.row(
-                muted_line(format!("Couldn't read the history: {problem}."), theme)
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            ),
+            Err(problem) => pane.row(problem_line(
+                format!("Couldn't read the history: {problem}."),
+                theme,
+            )),
         }
     }
 }
