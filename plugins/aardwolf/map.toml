@@ -2,6 +2,12 @@
 # of the rooms they lead to, and its zone a short id such as "aylor", so the
 # map needs only the default room identity and the moves the game refuses.
 
+# The area's name, from room.area: `{ "id": "aylor", "name": "The Grand City
+# of Aylor" }`. The game sends it when asked: see connection.toml.
+[area_info]
+zone = "room.area.id"
+name = "room.area.name"
+
 # "[ Exits: north east (south) ]": a closed door in parentheses. Aardwolf
 # prints the exits after the room's description, not before it as the rule
 # expects, so the map reads no description line: room numbers tell rooms

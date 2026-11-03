@@ -518,6 +518,71 @@ pub struct Connection {
     pub gmcp: Vec<String>,
     #[serde(default, rename = "login")]
     pub logins: Vec<LoginPrompt>,
+    /// GMCP messages to send, which need `send_gmcp`.
+    #[serde(default, rename = "request")]
+    pub requests: Vec<GmcpRequest>,
+}
+
+/// A GMCP message the plugin sends, each time a field's value changes:
+/// `send = "request area"` when `room.info.zone` does.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GmcpRequest {
+    pub send: GmcpMessage,
+    pub when: GmcpField,
+}
+
+/// A GMCP message from the client: a package name, then perhaps a space and
+/// its data. It goes out only inside a GMCP subnegotiation, which a server
+/// reads as GMCP, never on the line its command interpreter reads, so it
+/// can't be a game command. It holds no line ends or other control
+/// characters, and no `Core` message, which runs the connection itself.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GmcpMessage {
+    pub package: String,
+    pub data: String,
+}
+
+impl fmt::Display for GmcpMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.data.as_str() {
+            "" => f.write_str(&self.package),
+            data => write!(f, "{} {data}", self.package),
+        }
+    }
+}
+
+impl TryFrom<String> for GmcpMessage {
+    type Error = String;
+
+    fn try_from(message: String) -> Result<GmcpMessage, String> {
+        let (package, data) = message.split_once(' ').unwrap_or((&message, ""));
+        let named = |part: &str| {
+            part.starts_with(|c: char| c.is_ascii_alphabetic())
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        if !package.split('.').all(named) {
+            return Err(format!(
+                "`{message}` isn't a GMCP message: start with a package name, such as \"request area\" or \"Char.Skills.Get\""
+            ));
+        }
+        if message.chars().any(char::is_control) {
+            return Err(format!(
+                "the GMCP message `{message}` holds a control character"
+            ));
+        }
+        let core = package.split('.').next().unwrap_or_default();
+        if core.eq_ignore_ascii_case("core") {
+            return Err(format!(
+                "`{message}` is a Core message, which MUDling sends itself"
+            ));
+        }
+        Ok(GmcpMessage {
+            package: package.to_owned(),
+            data: data.to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -656,6 +721,19 @@ pub struct Text {
     /// Links and actions in lines.
     #[serde(default, rename = "link")]
     pub links: Vec<LinkRule>,
+    /// GMCP messages that are lines of the chat, such as a game's channels.
+    #[serde(default, rename = "channel")]
+    pub channels: Vec<Channel>,
+}
+
+/// A GMCP message whose text is a line of the chat. It's read as a finished
+/// line the server sent: by the patterns, colors and links, and by the
+/// player's triggers. The map, the login and the quiet reads don't see it.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    /// The field holding the line's text, perhaps colored with ANSI codes.
+    pub message: GmcpField,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

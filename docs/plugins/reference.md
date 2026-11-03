@@ -3,17 +3,14 @@
 This is API v1, and it's stable: two games from opposite ends of the range
 are written against it alone, [Avatar](../../plugins/avatar), a Merc-derived
 game read mostly from its text, and [Aardwolf](../../plugins/aardwolf), a
-customized ROM read mostly from GMCP. The core holds neither game's names
-for the character or the fight: each plugin's [HUD](#hud) point says where
-its game keeps them.
+customized ROM read mostly from GMCP. The core holds no game's GMCP names
+for the character, the fight, gear or doors: each plugin says where its game
+keeps them.
 
-Additions to come won't break a v1 plugin, as each is a new key or point a
-plugin can leave out:
-
-- **Chat channels**: a point for a game's channels, such as Aardwolf's
-  `comm.channel`.
-- **GMCP requests**: a way for a plugin to send GMCP, such as Aardwolf's
-  `request area`, which brings the area names `room.info` leaves out.
+Additions to API v1 are new keys a plugin can leave out, so every v1 plugin
+loads unchanged. The latest: [channels](#channels) that come as GMCP,
+[GMCP requests](#gmcp-requests), and the Map point's `room_exits` and
+`[area_info]`.
 
 The [cookbook](cookbook.md) works through a real plugin; this page lists what
 there is. A plugin is a folder of TOML with, where patterns aren't enough, a
@@ -79,7 +76,7 @@ of a bad pattern.
 | `encoding` | no | `"utf-8"` or `"latin-1"`. Only one applies: the highest layer's. |
 | `servers` | for `game` and `override` | The `[servers]` table. A `default` plugin can't have one. |
 | `points` | no | The `[points]` table. |
-| `permissions` | no | What hooks may do. See [Permissions](#permissions). |
+| `permissions` | no | What hooks and GMCP requests may do. See [Permissions](#permissions). |
 | `hooks` | no | The `[hooks]` table. |
 | `fragments` | no | The `[fragments]` table: regex shared by this plugin's patterns. See [Patterns](#patterns). |
 
@@ -184,6 +181,7 @@ Each point is a TOML file named in `[points]`. Use only those you need.
 | --- | --- |
 | `gmcp` | GMCP modules to subscribe to, such as `"Char 1"`, beside the core's own: `Core 1`, `Char 1` and `Room 1`. |
 | `login` | The `[[login]]` list. |
+| `request` | The `[[request]]` list: [GMCP requests](#gmcp-requests). Needs the `send_gmcp` permission. |
 
 <!-- keys: connection.toml [[login]] -->
 | `[[login]]` key | What it is |
@@ -193,6 +191,38 @@ Each point is a TOML file named in `[points]`. Use only those you need.
 
 Each prompt is answered once, because a server that asks for the password twice
 has refused it.
+
+#### GMCP requests
+
+Some games send a message only when asked, as Aardwolf sends an area's name
+in `room.area` after `request area`. A request asks each time a GMCP field's
+value changes, the first value included:
+
+```toml
+# Ask for the area's name in each zone the player enters.
+[[request]]
+send = "request area"
+when = "room.info.zone"
+```
+
+<!-- keys: connection.toml [[request]] -->
+| `[[request]]` key | What it is |
+| --- | --- |
+| `send` | The GMCP message: a package name, then perhaps a space and its data. |
+| `when` | The field whose new value sends it: `"room.info.zone"`. |
+
+A request needs the `send_gmcp` [permission](#permissions), and goes out only
+once the player approves the plugin, as for `send_commands`. It can't carry a
+game command:
+
+- It's only what the TOML says. No hook can send GMCP or change a request.
+- MUDling sends it only inside a GMCP subnegotiation, `IAC SB GMCP … IAC SE`,
+  with any `IAC` in it doubled. A server reads that as GMCP, apart from the
+  lines its command interpreter reads.
+- Loading refuses a `send` that doesn't start with a package name, that holds
+  a line end or any other control character, or that's a `Core` message,
+  which MUDling sends itself to run the connection.
+- The approval shows each request word for word.
 
 ### Commands point
 
@@ -235,6 +265,7 @@ has refused it.
 | `pattern` | Event rules over each finished line: trigger packs, and anything no other point reads. |
 | `color` | The `[[color]]` list: coloring for lines the server sends without any. |
 | `link` | The `[[link]]` list: links and actions in lines. |
+| `channel` | The `[[channel]]` list: [channels](#channels) and other lines of the chat that come as GMCP. |
 
 <!-- keys: text.toml [pager] -->
 | `[pager]` key | What it is |
@@ -261,6 +292,29 @@ has refused it.
 | `pattern` | What to link. |
 | `action` | A command to send or a URL to open, each `{capture}` standing for its text: `"examine {item}"`. |
 | `group` | Links only this named capture, not the whole match. |
+
+#### Channels
+
+A game may send its channels as GMCP instead of text, as Aardwolf does once
+a client subscribes to `Comm 1`. A `[[channel]]` names the field that holds
+the line:
+
+```toml
+# comm.channel { "chan": "gossip", "msg": "You gossip 'Testing'", "player": "Abelinc" }
+[[channel]]
+message = "comm.channel.msg"
+```
+
+<!-- keys: text.toml [[channel]] -->
+| `[[channel]]` key | What it is |
+| --- | --- |
+| `message` | The GMCP field holding the line, perhaps colored with ANSI codes. |
+
+The line is read as a finished line the server sent: by every plugin's
+`pattern`, `color` and `link` rules, and by the player's triggers, which can
+color it, play a sound or hide it. Then it shows in the chat, after any text
+the server hasn't ended. The map, the login and quiet reads don't read it,
+and nor does a replay, which skips GMCP.
 
 ### HUD
 
@@ -443,8 +497,9 @@ its top level, as it loads, goes nowhere.
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
 | `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from where it came: the directory, or the same link. A plugin from anywhere else with the same id asks again, and says what it replaces. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
+| `send_gmcp` | The Connection point's [GMCP requests](#gmcp-requests). They don't go out until the plugin's approved, which works just as it does for `send_commands`, and the approval lists each one. A plugin can ask for both; one approval covers both. |
 
-A plugin with no hooks needs no permissions.
+A plugin with no hooks and no GMCP requests needs no permissions.
 
 ### State
 

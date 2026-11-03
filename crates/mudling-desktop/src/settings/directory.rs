@@ -29,6 +29,7 @@ const CHECKING: &str = "Checking the community directory…";
 const NOTHING_MATCHES: &str = "No plugin matches.";
 const EMPTY: &str = "The directory lists no plugins yet.";
 const SENDS: &str = "sends commands";
+const SENDS_GMCP: &str = "asks the game for data";
 const ANY_GAME: &str = "Any game";
 const CANT_REACH: &str =
     "It can't read your files or reach the network. You can take this back on the Plugins page.";
@@ -112,10 +113,19 @@ fn offer(entry: &Entry, installed: &BTreeMap<String, Option<String>>) -> Offer {
 fn entry_about(entry: &Entry) -> String {
     let game = entry.game().unwrap_or(ANY_GAME);
     let mut about = format!("{game} · {} · {}", entry.version, entry.license);
-    if entry.sends_commands() {
-        about.push_str(&format!(" · {SENDS}"));
+    if let Some(sends) = sends(entry) {
+        about.push_str(&format!(" · {sends}"));
     }
     about
+}
+
+/// What it sends the game once approved, said as a warning.
+fn sends(entry: &Entry) -> Option<&'static str> {
+    if entry.sends_commands() {
+        Some(SENDS)
+    } else {
+        entry.sends_gmcp().then_some(SENDS_GMCP)
+    }
 }
 
 /// Where a row sits in its card, which decides its corners and borders. Each
@@ -153,11 +163,13 @@ pub(super) fn card_row(at: InCard, theme: &Theme) -> Div {
 }
 
 /// What the sheet asks before a plugin changes: approval for one that sends
-/// commands, trust for a copy that arrived, or a removal.
+/// commands or GMCP requests, trust for a copy that arrived, or a removal.
 pub(super) struct Approval {
     plugin: PluginId,
     name: SharedString,
     asks: Vec<SharedString>,
+    /// It sends commands, not only GMCP requests.
+    sends_commands: bool,
     purpose: Purpose,
     /// Where the keyboard goes back to.
     return_to: Option<FocusHandle>,
@@ -208,7 +220,10 @@ impl Approval {
     fn words(&self) -> Words {
         let name = &self.name;
         let approval = |without, with| Words {
-            title: format!("Let {name} send commands?"),
+            title: match self.sends_commands {
+                true => format!("Let {name} send commands?"),
+                false => format!("Let {name} ask the game for data?"),
+            },
             lead: None,
             shows_asks: true,
             footer: CANT_REACH,
@@ -261,6 +276,7 @@ impl Approval {
             plugin: row.id.clone(),
             name: row.name.clone(),
             asks: row.asks.clone(),
+            sends_commands: row.sends_commands(),
             purpose,
             return_to: window.focused(cx),
         }
@@ -279,6 +295,7 @@ impl Approval {
             plugin,
             name,
             asks: Vec::new(),
+            sends_commands: false,
             purpose,
             return_to: window.focused(cx),
         }
@@ -306,7 +323,8 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    /// A plugin downloaded and checked. One that sends commands asks first,
+    /// A plugin downloaded and checked. One that sends commands or GMCP
+    /// requests asks first,
     /// unless it's an update of an approved copy from where that came from.
     pub fn fetched(
         &mut self,
@@ -320,7 +338,7 @@ impl SettingsSheet {
                 fetched,
                 keeps_approval: false,
                 replaces,
-            }) if registry::sends_commands(&fetched.plugin) => {
+            }) if registry::needs_approval(&fetched.plugin) => {
                 let row = PluginRow::of(&fetched.plugin, false);
                 let purpose = Purpose::Install {
                     fetched,
@@ -861,7 +879,7 @@ fn offer_verb(offered: &Offer) -> &'static str {
     }
 }
 
-/// A row's smaller line, with "sends commands" in the warning color.
+/// A row's smaller line, with what it sends in the warning color.
 fn about_line(entry: &Entry, theme: &Theme) -> Stateful<Div> {
     let game = entry.game().unwrap_or(ANY_GAME);
     div()
@@ -871,8 +889,8 @@ fn about_line(entry: &Entry, theme: &Theme) -> Stateful<Div> {
         .text_size(px(13.))
         .text_color(theme.text_muted)
         .child(format!("{game} · {} · {}", entry.version, entry.license))
-        .when(entry.sends_commands(), |line| {
+        .when_some(sends(entry), |line, sends| {
             line.child(" · ")
-                .child(div().text_color(theme.warning).child(SENDS))
+                .child(div().text_color(theme.warning).child(sends))
         })
 }

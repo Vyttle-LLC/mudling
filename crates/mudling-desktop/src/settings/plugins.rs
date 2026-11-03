@@ -41,6 +41,9 @@ const OVERRAN: &str = " One of its hooks ran past its time limit three times thi
 const SENDS_COMMANDS: &str = "Sends commands";
 const NEEDS_APPROVAL: &str = "Needs your approval to send commands";
 const ONLY_WITH_ENABLE: &str = "Sends commands only when MUDling starts with --enable";
+const SENDS_GMCP: &str = "Asks the game for data";
+const NEEDS_APPROVAL_GMCP: &str = "Needs your approval to ask the game for data";
+const ONLY_WITH_ENABLE_GMCP: &str = "Asks the game for data only when MUDling starts with --enable";
 const ARRIVED: &str = "Arrived from another device";
 const SENDS_ASK: &str =
     "send commands to the game, which show in the chat like yours and are rate-limited";
@@ -101,23 +104,43 @@ pub enum Sending {
     OnlyWithEnable,
 }
 
-/// What `plugin`'s permissions let its hooks do, in the approval's words.
+/// What `plugin`'s permissions let it do, in the approval's words. Each GMCP
+/// request is said as it goes out.
 pub fn asks_of(plugin: &Plugin) -> Vec<SharedString> {
-    let mut asks: Vec<SharedString> = Vec::new();
-    for permission in &plugin.manifest.permissions {
-        let said = match permission {
-            Permission::SendCommands => SENDS_ASK.into(),
-            Permission::ReadState => READS_ASK.into(),
-            Permission::WriteStore(store) => format!("keep its own notes in the store \"{store}\""),
-        };
-        asks.push(said.into());
-    }
     // Sending first, as it's what the player is asked about.
-    asks.sort_by_key(|ask| ask != SENDS_ASK);
-    asks
+    let (mut sending, mut others): (Vec<SharedString>, Vec<SharedString>) = Default::default();
+    for permission in &plugin.manifest.permissions {
+        match permission {
+            Permission::SendCommands => sending.insert(0, SENDS_ASK.into()),
+            Permission::SendGmcp => {
+                let requests = plugin.points.connection.iter().flat_map(|c| &c.requests);
+                sending.extend(requests.map(|request| {
+                    let when = &request.when;
+                    format!(
+                        "send the game \"{}\" over GMCP, not as a command, each time {}'s {} changes",
+                        request.send, when.package, when.key
+                    )
+                    .into()
+                }));
+            }
+            Permission::ReadState => others.push(READS_ASK.into()),
+            Permission::WriteStore(store) => {
+                others.push(format!("keep its own notes in the store \"{store}\"").into());
+            }
+        }
+    }
+    sending.append(&mut others);
+    sending
 }
 
 impl PluginRow {
+    /// Whether what it sends once approved includes commands, which matter
+    /// most, so its approval speaks of them; otherwise it sends only GMCP
+    /// requests.
+    pub fn sends_commands(&self) -> bool {
+        self.asks.first().is_some_and(|ask| ask == SENDS_ASK)
+    }
+
     /// Marks those of `rows` in `approved` as let to send.
     pub fn approve(rows: &mut [PluginRow], approved: &[PluginId]) {
         for row in rows.iter_mut().filter(|row| approved.contains(&row.id)) {
@@ -145,7 +168,7 @@ impl PluginRow {
             on,
             flips: 0,
             elsewhere: None,
-            sending: match registry::sends_commands(plugin) {
+            sending: match registry::needs_approval(plugin) {
                 true => Sending::Waiting,
                 false => Sending::No,
             },
@@ -377,11 +400,25 @@ fn status_words(row: &PluginRow) -> Option<(Status, &'static str, Option<&'stati
     if row.held_back.is_some() {
         return Some((Status::Arrived, ARRIVED, Some("Review")));
     }
+    let commands = row.sends_commands();
+    let words = |for_commands, for_gmcp| if commands { for_commands } else { for_gmcp };
     match row.sending {
         Sending::No => None,
-        Sending::Approved => Some((Status::Approved, SENDS_COMMANDS, Some("Take back"))),
-        Sending::Waiting => Some((Status::Waiting, NEEDS_APPROVAL, Some("Review"))),
-        Sending::OnlyWithEnable => Some((Status::OnlyWithEnable, ONLY_WITH_ENABLE, None)),
+        Sending::Approved => Some((
+            Status::Approved,
+            words(SENDS_COMMANDS, SENDS_GMCP),
+            Some("Take back"),
+        )),
+        Sending::Waiting => Some((
+            Status::Waiting,
+            words(NEEDS_APPROVAL, NEEDS_APPROVAL_GMCP),
+            Some("Review"),
+        )),
+        Sending::OnlyWithEnable => Some((
+            Status::OnlyWithEnable,
+            words(ONLY_WITH_ENABLE, ONLY_WITH_ENABLE_GMCP),
+            None,
+        )),
     }
 }
 
@@ -1145,6 +1182,32 @@ mod tests {
             per_line: None,
         };
         assert_eq!(there.meant_elsewhere(&[running]), None, "it runs here");
+    }
+
+    #[test]
+    fn a_plugin_sending_only_gmcp_requests_waits_and_says_each_one() {
+        let asker = Plugin::from_files(|file| {
+            Ok(match file {
+                "plugin.toml" => A_GAME.replace(
+                    "\n\n[servers]",
+                    "\npermissions = [\"send_gmcp\"]\n\
+                     [points]\nconnection = \"connection.toml\"\n[servers]",
+                ),
+                _ => "[[request]]\nsend = \"request area\"\nwhen = \"room.info.zone\"\n".to_owned(),
+            })
+        })
+        .unwrap();
+        let row = PluginRow::of(&asker, true);
+        assert_eq!(row.sending, Sending::Waiting);
+        assert!(!row.sends_commands());
+        assert_eq!(
+            row.asks,
+            [
+                "send the game \"request area\" over GMCP, not as a command, each time room.info's zone changes"
+            ]
+        );
+        let (_, words, _) = status_words(&row).unwrap();
+        assert_eq!(words, NEEDS_APPROVAL_GMCP);
     }
 
     #[test]
