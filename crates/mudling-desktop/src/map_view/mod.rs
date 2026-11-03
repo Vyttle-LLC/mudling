@@ -44,7 +44,7 @@ const WHEEL_ZOOM_PER_PIXEL: f32 = 1.005;
 const INSET_ZOOM: f32 = 0.6;
 /// One press of the inset's + or −.
 const ZOOM_STEP: f32 = 1.25;
-const ZOOM_KEY: Pixels = px(26.);
+const ZOOM_KEY_SIZE: Pixels = px(26.);
 /// The least height the map keeps in the panel, whatever sits under it.
 const MIN_SURFACE: Pixels = px(120.);
 
@@ -336,7 +336,7 @@ impl MapView {
     fn zoom_keys(&self, theme: &Theme, cx: &mut Context<MapView>) -> impl IntoElement {
         let key = |id: &'static str, name: &'static str, label: &'static str, factor: f32| {
             button(id, name.into(), theme)
-                .size(ZOOM_KEY)
+                .size(ZOOM_KEY_SIZE)
                 .border_0()
                 .rounded_none()
                 .text_color(theme.text)
