@@ -38,6 +38,7 @@ pub(super) struct Worker {
     /// Where this device last cached a key for this vault, which `forget_device`
     /// still needs if the file has since become unreadable.
     pub account: Option<String>,
+    pub keep_on_device: bool,
     pub idle_deadline: Option<SystemTime>,
     pub state: watch::Sender<VaultState>,
     pub now: fn() -> SystemTime,
@@ -214,20 +215,44 @@ impl Worker {
         Ok(())
     }
 
-    /// Unlocks with `key` and caches it on this device. The key it replaces
-    /// here may open stranded passwords; if that fails, they stay stranded
-    /// for the old master password to open.
+    /// Unlocks with `key` and caches it on this device, if the player keeps a
+    /// copy here. The key it replaces here may open stranded passwords; if
+    /// that fails, or a guarded store won't hand it over without a prompt,
+    /// they stay stranded for the old master password to open.
     fn adopt(&mut self, key: VaultKey, file: &VaultFile) -> DeviceCache {
         let account = account(file);
-        let replaced = self.key_store.load(&account).ok().flatten();
-        let cached = self.key_store.save(&account, &key);
+        let replaced = self.key_store.load_without_prompt(&account).ok().flatten();
+        let cached = if self.keep_on_device {
+            save_copy(&*self.key_store, &account, &key)
+        } else {
+            DeviceCache::Off
+        };
         self.install(key, account);
         if let Some(replaced) = replaced {
             let _ = self.rescue(&replaced);
         }
-        match cached {
-            Ok(()) => DeviceCache::Saved,
-            Err(error) => DeviceCache::NotSaved(error),
+        cached
+    }
+
+    /// Turning the copy off removes it, even while the file is unreadable,
+    /// as [`Worker::forget_device`] does; with no vault yet there's nothing
+    /// to remove. Turning it on while unlocked saves the key held now, and
+    /// says how that went; while locked, the next unlock saves it.
+    pub fn set_keep_on_device(&mut self, keep: bool) -> Result<Option<DeviceCache>, Error> {
+        self.keep_on_device = keep;
+        if !keep {
+            match self.device_account() {
+                Ok(account) => self.key_store.delete(&account)?,
+                Err(Error::NotCreated) => {}
+                Err(error) => return Err(error),
+            }
+            return Ok(None);
+        }
+        let key_store = Arc::clone(&self.key_store);
+        match self.unlocked() {
+            Ok((file, key)) => Ok(Some(save_copy(&*key_store, &account(&file), key))),
+            Err(Error::Locked | Error::NotCreated) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -475,13 +500,27 @@ impl Worker {
     #[cfg(test)]
     pub fn forget_device(&mut self) -> Result<(), Error> {
         self.lock();
-        let account = match (self.read(), self.account.take()) {
-            (Ok(file), _) => account(&file),
-            (Err(_), Some(account)) => account,
-            (Err(error), None) => return Err(error),
-        };
+        let account = self.device_account()?;
+        self.account = None;
         self.key_store.delete(&account)?;
         Ok(())
+    }
+
+    /// The account this device caches the key under: the file's, or, while
+    /// that's unreadable, the one the last unlock here used.
+    fn device_account(&mut self) -> Result<String, Error> {
+        match (self.read(), &self.account) {
+            (Ok(file), _) => Ok(account(&file)),
+            (Err(_), Some(account)) => Ok(account.clone()),
+            (Err(error), None) => Err(error),
+        }
+    }
+}
+
+fn save_copy(key_store: &dyn KeyStore, account: &str, key: &VaultKey) -> DeviceCache {
+    match key_store.save(account, key) {
+        Ok(()) => DeviceCache::Saved,
+        Err(error) => DeviceCache::NotSaved(error),
     }
 }
 

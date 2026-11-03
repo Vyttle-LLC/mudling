@@ -212,13 +212,13 @@ async fn a_broken_credential_store_is_reported_and_the_vault_still_opens() {
     struct Broken;
     impl KeyStore for Broken {
         fn load(&self, _: &str) -> Result<Option<VaultKey>, KeyStoreError> {
-            Err(KeyStoreError("no keychain".into()))
+            Err(KeyStoreError::Failed("no keychain".into()))
         }
         fn save(&self, _: &str, _: &VaultKey) -> Result<(), KeyStoreError> {
-            Err(KeyStoreError("no keychain".into()))
+            Err(KeyStoreError::Failed("no keychain".into()))
         }
         fn delete(&self, _: &str) -> Result<(), KeyStoreError> {
-            Err(KeyStoreError("no keychain".into()))
+            Err(KeyStoreError::Failed("no keychain".into()))
         }
     }
 
@@ -236,6 +236,169 @@ async fn a_broken_credential_store_is_reported_and_the_vault_still_opens() {
         Ok(DeviceCache::NotSaved(_))
     ));
     assert_eq!(saved(&vault).await.as_deref(), Some("swordfish-42"));
+}
+
+/// How the player answers a [`Guarded`] store's prompt.
+#[derive(Clone, Copy)]
+enum Prompt {
+    Pass,
+    Cancel,
+    Fail,
+}
+
+/// A store that guards its keys as the Keychain does with Touch ID: every
+/// read is a prompt, and nothing reads a key without one.
+struct Guarded {
+    keys: MemoryKeyStore,
+    answer: std::sync::Mutex<Prompt>,
+    prompts: AtomicUsize,
+}
+
+impl Guarded {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            keys: MemoryKeyStore::default(),
+            answer: std::sync::Mutex::new(Prompt::Pass),
+            prompts: AtomicUsize::new(0),
+        })
+    }
+
+    fn answer(&self, answer: Prompt) {
+        *self.answer.lock().unwrap() = answer;
+    }
+
+    fn prompts(&self) -> usize {
+        self.prompts.load(Ordering::SeqCst)
+    }
+}
+
+impl KeyStore for Guarded {
+    fn load(&self, account: &str) -> Result<Option<VaultKey>, KeyStoreError> {
+        self.prompts.fetch_add(1, Ordering::SeqCst);
+        match *self.answer.lock().unwrap() {
+            Prompt::Pass => self.keys.load(account),
+            Prompt::Cancel => Err(KeyStoreError::Cancelled),
+            Prompt::Fail => Err(KeyStoreError::Failed("the Keychain is busy".into())),
+        }
+    }
+    fn load_without_prompt(&self, _: &str) -> Result<Option<VaultKey>, KeyStoreError> {
+        Ok(None)
+    }
+    fn save(&self, account: &str, key: &VaultKey) -> Result<(), KeyStoreError> {
+        self.keys.save(account, key)
+    }
+    fn delete(&self, account: &str) -> Result<(), KeyStoreError> {
+        self.keys.delete(account)
+    }
+}
+
+/// A locked vault holding one saved password, its key cached in `store`.
+async fn locked_behind(fixture: &Fixture, store: Arc<Guarded>) -> Vault {
+    let vault = Vault::with_kdf(fixture.path.clone(), store, AutoLock::NEVER, CHEAP_KDF);
+    let created = vault.create(MASTER.into()).await.unwrap();
+    assert!(matches!(created.device_cache, DeviceCache::Saved));
+    vault
+        .set_password(fikus(), "swordfish-42".into())
+        .await
+        .unwrap();
+    vault.lock().await.unwrap();
+    vault
+}
+
+#[tokio::test]
+async fn a_cancelled_prompt_leaves_the_vault_locked_and_auto_login_waiting() {
+    let fixture = Fixture::new();
+    let store = Guarded::new();
+    let vault = locked_behind(&fixture, store.clone()).await;
+    let auto_login = vault.clone();
+    let waiting = tokio::spawn(async move { saved(&auto_login).await });
+
+    store.answer(Prompt::Cancel);
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::Cancelled)
+    ));
+
+    assert_eq!(vault.state(), VaultState::Locked);
+    sleep(STILL_WAITING).await;
+    assert!(!waiting.is_finished());
+    let _ = vault.unlock_with_password(MASTER.into()).await.unwrap();
+    assert_eq!(waiting.await.unwrap().as_deref(), Some("swordfish-42"));
+}
+
+#[tokio::test]
+async fn a_failed_prompt_leaves_the_vault_locked_and_the_copy_in_place() {
+    let fixture = Fixture::new();
+    let store = Guarded::new();
+    let vault = locked_behind(&fixture, store.clone()).await;
+
+    store.answer(Prompt::Fail);
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::KeyStore(KeyStoreError::Failed(_)))
+    ));
+    assert_eq!(vault.state(), VaultState::Locked);
+
+    store.answer(Prompt::Pass);
+    vault.unlock_from_device().await.unwrap();
+    assert_eq!(saved(&vault).await.as_deref(), Some("swordfish-42"));
+}
+
+#[tokio::test]
+async fn unlocking_with_the_master_password_never_prompts() {
+    let fixture = Fixture::new();
+    let store = Guarded::new();
+    let vault = locked_behind(&fixture, store.clone()).await;
+
+    let cached = vault.unlock_with_password(MASTER.into()).await.unwrap();
+
+    assert!(matches!(cached, DeviceCache::Saved));
+    assert_eq!(store.prompts(), 0);
+}
+
+#[tokio::test]
+async fn turning_the_device_copy_off_removes_it_and_keeps_none() {
+    let fixture = Fixture::new();
+    let (vault, _) = fixture.created().await;
+
+    assert!(vault.set_keep_on_device(false).await.unwrap().is_none());
+    vault.lock().await.unwrap();
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::NotCached)
+    ));
+    assert!(matches!(
+        vault.unlock_with_password(MASTER.into()).await,
+        Ok(DeviceCache::Off)
+    ));
+    vault.lock().await.unwrap();
+    assert!(matches!(
+        vault.unlock_from_device().await,
+        Err(Error::NotCached)
+    ));
+}
+
+#[tokio::test]
+async fn turning_the_device_copy_back_on_while_unlocked_saves_it() {
+    let fixture = Fixture::new();
+    let (vault, _) = fixture.created().await;
+    let _ = vault.set_keep_on_device(false).await.unwrap();
+
+    let turned_on = vault.set_keep_on_device(true).await.unwrap();
+
+    assert!(matches!(turned_on, Some(DeviceCache::Saved)));
+    vault.lock().await.unwrap();
+    vault.unlock_from_device().await.unwrap();
+}
+
+#[tokio::test]
+async fn turning_the_device_copy_off_at_opening_comes_before_any_unlock() {
+    let fixture = Fixture::new();
+    let vault = fixture.vault();
+
+    drop(vault.set_keep_on_device(false));
+    let created = vault.create(MASTER.into()).await.unwrap();
+    assert!(matches!(created.device_cache, DeviceCache::Off));
 }
 
 #[tokio::test]
@@ -737,6 +900,7 @@ async fn a_job_that_wakes_the_thread_after_sleep_finds_the_vault_locked() {
         auto_lock: AutoLock::FIVE_MINUTES,
         key: Some(VaultKey::generate()),
         account: None,
+        keep_on_device: true,
         idle_deadline: Some(UNIX_EPOCH + Duration::from_secs(5 * 60)),
         state,
         now: clock_jumping_after_first_read,

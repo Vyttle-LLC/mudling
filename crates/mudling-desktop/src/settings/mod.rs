@@ -204,6 +204,7 @@ pub enum SheetEvent {
     ClearRepo,
     SyncNow,
     LockAfter(LockAfter),
+    KeepKeyOnDevice(bool),
     VaultUnlocked,
 }
 

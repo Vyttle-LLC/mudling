@@ -39,6 +39,10 @@ pub enum Error {
     /// This device holds no cached key for this vault, so unlocking takes the
     /// master password or the recovery key.
     NotCached,
+    /// The player cancelled or failed the Touch ID or Face ID prompt for this
+    /// device's key. The vault stays locked, so unlocking takes the master
+    /// password, the recovery key or another try.
+    Cancelled,
     Stopped,
     Io(io::Error),
     KeyStore(KeyStoreError),
@@ -65,6 +69,9 @@ impl fmt::Display for Error {
             Self::NoCurrentPassword => f.write_str("no current password is saved to keep"),
             Self::Locked => f.write_str("the vault is locked"),
             Self::NotCached => f.write_str("this device has no cached vault key"),
+            Self::Cancelled => {
+                f.write_str("the prompt for this device's key was cancelled or failed")
+            }
             Self::Stopped => f.write_str("the vault's thread has stopped"),
             Self::Io(error) => write!(f, "vault file: {error}"),
             Self::KeyStore(error) => error.fmt(f),
@@ -90,6 +97,9 @@ impl From<io::Error> for Error {
 
 impl From<KeyStoreError> for Error {
     fn from(error: KeyStoreError) -> Self {
-        Self::KeyStore(error)
+        match error {
+            KeyStoreError::Cancelled => Self::Cancelled,
+            error => Self::KeyStore(error),
+        }
     }
 }

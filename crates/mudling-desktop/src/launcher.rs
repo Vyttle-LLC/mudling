@@ -714,7 +714,7 @@ fn login_as(vault: &Vault, host: &str, character: String) -> Login {
     if vault.state() != VaultState::Unlocked {
         match block_on(vault.unlock_from_device()) {
             Ok(()) => {}
-            Err(VaultError::NotCached) => return Login::Locked,
+            Err(VaultError::NotCached | VaultError::Cancelled) => return Login::Locked,
             Err(_) => return Login::Ready(None),
         }
     }

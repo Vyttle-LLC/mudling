@@ -4,7 +4,16 @@
 //! A random vault key encrypts each password with XChaCha20-Poly1305. The key
 //! is stored twice in the file: under a key Argon2id derives from the master
 //! password, and under a recovery key shown once. Each device also caches it
-//! in its OS credential store, behind [`KeyStore`].
+//! in its OS credential store, behind [`KeyStore`], unless the player turns
+//! that off with [`Vault::set_keep_on_device`].
+//!
+//! **The device's copy.** On a macOS release build, only Touch ID, or the
+//! login password where there's no Touch ID, reads that copy: the Keychain
+//! item's own access control asks, on the vault's thread, and a cancelled or
+//! failed prompt leaves the vault locked with [`Error::Cancelled`]. Development
+//! builds, Windows and Linux keep a copy anyone at the unlocked computer can
+//! use; [`DEVICE_KEY_GUARDED`] says which this build does. iOS's Face ID
+//! (VYT-244) only needs a [`KeyStore`] of its own.
 //!
 //! [`Vault`] is a cheap, cloneable handle to a thread of its own, and every
 //! call is an `async fn` that waits on that thread, so no caller ever does
@@ -18,7 +27,8 @@
 //! changing its password costs the same. It runs on the vault's thread, so it
 //! stalls neither the UI nor a core thread; other vault calls queue behind it.
 //! Peak memory is the 64 MiB. Unlocking from the device cache (around a
-//! millisecond or less) or a recovery key skips Argon2. To measure it here:
+//! millisecond or less, plus any prompt) or a recovery key skips Argon2. To
+//! measure it here:
 //! `cargo run --release -p mudling-core --example vault_kdf_cost`.
 //!
 //! **Locked vaults.** [`Vault::password`] and the other entry calls wait until
@@ -26,13 +36,12 @@
 //! Auto-login awaits [`Vault::password`]; dropping the future stops the wait.
 //!
 //! ```no_run
-//! use mudling_core::vault::{AutoLock, EntryKey, FILE_NAME, OsKeyStore, Vault};
+//! use mudling_core::vault::{AutoLock, EntryKey, FILE_NAME, Vault, device_key_store};
 //! use std::path::Path;
-//! use std::sync::Arc;
 //!
 //! # async fn example() -> Result<(), mudling_core::vault::Error> {
 //! let path = Path::new("/path/to/data").join(FILE_NAME);
-//! let vault = Vault::open(path, Arc::new(OsKeyStore), AutoLock::default());
+//! let vault = Vault::open(path, device_key_store(), AutoLock::default());
 //! vault.unlock_with_password("a long and unusual passphrase".into()).await?;
 //! let entry = EntryKey::new("mud.example.org", "Fikus");
 //! let password = vault.password(&entry).await?;
@@ -53,7 +62,9 @@ mod worker;
 mod tests;
 
 pub use error::Error;
-pub use key_store::{KeyStore, KeyStoreError, MemoryKeyStore, OsKeyStore};
+pub use key_store::{
+    DEVICE_KEY_GUARDED, KeyStore, KeyStoreError, MemoryKeyStore, OsKeyStore, device_key_store,
+};
 pub(crate) use merge::merge_files;
 pub use secret::{RecoveryKey, Secret, VaultKey};
 
@@ -128,6 +139,8 @@ impl Default for AutoLock {
 pub enum DeviceCache {
     Saved,
     NotSaved(KeyStoreError),
+    /// The player chose to keep no copy on this device.
+    Off,
 }
 
 /// What creating a vault or changing its master password hands back. The
@@ -167,6 +180,7 @@ impl Vault {
             auto_lock,
             key: None,
             account: None,
+            keep_on_device: true,
             idle_deadline: None,
             state: state_sender,
             now: SystemTime::now,
@@ -219,7 +233,9 @@ impl Vault {
     }
 
     /// Unlocks with the key cached on this device, or returns
-    /// [`Error::NotCached`]. This is where Touch ID or Face ID will gate it.
+    /// [`Error::NotCached`]. A guarded store asks for Touch ID or Face ID
+    /// first, and a prompt the player cancels or fails gives
+    /// [`Error::Cancelled`], leaving the vault locked.
     pub async fn unlock_from_device(&self) -> Result<(), Error> {
         self.call(Worker::unlock_from_device).await
     }
@@ -239,6 +255,18 @@ impl Vault {
             Ok(())
         })
         .await
+    }
+
+    /// Whether unlocking keeps a copy of the key on this device. It's on
+    /// until this turns it off, which removes the copy. Turning it back on
+    /// while unlocked saves one at once and says how that went; otherwise
+    /// this gives `None`. It's queued before this returns, so no call made
+    /// after it can save a copy first, even if nothing awaits the answer.
+    pub fn set_keep_on_device(
+        &self,
+        keep: bool,
+    ) -> impl Future<Output = Result<Option<DeviceCache>, Error>> + use<> {
+        self.call(move |worker| worker.set_keep_on_device(keep))
     }
 
     /// The saved password for `entry`, waiting for an unlock if the vault is
@@ -350,16 +378,21 @@ impl Vault {
         }
     }
 
-    async fn call<T: Send + 'static>(
-        &self,
-        job: impl FnOnce(&mut Worker) -> Result<T, Error> + Send + 'static,
-    ) -> Result<T, Error> {
+    /// Queues `job` at once, and answers when it has run.
+    fn call<T, J>(&self, job: J) -> impl Future<Output = Result<T, Error>> + use<T, J>
+    where
+        T: Send + 'static,
+        J: FnOnce(&mut Worker) -> Result<T, Error> + Send + 'static,
+    {
         let (reply, answer) = oneshot::channel();
         let job: Job = Box::new(move |worker| {
             // The caller may have stopped waiting; that's not an error.
             let _ = reply.send(job(worker));
         });
-        self.jobs.send(job).map_err(|_| Error::Stopped)?;
-        answer.await.map_err(|_| Error::Stopped)?
+        let queued = self.jobs.send(job);
+        async move {
+            queued.map_err(|_| Error::Stopped)?;
+            answer.await.map_err(|_| Error::Stopped)?
+        }
     }
 }
