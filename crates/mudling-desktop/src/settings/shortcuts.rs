@@ -76,6 +76,11 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
             ),
             row("Close Review", &["escape"], &["map_view::CloseReview"]),
             row(
+                "Keep the room when asked to forget it",
+                &["escape"],
+                &["map_view::KeepRoom"],
+            ),
+            row(
                 "Move along the notes",
                 &["up", "down"],
                 &["notes::PreviousNote", "notes::NextNote"],

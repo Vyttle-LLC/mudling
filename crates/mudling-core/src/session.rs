@@ -230,6 +230,8 @@ pub enum MapEdit {
     /// that made it.
     /// `MapState::last_join` says how it went.
     UndoJoin { created: Timestamp },
+    /// Removes a room and every link into it, so walking in maps it afresh.
+    Forget { room: RoomId },
 }
 
 enum Input {

@@ -519,6 +519,7 @@ impl Engine {
             MapEdit::UndoJoin { created } => {
                 self.answer_join(now, |engine| engine.undo_join(created, now));
             }
+            MapEdit::Forget { room } => self.map.forget(&[room]),
         }
     }
 

@@ -47,11 +47,12 @@ pub enum ScanStep {
     WaitFor(Duration),
 }
 
-/// The note over the map after a join.
+/// The note over the map after a join, or after forgetting the room named.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JoinNote {
     Joined { label: String, created: Timestamp },
     Failed(String),
+    Forgot(String),
 }
 
 /// One room of a pair, as Review words it.
@@ -672,6 +673,16 @@ impl MapModel {
         self.joining = Some(pair);
         self.join_note = None;
         self.picks.clear();
+    }
+
+    /// The session has been asked to forget `room`, so nothing here holds it.
+    pub fn await_forget(&mut self, room: RoomId) {
+        self.join_note = self
+            .room_name(room)
+            .map(|name| JoinNote::Forgot(name.to_owned()));
+        self.picks.retain(|picked| *picked != room);
+        self.selection = None;
+        self.walk_for = None;
     }
 
     pub fn joining(&self) -> Option<RoomPair> {
