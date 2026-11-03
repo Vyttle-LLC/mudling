@@ -83,6 +83,7 @@ impl MapView {
     pub fn close_review(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.model.close_review();
         self.review_open = false;
+        self.start_work(cx);
         self.focus_what_remains(window, cx);
         cx.notify();
     }

@@ -245,7 +245,9 @@ impl MapView {
         let Some(press) = self.press.take() else {
             return;
         };
-        if press.dragged > px(CLICK_SLOP) {
+        // Review's map is for looking: a click there would take away its
+        // note and Undo, and Review has no Join for picked rooms.
+        if press.dragged > px(CLICK_SLOP) || self.model.reviewing() {
             return;
         }
         let point = self.in_view(event.position);
@@ -1068,6 +1070,32 @@ mod tests {
             [MapEdit::Join { .. }, MapEdit::UndoJoin { .. }]
         ));
         assert!(cx.debug_bounds("map-review-note").is_none());
+    }
+
+    #[gpui::test]
+    fn a_click_on_reviews_map_keeps_undo_and_picks_nothing(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        click_on("Review duplicates", cx);
+        click_on("Join these rooms", cx);
+        answer(&view, 1, joined(), cx);
+
+        let on_a_copy = view.read_with(cx, |view, _| {
+            let (x, y) = view.model.review_squares()[0].expect("the first copy is shown");
+            let at = view
+                .model
+                .camera()
+                .to_view((x as f32, y as f32), view.view_size());
+            view.bounds.get().origin + point(px(at.0), px(at.1))
+        });
+        cx.simulate_click(on_a_copy, Modifiers::none());
+        cx.simulate_click(on_a_copy, Modifiers::shift());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("Undo the join").is_some());
+        view.read_with(cx, |view, _| {
+            assert!(view.model.picks().is_empty());
+            assert!(view.model.selection().is_none());
+        });
     }
 
     #[gpui::test]

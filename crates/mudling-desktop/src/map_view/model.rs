@@ -108,18 +108,20 @@ impl Verdict {
 pub struct CompareRow {
     pub label: String,
     pub values: [String; 2],
+    differs: bool,
 }
 
 impl CompareRow {
     fn new(label: impl Into<String>, values: [String; 2]) -> CompareRow {
         CompareRow {
             label: label.into(),
+            differs: values[0] != values[1],
             values,
         }
     }
 
     pub fn differs(&self) -> bool {
-        self.values[0] != self.values[1]
+        self.differs
     }
 }
 
@@ -165,7 +167,7 @@ impl Comparison<'_> {
 
     fn verdict(&self) -> Verdict {
         let derived = self.map.derived().map(|derived| &**derived);
-        let [(_, first), (_, second)] = self.both(|room| Place::of(room, derived));
+        let [(place, first), (other_place, second)] = self.both(|room| Place::of(room, derived));
         let [zone, other_zone] = self.both(|room| self.area_name(room));
         let alike = self.alike();
         let alike = if alike.is_empty() {
@@ -177,6 +179,14 @@ impl Comparison<'_> {
             return Verdict {
                 lead: "In different zones".to_owned(),
                 rest: format!(": {zone} and {other_zone}.{alike}"),
+            };
+        }
+        // A building with a map of its own counts its squares apart from the
+        // outdoors', so there's no distance to give.
+        if place.building != other_place.building {
+            return Verdict {
+                lead: "On separate maps".to_owned(),
+                rest: format!(" in {zone}.{alike}"),
             };
         }
         let apart = (first.x - second.x).abs() + (first.y - second.y).abs();
@@ -219,10 +229,7 @@ impl Comparison<'_> {
             CompareRow::new("Zone", self.both(|room| self.area_name(room))),
             CompareRow::new("Exits", self.both(exit_letters)),
         ];
-        rows.extend(self.ways().map(|way| {
-            let label = format!("{} to", capitalized(way.name()));
-            CompareRow::new(label, self.both(|room| self.leads_to(room, way)))
-        }));
+        rows.extend(self.ways().map(|way| self.way_row(way)));
         rows.extend([
             CompareRow::new(
                 "Notes",
@@ -253,9 +260,27 @@ impl Comparison<'_> {
         })
     }
 
-    fn leads_to(&self, room: &MapRoom, way: Direction) -> String {
-        let next = room.links.get_copied(way).and_then(|id| self.map.room(id));
-        next.map_or_else(|| NOT_WALKED.to_owned(), |next| next.name.clone())
+    /// Where `way` leads from each copy. It differs by the room it reaches,
+    /// as [`ways_that_differ`] does; two rooms of one name say where each is.
+    fn way_row(&self, way: Direction) -> CompareRow {
+        let targets = self.both(|room| room.links.get_copied(way));
+        let rooms = targets.map(|id| id.and_then(|id| self.map.room(id)));
+        let names = rooms.map(|room| room.map(|room| room.name.as_str()));
+        let differs = targets[0] != targets[1];
+        let derived = self.map.derived().map(|derived| &**derived);
+        let values = rooms.map(|room| match room {
+            None => NOT_WALKED.to_owned(),
+            Some(room) if differs && names[0] == names[1] => {
+                let (_, square) = Place::of(room, derived);
+                format!("{} · at {}, {}", room.name, square.x, square.y)
+            }
+            Some(room) => room.name.clone(),
+        });
+        CompareRow {
+            label: format!("{} to", capitalized(way.name())),
+            values,
+            differs,
+        }
     }
 
     fn description(&self) -> Description {
@@ -729,6 +754,9 @@ impl MapModel {
         if let Some(index) = self.reviewing {
             let last = self.duplicates.pairs.len().checked_sub(1);
             self.reviewing = last.map(|last| index.min(last));
+            if self.reviewing.is_none() {
+                self.follow();
+            }
         }
     }
 
@@ -752,8 +780,10 @@ impl MapModel {
         self.reviewing = (!self.duplicates.pairs.is_empty()).then_some(0);
     }
 
+    /// Closes Review, back to following the player.
     pub fn close_review(&mut self) {
         self.reviewing = None;
+        self.follow();
     }
 
     pub fn reviewing(&self) -> bool {
@@ -1506,6 +1536,71 @@ mod tests {
             "Joining keeps both copies' links, notes, features and sightings. \
              Where they lead different ways (north), the newer link stays."
         );
+    }
+
+    #[test]
+    fn ways_to_two_rooms_of_one_name_differ_and_say_where_each_is() {
+        let (mut first, mut second) = (copy(FIRST, 0, 0), copy(SECOND, 7, 0));
+        for (copy, to) in [(&mut first, 5), (&mut second, 6)] {
+            copy.links.insert(Direction::North, to);
+            copy.links.insert(Direction::East, 9);
+        }
+        let mut alike = [room(5, 0, 1), room(6, 7, 1)];
+        for room in &mut alike {
+            room.name = "Square 0, 1".to_owned();
+        }
+        let [north_of_first, north_of_second] = alike;
+        let rooms = vec![
+            first,
+            second,
+            north_of_first,
+            north_of_second,
+            named(9, "The Well"),
+        ];
+        let (north, east, note) = compare(rooms, |c| {
+            let rows = c.rows();
+            (row(&rows, "North to"), row(&rows, "East to"), c.join_note())
+        });
+        assert_eq!(
+            north.values,
+            ["Square 0, 1 · at 0, 1", "Square 0, 1 · at 7, 1"]
+        );
+        assert!(north.differs(), "as the join note says");
+        assert!(note.contains("(north)"));
+        assert_eq!(east.values, ["The Well", "The Well"]);
+        assert!(!east.differs(), "one room, reached from both");
+    }
+
+    #[test]
+    fn the_verdict_gives_no_distance_between_separate_maps() {
+        let mut indoors = copy(SECOND, 1, 0);
+        indoors.building = Some(SECOND);
+        let verdict = compare(vec![copy(FIRST, 0, 0), indoors], |c| c.verdict().text());
+        assert_eq!(
+            verdict,
+            "On separate maps in The Synthetic Reach. Same name, zone, description and exits."
+        );
+    }
+
+    #[test]
+    fn closing_review_goes_back_to_following_the_player() {
+        let mut model = duplicated_model();
+        let player = model.you().expect("the player is on this sheet").0;
+        model.open_review();
+        model.skip_pair();
+        model.look_at_review(VIEW);
+        assert_ne!(model.camera().center, (player.0 as f32, player.1 as f32));
+
+        model.close_review();
+        assert_eq!(model.camera().center, (player.0 as f32, player.1 as f32));
+        let pairs = model.duplicates().pairs.clone();
+        model.open_review();
+        model.look_at_review(VIEW);
+        for pair in pairs {
+            model.answer_pair(pair, None);
+        }
+        assert!(!model.reviewing(), "nothing's left to review");
+        assert_eq!(model.camera().center, (player.0 as f32, player.1 as f32));
     }
 
     #[test]
