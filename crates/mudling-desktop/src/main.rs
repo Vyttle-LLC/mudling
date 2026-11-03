@@ -37,6 +37,10 @@
 //! accessibility tree and exits (see `macos`). `--map-harness` shows the map
 //! alone (see `map_view::harness`).
 
+// A release build on Windows opens no console window. Its output to a terminal
+// is lost, but measured runs still report through their piped stderr.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 /// A shortcut on the platform's main modifier: ⌘ on macOS, Ctrl elsewhere.
 macro_rules! secondary {
     ($key:literal) => {

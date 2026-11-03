@@ -116,6 +116,12 @@ and builds for x64 and arm64 from one script. It is already on GitHub's Windows
 runners. WiX builds MSIs, which suit managed fleets but make a per-user install
 awkward; NSIS needs more script for the same result.
 
+On Windows, a release build is a windowed app, so launching it opens no console
+window. Run from a terminal, its messages, such as a usage error, go nowhere;
+redirect them (`MUDling.exe --measure 2> err.txt`) or use a debug build, which
+keeps its console. `--measure` still works, since its measured run reports
+through a pipe.
+
 Installing or reinstalling never touches the data folder: on macOS
 `~/Library/Application Support/com.Vyttle.MUDling`, wherever the app itself
 lives.
