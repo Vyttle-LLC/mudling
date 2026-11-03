@@ -29,7 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0 # Needed to confirm the tag is on main.
       - id: tag
@@ -56,27 +56,35 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       MUDLING_VERSION: ${{ needs.version.outputs.version }}
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+    # Each secret reaches only the steps that use it, never the third-party actions.
     steps:
       # An unsigned Mac build would only meet Gatekeeper's refusal: publish none.
       - name: Require the signing secrets
+        id: macos-secrets
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
         run: |
           for secret in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
             if [ -z "${!secret}" ]; then
               echo "::error::The $secret secret is missing; see docs/releasing.md"; exit 1
             fi
           done
+          # A step's `if` cannot read secrets, so the optional profile's presence is passed as an output.
+          echo "has_profile=$([ -n "$MACOS_PROVISIONING_PROFILE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Import the Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password="$(uuidgen)"
@@ -98,7 +106,9 @@ jobs:
 
       # Optional: with the profile, the app gets its Keychain access group, for Touch ID.
       - name: Install the provisioning profile
-        if: env.MACOS_PROVISIONING_PROFILE != ''
+        if: steps.macos-secrets.outputs.has_profile == 'true'
+        env:
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
         run: |
           echo "$MACOS_PROVISIONING_PROFILE" | base64 --decode > "$RUNNER_TEMP/MUDling.provisionprofile"
           echo "PROVISIONING_PROFILE=$RUNNER_TEMP/MUDling.provisionprofile" >> "$GITHUB_ENV"
@@ -107,6 +117,10 @@ jobs:
         run: bash scripts/package-macos.sh
 
       - name: Notarize
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/api-key.p8"
           ditto -c -k --keepParent target/MUDling.app "$RUNNER_TEMP/notarize.zip"
@@ -121,7 +135,7 @@ jobs:
           ditto -c -k --keepParent target/MUDling.app \
             "target/dist/MUDling-$MUDLING_VERSION-macos-${{ matrix.arch }}.zip"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-${{ matrix.arch }}
           path: target/dist/*
@@ -141,17 +155,32 @@ jobs:
     runs-on: windows-latest
     env:
       MUDLING_VERSION: ${{ needs.version.outputs.version }}
-      # Signing goes ahead only with every Azure Trusted Signing secret; otherwise the builds ship unsigned.
-      SIGN_WINDOWS: >-
-        ${{ secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != ''
-        && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT != '' && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT != ''
-        && secrets.AZURE_TRUSTED_SIGNING_PROFILE != '' }}
+    # Each secret reaches only the signing steps, never the third-party build actions.
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Signing goes ahead only with every Azure Trusted Signing secret; otherwise the builds ship unsigned.
+      # A step's `if` cannot read secrets, so the answer is passed as an output.
+      - name: Check for the Azure signing secrets
+        id: azure
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+        run: |
+          sign=true
+          for secret in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT AZURE_TRUSTED_SIGNING_PROFILE; do
+            [ -n "${!secret}" ] || sign=false
+          done
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
 
@@ -160,8 +189,8 @@ jobs:
 
       # Signed before packaging, so the zip and the installer both carry the signed app.
       - name: Sign the app
-        if: env.SIGN_WINDOWS == 'true'
-        uses: azure/trusted-signing-action@v2
+        if: steps.azure.outputs.sign == 'true'
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -184,8 +213,8 @@ jobs:
         run: scripts/package-windows.ps1 -Target ${{ matrix.target }} -Arch ${{ matrix.arch }}
 
       - name: Sign the installer
-        if: env.SIGN_WINDOWS == 'true'
-        uses: azure/trusted-signing-action@v2
+        if: steps.azure.outputs.sign == 'true'
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -196,7 +225,7 @@ jobs:
           files-folder: target/dist
           files-folder-filter: exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-${{ matrix.arch }}
           path: target/dist/*
@@ -221,11 +250,11 @@ jobs:
       # The runners have no FUSE, so appimagetool runs from its extracted self.
       APPIMAGE_EXTRACT_AND_RUN: 1
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install gpui's Linux libraries (X11 and Wayland)
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Build
         run: cargo build --locked --release -p mudling-desktop
@@ -240,7 +269,7 @@ jobs:
       - name: Package
         run: bash scripts/package-linux.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-${{ matrix.arch }}
           path: target/dist/*
@@ -257,7 +286,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           # Only the builds: CI, run first, uploads its bench reports to this run too.
