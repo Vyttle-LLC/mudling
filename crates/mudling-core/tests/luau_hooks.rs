@@ -265,7 +265,8 @@ fn an_infinite_loop_is_stopped_by_the_budget() {
 }
 
 #[test]
-fn a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
+#[ignore = "timing: runs daily"]
+fn timing_a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
     let plugin = hooked(
         &[],
         "function on_go(event) for i = 1, 2000 do local s = string.rep('x', 100000) s = s:upper() end end",
@@ -298,7 +299,8 @@ impl StateView for OneSpike {
 }
 
 #[test]
-fn one_jump_past_the_time_limit_isnt_an_overrun() {
+#[ignore = "timing: runs daily"]
+fn timing_one_jump_past_the_time_limit_isnt_an_overrun() {
     let plugin = hooked(
         &["read_state", "write_store:s"],
         "function on_go(event) mud.state('k') for i = 1, 50 do end mud.store('s', 'done', true) end",
@@ -327,7 +329,8 @@ impl StateView for Slow {
 }
 
 #[test]
-fn time_a_hook_spends_off_the_cpu_isnt_charged() {
+#[ignore = "timing: runs daily"]
+fn timing_time_off_the_cpu_isnt_charged_to_a_hook() {
     let plugin = hooked(
         &["read_state", "write_store:s"],
         "function on_go(event) for i = 1, 3 do mud.state('k') end mud.store('s', 'done', true) end",
