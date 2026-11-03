@@ -7,13 +7,15 @@
 //!
 //! `--measure` relaunches with gpui's frame timing on, like the chat's
 //! `--measure`, and drives pan then zoom with every room in view. It writes
-//! a JSON report and prints each phase against the 8 ms budget. Maps here
+//! a JSON report, prints each phase, and judges pan and zoom against the
+//! 8 ms budget. Maps here
 //! are made up; no real map data belongs in this file.
 //!
 //! gpui's frame time includes waiting for a free Metal drawable. On a busy
-//! machine a whole phase can lock on to that wait and sit near 8 or 16 ms,
-//! with no more work done. `--rooms 25` is the control: it shows the same
-//! stall, so only a phase that stays slow beside a fast control is the map.
+//! machine one late frame can lock the run on to that wait, every frame near
+//! 8 or 16 ms with no more work done, often for the rest of the run.
+//! `--rooms 25` is the control: it locks on the same way, so only a phase
+//! that stays slow beside a fast control is the map.
 //!
 //! Built with `--features shots`, `--shot <path.png>` saves a picture of the
 //! window and quits, and `--shot-fit <path.png>` frames the whole map first.
@@ -51,6 +53,7 @@ const INSET: Size<gpui::Pixels> = Size {
     height: px(202.),
 };
 const FRAME_BUDGET_US: f64 = 8_000.0;
+const BUDGETED_PHASES: [&str; 2] = ["pan", "zoom"];
 const SETTLE: Duration = Duration::from_secs(1);
 /// Backs off a little from a tight fit, so panning keeps every room in view.
 const FIT_MARGIN: f32 = 0.92;
@@ -763,8 +766,7 @@ fn run_measured(child_args: &[String], options: &Options) -> ExitCode {
         load_average_1m_start,
         load_average_1m_end: measure::load_average(),
         frame_budget_us: FRAME_BUDGET_US,
-        within_budget: !phases.is_empty()
-            && phases.values().all(|phase| phase.p99_us <= FRAME_BUDGET_US),
+        within_budget: within_budget(&phases),
         phases,
         info,
     };
@@ -779,6 +781,16 @@ fn run_measured(child_args: &[String], options: &Options) -> ExitCode {
     }
     println!("report: {}", options.report.display());
     ExitCode::SUCCESS
+}
+
+/// Whether pan and zoom, the phases the budget names, both met it. Moves and
+/// the frame drawn as the run ends are reported but not judged.
+fn within_budget(phases: &BTreeMap<String, Summary>) -> bool {
+    BUDGETED_PHASES.iter().all(|name| {
+        phases
+            .get(*name)
+            .is_some_and(|phase| phase.p99_us <= FRAME_BUDGET_US)
+    })
 }
 
 fn print_report(report: &MapFrameReport) {
@@ -802,4 +814,41 @@ fn print_report(report: &MapFrameReport) {
         "pan and zoom frame p99 ≤ 8 ms: {}",
         if report.within_budget { "ok" } else { "MISSED" }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phases(p99s: &[(&str, f64)]) -> BTreeMap<String, Summary> {
+        let summary = |p99_ms: f64| Summary {
+            samples: 480,
+            mean_us: 2_000.,
+            p50_us: 2_000.,
+            p99_us: p99_ms * 1e3,
+            max_us: p99_ms * 1e3,
+        };
+        (p99s.iter())
+            .map(|(name, p99_ms)| (name.to_string(), summary(*p99_ms)))
+            .collect()
+    }
+
+    #[test]
+    fn slow_moves_and_end_frames_dont_miss_the_budget() {
+        let run = phases(&[("pan", 4.), ("zoom", 3.6), ("moves", 11.), ("end", 9.)]);
+        assert!(within_budget(&run));
+    }
+
+    #[test]
+    fn a_slow_pan_or_zoom_misses_the_budget() {
+        let slow_pan = phases(&[("pan", 8.5), ("zoom", 3.6)]);
+        let slow_zoom = phases(&[("pan", 4.), ("zoom", 8.5)]);
+        assert!(!within_budget(&slow_pan));
+        assert!(!within_budget(&slow_zoom));
+    }
+
+    #[test]
+    fn a_run_missing_pan_or_zoom_misses_the_budget() {
+        assert!(!within_budget(&phases(&[("zoom", 3.6), ("moves", 4.)])));
+    }
 }
