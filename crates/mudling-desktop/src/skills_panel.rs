@@ -1,30 +1,32 @@
 //! The Skills panel: Spells and Skills, with percentages, levels and costs, a
 //! filter, the practices left, Practice, and a banner when a skill improves.
 //!
-//! Only the rows in view are laid out, so a long list costs a frame no more
-//! than a short one. Rows out of view aren't tab stops, so Tab moves between
-//! rows itself, as the Find panel's does.
+//! A skill is one line of columns, under a heading for what's learned and
+//! one for what isn't yet. Only the lines in view are laid out, so a long
+//! list costs a frame no more than a short one. Rows out of view aren't tab
+//! stops, so Tab moves between rows itself, as the Find panel's does, and
+//! passes over the headings.
 //!
 //! The panel never sends a command itself: it emits [`SendCommand`] and the
 //! shell sends it, refusing it while the server asks for a password.
 
-use crate::assets::HEADING_FONT;
 use crate::character_panel::CLOCK_TICK;
 use crate::chat::live_region;
 use crate::input::CommandInput;
-use crate::room_panel::{SendCommand, Verbs, button, row_name};
+use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label};
 use crate::shell::FocusNext;
 use crate::theme::Theme;
 use crate::title_bar::FocusPreviousControl;
 use gpui::{
-    ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, Pixels, Role,
-    ScrollStrategy, SharedString, Stateful, Subscription, Task, UniformListScrollHandle, Window,
-    div, prelude::*, px, relative, uniform_list,
+    AnyElement, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, FontFeatures,
+    FontWeight, Hsla, Pixels, Role, ScrollStrategy, SharedString, Stateful, Subscription, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
 };
 use mudling_core::persist::Timestamp;
 use mudling_core::store::{Improved, SheetState, SkillRow};
 use std::cmp::Reverse;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// The key context while focus is in the panel.
 pub const CONTEXT: &str = "SkillsPanel";
@@ -35,10 +37,16 @@ const LOCKED_NOTE: &str = "Practice is off while the game asks for a password.";
 const NOTHING_READ: &str = "Nothing read from the game yet.";
 /// A row the game hasn't offered to teach: it has no percent and no Practice.
 const NOT_YET: &str = "not learned yet";
-const ROW_HEIGHT: Pixels = px(52.);
-const BUTTON_HEIGHT: Pixels = px(28.);
+/// Every line is this tall, headings too: the list is a uniform one.
+const ROW_HEIGHT: Pixels = px(24.);
+const BUTTON_HEIGHT: Pixels = px(18.);
 const TAB_HEIGHT: Pixels = px(28.);
-const BAR_WIDTH: Pixels = px(64.);
+const COLUMN_GAP: Pixels = px(8.);
+const MANA_WIDTH: Pixels = px(34.);
+const BAR_WIDTH: Pixels = px(44.);
+const PERCENT_WIDTH: Pixels = px(30.);
+const PRACTICE_WIDTH: Pixels = px(56.);
+const LEVEL_WIDTH: Pixels = px(26.);
 /// How long an improvement stays "just" improved.
 const IMPROVED_LASTS_MS: i64 = 10 * 60 * 1000;
 
@@ -77,19 +85,74 @@ impl Kind {
     }
 }
 
-/// `kind`'s rows that match `filter`, in the order the game teaches them,
-/// the best learned first within a level.
+/// What's learned lists first, then what the game hasn't offered to teach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Learned,
+    NotYet,
+}
+
+impl Group {
+    fn of(skill: &SkillRow) -> Group {
+        match skill.learned {
+            Some(_) => Group::Learned,
+            None => Group::NotYet,
+        }
+    }
+
+    fn heading(self) -> &'static str {
+        match self {
+            Group::Learned => "LEARNED",
+            Group::NotYet => "NOT LEARNED YET",
+        }
+    }
+}
+
+/// A line of the list: a group's heading, or the row at that index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Line {
+    Heading(Group),
+    Skill(usize),
+}
+
+/// `kind`'s rows that match `filter`, learned first, each group in the order
+/// the game teaches them, the best learned first within a level.
 fn rows_of(skills: &[SkillRow], kind: Kind, filter: &str) -> Vec<SkillRow> {
     let filter = filter.trim().to_lowercase();
     let mut rows: Vec<SkillRow> = (skills.iter())
         .filter(|skill| kind.holds(skill) && skill.name.to_lowercase().contains(&filter))
         .cloned()
         .collect();
-    rows.sort_by_key(|skill| (skill.level, Reverse(skill.learned), skill.name.clone()));
+    rows.sort_by_key(|skill| {
+        let group = Group::of(skill);
+        (
+            group,
+            skill.level,
+            Reverse(skill.learned),
+            skill.name.clone(),
+        )
+    });
     rows
 }
 
-/// A row's second line: "Level 1 · 15 mana · just improved".
+/// The rows, as `rows_of` orders them, with a heading where each group
+/// starts. A group with no rows has no heading.
+fn lines_of(rows: &[SkillRow]) -> Vec<Line> {
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    let mut group = None;
+    for (index, skill) in rows.iter().enumerate() {
+        let of = Group::of(skill);
+        if group != Some(of) {
+            lines.push(Line::Heading(of));
+            group = Some(of);
+        }
+        lines.push(Line::Skill(index));
+    }
+    lines
+}
+
+/// What a row says after its name, for a screen reader:
+/// "Level 1 · 15 mana · just improved".
 fn details(skill: &SkillRow, just_improved: bool) -> String {
     let parts = [
         skill.level.map(|level| format!("Level {level}")),
@@ -110,6 +173,18 @@ fn practices_left(practices: i64) -> String {
     }
 }
 
+/// A right-aligned column of a row, blank when there's nothing to show.
+fn number_column(width: Pixels, text: Option<String>, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .w(width)
+        .flex()
+        .justify_end()
+        .text_size(px(12.))
+        .text_color(color)
+        .children(text)
+}
+
 fn banner_words(improved: &Improved) -> String {
     format!(
         "You got better at {} — now {}%.",
@@ -125,6 +200,7 @@ pub struct SkillsPanel {
     input: Entity<CommandInput>,
     /// What's listed, and what it was made from.
     rows: Vec<SkillRow>,
+    lines: Vec<Line>,
     listed_for: Option<(Kind, String)>,
     /// A handle for each row's Practice, so Tab can land on a row out of view.
     practices: Vec<FocusHandle>,
@@ -149,6 +225,7 @@ impl SkillsPanel {
             locked: false,
             input,
             rows: Vec::new(),
+            lines: Vec::new(),
             listed_for: None,
             practices: Vec::new(),
             scroll: UniformListScrollHandle::new(),
@@ -203,6 +280,7 @@ impl SkillsPanel {
             return;
         }
         self.rows = rows_of(&self.sheet.skills, wanted.0, &wanted.1);
+        self.lines = lines_of(&self.rows);
         self.listed_for = Some(wanted);
         while self.practices.len() < self.rows.len() {
             self.practices.push(cx.focus_handle().tab_stop(true));
@@ -234,7 +312,9 @@ impl SkillsPanel {
     }
 
     fn focus_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<SkillsPanel>) {
-        self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        if let Some(line) = self.lines.iter().position(|line| *line == Line::Skill(row)) {
+            self.scroll.scroll_to_item(line, ScrollStrategy::Nearest);
+        }
         window.focus(&self.practices[row], cx);
         cx.notify();
     }
@@ -253,7 +333,8 @@ impl SkillsPanel {
         }
     }
 
-    fn render_heading(&self, theme: &Theme, cx: &mut Context<SkillsPanel>) -> impl IntoElement {
+    /// The Spells and Skills switch, the filter and the practices left.
+    fn render_toolbar(&self, theme: &Theme, cx: &mut Context<SkillsPanel>) -> impl IntoElement {
         let tabs = Kind::ALL.map(|kind| {
             let selected = kind == self.kind;
             let name = kind.name();
@@ -273,24 +354,19 @@ impl SkillsPanel {
                 .on_click(cx.listener(move |panel, _, _, cx| panel.choose(kind, cx)))
                 .child(name)
         });
+        let left = self.sheet.practices.map(practices_left);
         div()
             .flex()
             .flex_none()
             .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .font_family(HEADING_FONT)
-                    .font_weight(FontWeight::BOLD)
-                    .text_size(px(22.))
-                    .child("Skills"),
-            )
+            .gap_2()
             .child(
                 div()
                     .id("skills-kinds")
                     .role(Role::TabList)
                     .aria_label("Show")
                     .flex()
+                    .flex_none()
                     .p(px(3.))
                     .rounded_lg()
                     .bg(theme.segment)
@@ -299,6 +375,70 @@ impl SkillsPanel {
                     .capture_any_mouse_down(|_, window, _| window.prevent_default())
                     .children(tabs),
             )
+            .child(div().flex_1().min_w_0().child(self.input.clone()))
+            .children(left.map(|left| {
+                div()
+                    .id("skills-practices-left")
+                    .role(Role::Label)
+                    .aria_label(left.clone())
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(12.))
+                    .text_color(theme.text_muted)
+                    .child(left)
+            }))
+    }
+
+    /// Names the columns over the rows: "Mana · Learned · Lv". A screen
+    /// reader hears each row's own sentence instead.
+    fn render_columns(theme: &Theme) -> impl IntoElement {
+        let learned_width = BAR_WIDTH + PERCENT_WIDTH + PRACTICE_WIDTH + COLUMN_GAP * 2.;
+        div()
+            .flex()
+            .flex_none()
+            .gap(COLUMN_GAP)
+            .px_1()
+            .pb(px(3.))
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(10.5))
+            .text_color(theme.text_muted)
+            .child(div().flex_1())
+            .child(div().w(MANA_WIDTH).flex().justify_end().child("Mana"))
+            .child(
+                div()
+                    .w(learned_width)
+                    .flex()
+                    .justify_center()
+                    .child("Learned"),
+            )
+            .child(div().w(LEVEL_WIDTH).flex().justify_end().child("Lv"))
+    }
+
+    fn render_line(
+        &self,
+        index: usize,
+        now: Timestamp,
+        theme: &Theme,
+        cx: &mut Context<SkillsPanel>,
+    ) -> AnyElement {
+        match self.lines[index] {
+            Line::Heading(group) => div()
+                .id(("skills-heading", index))
+                .debug_selector(move || format!("skills-heading-{}", group.heading()))
+                .role(Role::Heading)
+                .aria_label(group.heading())
+                .flex()
+                .items_end()
+                .h(ROW_HEIGHT)
+                .px_1()
+                .pb(px(2.))
+                .child(section_label(group.heading(), theme))
+                .into_any_element(),
+            Line::Skill(row) => self
+                .render_row(row, &self.rows[row], now, theme, cx)
+                .into_any_element(),
+        }
     }
 
     fn render_row(
@@ -321,9 +461,10 @@ impl SkillsPanel {
                 theme,
             )
             .track_focus(&self.practices[index])
+            .w(PRACTICE_WIDTH)
             .h(BUTTON_HEIGHT)
-            .px_3()
-            .font_weight(FontWeight::MEDIUM)
+            .rounded(px(5.))
+            .text_size(px(12.))
             .text_color(theme.accent)
             .child("Practice")
             .map(|practice| {
@@ -340,44 +481,35 @@ impl SkillsPanel {
             Some(learned) => format!("{name}, {learned}%, {details}"),
             None => format!("{name}, {details}"),
         };
-        let progress = skill.learned.map(|learned| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_none()
-                        .w(BAR_WIDTH)
-                        .h(px(4.))
-                        .rounded_full()
-                        .bg(theme.segment)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(learned as f32 / 100.))
-                                .rounded_full()
-                                .bg(theme.accent),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(36.))
-                        .flex()
-                        .justify_end()
-                        .text_size(px(13.))
-                        .child(format!("{learned}%")),
-                )
+        let name_color = match (just_improved, skill.learned) {
+            (true, _) => theme.accent,
+            (false, Some(_)) => theme.text,
+            (false, None) => theme.text_muted,
+        };
+        let bar = skill.learned.map(|learned| {
+            div().h(px(4.)).rounded_full().bg(theme.segment).child(
+                div()
+                    .h_full()
+                    .w(relative(learned as f32 / 100.))
+                    .rounded_full()
+                    .bg(theme.accent),
+            )
         });
+        let mana = (skill.mana)
+            .filter(|mana| *mana > 0)
+            .map(|mana| mana.to_string());
+        let percent = skill.learned.map(|learned| format!("{learned}%"));
+        let level = skill.level.map(|level| level.to_string());
+        let blank = practice
+            .is_none()
+            .then(|| div().flex_none().w(PRACTICE_WIDTH));
         div()
             .id(("skills-row", index))
             .debug_selector(move || format!("skills-row-{index}"))
             .role(Role::ListItem)
             .aria_label(label)
             // Tab stops on every row, so one with no button is reachable too.
-            .when(practice.is_none(), |row| {
+            .when(blank.is_some(), |row| {
                 row.track_focus(&self.practices[index])
             })
             .flex()
@@ -385,26 +517,27 @@ impl SkillsPanel {
             .w_full()
             .h(ROW_HEIGHT)
             .items_center()
-            .gap_2()
-            .px_2()
+            .gap(COLUMN_GAP)
+            .px_1()
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .items_center()
+                    .gap_1()
+                    .text_color(name_color)
                     .child(row_name(name))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(14.))
-                            .text_color(theme.text_muted)
-                            .child(details),
-                    ),
+                    .when(just_improved, |name| {
+                        name.child(div().flex_none().text_size(px(12.)).child("↑"))
+                    }),
             )
-            .children(progress)
+            .child(number_column(MANA_WIDTH, mana, theme.text_muted))
+            .child(div().flex_none().w(BAR_WIDTH).children(bar))
+            .child(number_column(PERCENT_WIDTH, percent, theme.text))
             .children(practice)
+            .children(blank)
+            .child(number_column(LEVEL_WIDTH, level, theme.text_muted))
     }
 
     fn render_list(&self, theme: &Theme, cx: &mut Context<SkillsPanel>) -> Stateful<Div> {
@@ -425,12 +558,9 @@ impl SkillsPanel {
         let rows = cx.processor(|panel, range: Range<usize>, _, cx| {
             let theme = *cx.global::<Theme>();
             let now = Timestamp::now();
-            let end = range.end.min(panel.rows.len());
-            let in_view = panel.rows[range.start..end].iter().enumerate();
-            in_view
-                .map(|(offset, skill)| {
-                    panel.render_row(range.start + offset, skill, now, &theme, cx)
-                })
+            let end = range.end.min(panel.lines.len());
+            (range.start..end)
+                .map(|line| panel.render_line(line, now, &theme, cx))
                 .collect()
         });
         div()
@@ -441,8 +571,9 @@ impl SkillsPanel {
             .flex_1()
             .min_h_0()
             .capture_any_mouse_down(|_, window, _| window.prevent_default())
+            .font_features(FontFeatures(Arc::new(vec![("tnum".to_owned(), 1)])))
             .child(
-                uniform_list("skills-rows", self.rows.len(), rows)
+                uniform_list("skills-rows", self.lines.len(), rows)
                     .track_scroll(&self.scroll)
                     .size_full(),
             )
@@ -466,7 +597,6 @@ impl Render for SkillsPanel {
                 .child(div().font_weight(FontWeight::BOLD).child(skill))
                 .child(format!("— now {learned}%."))
         });
-        let left = self.sheet.practices.map(practices_left);
         div()
             .id("skills-panel")
             .debug_selector(|| "skills-panel".to_owned())
@@ -482,11 +612,11 @@ impl Render for SkillsPanel {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .pt_2()
             .text_size(px(14.))
             .text_color(theme.text)
-            .child(self.render_heading(&theme, cx))
+            .child(self.render_toolbar(&theme, cx))
             .children(banner.clone().zip(drawn_banner).map(|(banner, drawn)| {
                 div()
                     .id("skills-banner")
@@ -501,24 +631,9 @@ impl Render for SkillsPanel {
                     .text_size(px(13.))
                     .child(drawn)
             }))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().child(self.input.clone()))
-                    .children(left.map(|left| {
-                        div()
-                            .id("skills-practices-left")
-                            .role(Role::Label)
-                            .aria_label(left.clone())
-                            .flex_none()
-                            .text_size(px(12.))
-                            .text_color(theme.text_muted)
-                            .child(left)
-                    })),
-            )
+            .when(!self.rows.is_empty(), |panel| {
+                panel.child(Self::render_columns(&theme))
+            })
             .child(self.render_list(&theme, cx))
             .children(
                 banner
@@ -612,6 +727,58 @@ mod tests {
         panel.update_in(cx, |panel, window, _| {
             assert_eq!(panel.focused_row(window), Some(last));
         });
+    }
+
+    #[test]
+    fn learned_rows_list_first_under_headings_and_an_empty_group_has_none() {
+        let later = SkillRow {
+            level: Some(2),
+            ..SkillRow::named("weapon lore")
+        };
+        let list = [later, skill("kick", 7, None), skill("dodge", 4, None)];
+        let rows = rows_of(&list, Kind::Skills, "");
+        let names: Vec<&str> = rows.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["dodge", "kick", "weapon lore"], "learned first");
+        assert_eq!(
+            lines_of(&rows),
+            [
+                Line::Heading(Group::Learned),
+                Line::Skill(0),
+                Line::Skill(1),
+                Line::Heading(Group::NotYet),
+                Line::Skill(2),
+            ]
+        );
+        let learned_only = rows_of(&list, Kind::Skills, "d");
+        assert_eq!(
+            lines_of(&learned_only),
+            [Line::Heading(Group::Learned), Line::Skill(0)]
+        );
+        let not_yet_only = rows_of(&list, Kind::Skills, "lore");
+        assert_eq!(
+            lines_of(&not_yet_only),
+            [Line::Heading(Group::NotYet), Line::Skill(0)]
+        );
+        assert!(lines_of(&[]).is_empty());
+    }
+
+    #[gpui::test]
+    fn tab_reaches_every_row_in_order_but_no_heading(cx: &mut TestAppContext) {
+        let (panel, cx, _) = panel_window(cx);
+        let rows = panel.read_with(cx, |panel, _| {
+            assert!(panel.lines.contains(&Line::Heading(Group::NotYet)));
+            panel.rows.len()
+        });
+        panel.update_in(cx, |panel, window, cx| panel.focus_row(0, window, cx));
+        cx.run_until_parked();
+        let mut reached = vec![0];
+        for _ in 1..rows {
+            cx.simulate_keystrokes("tab");
+            cx.run_until_parked();
+            let focused = panel.update_in(cx, |panel, window, _| panel.focused_row(window));
+            reached.extend(focused);
+        }
+        assert_eq!(reached, (0..rows).collect::<Vec<_>>());
     }
 
     #[test]
