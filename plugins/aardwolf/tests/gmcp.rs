@@ -1,14 +1,16 @@
 //! What Aardwolf's GMCP becomes in a session with the plugin on: the map
-//! from room.info; the vitals from char.vitals, char.maxstats, char.status
-//! and char.base; the sheet from char.base, char.stats, char.status and
-//! char.worth; and the opponent from char.status.
+//! from room.info, its areas named by room.area after `request area`; the
+//! vitals from char.vitals, char.maxstats, char.status and char.base; the
+//! sheet from char.base, char.stats, char.status and char.worth; the
+//! opponent from char.status; and the channels from comm.channel.
 
 use mudling_core::defaults::hud::Vital;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, CharactersState, MapState, RoomState,
-    Target, TargetState, VitalsState,
+    Target, TargetState, TerminalState, VitalsState,
 };
+use mudling_core::telnet::gmcp;
 use mudling_plugin_aardwolf::Played;
 
 fn sample() -> Played {
@@ -75,4 +77,55 @@ fn the_opponent_is_named_with_its_health_as_a_percentage() {
             max_health: Some(100),
         })
     );
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+#[test]
+fn the_client_subscribes_to_the_channels() {
+    let mut subscribe = Vec::new();
+    gmcp::encode_supports_set(&["Char 1", "Comm 1", "Core 1", "Room 1"], &mut subscribe);
+    assert!(contains(sample().sent(), &subscribe));
+}
+
+#[test]
+fn request_area_goes_out_once_for_each_zone_entered() {
+    let mut request = Vec::new();
+    gmcp::encode("request", "area", &mut request);
+    let sent = sample().sent().to_vec();
+    let times = sent
+        .windows(request.len())
+        .filter(|window| *window == request)
+        .count();
+    assert_eq!(times, 1, "two rooms, one zone");
+}
+
+#[test]
+fn room_area_names_the_area() {
+    let areas = sample().read(|map: &MapState| {
+        let derived = map.derived().expect("the areas");
+        let names = derived.areas.iter().map(|area| area.name.name.clone());
+        names.collect::<Vec<_>>()
+    });
+    assert_eq!(areas, ["The Hedgerow"]);
+}
+
+#[test]
+fn a_channel_is_a_line_of_the_chat_in_its_own_colors() {
+    let played = sample();
+    let lines = played
+        .read(|terminal: &TerminalState| terminal.lines().iter().cloned().collect::<Vec<_>>());
+    let gossip = lines
+        .iter()
+        .find(|line| line.plain().contains("gossip"))
+        .expect("the gossip shows");
+    assert_eq!(
+        gossip.plain(),
+        "You gossip 'Is the courtyard gate always shut?'"
+    );
+    assert!(!gossip.styled().is_empty(), "with its color");
 }

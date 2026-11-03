@@ -34,7 +34,7 @@ mod trust;
 #[cfg(test)]
 mod tests;
 
-pub use approvals::{Approvals, sends_commands};
+pub use approvals::{Approvals, needs_approval};
 pub use folders::AddedFolder;
 pub(crate) use installed::plugin_of;
 pub use installed::{
@@ -109,6 +109,10 @@ pub struct Games {
 impl Entry {
     pub fn sends_commands(&self) -> bool {
         self.permissions.iter().any(|p| p == "send_commands")
+    }
+
+    pub fn sends_gmcp(&self) -> bool {
+        self.permissions.iter().any(|p| p == "send_gmcp")
     }
 
     /// The game it's for, as the player knows it, or `None` for any game.

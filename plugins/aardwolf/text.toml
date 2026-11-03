@@ -7,3 +7,9 @@
 # either way it ends where the prompt does.
 [[prompt]]
 pattern = '''^{prompt}'''
+
+# The channels, tells, says and yells: with Comm 1 on, each comes as a
+# comm.channel, `{ "chan": "gossip", "msg": "You gossip 'Testing'",
+# "player": "Abelinc" }`, whose msg is the line as the chat shows it.
+[[channel]]
+message = "comm.channel.msg"

@@ -22,13 +22,14 @@ use std::sync::Arc;
 const UNKNOWN: &str = "not_a_key";
 const MANIFEST: &str = "id = \"probe\"\nname = \"Probe\"\nversion = \"1.0.0\"\napi = 1\n\
                         license = \"MIT\"\nlayer = \"game\"\n";
-const EVERY_KEY_TABLE: [&str; 25] = [
+const EVERY_KEY_TABLE: [&str; 28] = [
     "plugin.toml root",
     "plugin.toml [servers]",
     "plugin.toml [points]",
     "plugin.toml [hooks]",
     "connection.toml root",
     "connection.toml [[login]]",
+    "connection.toml [[request]]",
     "commands.toml root",
     "commands.toml [speedwalk]",
     "commands.toml [[alias]]",
@@ -39,8 +40,10 @@ const EVERY_KEY_TABLE: [&str; 25] = [
     "text.toml [[pattern]]",
     "text.toml [[color]]",
     "text.toml [[link]]",
+    "text.toml [[channel]]",
     "hud.toml root",
     "map.toml root",
+    "map.toml [area_info]",
     "map.toml [[maze]]",
     "character.toml root",
     "character.toml [[command]]",

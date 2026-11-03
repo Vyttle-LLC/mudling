@@ -1,4 +1,5 @@
-//! Which plugins the player let send commands, on this device only.
+//! Which plugins the player let send commands or GMCP requests, on this
+//! device only.
 //!
 //! An approval never syncs. It's consent given here, so a plugin that reaches
 //! this device by sync asks again, and nobody who can write to the repo can
@@ -63,7 +64,8 @@ impl Approvals {
     }
 }
 
-/// Whether `plugin`'s hooks may send commands once approved.
-pub fn sends_commands(plugin: &Plugin) -> bool {
-    (plugin.manifest.permissions).contains(&Permission::SendCommands)
+/// Whether `plugin` sends anything to the game once approved: its hooks'
+/// commands, or its GMCP requests.
+pub fn needs_approval(plugin: &Plugin) -> bool {
+    (plugin.manifest.permissions.iter()).any(Permission::needs_approval)
 }

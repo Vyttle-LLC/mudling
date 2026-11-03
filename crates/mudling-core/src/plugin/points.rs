@@ -447,6 +447,38 @@ impl TryFrom<String> for HookName {
     }
 }
 
+/// A field of a GMCP message: the package, then the key after the last `.`,
+/// as in `"Char.Status.room_exits"`. The package matches in any case.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GmcpField {
+    pub package: String,
+    pub key: String,
+}
+
+impl GmcpField {
+    /// Whether the field is in a message of `package`.
+    pub fn is_in(&self, package: &str) -> bool {
+        self.package.eq_ignore_ascii_case(package)
+    }
+}
+
+impl TryFrom<String> for GmcpField {
+    type Error = String;
+
+    fn try_from(path: String) -> Result<GmcpField, String> {
+        match path.rsplit_once('.') {
+            Some((package, key)) if !package.is_empty() && !key.is_empty() => Ok(GmcpField {
+                package: package.to_owned(),
+                key: key.to_owned(),
+            }),
+            _ => Err(format!(
+                "`{path}` isn't a GMCP field: write the package, then the key, as in \"Char.Status.str\""
+            )),
+        }
+    }
+}
+
 /// A pattern that emits a named event, its named captures as the data.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -486,6 +518,71 @@ pub struct Connection {
     pub gmcp: Vec<String>,
     #[serde(default, rename = "login")]
     pub logins: Vec<LoginPrompt>,
+    /// GMCP messages to send, which need `send_gmcp`.
+    #[serde(default, rename = "request")]
+    pub requests: Vec<GmcpRequest>,
+}
+
+/// A GMCP message the plugin sends, each time a field's value changes:
+/// `send = "request area"` when `room.info.zone` does.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GmcpRequest {
+    pub send: GmcpMessage,
+    pub when: GmcpField,
+}
+
+/// A GMCP message from the client: a package name, then perhaps a space and
+/// its data. It goes out only inside a GMCP subnegotiation, which a server
+/// reads as GMCP, never on the line its command interpreter reads, so it
+/// can't be a game command. It holds no line ends or other control
+/// characters, and no `Core` message, which runs the connection itself.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct GmcpMessage {
+    pub package: String,
+    pub data: String,
+}
+
+impl fmt::Display for GmcpMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.data.as_str() {
+            "" => f.write_str(&self.package),
+            data => write!(f, "{} {data}", self.package),
+        }
+    }
+}
+
+impl TryFrom<String> for GmcpMessage {
+    type Error = String;
+
+    fn try_from(message: String) -> Result<GmcpMessage, String> {
+        let (package, data) = message.split_once(' ').unwrap_or((&message, ""));
+        let named = |part: &str| {
+            part.starts_with(|c: char| c.is_ascii_alphabetic())
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        if !package.split('.').all(named) {
+            return Err(format!(
+                "`{message}` isn't a GMCP message: start with a package name, such as \"request area\" or \"Char.Skills.Get\""
+            ));
+        }
+        if message.chars().any(char::is_control) {
+            return Err(format!(
+                "the GMCP message `{message}` holds a control character"
+            ));
+        }
+        let core = package.split('.').next().unwrap_or_default();
+        if core.eq_ignore_ascii_case("core") {
+            return Err(format!(
+                "`{message}` is a Core message, which MUDling sends itself"
+            ));
+        }
+        Ok(GmcpMessage {
+            package: package.to_owned(),
+            data: data.to_owned(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -624,6 +721,20 @@ pub struct Text {
     /// Links and actions in lines.
     #[serde(default, rename = "link")]
     pub links: Vec<LinkRule>,
+    /// GMCP messages that are lines of the chat, such as a game's channels.
+    #[serde(default, rename = "channel")]
+    pub channels: Vec<Channel>,
+}
+
+/// A GMCP message whose text is a line of the chat. The Text point's
+/// patterns, the colors and links, and the player's triggers read it as a
+/// finished line. The other points' rules, table readers, the map, gear, the
+/// login and the quiet reads don't: it may be another player's words.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    /// The field holding the line's text, perhaps colored with ANSI codes.
+    pub message: GmcpField,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -793,6 +904,32 @@ pub struct Map {
     /// Rooms whose exits don't hold still.
     #[serde(default, rename = "maze")]
     pub mazes: Vec<Maze>,
+    /// The field listing the room's exits, as Room.Info's do, when a door
+    /// changes in place. Only one applies: the highest layer's.
+    pub room_exits: Option<GmcpField>,
+    /// The message naming an area. Only one applies: the highest layer's.
+    pub area_info: Option<AreaInfo>,
+}
+
+/// A GMCP message naming an area: its zone id, as Room.Info's zone gives
+/// it, and its name. Both fields are in the one message.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreaInfo {
+    pub zone: GmcpField,
+    pub name: GmcpField,
+}
+
+impl Map {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match &self.area_info {
+            Some(AreaInfo { zone, name }) if !zone.is_in(&name.package) => Err(format!(
+                "`area_info`'s fields must be in one message: `zone` is in {}, `name` in {}",
+                zone.package, name.package
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// A maze: the rooms of an area with these names, or with none listed, the

@@ -1,0 +1,10 @@
+# What Aardwolf's GMCP needs beyond the core's own Core 1, Char 1 and
+# Room 1: Comm 1 brings the channels as comm.channel, which text.toml shows.
+gmcp = ["Comm 1"]
+
+# room.info names the area only by its zone id, such as "aylor". Asked with
+# `request area`, the game names it in room.area, which map.toml reads. Asked
+# once for each zone the player enters, as the game's own mapper does.
+[[request]]
+send = "request area"
+when = "room.info.zone"
