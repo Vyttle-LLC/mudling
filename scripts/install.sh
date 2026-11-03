@@ -11,6 +11,7 @@
 set -euo pipefail
 
 releases="${MUDLING_RELEASES_URL:-https://github.com/Vyttle-LLC/mudling/releases}"
+team_id=34674BKS72
 
 fail() { printf 'mudling: %s\n' "$1" >&2; exit 1; }
 
@@ -42,6 +43,10 @@ install_macos() {
     # Accept only an intact, Developer ID–signed and notarized bundle.
     codesign --verify --deep --strict "$work/MUDling.app" || fail "The download's signature is broken."
     spctl --assess --type execute "$work/MUDling.app" || fail "The download did not pass Gatekeeper."
+    # Gatekeeper accepts any Developer ID; only Vyttle's team signs MUDling.
+    local team
+    team="$(codesign -dv "$work/MUDling.app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [ "$team" = "$team_id" ] || fail "The download is signed by team '${team:-none}', not Vyttle ($team_id)."
 
     # Quit only a running copy; asking a closed app to quit would launch it.
     if pgrep -f "$app/Contents/MacOS/" >/dev/null; then
