@@ -18,7 +18,9 @@ mudling is a small creature of living mud, and MUD is where it lives.
 - **Your data, your repository.** MUDling syncs your servers, settings and
   map to a Git repository you own, and keeps saved passwords in an encrypted
   vault.
-- **Keyboard and screen readers.** Every control has a name and a key.
+- **Keyboard and screen readers.** Every control has a name a screen reader
+  says, and the keyboard can reach every action. A check on macOS tests this
+  automatically; hands-on testing with screen readers is still to come.
   [docs/accessibility.md](docs/accessibility.md) is the audit.
 
 MUDling is on the desktop today. An iPad and iPhone app is planned, not built.
