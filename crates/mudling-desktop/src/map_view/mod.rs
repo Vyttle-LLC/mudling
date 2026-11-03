@@ -17,6 +17,7 @@ mod sheet;
 
 use crate::assets::HEADING_FONT;
 use crate::map_history;
+use crate::room_panel::button;
 use crate::theme::{MapColors, Theme};
 use gpui::{
     AnyView, Bounds, Context, EventEmitter, FocusHandle, FontWeight, Hsla, IntoElement,
@@ -39,6 +40,11 @@ use std::time::Instant;
 const CLICK_SLOP: f32 = 4.;
 const WHEEL_ZOOM_PER_LINE: f32 = 1.1;
 const WHEEL_ZOOM_PER_PIXEL: f32 = 1.005;
+/// The Room panel's map opens further out than the left panel's.
+const INSET_ZOOM: f32 = 0.6;
+/// One press of the inset's + or −.
+const ZOOM_STEP: f32 = 1.25;
+const ZOOM_KEY: Pixels = px(26.);
 /// The least height the map keeps in the panel, whatever sits under it.
 const MIN_SURFACE: Pixels = px(120.);
 
@@ -46,7 +52,8 @@ const MIN_SURFACE: Pixels = px(120.);
 pub enum MapLayout {
     /// The left panel: pan, zoom, floors and the legend.
     Panel,
-    /// The Room panel's small map: the player's surroundings, and no more.
+    /// The Room panel's small map: the player's surroundings, zoomed with its
+    /// own + and −, and no more.
     Inset,
 }
 
@@ -87,8 +94,12 @@ impl MapView {
         layout: MapLayout,
         cx: &mut Context<MapView>,
     ) -> MapView {
+        let mut model = MapModel::new(snapshot);
+        if layout == MapLayout::Inset {
+            model.zoom_by(INSET_ZOOM);
+        }
         let mut view = MapView {
-            model: MapModel::new(snapshot),
+            model,
             layout,
             press: None,
             bounds: Rc::default(),
@@ -305,7 +316,7 @@ impl MapView {
             .bg(colors.ground)
             .child(surface);
         match self.layout {
-            MapLayout::Inset => frame,
+            MapLayout::Inset => frame.child(self.zoom_keys(&theme, cx)),
             MapLayout::Panel => frame
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::pressed))
                 .on_mouse_move(cx.listener(Self::moved))
@@ -319,6 +330,39 @@ impl MapView {
                 .child(self.legend(colors, cx))
                 .children(self.pill(&theme, cx)),
         }
+    }
+
+    /// The inset's + over −, in its bottom-right corner.
+    fn zoom_keys(&self, theme: &Theme, cx: &mut Context<MapView>) -> impl IntoElement {
+        let key = |id: &'static str, name: &'static str, label: &'static str, factor: f32| {
+            button(id, name.into(), theme)
+                .size(ZOOM_KEY)
+                .border_0()
+                .rounded_none()
+                .text_color(theme.text)
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.model.zoom_by(factor);
+                    cx.notify();
+                }))
+                .child(label)
+        };
+        div()
+            .absolute()
+            .right_2()
+            .bottom_2()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised.opacity(0.92))
+            .child(key("map-zoom-in", "Zoom in", "+", ZOOM_STEP))
+            .child(
+                key("map-zoom-out", "Zoom out", "−", ZOOM_STEP.recip())
+                    .border_t_1()
+                    .border_color(theme.border),
+            )
     }
 
     fn header(&self, colors: MapColors, cx: &mut Context<MapView>) -> impl IntoElement {
@@ -589,6 +633,36 @@ mod tests {
             panic!("the grid is linked");
         };
         assert_eq!(steps.len(), 3);
+    }
+
+    #[gpui::test]
+    fn the_inset_opens_zoomed_out_and_its_keys_step_the_zoom(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::for_appearance(WindowAppearance::Dark)));
+        let zoom = |view: &Entity<MapView>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.model.camera().zoom)
+        };
+        let (panel, panel_cx) =
+            cx.add_window_view(|_, cx| MapView::new(versioned(grid_map(3)), MapLayout::Panel, cx));
+        assert_eq!(zoom(&panel, panel_cx), 1.);
+
+        let (inset, cx) =
+            cx.add_window_view(|_, cx| MapView::new(versioned(grid_map(3)), MapLayout::Inset, cx));
+        cx.run_until_parked();
+        assert_eq!(zoom(&inset, cx), INSET_ZOOM);
+        let press = |name: &'static str, times: usize, cx: &mut VisualTestContext| {
+            for _ in 0..times {
+                let key = cx.debug_bounds(name).expect("the inset has zoom keys");
+                cx.simulate_click(key.center(), Modifiers::none());
+            }
+        };
+        press("Zoom in", 1, cx);
+        assert!((zoom(&inset, cx) - INSET_ZOOM * ZOOM_STEP).abs() < 1e-5);
+        press("Zoom out", 2, cx);
+        assert!((zoom(&inset, cx) - INSET_ZOOM / ZOOM_STEP).abs() < 1e-5);
+        press("Zoom out", 20, cx);
+        assert_eq!(zoom(&inset, cx), camera::MIN_ZOOM);
+        press("Zoom in", 30, cx);
+        assert_eq!(zoom(&inset, cx), camera::MAX_ZOOM);
     }
 
     fn heard_edits(
