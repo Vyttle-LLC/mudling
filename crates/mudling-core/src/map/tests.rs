@@ -1047,12 +1047,14 @@ fn a_recall_into_a_room_mapped_twice_starts_no_island() {
 #[test]
 fn a_room_added_before_its_description_folds_into_the_known_room_it_is() {
     // Two shades told apart by their descriptions; the cool one's path east
-    // was mapped into a barn.
+    // was mapped into a barn of the caves.
     let mut walk = Walk::new(text_map());
     walk.arrive_in("A path", FIELDS, &["e", "n"], "A worn path.");
     walk.go_described("e", "In shade", &CROSSROADS, "Cool shade.");
     let cool = walk.current().id;
-    walk.go_described("e", "A barn", &["w"], "Hay everywhere.");
+    let now = walk.now();
+    walk.map.sent("e", now);
+    walk.arrive_in("A barn", CAVES, &["w"], "Hay everywhere.");
     walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
     walk.go_described("w", "A path", &["e", "n"], "A worn path.");
     walk.go_described("n", "A hill", &["s", "e"], "A grassy hill.");
@@ -1068,6 +1070,7 @@ fn a_room_added_before_its_description_folds_into_the_known_room_it_is() {
     walk.go_described("e", "A field", &["w"], "Wildflowers.");
     assert!(walk.map.whereabouts().unsure);
     assert_eq!(walk.count(), rooms + 2);
+    assert_eq!(on_islands(&walk, FIELDS), 2);
 
     // Back west, the description says which shade it was.
     walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
@@ -1080,29 +1083,36 @@ fn a_room_added_before_its_description_folds_into_the_known_room_it_is() {
     );
     let field = walk.map.room(walk.id_of("A field")).unwrap();
     assert_eq!(field.links.get_copied(Direction::West), Some(cool));
+    // The field came along from the island, to the cool shade's east.
+    let cool_room = walk.map.room(cool).unwrap();
+    assert_eq!(field.position, cool_room.position + GridPoint::new(1, 0, 0));
+    assert_eq!(on_islands(&walk, FIELDS), 0);
     assert!(
         walk.map.room(warm).is_some(),
         "the warm shade only looks alike"
     );
 }
 
-#[test]
-fn walking_a_field_of_rooms_alike_in_everything_stays_on_its_map() {
-    const MEADOW: &str = "A meadow";
-    const GRASS: &str = "Tall grass sways.";
-    let exits = |x: i64, y: i64| {
-        let mut exits = Vec::new();
-        for (direction, open) in [("s", y < 4), ("n", y > 0), ("e", x < 4), ("w", x > 0)] {
-            if open {
-                exits.push(direction);
-            }
+const MEADOW: &str = "A meadow";
+
+/// Where a meadow of a five-by-five field opens: every way but off its
+/// edges. Rows count south from the north edge.
+fn field_exits(x: i64, y: i64) -> Vec<&'static str> {
+    let mut exits = Vec::new();
+    for (direction, open) in [("s", y < 4), ("n", y > 0), ("e", x < 4), ("w", x > 0)] {
+        if open {
+            exits.push(direction);
         }
-        exits
-    };
+    }
+    exits
+}
+
+/// Five rows of five meadows, walked back and forth from the northwest, so
+/// the walk ends in the southeast corner. `description` says how each reads.
+fn mapped_field(description: impl Fn(i64, i64) -> String) -> Walk {
     let mut walk = Walk::new(text_map());
     walk.arrive_in("A road", FIELDS, &["e"], "A dusty road.");
-    // Five rows of five, walked back and forth from the northwest.
-    walk.go_described("e", MEADOW, &exits(0, 0), GRASS);
+    walk.go_described("e", MEADOW, &field_exits(0, 0), &description(0, 0));
     for y in 0..5 {
         for step in 1..5 {
             let (direction, x) = if y % 2 == 0 {
@@ -1110,35 +1120,66 @@ fn walking_a_field_of_rooms_alike_in_everything_stays_on_its_map() {
             } else {
                 ("w", 4 - step)
             };
-            walk.go_described(direction, MEADOW, &exits(x, y), GRASS);
+            walk.go_described(direction, MEADOW, &field_exits(x, y), &description(x, y));
         }
         if y < 4 {
-            walk.go_described("s", MEADOW, &exits(4 - 4 * (y % 2), y + 1), GRASS);
+            let x = 4 - 4 * (y % 2);
+            walk.go_described("s", MEADOW, &field_exits(x, y + 1), &description(x, y + 1));
         }
     }
-    let rooms = walk.count();
+    walk
+}
 
-    for (direction, x, y) in [
-        ("n", 4, 3),
-        ("w", 3, 3),
-        ("w", 2, 3),
-        ("n", 2, 2),
-        ("n", 2, 1),
-        ("e", 3, 1),
-        ("s", 3, 2),
-        ("w", 2, 2),
-        ("w", 1, 2),
-        ("s", 1, 3),
-        ("e", 2, 3),
-        ("e", 3, 3),
-    ] {
+/// A loop through the field's middle from its southeast corner: each move
+/// with the meadow it leads to.
+const FIELD_LOOP: [(&str, i64, i64); 12] = [
+    ("n", 4, 3),
+    ("w", 3, 3),
+    ("w", 2, 3),
+    ("n", 2, 2),
+    ("n", 2, 1),
+    ("e", 3, 1),
+    ("s", 3, 2),
+    ("w", 2, 2),
+    ("w", 1, 2),
+    ("s", 1, 3),
+    ("e", 2, 3),
+    ("e", 3, 3),
+];
+
+/// Walks the loop, checking that the map follows each move a square at a
+/// time and adds no room.
+fn walk_the_field_loop(walk: &mut Walk, description: impl Fn(i64, i64) -> String) {
+    let rooms = walk.count();
+    for (direction, x, y) in FIELD_LOOP {
         let before = walk.position();
-        walk.go_described(direction, MEADOW, &exits(x, y), GRASS);
+        walk.go_described(direction, MEADOW, &field_exits(x, y), &description(x, y));
         let moved = Direction::parse(direction).unwrap().offset();
         assert_eq!(walk.position(), before + moved, "{direction} to {x},{y}");
         assert_eq!(walk.count(), rooms);
     }
+}
+
+#[test]
+fn walking_a_field_of_rooms_alike_in_everything_stays_on_its_map() {
+    let grass = |_: i64, _: i64| "Tall grass sways.".to_owned();
+    let mut walk = mapped_field(grass);
+    walk_the_field_loop(&mut walk, grass);
     assert_eq!(on_islands(&walk, FIELDS), 0);
+}
+
+#[test]
+fn a_look_after_a_refused_move_leaves_nothing_waiting() {
+    let grass = |x: i64, y: i64| format!("Grass at {x},{y}.");
+    let mut walk = mapped_field(grass);
+    let corner = walk.current().id;
+    // West is the way the walk came in, so the map knows where it leads.
+    refused_then_look(&mut walk, "w");
+    walk.arrive_in(MEADOW, FIELDS, &field_exits(4, 4), &grass(4, 4));
+    assert_eq!(walk.current().id, corner);
+
+    walk_the_field_loop(&mut walk, grass);
+    assert_eq!(walk.map.pending_commands(), 0);
 }
 
 // MARK: Buildings and straightening

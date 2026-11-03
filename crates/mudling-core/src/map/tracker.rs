@@ -7,8 +7,8 @@
 //! lets the next rooms decide. Each area has a grid of its own, and so does
 //! each building within an area.
 //!
-//! The tracker never joins rooms the map already holds. The one room it
-//! folds by itself is one it added during the unsure walk for a room shown
+//! The tracker never joins rooms the map already holds. The only rooms it
+//! folds by itself are ones it added during the unsure walk for a room shown
 //! before its description: once the description is read and shows a known
 //! room exactly, the two are one (see `join` for the player's own joins).
 
@@ -93,9 +93,8 @@ struct Guess {
     path: Vec<RoomId>,
     score: i32,
     arrival: Arrival,
-    /// Rooms this explanation added for an arrival nothing explained, shown
-    /// before their description: their looks alone placed them, and only
-    /// half seen.
+    /// Rooms this explanation added, for an arrival nothing explained,
+    /// before their description was shown.
     undescribed: Vec<RoomId>,
 }
 
@@ -111,8 +110,9 @@ impl Guess {
     }
 
     /// Folds each undescribed room whose description has since been read
-    /// into the one known room it then reads exactly like. Returns whether
-    /// any was folded.
+    /// into the one known room it then reads exactly like. The rooms walked
+    /// to from it go along, so no long path is left back to its island.
+    /// Returns whether any was folded.
     fn fold_described(&mut self, origin: &Layout) -> bool {
         let layout = &mut self.layout;
         let mut folded = false;
@@ -123,17 +123,45 @@ impl Guess {
             if room.description.is_empty() {
                 return true;
             }
-            if let Some(known) = origin
-                .exact_twin(room)
-                .filter(|known| layout.contains(*known))
-            {
+            let twin = origin.exact_twin(room).and_then(|known| layout.room(known));
+            if let Some(known) = twin {
+                let offset = known.position - room.position;
+                let known = known.id;
+                let walked = added_with(layout, origin, *id);
                 layout.fold(*id, known);
+                layout.shift(&walked, offset);
                 folded = true;
             }
             false
         });
         folded
     }
+}
+
+/// The rooms added since `origin` that hang together with `fresh` on its
+/// map, by paths that don't pass through a room `origin` holds.
+fn added_with(layout: &Layout, origin: &Layout, fresh: RoomId) -> Vec<RoomId> {
+    let Some(start) = layout.room(fresh) else {
+        return Vec::new();
+    };
+    let same_map = |id: RoomId| {
+        layout
+            .room(id)
+            .is_some_and(|room| room.zone == start.zone && room.building == start.building)
+    };
+    let mut found = HashSet::from([fresh]);
+    let mut queue = vec![fresh];
+    while let Some(id) = queue.pop() {
+        for next in layout.neighbors(id) {
+            if !origin.contains(next) && same_map(next) && found.insert(next) {
+                queue.push(next);
+            }
+        }
+    }
+    found.remove(&fresh);
+    let mut rooms: Vec<RoomId> = found.into_iter().collect();
+    rooms.sort_unstable();
+    rooms
 }
 
 /// The walk since the map was last sure where the player was.
@@ -199,6 +227,12 @@ impl Tracker {
         if adrift {
             self.expected.clear();
         }
+    }
+
+    /// Commands still waiting for the Room.Info they bring.
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.expected.len()
     }
 
     pub fn is_in_dark(&self) -> bool {
@@ -317,6 +351,12 @@ impl Tracker {
             _ => None,
         };
         step.landing = dark_walk.as_ref().and_then(|walk| walk.landing(step_taken));
+        let refused_then_looked =
+            step_taken
+                .zip(previous.as_ref())
+                .is_some_and(|(direction, here)| {
+                    text_denies_move(&self.layout, here, &step, direction)
+                });
         let mut maze_exit = None;
         if let (Some(maze), Some(direction)) =
             (previous.as_ref().filter(|room| room.maze), step_taken)
@@ -337,16 +377,26 @@ impl Tracker {
             // The rooms walked in the dark were never seen, so nothing
             // links to this one: it's placed where the moves lead.
         } else if let Some(direction) = step_taken
-            && !previous.as_ref().is_some_and(|room| {
-                number_denies_move(room, &step, direction)
-                    || text_denies_move(&self.layout, room, &step, direction)
-            })
+            && !refused_then_looked
+            && !previous
+                .as_ref()
+                .is_some_and(|room| number_denies_move(room, &step, direction))
         {
             step.direction = Some(direction);
         } else if let Some(previous) = &previous
             && self.layout.matches_exactly(previous, &step)
         {
             // A look, or a Room.Info nobody asked for, showing the same room.
+            // After a refused move, it answers the look sent behind it too.
+            if refused_then_looked
+                && self
+                    .expected
+                    .front()
+                    .is_some_and(|pending| pending.expectation == Expectation::Stay)
+            {
+                self.expected.pop_front();
+                self.start_waiting(now);
+            }
             self.update_current_rooms(|room| refresh(room, &step));
             self.fold_described();
             return arrived;
@@ -558,9 +608,7 @@ fn number_denies_move(here: &MapRoom, step: &Step, direction: Direction) -> bool
 /// refused the move in words its rules don't know, and this is a look.
 /// Taken for a move, it would map the player's room a second time.
 fn text_denies_move(layout: &Layout, here: &MapRoom, step: &Step, direction: Direction) -> bool {
-    !step.description.is_empty()
-        && here.description == step.description
-        && layout.matches_exactly(here, step)
+    layout.reads_exactly(here, step)
         && here
             .links
             .get_copied(direction)
@@ -662,12 +710,11 @@ fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
         // and out of the dark, so is the room the moves lead to. A room new
         // to the map starts a far-off island, so it's least, and out of the
         // question when known rooms read exactly like it, description and all.
-        let exact = !step.description.is_empty()
-            && !known.is_empty()
+        let exact = !known.is_empty()
             && known.iter().all(|id| {
                 layout
                     .room(*id)
-                    .is_some_and(|room| room.description == step.description)
+                    .is_some_and(|room| layout.reads_exactly(room, step))
             });
         let new_room = (!exact).then_some((None, -1));
         let landing = step.landing.map(|landing| landing.position);
