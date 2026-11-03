@@ -4,8 +4,7 @@
 #   scripts\package-windows.ps1 -Target aarch64-pc-windows-msvc -Arch arm64
 #
 # Release builds set MUDLING_VERSION; local builds take the workspace's version.
-# With WINDOWS_SIGNTOOL, WINDOWS_CERTIFICATE_FILE (a .pfx) and WINDOWS_CERTIFICATE_PASSWORD
-# set, it signs the app, the installer and the uninstaller; without them, nothing is signed.
+# It signs nothing: the release workflow signs the app before and the installer after.
 param(
     [Parameter(Mandatory)] [string] $Target,
     [Parameter(Mandatory)] [ValidateSet('x64', 'arm64')] [string] $Arch
@@ -24,13 +23,6 @@ $name = "MUDling-$version-windows-$Arch"
 Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$dist\$name" | Out-Null
 
-$signing = [bool]$env:WINDOWS_SIGNTOOL
-$digests = @('/fd', 'sha256', '/tr', 'http://timestamp.digicert.com', '/td', 'sha256')
-if ($signing) {
-    & $env:WINDOWS_SIGNTOOL sign /f $env:WINDOWS_CERTIFICATE_FILE /p $env:WINDOWS_CERTIFICATE_PASSWORD @digests $exe
-    if ($LASTEXITCODE -ne 0) { throw "signtool failed on $exe" }
-}
-
 Copy-Item $exe "$dist\$name\MUDling.exe"
 Copy-Item LICENSE "$dist\$name\"
 Compress-Archive -Path "$dist\$name" -DestinationPath "$dist\$name.zip"
@@ -41,12 +33,6 @@ $defines = @(
     "/DAppVersion=$version", "/DArch=$Arch",
     "/DSourceExe=$root\$exe", "/DOutputDir=$root\$dist"
 )
-if ($signing) {
-    # Inno Setup spells a quote $q and the file to sign $f.
-    $defines += '/DSign'
-    $defines += '/Smudling=$q' + $env:WINDOWS_SIGNTOOL + '$q sign /f $q' + $env:WINDOWS_CERTIFICATE_FILE +
-        '$q /p ' + $env:WINDOWS_CERTIFICATE_PASSWORD + " $($digests -join ' ') " + '$f'
-}
 & $iscc @defines scripts\mudling.iss
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
 

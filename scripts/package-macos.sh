@@ -6,6 +6,11 @@
 # Developer ID, and CODESIGN_KEYCHAIN limits its lookup to one keychain; the
 # default ad-hoc signature is for local use.
 #
+# PROVISIONING_PROFILE, the path to a Developer ID provisioning profile, embeds
+# that profile and signs with the entitlements file, which grants the Keychain
+# access group Touch ID items need. Without a profile the app is signed without
+# entitlements: macOS kills an app at launch that claims one no profile allows.
+#
 # The bundle id names no data folder: MUDling keeps its data where the core's
 # `data_folder` says, whatever the bundle is called.
 set -euo pipefail
@@ -14,6 +19,12 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 version="${MUDLING_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
 identity="${CODESIGN_IDENTITY:--}"
+entitlements="$repo_root/apple/MUDling.entitlements"
+profile="${PROVISIONING_PROFILE:-}"
+if [ -n "$profile" ]; then
+    [ "$identity" != "-" ] || { echo "A provisioning profile needs a Developer ID (CODESIGN_IDENTITY)." >&2; exit 1; }
+    [ -f "$entitlements" ] || { echo "A provisioning profile needs $entitlements." >&2; exit 1; }
+fi
 cargo build --locked --release -p mudling-desktop
 # Cargo reads a relative CARGO_TARGET_DIR against the working directory, the repository root.
 target_dir="${CARGO_TARGET_DIR:-target}"
@@ -59,8 +70,13 @@ PLIST
 if [ "$identity" = "-" ]; then
     codesign --force --sign - "$app_bundle"
 else
+    signing=()
+    if [ -n "$profile" ]; then
+        cp "$profile" "$app_bundle/Contents/embedded.provisionprofile"
+        signing=(--entitlements "$entitlements")
+    fi
     # Notarization requires the hardened runtime and a timestamp.
-    codesign --force --options runtime --timestamp --sign "$identity" \
+    codesign --force --options runtime --timestamp --sign "$identity" ${signing[@]+"${signing[@]}"} \
         ${CODESIGN_KEYCHAIN:+--keychain "$CODESIGN_KEYCHAIN"} "$app_bundle"
 fi
 printf 'Bundle: %s\n' "$app_bundle"

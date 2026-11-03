@@ -3,9 +3,8 @@
 ;   iscc /DAppVersion=1.2.3 /DArch=x64 /DSourceExe=<mudling-desktop.exe> /DOutputDir=<dir> mudling.iss
 ;
 ; It installs for the current user alone, so it never asks for admin rights,
-; and adds a Start menu entry and an uninstaller. Defining Sign, with a
-; /Smudling=<command> sign tool, signs the installer and its uninstaller.
-; Neither touches MUDling's data folder.
+; and adds a Start menu entry and an uninstaller. Neither touches MUDling's
+; data folder.
 
 [Setup]
 ; The id Windows knows the installation by: never change it, or upgrades install beside it.
@@ -34,9 +33,6 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-#ifdef Sign
-SignTool=mudling
-#endif
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "MUDling.exe"; Flags: ignoreversion

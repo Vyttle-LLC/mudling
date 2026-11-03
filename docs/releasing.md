@@ -62,18 +62,44 @@ values work.
 Without all five, the macOS jobs fail and nothing is published: an unsigned
 Mac build would only meet Gatekeeper's refusal.
 
-Windows signing is still to be decided. The workflow signs the app, the
-installer and its uninstaller when these exist, and otherwise publishes the
-Windows builds unsigned, so SmartScreen warns on first run:
+One more is optional:
 
 | Secret | What it holds |
 |---|---|
-| `WINDOWS_CERTIFICATE` | Base64 of a code-signing certificate and its key, as a `.pfx` |
-| `WINDOWS_CERTIFICATE_PASSWORD` | The `.pfx`'s password |
+| `MACOS_PROVISIONING_PROFILE` | Base64 of a Developer ID provisioning profile for `com.vyttle.mudling` that allows the Keychain access group `34674BKS72.com.vyttle.mudling` |
 
-A cloud signing service, such as Azure Trusted Signing, would replace the
-**Prepare signing** step and the `signtool` calls in
-`scripts/package-windows.ps1`.
+With it, the app embeds the profile as `Contents/embedded.provisionprofile` and
+is signed with `apple/MUDling.entitlements`, so Touch ID can guard Keychain
+items. Without it, the app is signed without entitlements and still launches,
+but without Touch ID: macOS kills an app at launch that claims an entitlement no
+profile allows.
+
+### Windows: add before a public release
+
+Windows builds ship unsigned for now. Before a public release, add these for
+[Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/),
+which Microsoft now calls Artifact Signing. The workflow signs the app and the installer once all six exist, and otherwise
+publishes unsigned.
+
+| Secret | What it holds |
+|---|---|
+| `AZURE_TENANT_ID` | The Microsoft Entra tenant of the app registration below |
+| `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | An app registration with the *Certificate Profile Signer* role on the signing account |
+| `AZURE_TRUSTED_SIGNING_ENDPOINT` | The account's region endpoint, such as `https://eus.codesigning.azure.net/` |
+| `AZURE_TRUSTED_SIGNING_ACCOUNT` | The Trusted Signing account's name |
+| `AZURE_TRUSTED_SIGNING_PROFILE` | Its certificate profile's name |
+
+The uninstaller Inno Setup writes stays unsigned; Windows runs it from
+Settings without a SmartScreen check.
+
+What an unsigned build shows: a downloaded `-setup.exe` or `MUDling.exe`
+opens a blue **Windows protected your PC** box, *"Microsoft Defender
+SmartScreen prevented an unrecognized app from starting"*, with the publisher
+as *Unknown publisher*. The player must click **More info**, then **Run
+anyway**. Edge may also call the download *not commonly downloaded* and ask to
+keep it. `install.ps1` avoids both, since files `Invoke-WebRequest` downloads
+carry no mark of the web. A signed build names Vyttle LLC as the publisher; the
+SmartScreen warning fades as the signature builds reputation.
 
 ## Building packages locally
 
