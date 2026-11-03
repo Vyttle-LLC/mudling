@@ -20,10 +20,13 @@ mudling-core.workspace = true
 aho-corasick = "1.1"
 mudling-plugin-avatar = { path = "../../plugins/avatar" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+directories.workspace = true
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 serde.workspace = true
 serde_json.workspace = true
+# Checks an update against the digest GitHub publishes for it.
+sha2 = "0.11"
 tempfile.workspace = true
 futures = "0.3"
 memory-stats = "1"

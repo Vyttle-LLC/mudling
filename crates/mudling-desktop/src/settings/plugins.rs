@@ -333,7 +333,7 @@ fn layer_badge(layer: Layer) -> &'static str {
 }
 
 /// The switch's look.
-fn switch(on: bool, theme: &Theme) -> Div {
+pub(super) fn switch(on: bool, theme: &Theme) -> Div {
     let knob =
         div()
             .size(SWITCH_KNOB)

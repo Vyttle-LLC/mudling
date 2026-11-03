@@ -68,6 +68,7 @@ use crate::notes::{Host, NoteTarget};
 use crate::settings::{Listing, PluginRow, Section, Sending, ServerPlugins, SuggestedPlugin};
 use crate::shell::Shell;
 use crate::stream;
+use crate::update::Staged;
 use gpui::{
     ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, SharedString, Window,
     point, px,
@@ -1439,6 +1440,17 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         ..row("MUDling defaults", Layer::Default)
     });
     rows
+}
+
+/// A made-up release, ready to go in, with a summary of two lines.
+pub fn sample_update() -> Staged {
+    Staged::sample(
+        "0.9.0",
+        &[
+            "Chat channels from Aardwolf's GMCP",
+            "Touch ID guards the vault",
+        ],
+    )
 }
 
 /// What a made-up plugin that sends commands asks to do.

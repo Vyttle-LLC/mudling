@@ -41,6 +41,8 @@ const RESIZE_MARGIN: Pixels = px(6.);
 /// With no session the switcher has no server to name.
 const NO_SERVER: &str = "MUDling";
 const BADGE_SIZE: Pixels = px(15.);
+/// With its 2 px ring in the bar's color.
+const UPDATE_DOT: Pixels = px(11.);
 const CONTEXT: &str = "TitleBar";
 const MENU_CONTEXT: &str = "TitleBarMenu";
 /// Above a panel that overlays the chat.
@@ -338,6 +340,8 @@ pub struct TitleBar {
     session: SessionLabel,
     /// Problems for the sprocket's badge.
     problems: usize,
+    /// The version of the update that's ready, for the sprocket's dot.
+    update_ready: Option<SharedString>,
     left_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
     /// The press that may turn into dragging the window.
@@ -366,6 +370,7 @@ impl TitleBar {
         TitleBar {
             session: SessionLabel::default(),
             problems: 0,
+            update_ready: None,
             left_dock,
             right_dock,
             pressed: false,
@@ -428,6 +433,13 @@ impl TitleBar {
     pub fn show_problems(&mut self, problems: usize, cx: &mut Context<TitleBar>) {
         if problems != self.problems {
             self.problems = problems;
+            cx.notify();
+        }
+    }
+
+    pub fn show_update_ready(&mut self, version: Option<SharedString>, cx: &mut Context<TitleBar>) {
+        if version != self.update_ready {
+            self.update_ready = version;
             cx.notify();
         }
     }
@@ -564,9 +576,11 @@ impl TitleBar {
         .when(open, |button| button.bg(theme.selected))
     }
 
-    /// The sprocket, with the count of problems on its corner.
+    /// The sprocket, with the count of problems on its corner, or a Moss dot
+    /// when an update is ready. Problems win when both apply.
     fn render_settings_button(&self, theme: &Theme) -> Stateful<Div> {
         let problems = self.problems;
+        let ready = self.update_ready.clone();
         action_button(
             ("open-settings", "Settings", Icon::Sprocket),
             ",",
@@ -575,6 +589,21 @@ impl TitleBar {
             theme,
         )
         .relative()
+        .when_some(ready, |button, version| {
+            let dot = div()
+                .debug_selector(|| "update-dot".to_owned())
+                .absolute()
+                .top(px(-3.))
+                .right(px(-3.))
+                .size(UPDATE_DOT)
+                .rounded_full()
+                .border_2()
+                .border_color(theme.background)
+                .bg(theme.accent);
+            button
+                .aria_label(format!("Settings, MUDling {version} is ready"))
+                .when(problems == 0, |button| button.child(dot))
+        })
         .when(problems > 0, |button| {
             button.aria_description(problems_text(problems)).child(
                 div()

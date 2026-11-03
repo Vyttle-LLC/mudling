@@ -1,7 +1,8 @@
 //! `mudling-desktop`: MUDling's gpui shell, a thin window over a `Session`.
 //!
 //! ```text
-//! mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic]
+//! mudling-desktop [--host <host> --port <port> | --reopen <host:port> |
+//!                  --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
@@ -14,7 +15,9 @@
 //! ```
 //!
 //! With no arguments the window shows the saved servers ("Where to today?").
-//! `--host` and `--port` connect to a server at once. The plugins bundled with
+//! `--host` and `--port` connect to a server at once. `--reopen` opens a saved
+//! server as its card would, logging in, which is how a restart to update
+//! goes back to the server it left (see `update`). The plugins bundled with
 //! the app are installed, off, as are those in the data folder and any
 //! `--plugin` folder, so game detection can suggest them; `--enable` turns one
 //! on and lets it send commands. A plugin in a folder replaces a bundled one
@@ -77,6 +80,7 @@ mod status;
 mod stream;
 mod theme;
 mod title_bar;
+mod update;
 #[cfg(all(test, target_os = "macos"))]
 mod window_images;
 
@@ -98,18 +102,20 @@ use mudling_core::sync::{RepoSettings, SyncConfig, Syncer};
 use mudling_core::vault::OsKeyStore;
 use room_panel::Verbs;
 use settings::{PluginRow, SavedSettings, Section, app_settings};
-use shell::{Game, LEAVE_WAIT, Shell};
+use shell::{Game, LEAVE_WAIT, Shell, UpdateStart};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use theme::Appearance;
+use update::Eligibility;
 
 const SCROLLBACK_LINES: usize = 100_000;
 /// A replay has no server; its data folder holds this one's database.
 const REPLAY_HOST: &str = "replay";
-const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --replay <session.log>… | --synthetic] \
+const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --reopen <host:port> | \
+                     --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] \
@@ -125,6 +131,7 @@ actions!(mudling, [Quit]);
 struct Options {
     host: Option<String>,
     port: Option<u16>,
+    reopen: Option<Target>,
     plugins: Vec<PathBuf>,
     enable: Vec<String>,
     data: Option<PathBuf>,
@@ -201,6 +208,7 @@ fn main() -> ExitCode {
         };
         Ok((feed, game, launcher, syncer))
     });
+    let update_start = launcher_updates(&options, kept_settings.is_some());
     let (feed, game, launcher, syncer) = match opened {
         Ok(opened) => opened,
         Err(message) => {
@@ -269,6 +277,12 @@ fn main() -> ExitCode {
                 // The accessibility check reads the chat and the command bar.
                 if let Some(launcher) = launcher.filter(|_| !options.ax_check) {
                     shell.use_launcher(launcher, window, cx);
+                    if let Some(target) = &options.reopen {
+                        shell.reopen(target, window, cx);
+                    }
+                }
+                if let Some(start) = update_start {
+                    shell.use_updates(start, cx);
                 }
                 shell
             })
@@ -312,6 +326,8 @@ fn main() -> ExitCode {
                 if options.settings_open {
                     window
                         .update(cx, |shell, window, cx| {
+                            // Every section is measured under the update card.
+                            shell.show_sample_update(measure::sample_update(), cx);
                             match (options.settings_page, options.settings_section) {
                                 (Some(SamplePage::Inspector), _) => {
                                     measure::open_sample_inspector(shell, &[], window, cx);
@@ -431,13 +447,47 @@ fn start_sync(
         .ok()
 }
 
-/// Ends the session, then the app, without holding up the UI thread.
+/// What a window that plays on real servers needs for updates, read from the
+/// disk now. Replays, measured runs and checks keep no settings, so they
+/// never check.
+fn launcher_updates(options: &Options, keeps_settings: bool) -> Option<UpdateStart> {
+    if !keeps_settings || options.synthetic || !options.replay.is_empty() {
+        return None;
+    }
+    let cache = update::cache_folder()?;
+    let eligibility = update::this_copy();
+    let failed = match &eligibility {
+        Eligibility::Updates(installed) => update::after_last_exit(installed, &cache),
+        _ => None,
+    };
+    // A restart opens the new copy on the same data folder.
+    let arguments = (options.data.iter())
+        .flat_map(|data| ["--data".to_owned(), data.display().to_string()])
+        .collect();
+    Some(UpdateStart {
+        eligibility,
+        cache,
+        failed,
+        arguments,
+    })
+}
+
+/// Ends the session, then the app, without holding up the UI thread. An
+/// update that's ready goes in once everything is saved and sync's last push
+/// is done.
 fn shut_down(shell: &Entity<Shell>, cx: &mut App) {
-    let Some(saved) = shell.update(cx, |shell, cx| shell.leave(cx)) else {
+    let left = shell.update(cx, |shell, cx| {
+        let saved = shell.leave(cx)?;
+        Some((saved, shell.take_update_for_exit()))
+    });
+    let Some((saved, update)) = left else {
         return;
     };
     cx.spawn(async move |cx| {
         wait_for_save(saved, cx).await;
+        if let Some(update) = update {
+            update.install();
+        }
         cx.update(|cx| cx.quit());
     })
     .detach();
@@ -540,6 +590,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
         host: None,
         port: None,
+        reopen: None,
         plugins: Vec::new(),
         enable: Vec::new(),
         data: None,
@@ -571,6 +622,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--host" => options.host = Some(value()?.clone()),
             "--port" => {
                 options.port = Some(value()?.parse().map_err(|_| "--port needs a port number")?)
+            }
+            "--reopen" => {
+                let address = empty_state::parse_address(value()?);
+                options.reopen = Some(address.map_err(|rule| format!("--reopen: {rule}"))?);
             }
             "--plugin" => options.plugins.push(PathBuf::from(value()?)),
             "--enable" => options.enable.push(value()?.clone()),
@@ -647,8 +702,11 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     if options.host.is_some() != options.port.is_some() {
         return Err("--host and --port go together".into());
     }
-    if options.host.is_some() && replaying {
+    if (options.host.is_some() || options.reopen.is_some()) && replaying {
         return Err("use either --host or a replay".into());
+    }
+    if options.host.is_some() && options.reopen.is_some() {
+        return Err("use either --host or --reopen".into());
     }
     if (options.measure || options.measured_run) && options.replay.is_empty() && !options.synthetic
     {
