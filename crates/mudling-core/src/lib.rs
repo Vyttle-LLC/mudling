@@ -30,6 +30,15 @@ pub use scrollback::Scrollback;
 
 use std::path::PathBuf;
 
+/// The release this build is, which CI embeds from the version tag. A local
+/// build leaves `MUDLING_VERSION` unset, so this is `None`.
+pub const RELEASE_VERSION: Option<&str> = option_env!("MUDLING_VERSION");
+
+/// This build's version: the release's, or the crate's in a local build.
+pub fn build_version() -> &'static str {
+    RELEASE_VERSION.unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// The OS data folder MUDling keeps its files in, or `None` when the OS names
 /// no home folder.
 pub fn data_folder() -> Option<PathBuf> {

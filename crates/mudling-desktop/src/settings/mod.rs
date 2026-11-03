@@ -776,11 +776,12 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let tabs = Section::ALL.map(|section| self.render_tab(section, theme, cx));
-        let version = format!(
-            "MUDling {} · {}",
-            env!("CARGO_PKG_VERSION"),
-            env!("CARGO_PKG_LICENSE")
-        );
+        // A local build says so, as it never matches a release.
+        let version = match mudling_core::RELEASE_VERSION {
+            Some(release) => release.to_owned(),
+            None => format!("{} dev", env!("CARGO_PKG_VERSION")),
+        };
+        let version = format!("MUDling {version} · {}", env!("CARGO_PKG_LICENSE"));
         div()
             .flex_none()
             .w(width)

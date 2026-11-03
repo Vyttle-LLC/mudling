@@ -20,6 +20,34 @@ instead of typing. Protocol-aware (GMCP/MXP) and accessibility-first.
 > the mouse. [docs/phase-0-spike.md](docs/phase-0-spike.md) records the spike
 > it grew from. The iOS app is still to come.
 
+## Install
+
+Download a build for your computer from the
+[releases page](https://github.com/Vyttle-LLC/mudling/releases), or install
+the latest from a terminal.
+
+**macOS and Linux.** On a Mac this puts `MUDling.app` in `/Applications`;
+on Linux, the AppImage in `~/.local/bin` with a menu entry.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Vyttle-LLC/mudling/main/scripts/install.sh | bash
+```
+
+Add `-s -- v1.2.3` after `bash` for a particular release. On a Mac,
+`MUDLING_INSTALL_DIR=~/Applications` installs somewhere you can write without
+`sudo`.
+
+**Windows.** Double-click the `-setup.exe` from the releases page, or run this
+in PowerShell. Both install for you alone, without asking for admin rights.
+
+```powershell
+irm https://raw.githubusercontent.com/Vyttle-LLC/mudling/main/scripts/install.ps1 | iex
+```
+
+Running either again upgrades MUDling in place. Your servers, settings and
+logs stay where they are. [docs/releasing.md](docs/releasing.md) says how a
+release is made.
+
 ## Building
 
 MUDling is a Cargo workspace:

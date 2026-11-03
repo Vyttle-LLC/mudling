@@ -1,0 +1,248 @@
+# Publishes MUDling for macOS, Windows and Linux when a version tag such as
+# v1.2.3 on main is pushed. CI runs first; every build then lands on one
+# GitHub Release, which publishes each asset's SHA-256 digest. Self-update
+# reads those digests, so assets are never renamed after upload.
+# docs/releasing.md says how to cut a release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Read the version from the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed to confirm the tag is on main.
+      - id: tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must look like v1.2.3"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME points at a commit that is not on main"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    needs: [check, version]
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      MUDLING_VERSION: ${{ needs.version.outputs.version }}
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+    steps:
+      # An unsigned Mac build would only meet Gatekeeper's refusal: publish none.
+      - name: Require the signing secrets
+        run: |
+          for secret in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            if [ -z "${!secret}" ]; then
+              echo "::error::The $secret secret is missing; see docs/releasing.md"; exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Import the Developer ID certificate
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          # shellcheck disable=SC2046 # The keychain list is one path per word.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # Sign by hash from this keychain alone, so a copy of the certificate elsewhere never matches.
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application/ { print $2; exit }')"
+          test -n "$identity"
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "CODESIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Package
+        run: bash scripts/package-macos.sh
+
+      - name: Notarize
+        run: |
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/api-key.p8"
+          ditto -c -k --keepParent target/MUDling.app "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --wait \
+            --key "$RUNNER_TEMP/api-key.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+          xcrun stapler staple target/MUDling.app
+          spctl --assess --type execute --verbose target/MUDling.app
+
+      - name: Archive
+        run: |
+          mkdir -p target/dist
+          ditto -c -k --keepParent target/MUDling.app \
+            "target/dist/MUDling-$MUDLING_VERSION-macos-${{ matrix.arch }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.arch }})
+    needs: [check, version]
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          # Cross-built: the x64 runner carries MSVC's ARM64 tools and Inno Setup.
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: windows-latest
+    env:
+      MUDLING_VERSION: ${{ needs.version.outputs.version }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --locked --release -p mudling-desktop --target ${{ matrix.target }}
+
+      # Windows signing is still to be decided: until its secrets exist, the build ships unsigned.
+      - name: Prepare signing
+        if: env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $pfx = "$env:RUNNER_TEMP\certificate.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          "WINDOWS_SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
+          "WINDOWS_CERTIFICATE_FILE=$pfx" >> $env:GITHUB_ENV
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Package
+        shell: pwsh
+        run: scripts/package-windows.ps1 -Target ${{ matrix.target }} -Arch ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    needs: [check, version]
+    strategy:
+      matrix:
+        include:
+          # The oldest supported Ubuntu sets the oldest glibc the builds run on.
+          - arch: x64
+            runner: ubuntu-22.04
+            tool: x86_64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            tool: aarch64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MUDLING_VERSION: ${{ needs.version.outputs.version }}
+      # The runners have no FUSE, so appimagetool runs from its extracted self.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install gpui's Linux libraries (X11 and Wayland)
+        run: scripts/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --release -p mudling-desktop
+
+      - name: Install appimagetool
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-${{ matrix.tool }}.AppImage"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Package
+        run: bash scripts/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [version, macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          ls -l dist
+          # A release drafted in GitHub's UI already exists; attach the builds to it.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "MUDling $VERSION" --verify-tag --generate-notes
+          fi
