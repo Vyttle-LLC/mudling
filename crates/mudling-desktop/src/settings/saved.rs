@@ -104,13 +104,26 @@ impl LockAfter {
 
 /// What sync and the vault need from the player, kept across launches. Sync's
 /// [`AppSettings`] come from these and [`Appearance`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncChoices {
     pub repo: Option<PathBuf>,
     pub lock_after: LockAfter,
+    /// Whether unlocking keeps a copy of the vault key on this device.
+    pub keep_on_device: bool,
     /// When the theme or font last changed, here or on another device.
     pub settings_updated: Timestamp,
+}
+
+impl Default for SyncChoices {
+    fn default() -> SyncChoices {
+        SyncChoices {
+            repo: None,
+            lock_after: LockAfter::default(),
+            keep_on_device: true,
+            settings_updated: Timestamp::default(),
+        }
+    }
 }
 
 /// `appearance` as sync carries it, as of `updated`.
@@ -257,6 +270,7 @@ mod tests {
         let chosen = SyncChoices {
             repo: Some("/some/repo".into()),
             lock_after: LockAfter::Hour,
+            keep_on_device: false,
             settings_updated: Timestamp(7),
         };
         saved.save_sync(&chosen);
@@ -264,6 +278,12 @@ mod tests {
 
         let (next, _) = SavedSettings::open(folder.path()).unwrap();
         assert_eq!(next.sync_choices(), chosen);
+    }
+
+    #[test]
+    fn choices_kept_before_the_device_copy_was_a_choice_keep_it() {
+        let choices: SyncChoices = serde_json::from_str(r#"{"lock_after":"hour"}"#).unwrap();
+        assert!(choices.keep_on_device);
     }
 
     #[test]

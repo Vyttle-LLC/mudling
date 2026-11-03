@@ -9,7 +9,7 @@ use super::triggers::switch;
 use super::{Pane, Section, SettingsSheet, SheetEvent, muted_line, section_heading, text_button};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
-use gpui::{Context, Div, FontWeight, Role, SharedString, Task, div, prelude::*, px};
+use gpui::{Context, Div, FontWeight, Role, SharedString, Task, Window, div, prelude::*, px};
 use mudling_core::logs::{Kind, LogFile, LogSettings, Logs, MOST_BYTES, MOST_LOGS};
 use std::io;
 
@@ -196,7 +196,7 @@ impl SettingsSheet {
             "log-debug".to_owned(),
             KEEP_DEBUG,
             on,
-            move |sheet, cx| {
+            move |sheet, _, cx| {
                 sheet.change_log_settings(|settings| settings.debug = !on, cx);
             },
             pane,
@@ -218,7 +218,7 @@ impl SettingsSheet {
                 format!("log-chat-{number}"),
                 &format!("Keep chat logs for {host}"),
                 on,
-                move |sheet, cx| {
+                move |sheet, _, cx| {
                     sheet.change_log_settings(|settings| settings.set_chat(&host, !on), cx);
                 },
                 pane,
@@ -376,11 +376,11 @@ impl SettingsSheet {
 }
 
 /// A line of text with its switch.
-fn switch_row(
+pub(super) fn switch_row(
     id: String,
     what: &str,
     on: bool,
-    toggle: impl Fn(&mut SettingsSheet, &mut Context<SettingsSheet>) + 'static,
+    toggle: impl Fn(&mut SettingsSheet, &mut Window, &mut Context<SettingsSheet>) + 'static,
     pane: &mut Pane,
     theme: &Theme,
     cx: &mut Context<SettingsSheet>,
@@ -397,7 +397,7 @@ fn switch_row(
         .child(what.to_owned())
         .child(
             switch(id, what, on, &pane.stop(cx), theme)
-                .on_click(cx.listener(move |sheet, _, _, cx| toggle(sheet, cx))),
+                .on_click(cx.listener(move |sheet, _, window, cx| toggle(sheet, window, cx))),
         )
 }
 

@@ -518,6 +518,7 @@ impl Shell {
                         }
                     }
                     SheetEvent::LockAfter(lock_after) => shell.keep_lock_after(*lock_after),
+                    SheetEvent::KeepKeyOnDevice(keep) => shell.keep_key_on_device(*keep),
                     SheetEvent::VaultUnlocked => shell.go_on_after_unlock(window, cx),
                 },
             );
@@ -862,14 +863,24 @@ impl Shell {
         let moved = !state.vault_file.as_os_str().is_empty() && state.vault_file != link.vault_file;
         if moved {
             link.vault_file.clone_from(&state.vault_file);
-            let lock_after = link.choices.lock_after;
+            let (lock_after, keep_on_device) =
+                (link.choices.lock_after, link.choices.keep_on_device);
             let vault = Vault::open(
                 state.vault_file.clone(),
                 Arc::clone(&link.key_store),
                 lock_after.auto_lock(),
             );
+            if !keep_on_device {
+                let removed = vault.set_keep_on_device(false);
+                cx.spawn(async move |_, _| {
+                    if let Err(error) = removed.await {
+                        eprintln!("couldn't remove this device's copy of the vault key: {error}");
+                    }
+                })
+                .detach();
+            }
             self.settings.update(cx, |sheet, cx| {
-                sheet.use_vault(vault, lock_after, window, cx);
+                sheet.use_vault(vault, lock_after, keep_on_device, window, cx);
             });
         }
         let Some(link) = &self.sync else { return };
@@ -970,6 +981,14 @@ impl Shell {
     fn keep_lock_after(&mut self, lock_after: LockAfter) {
         let Some(link) = &mut self.sync else { return };
         link.choices.lock_after = lock_after;
+        if let Some(saved) = &self.saved_settings {
+            saved.save_sync(&link.choices);
+        }
+    }
+
+    fn keep_key_on_device(&mut self, keep: bool) {
+        let Some(link) = &mut self.sync else { return };
+        link.choices.keep_on_device = keep;
         if let Some(saved) = &self.saved_settings {
             saved.save_sync(&link.choices);
         }

@@ -95,13 +95,12 @@ use mudling_core::plugin::{Plugin, PluginId};
 use mudling_core::replay::{self, ReplayFeed};
 use mudling_core::session::{Session, SessionConfig};
 use mudling_core::sync::{RepoSettings, SyncConfig, Syncer};
-use mudling_core::vault::OsKeyStore;
+use mudling_core::vault::device_key_store;
 use room_panel::Verbs;
 use settings::{PluginRow, SavedSettings, Section, app_settings};
 use shell::{Game, LEAVE_WAIT, Shell};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use theme::Appearance;
@@ -264,7 +263,7 @@ fn main() -> ExitCode {
                     shell.restore_settings(saved, choice, window, cx);
                 }
                 if let Some(syncer) = syncer {
-                    shell.use_sync(syncer, Arc::new(OsKeyStore), window, cx);
+                    shell.use_sync(syncer, device_key_store(), window, cx);
                 }
                 // The accessibility check reads the chat and the command bar.
                 if let Some(launcher) = launcher.filter(|_| !options.ax_check) {
