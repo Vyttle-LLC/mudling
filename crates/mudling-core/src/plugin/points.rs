@@ -726,9 +726,10 @@ pub struct Text {
     pub channels: Vec<Channel>,
 }
 
-/// A GMCP message whose text is a line of the chat. It's read as a finished
-/// line the server sent: by the patterns, colors and links, and by the
-/// player's triggers. The map, the login and the quiet reads don't see it.
+/// A GMCP message whose text is a line of the chat. The Text point's
+/// patterns, the colors and links, and the player's triggers read it as a
+/// finished line. The other points' rules, table readers, the map, gear, the
+/// login and the quiet reads don't: it may be another player's words.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Channel {

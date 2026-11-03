@@ -1471,19 +1471,23 @@ impl Engine {
             self.game_signal_arrived(now);
         }
         for line in channels::lines(&self.plugins, package, json) {
-            self.read_channel_line(&line, now);
+            self.read_channel_line(&line);
         }
         self.read_pending(now);
     }
 
-    /// Reads a line of the chat that came as GMCP as the plugins and the
-    /// triggers read a finished server line, and shows it. Text the server
-    /// hasn't ended shows first, as it came first.
-    fn read_channel_line(&mut self, line: &Line, now: Timestamp) {
+    /// Reads a line of the chat that came as GMCP with the Text point's
+    /// patterns, the colors and the triggers, and shows it. Its events go
+    /// only to the hooks: the map, gear, tables and quiet reads never see it.
+    /// Text the server hasn't ended shows first, as it came first.
+    fn read_channel_line(&mut self, line: &Line) {
         self.show_pending();
-        let coloring = self.plugins.read_line(line, &mut self.events);
+        let mut events = Vec::new();
+        let coloring = self.plugins.read_channel_line(line, &mut events);
         let response = self.trigger_response();
-        self.route_events(now);
+        if let Some(link) = &mut self.link {
+            events.into_iter().for_each(|event| link.hooks.event(event));
+        }
         self.sounds.extend(response.sounds);
         if response.hides {
             return;

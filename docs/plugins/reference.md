@@ -310,11 +310,12 @@ message = "comm.channel.msg"
 | --- | --- |
 | `message` | The GMCP field holding the line, perhaps colored with ANSI codes. |
 
-The line is read as a finished line the server sent: by every plugin's
-`pattern`, `color` and `link` rules, and by the player's triggers, which can
-color it, play a sound or hide it. Then it shows in the chat, after any text
-the server hasn't ended. The map, the login and quiet reads don't read it,
-and nor does a replay, which skips GMCP.
+The line is read as a finished line: by every plugin's Text `pattern`,
+`color` and `link` rules, and by the player's triggers, which can color it,
+play a sound or hide it. Then it shows in the chat, after any text the server
+hasn't ended. It may be another player's words, so nothing else reads it: no
+other point's rules, such as the map's or gear's, no table reader, and not
+the login or quiet reads. Nor does a replay, which skips GMCP.
 
 ### HUD
 

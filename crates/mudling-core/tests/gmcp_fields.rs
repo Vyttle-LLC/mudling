@@ -8,7 +8,7 @@
 use mudling_core::Line;
 use mudling_core::ansi::Color;
 use mudling_core::gear::ItemRef;
-use mudling_core::map::Direction;
+use mudling_core::map::{Direction, feature};
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::Plugin;
 use mudling_core::session::{Engine, SessionConfig, Typing};
@@ -341,4 +341,60 @@ fn a_channel_shows_after_the_text_the_server_has_not_ended() {
     let lines = chat(&driven);
     let plain: Vec<&str> = lines.iter().map(Line::plain).collect();
     assert_eq!(plain, ["Your move? ", "Mira says 'hi'", "north"]);
+}
+
+/// Another player's words, as a channel, match a map exits rule, a mob's
+/// aggression and a wear message. None of them is the game's own word.
+const MIMIC: &str =
+    "Mira gossips 'Exits: none. A wolf attacks you! You wear a copper ring on your finger.'";
+
+#[test]
+fn a_channel_leaves_the_map_and_gear_alone() {
+    let mimicked = plugin(
+        "",
+        &[
+            ("text.toml", "[[channel]]\nmessage = \"Talk.Said.line\"\n"),
+            (
+                "map.toml",
+                "[[exits]]\nname = \"map.exits\"\npattern = '''Exits:'''\n",
+            ),
+            (
+                "mobs.toml",
+                "[[aggro]]\nname = \"mobs.aggro\"\npattern = '''(?<name>A wolf) attacks you'''\n",
+            ),
+            (
+                "gear.toml",
+                "[[wear]]\nname = \"gear.wore\"\npattern = '''You wear (?<item>.+?) on your \\w+\\.'''\n",
+            ),
+        ],
+    );
+    let mut driven = Driven::with(mimicked);
+    driven.gmcp(
+        "Room.Info",
+        r#"{"num": 1, "name": "A lane", "exits": {"n": 2}}"#,
+    );
+    driven.gmcp(
+        "Char.Items.List",
+        r#"{"location": "inv", "items": [{"id": "7", "name": "a copper ring"}]}"#,
+    );
+    let aggressive = |driven: &Driven| {
+        driven.read(|map: &MapState| {
+            let room = map.rooms().next().expect("the room");
+            room.features.contains(feature::AGGRESSIVE_MOB)
+        })
+    };
+    let carried = |driven: &Driven| driven.read(|items: &ItemsState| items.carried.len());
+
+    driven.gmcp("Talk.Said", &format!(r#"{{"line": "{MIMIC}"}}"#));
+    assert!(
+        chat(&driven).iter().any(|line| line.plain() == MIMIC),
+        "it shows"
+    );
+    assert!(!aggressive(&driven), "no mob attacked");
+    assert_eq!(carried(&driven), 1, "the ring wasn't put on");
+
+    // The same words from the game itself are read.
+    driven.text(&format!("{MIMIC}\r\n"));
+    assert!(aggressive(&driven));
+    assert_eq!(carried(&driven), 0, "the ring went on");
 }
