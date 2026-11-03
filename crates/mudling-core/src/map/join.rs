@@ -2,7 +2,10 @@
 //!
 //! On a game with no room numbers a duplicate that has synced stays for good
 //! (see `merge::rooms`), so the player tidies up by hand. MUDling only points
-//! at rooms that read alike: it never joins anything by itself.
+//! at rooms that read alike: it never joins rooms the map holds by itself.
+//! The one exception is narrower than a join and leaves no record: a room
+//! the tracker added while unsure, shown before its description, folds into
+//! the known room the description shows it to be (see `tracker`).
 //!
 //! A join is a record, `map.joined.<retired id>` = `<kept id>`, and every merge
 //! on every device moves whatever hangs off the retired room onto the kept one

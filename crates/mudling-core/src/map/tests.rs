@@ -959,6 +959,188 @@ fn an_off_grid_return_reuses_the_described_room() {
     assert_eq!(walk.tangled(), 0);
 }
 
+const CAMP: &str = "A camp";
+const CAMPFIRE: &str = "An old man camps here.";
+const TREE: &str = "Inside the tree";
+const TRUNK: &str = "A hollow trunk.";
+
+/// A camp with a tree east of it:
+///
+/// ```text
+///     Hill
+///      │
+///     Path ── Camp ── Tree
+/// ```
+fn mapped_camp() -> Walk {
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A path", FIELDS, &["e", "n"], "A worn path.");
+    walk.go_described("e", CAMP, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    walk.go_described("w", CAMP, &["e", "w"], CAMPFIRE);
+    walk
+}
+
+/// The camp and its tree mapped twice, as the player's map had the Meadow:
+/// the copies alike in name, description and exits.
+///
+/// ```text
+///     Hill ── Camp₂ ── Tree₂
+///      │
+///     Path ── Camp₁ ── Tree₁
+/// ```
+fn camp_mapped_twice() -> Walk {
+    let mut walk = mapped_camp();
+    walk.go_described("w", "A path", &["e", "n"], "A worn path.");
+    walk.go_described("n", "A hill", &["s", "e"], "A grassy hill.");
+    walk.go_described("e", CAMP, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    walk
+}
+
+/// A move the game refuses in words the rules don't know, then a look.
+fn refused_then_look(walk: &mut Walk, direction: &str) {
+    let now = walk.now();
+    walk.map.sent(direction, now);
+    walk.map.sent("look", now);
+}
+
+/// Rooms of the area drawn on islands of their own, away from the first.
+fn on_islands(walk: &Walk, zone: &str) -> usize {
+    walk.map
+        .rooms()
+        .filter(|room| room.zone == zone && room.position.x.abs() >= 500)
+        .count()
+}
+
+#[test]
+fn a_room_shown_again_while_a_move_waits_is_not_mapped_twice() {
+    let mut walk = mapped_camp();
+    let camp = walk.current().id;
+    refused_then_look(&mut walk, "e");
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], CAMPFIRE);
+    assert_eq!(walk.current().id, camp);
+    assert_eq!(walk.count(), 3);
+    assert_eq!(walk.tangled(), 0);
+
+    walk.go_described("e", TREE, &["w"], TRUNK);
+    assert_eq!(walk.current().id, walk.id_of(TREE));
+    assert_eq!(walk.count(), 3);
+}
+
+#[test]
+fn a_recall_into_a_room_mapped_twice_starts_no_island() {
+    let mut walk = camp_mapped_twice();
+    walk.arrive_in("A temple", CAVES, &["n"], "Incense hangs in the air.");
+    let rooms = walk.count();
+    // Recalled, and the Room.Info comes before the room's text.
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], "");
+    refused_then_look(&mut walk, "e");
+    walk.arrive_in(CAMP, FIELDS, &["e", "w"], CAMPFIRE);
+    walk.go_described("e", TREE, &["w"], TRUNK);
+
+    assert_eq!(walk.count(), rooms, "no third camp or tree");
+    assert_eq!(on_islands(&walk, FIELDS), 0);
+    let camps = walk.map.rooms().filter(|room| room.name == CAMP).count();
+    assert_eq!(camps, 2, "the saved copies are both left as they are");
+}
+
+#[test]
+fn a_room_added_before_its_description_folds_into_the_known_room_it_is() {
+    // Two shades told apart by their descriptions; the cool one's path east
+    // was mapped into a barn.
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A path", FIELDS, &["e", "n"], "A worn path.");
+    walk.go_described("e", "In shade", &CROSSROADS, "Cool shade.");
+    let cool = walk.current().id;
+    walk.go_described("e", "A barn", &["w"], "Hay everywhere.");
+    walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
+    walk.go_described("w", "A path", &["e", "n"], "A worn path.");
+    walk.go_described("n", "A hill", &["s", "e"], "A grassy hill.");
+    walk.go_described("e", "In shade", &CROSSROADS, "Warm shade.");
+    let warm = walk.current().id;
+    walk.go_described("e", "A pond", &["w"], "Still water.");
+    walk.arrive_in("A temple", CAVES, &["n"], "Incense hangs in the air.");
+    let rooms = walk.count();
+
+    // Recalled before the room's text: neither shade's path east fits what
+    // the player finds there, so the map starts a new shade on an island.
+    walk.arrive_in("In shade", FIELDS, &CROSSROADS, "");
+    walk.go_described("e", "A field", &["w"], "Wildflowers.");
+    assert!(walk.map.whereabouts().unsure);
+    assert_eq!(walk.count(), rooms + 2);
+
+    // Back west, the description says which shade it was.
+    walk.go_described("w", "In shade", &CROSSROADS, "Cool shade.");
+    assert!(!walk.map.whereabouts().unsure);
+    assert_eq!(walk.current().id, cool);
+    assert_eq!(
+        walk.count(),
+        rooms + 1,
+        "the new shade folded into the cool one"
+    );
+    let field = walk.map.room(walk.id_of("A field")).unwrap();
+    assert_eq!(field.links.get_copied(Direction::West), Some(cool));
+    assert!(
+        walk.map.room(warm).is_some(),
+        "the warm shade only looks alike"
+    );
+}
+
+#[test]
+fn walking_a_field_of_rooms_alike_in_everything_stays_on_its_map() {
+    const MEADOW: &str = "A meadow";
+    const GRASS: &str = "Tall grass sways.";
+    let exits = |x: i64, y: i64| {
+        let mut exits = Vec::new();
+        for (direction, open) in [("s", y < 4), ("n", y > 0), ("e", x < 4), ("w", x > 0)] {
+            if open {
+                exits.push(direction);
+            }
+        }
+        exits
+    };
+    let mut walk = Walk::new(text_map());
+    walk.arrive_in("A road", FIELDS, &["e"], "A dusty road.");
+    // Five rows of five, walked back and forth from the northwest.
+    walk.go_described("e", MEADOW, &exits(0, 0), GRASS);
+    for y in 0..5 {
+        for step in 1..5 {
+            let (direction, x) = if y % 2 == 0 {
+                ("e", step)
+            } else {
+                ("w", 4 - step)
+            };
+            walk.go_described(direction, MEADOW, &exits(x, y), GRASS);
+        }
+        if y < 4 {
+            walk.go_described("s", MEADOW, &exits(4 - 4 * (y % 2), y + 1), GRASS);
+        }
+    }
+    let rooms = walk.count();
+
+    for (direction, x, y) in [
+        ("n", 4, 3),
+        ("w", 3, 3),
+        ("w", 2, 3),
+        ("n", 2, 2),
+        ("n", 2, 1),
+        ("e", 3, 1),
+        ("s", 3, 2),
+        ("w", 2, 2),
+        ("w", 1, 2),
+        ("s", 1, 3),
+        ("e", 2, 3),
+        ("e", 3, 3),
+    ] {
+        let before = walk.position();
+        walk.go_described(direction, MEADOW, &exits(x, y), GRASS);
+        let moved = Direction::parse(direction).unwrap().offset();
+        assert_eq!(walk.position(), before + moved, "{direction} to {x},{y}");
+        assert_eq!(walk.count(), rooms);
+    }
+    assert_eq!(on_islands(&walk, FIELDS), 0);
+}
+
 // MARK: Buildings and straightening
 
 fn walk_around_the_tower() -> Walk {
