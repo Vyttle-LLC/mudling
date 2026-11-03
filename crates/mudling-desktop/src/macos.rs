@@ -386,7 +386,7 @@ const COMMAND_BAR_CONTROLS: [&str; 4] = ["Hotbar", "look", "Add a chip", "Pin to
 /// The Gear tab on its sample: the views, a carried item's actions, the lists.
 const GEAR_CONTROLS: [&str; 5] = [
     "Worn",
-    "Carrying",
+    "Carrying · 10",
     "Wear a small necklace",
     "More about a small necklace",
     "Items named in chat",
@@ -416,8 +416,10 @@ const GEAR_EDITOR_CONTROLS: [&str; 11] = [
 ];
 /// What the editor's preview reads as one stop.
 const GEAR_PREVIEW_START: &str = "Wearing it now would send: remove 1204883";
-/// What the sample's level lock says, on the row, to a screen reader.
-const GEAR_LOCKED_ROW: &str = "a copper bracelet, Glowing, Humming, Needs level 7";
+/// What the sample's level lock says, on the row, to a screen reader, with
+/// the row's stats and what wearing it would change.
+const GEAR_LOCKED_ROW: &str =
+    "a copper bracelet, Glowing, Humming, Needs level 7, AC −2 → wrist empty";
 /// What the tooltip over the sample's item says.
 const GEAR_TIP: &str = "AC −1 (better) (estimate from 1 copy)";
 

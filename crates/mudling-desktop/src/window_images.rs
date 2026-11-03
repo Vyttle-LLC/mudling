@@ -30,18 +30,19 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::gear::{ItemRef, Reading};
 use mudling_core::git::FolderFiles;
 use mudling_core::logs::LogSettings;
 use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
-use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
+use mudling_core::persist::{Batch, SavedCharacter, SavedServer, SavedServers, StatMap, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
 use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId};
 use mudling_core::registry::{self, Fetched, IndexError};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    ConnectionStatus, Diff, Revision, RulesState, SettingsState, TerminalChange, TerminalState,
-    VitalsState,
+    ConnectionStatus, Diff, ItemsState, Revision, RulesState, SettingsState, TerminalChange,
+    TerminalState, VitalsState, WornItem,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -350,6 +351,87 @@ fn open_gear_worn(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell
     shell
         .gear_panel()
         .update(cx, |panel, cx| panel.show_worn(cx));
+}
+
+/// The mockup's Worn view: 14 places to wear something across 12 slots, 9 of
+/// them filled, with the sample's sets. Made up, as all of this file's are.
+fn full_worn() -> ItemsState {
+    let mut items = crate::measure::sample_items_with_sets();
+    let mut book = (*items.book).clone();
+    let mut batch = Batch::new();
+    let stats = |pairs: &[(&str, i64)]| -> StatMap {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
+    };
+    let reading = |word: &str, pairs: &[(&str, i64)]| Reading {
+        keywords: word.to_owned(),
+        item_type: "armor".to_owned(),
+        base: stats(pairs),
+        ..Reading::default()
+    };
+    let worn = [
+        (
+            "finger",
+            "a pink ice ring",
+            &[("int", 2), ("mana_max", 15)][..],
+        ),
+        ("finger", "a pink ice ring", &[("int", 2), ("mana_max", 15)]),
+        (
+            "neck",
+            "a mushroom-shaped amulet",
+            &[("con", 1), ("ac", -4)],
+        ),
+        (
+            "neck",
+            "the mantle of Bonk",
+            &[("str", 1), ("damroll", 3), ("ac", -2)],
+        ),
+        (
+            "body",
+            "(Glowing) a glowing suit of bronze plate",
+            &[("hitroll", 2), ("ac", -12)],
+        ),
+        ("head", "a Tiamat mask", &[("wis", 2), ("damroll", 4)]),
+        ("arms", "a tulip tattoo", &[]),
+        (
+            "offhand",
+            "(Glowing) a Golden Unicorn horn",
+            &[("dex", 2), ("hitroll", 7), ("damroll", 7)],
+        ),
+        ("about", "a linen robe", &[("ac", -3)]),
+    ];
+    for (_, name, effects) in worn.iter().filter(|(_, _, effects)| !effects.is_empty()) {
+        let item = ItemRef { name, copy: None };
+        book.learn(reading(name, effects), item, Timestamp(0), &mut batch);
+    }
+    // A second mask, read stronger: the mask's damage is a range.
+    let mask = ItemRef {
+        name: "a Tiamat mask",
+        copy: Some("31"),
+    };
+    let stronger = reading("mask", &[("wis", 2), ("damroll", 6)]);
+    book.learn(stronger, mask, Timestamp(0), &mut batch);
+    items.book = Arc::new(book);
+    items.worn = (worn.iter())
+        .map(|(slot, name, _)| WornItem {
+            slot: (*slot).to_owned(),
+            item: (*name).to_owned(),
+            copy: None,
+        })
+        .collect();
+    let slots = [
+        "light", "finger", "neck", "body", "head", "legs", "feet", "hands", "arms", "offhand",
+        "about", "waist",
+    ];
+    items.slots = slots.map(str::to_owned).to_vec().into();
+    items
+}
+
+fn open_full_worn(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_gear_sets(shell, window, cx);
+    shell.gear_panel().update(cx, |panel, cx| {
+        panel.show_items(full_worn(), cx);
+        panel.show_worn(cx);
+    });
 }
 
 fn open_gear_sets(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
@@ -755,6 +837,8 @@ fn window_images() {
     render("gear-tab-worn-dark", Dark, WIDE, open_gear_worn);
     render("gear-sets-dark", Dark, WIDE, open_gear_sets);
     render("gear-sets-light", Light, WIDE, open_gear_sets);
+    render("gear-worn-full-dark", Dark, WIDE, open_full_worn);
+    render("gear-worn-full-light", Light, WIDE, open_full_worn);
     render("gear-set-editor-dark", Dark, WIDE, edit_gear_set);
     render("gear-set-editor-light", Light, WIDE, edit_gear_set);
     render_hovering(

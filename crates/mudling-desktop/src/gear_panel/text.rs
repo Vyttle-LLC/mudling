@@ -3,7 +3,9 @@
 
 use mudling_core::gear::{Comparison, Estimate, GEAR_STATS, ItemStats, shown_name};
 use mudling_core::persist::{Identification, StatMap};
+use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::ops::{Range, RangeInclusive};
 
 fn label(stat: &str) -> &str {
     match stat {
@@ -51,19 +53,53 @@ fn in_order(stats: impl IntoIterator<Item = String>) -> Vec<String> {
     stats
 }
 
+/// "AC −1 (better)": one stat's change.
+fn stat_words(stat: &str, value: i64) -> String {
+    format!(
+        "{} {}{}",
+        label(stat),
+        signed(value),
+        armor_note(stat, value)
+    )
+}
+
 /// "Str +1 · AC −1 (better)", or nothing when nothing changed.
 pub fn stat_changes(effects: &StatMap) -> Option<String> {
     let stats = effects.iter().filter(|(_, value)| **value != 0);
     let parts: Vec<String> = in_order(stats.map(|(stat, _)| stat.clone()))
         .iter()
+        .map(|stat| stat_words(stat, effects[stat]))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Each stat's lowest and highest value.
+pub type StatRanges = BTreeMap<String, RangeInclusive<i64>>;
+
+/// "+1", or "+1 to +3".
+fn range_value(range: &RangeInclusive<i64>) -> String {
+    let (low, high) = (*range.start(), *range.end());
+    if low == high {
+        signed(low)
+    } else {
+        format!("{} to {}", signed(low), signed(high))
+    }
+}
+
+/// "Str +1 to +3 · Hit +2 · AC −1", leaving out what adds up to nothing, with
+/// armor's note when `noted`.
+fn range_words(ranges: &StatRanges, noted: bool) -> Option<String> {
+    let changed = ranges.iter().filter(|(_, range)| **range != (0..=0));
+    let parts: Vec<String> = in_order(changed.map(|(stat, _)| stat.clone()))
+        .iter()
         .map(|stat| {
-            let value = effects[stat];
-            format!(
-                "{} {}{}",
-                label(stat),
-                signed(value),
-                armor_note(stat, value)
-            )
+            let range = &ranges[stat];
+            let note = if noted {
+                armor_note(stat, *range.start())
+            } else {
+                ""
+            };
+            format!("{} {}{note}", label(stat), range_value(range))
         })
         .collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
@@ -71,20 +107,86 @@ pub fn stat_changes(effects: &StatMap) -> Option<String> {
 
 /// "Str +1 to +3 · Hit +2".
 fn ranges(estimate: &Estimate) -> Option<String> {
-    let parts: Vec<String> = in_order(estimate.ranges.keys().cloned())
-        .iter()
-        .map(|stat| {
-            let range = &estimate.ranges[stat];
-            let (low, high) = (*range.start(), *range.end());
-            let value = if low == high {
-                signed(low)
-            } else {
-                format!("{} to {}", signed(low), signed(high))
-            };
-            format!("{} {value}{}", label(stat), armor_note(stat, low))
-        })
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    range_words(&estimate.ranges, true)
+}
+
+/// What an item does, stat by stat: one value where it's exact, enchants
+/// included, and an estimate's range.
+pub fn stat_ranges(stats: &ItemStats) -> StatRanges {
+    match stats {
+        ItemStats::Estimated(estimate) => estimate.ranges.clone(),
+        exact => (exact.effects().into_iter())
+            .map(|(stat, value)| (stat, value..=value))
+            .collect(),
+    }
+}
+
+/// What a row's second line says of an item: its stats, without where they're
+/// from, which More and the tooltip say.
+pub fn brief(stats: Option<&ItemStats>) -> String {
+    match stats {
+        None => STATS_UNKNOWN.to_owned(),
+        Some(stats) => {
+            range_words(&stat_ranges(stats), false).unwrap_or_else(|| NO_STAT_CHANGES.to_owned())
+        }
+    }
+}
+
+/// "Worn total · Str +3 · AC −31 · 2 unknown": what's known adds up to, and
+/// how many worn items nothing is known about.
+pub fn worn_total(total: &StatRanges, unknown: usize) -> String {
+    let mut parts = vec![WORN_TOTAL.to_owned()];
+    parts.extend(range_words(total, false));
+    if unknown > 0 {
+        parts.push(format!("{unknown} unknown"));
+    } else if parts.len() == 1 {
+        parts.push(NO_STAT_CHANGES.to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// Whether a change is for the better: armor counts down.
+fn is_better(stat: &str, change: i64) -> bool {
+    if stat == "ac" { change < 0 } else { change > 0 }
+}
+
+/// Text with some words marked as a gain or a loss.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Marked {
+    pub text: String,
+    /// Each marked span, and whether it's for the better.
+    pub marks: Vec<(Range<usize>, bool)>,
+}
+
+impl Marked {
+    pub fn push(&mut self, words: &str) {
+        self.text.push_str(words);
+    }
+
+    fn push_marked(&mut self, words: &str, better: bool) {
+        let start = self.text.len();
+        self.text.push_str(words);
+        self.marks.push((start..self.text.len(), better));
+    }
+
+    /// "Wis +3 Int −2": each stat wearing it would change, marked, against
+    /// one item worn in its slot.
+    pub fn push_comparison(&mut self, compared: &Comparison) {
+        let changed = in_order(compared.changes.keys().cloned());
+        if changed.is_empty() {
+            self.push("no change");
+        }
+        for (at, stat) in changed.iter().enumerate() {
+            if at > 0 {
+                self.push(" ");
+            }
+            let value = compared.changes[stat];
+            self.push_marked(&stat_words(stat, value), is_better(stat, value));
+        }
+        if !compared.known {
+            self.push(" (worn stats unknown)");
+        }
+    }
 }
 
 fn added_total(reading: &Identification) -> StatMap {
@@ -104,7 +206,7 @@ pub fn line(stats: &ItemStats) -> String {
             let base = stat_changes(&reading.base);
             let added = stat_changes(&added_total(reading));
             let added = added.map_or_else(String::new, |added| format!(", enchanted {added}"));
-            let base = base.as_deref().unwrap_or("No stat changes");
+            let base = base.as_deref().unwrap_or(NO_STAT_CHANGES);
             format!("{base}{added} (identified)")
         }
         ItemStats::Measured(effects) => {
@@ -128,10 +230,7 @@ pub fn line(stats: &ItemStats) -> String {
                 source.push_str("; likely enchanted, may be better");
             }
             let seen = ranges(estimate);
-            format!(
-                "{} ({source})",
-                seen.as_deref().unwrap_or("No stat changes")
-            )
+            format!("{} ({source})", seen.as_deref().unwrap_or(NO_STAT_CHANGES))
         }
     }
 }
@@ -185,11 +284,14 @@ pub fn comparison(compared: &Comparison) -> String {
 
 /// What's said of an item nothing is known about.
 pub const NOT_LEARNED: &str = "Not learned yet: identify it, or take it off and put it back on.";
+/// The same, in a row's second line.
+const STATS_UNKNOWN: &str = "Stats unknown";
+const NO_STAT_CHANGES: &str = "No stat changes";
+pub const WORN_TOTAL: &str = "Worn total";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn stats(pairs: &[(&str, i64)]) -> StatMap {
         pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
