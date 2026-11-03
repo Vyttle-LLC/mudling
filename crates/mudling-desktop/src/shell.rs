@@ -1658,8 +1658,9 @@ impl Shell {
         }
     }
 
-    /// Tells the session whether the command field holds text, when that
-    /// changes: quiet reads wait while it does.
+    /// Tells the session whether the player is typing, when that changes:
+    /// quiet reads wait while they are. A sent command kept in the field
+    /// doesn't count.
     fn tell_of_typing(&mut self, cx: &mut Context<Shell>) {
         let typing = self.input.read(cx).is_typing();
         if self.told_of_typing != typing {
