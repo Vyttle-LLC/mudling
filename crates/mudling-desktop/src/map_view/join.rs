@@ -342,7 +342,8 @@ impl MapView {
             .on_click(cx.listener(|view, _, _, cx| view.undo(cx)))
     }
 
-    /// The pill over the map: what's picked, or how the last join went.
+    /// The pill over the map: what's picked, how the last join went, or
+    /// which room was forgotten.
     pub(super) fn pill(
         &self,
         theme: &Theme,
@@ -417,6 +418,10 @@ impl MapView {
                         .text_color(theme.text_muted)
                         .child(
                             div()
+                                .debug_selector({
+                                    let text = text.clone();
+                                    move || text
+                                })
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
                                 .child(text),
@@ -427,8 +432,8 @@ impl MapView {
         )
     }
 
-    /// What can be done with the room shown: the keyboard's way to pick it,
-    /// for anyone who'd rather press a button than hold Shift, and Forget.
+    /// What can be done with the room shown: pick it to join, for anyone
+    /// who'd rather press a button than hold Shift, or forget it.
     pub(super) fn room_actions(
         &self,
         room: RoomId,

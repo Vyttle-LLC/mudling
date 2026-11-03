@@ -481,6 +481,9 @@ const PICK_CONTROLS: [&str; 3] = [
     "Clear the rooms picked",
     "Pick Square 1, 1 to join",
 ];
+const FORGET_ROOM: &str = "Forget room Square 1, 1";
+/// The question's Cancel, then its Forget.
+const FORGET_CONTROLS: [&str; 2] = ["Keep Square 1, 1", "Forget Square 1, 1"];
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// The Character tab on its sample, by accessibility role and name.
 const CHARACTER_CONTROLS: [(&str, &str); 2] = [
@@ -1261,6 +1264,51 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "what's picked is a status a screen reader hears",
             passed: picked.len() == 1,
             detail: format!("{} element(s)", picked.len()),
+        });
+        let unnamed = missing(&[FORGET_ROOM], &tree);
+        checks.push(Check {
+            name: "the room shown has a named Forget room",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell
+                    .map()
+                    .update(cx, |map, cx| map.forget_sample(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let unnamed = missing(&FORGET_CONTROLS, &tree);
+        checks.push(Check {
+            name: "forgetting a room asks with named Cancel and Forget",
+            passed: unnamed.is_empty(),
+            detail: format!("not found: {unnamed:?}"),
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "the question takes focus, on Cancel",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == FORGET_CONTROLS[0]),
+            detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                shell.map().update(cx, |map, cx| map.keep_room(window, cx));
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "keeping the room takes focus back to Forget room",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == FORGET_ROOM),
+            detail: format!("{focused:?}"),
         });
 
         in_window(

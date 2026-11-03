@@ -53,8 +53,16 @@ impl MapView {
         cx.notify();
     }
 
+    /// Asks about the room shown, for the accessibility check.
+    #[cfg(target_os = "macos")]
+    pub fn forget_sample(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
+        if let Some(room) = self.model.selection().map(|selection| selection.room) {
+            self.ask_to_forget(room, window, cx);
+        }
+    }
+
     /// Takes the question back, and focus to the button that asked it.
-    fn keep_room(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
+    pub fn keep_room(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.forget.asking = None;
         window.focus(&self.forget.button, cx);
         cx.notify();
@@ -166,14 +174,12 @@ mod tests {
     use super::*;
     use crate::map_view::MapLayout;
     use crate::map_view::harness::{grid_map, versioned};
-    use crate::map_view::model::JoinNote;
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowAppearance};
     use std::cell::RefCell;
     use std::rc::Rc;
 
     /// Room 12 of a grid with room numbers, so no Pick to join beside Forget.
     const ROOM: RoomId = 12;
-    const NAME: &str = "Square 2, 1";
     const FORGET_ROOM: &str = "Forget room Square 2, 1";
     const KEEP: &str = "Keep Square 2, 1";
     const FORGET: &str = "Forget Square 2, 1";
@@ -237,14 +243,11 @@ mod tests {
         click_on(FORGET, cx);
 
         assert_eq!(*heard.borrow(), [MapEdit::Forget { room: ROOM }]);
-        view.read_with(cx, |view, _| {
-            assert!(view.selection().is_none());
-            assert_eq!(
-                view.model.join_note(),
-                Some(&JoinNote::Forgot(NAME.to_owned()))
-            );
-        });
-        assert!(cx.debug_bounds("map-pill").is_some());
+        view.read_with(cx, |view, _| assert!(view.selection().is_none()));
+        assert!(
+            cx.debug_bounds("Forgot Square 2, 1").is_some(),
+            "the pill says so"
+        );
         assert!(cx.debug_bounds(FORGET_ROOM).is_none());
     }
 
