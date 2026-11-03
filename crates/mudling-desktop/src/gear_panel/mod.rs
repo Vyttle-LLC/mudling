@@ -1,6 +1,7 @@
 //! The Gear panel (PRD §8): what's worn, in the game plugin's slot order with
-//! empty slots shown, and what's carried, with flags, a level lock, what it
-//! would change against what's worn in its slot, and actions.
+//! what it adds up to and the empty slots on one line, and what's carried,
+//! with tags, a level lock, what it would change against what's worn in its
+//! slot, and actions. Each item takes two lines: its name, then its stats.
 //!
 //! The panel holds what the shell gave it and works out its rows when that
 //! changes, so a frame only draws them. It never sends a command itself: it
@@ -23,12 +24,14 @@ use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label};
 use crate::theme::Theme;
 use gpui::{
     AnyView, App, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight,
-    KeyBinding, Pixels, Render, Role, SharedString, Stateful, Window, actions, div, prelude::*, px,
+    HighlightStyle, Hsla, KeyBinding, Pixels, Render, Role, SharedString, Stateful, StyledText,
+    Window, actions, div, prelude::*, px, transparent_black,
 };
-use mudling_core::gear::{ItemMatcher, ItemRef, plain_name, shown_name, tags};
+use mudling_core::gear::{ItemMatcher, ItemRef, ItemStats, plain_name, shown_name, tags};
 use mudling_core::store::{CHARACTER_LEVEL, CarriedItem, CharactersState, ItemsState, WornItem};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use text::Marked;
 
 actions!(gear_panel, [CloseEditor, CloseWords]);
 
@@ -37,12 +40,18 @@ const EDITOR_CONTEXT: &str = "GearSetEditor";
 /// The Words field's, nearer than the editor's: its Escape leaves only the field.
 const WORDS_CONTEXT: &str = "GearSetWords";
 const BUTTON_HEIGHT: Pixels = px(28.);
-const FILTER_HEIGHT: Pixels = px(30.);
+const TAB_HEIGHT: Pixels = px(26.);
+/// A row's own buttons, small enough for its two lines.
+const ROW_BUTTON_HEIGHT: Pixels = px(22.);
+const SLOT_WIDTH: Pixels = px(50.);
+/// The group a row's hover lights its primary action from.
+const ROW_GROUP: &str = "gear-row";
 /// How many items the panel remembers the chat naming.
 const MOST_NAMED: usize = 6;
 const LOCKED_NOTE: &str = "Gear actions are off while the game asks for a password.";
 const NOT_READ_NOTE: &str = "What's worn is read when the game lists it.";
 const NOTHING_CARRIED: &str = "You're carrying nothing, as far as the game has said.";
+const EMPTY: &str = "Empty";
 const WEAR: &str = "wear";
 const WIELD: &str = "wield";
 const HOLD: &str = "hold";
@@ -105,30 +114,30 @@ struct Row {
     name: SharedString,
     /// How many copies it stands for.
     count: usize,
-    /// The game's tags, or a note.
-    flags: Vec<String>,
+    /// The game's tags.
+    tags: Vec<String>,
     /// The level it needs, when the character hasn't reached it.
     needs_level: Option<i64>,
     /// What the row offers without opening.
     primary: Option<Action>,
     /// What More offers.
     more: Vec<Action>,
-    /// What's known, then what it would change.
+    /// The second line: its stats, and for a carried item what wearing it
+    /// would change.
+    line: Marked,
+    /// What More shows: what's known, then what it would change.
     known: Vec<String>,
 }
 
 impl Row {
-    fn is_empty_slot(&self) -> bool {
-        self.key.is_empty()
-    }
-
     /// What a screen reader reads, all of what a row shows.
     fn label(&self) -> String {
         let mut parts = Vec::new();
         parts.extend(self.slot.clone());
         parts.push(self.counted_name());
-        parts.extend(self.flags.iter().cloned());
-        parts.extend(self.needs_level.map(needs_level));
+        parts.extend(self.tags.iter().cloned());
+        parts.extend(self.needs_level.map(|level| format!("Needs level {level}")));
+        parts.push(self.line.text.clone());
         parts.join(", ")
     }
 
@@ -138,78 +147,87 @@ impl Row {
             count => format!("{} ×{count}", self.name),
         }
     }
-
-    /// The second line, without the level lock.
-    fn flag_line(&self) -> String {
-        self.flags.join(" · ")
-    }
 }
 
-fn needs_level(level: i64) -> String {
-    format!("Needs level {level}")
-}
-
-fn what_is_known(items: &ItemsState, item: ItemRef<'_>) -> String {
-    (items.book.stats(item)).map_or_else(
-        || text::NOT_LEARNED.to_owned(),
-        |stats| text::describe(&stats),
-    )
+fn what_is_known(stats: Option<&ItemStats>) -> String {
+    stats.map_or_else(|| text::NOT_LEARNED.to_owned(), text::describe)
 }
 
 /// What the book knows of an item the chat named.
 pub fn tip(items: &ItemsState, name: &str) -> String {
-    what_is_known(items, ItemRef { name, copy: None })
+    what_is_known(items.book.stats(ItemRef { name, copy: None }).as_ref())
+}
+
+fn worn_item(worn: &WornItem) -> ItemRef<'_> {
+    ItemRef {
+        name: &worn.item,
+        copy: worn.copy.as_deref(),
+    }
 }
 
 fn worn_row(items: &ItemsState, worn: &WornItem) -> Row {
-    let item = ItemRef {
-        name: &worn.item,
-        copy: worn.copy.as_deref(),
-    };
+    let item = worn_item(worn);
     let target = items.book.target(item);
+    let stats = items.book.stats(item);
+    let mut line = Marked::default();
+    line.push(&text::brief(stats.as_ref()));
     Row {
         key: format!("{}:{}", worn.slot, plain_name(&worn.item)),
         slot: Some(worn.slot.clone()),
         name: shown_name(&worn.item).into(),
         count: 1,
-        flags: tags(&worn.item),
+        tags: tags(&worn.item),
         needs_level: None,
         primary: action("Remove", REMOVE, &target),
         more: action("Examine", EXAMINE, &target).into_iter().collect(),
-        known: vec![what_is_known(items, item)],
+        line,
+        known: vec![what_is_known(stats.as_ref())],
     }
 }
 
-/// Every worn row, in the plugin's slot order. An empty slot shows even if the
-/// game hasn't listed it yet; a slot the plugin doesn't name comes last.
+/// What's worn, in the plugin's slot order; a slot the plugin doesn't name
+/// comes last.
+fn filled_slots(items: &ItemsState) -> impl Iterator<Item = &WornItem> {
+    let in_order = (items.slots.iter())
+        .flat_map(|slot| items.worn.iter().filter(move |worn| worn.slot == *slot));
+    let others = (items.worn.iter()).filter(|worn| !items.slots.contains(&worn.slot));
+    in_order.chain(others).filter(|worn| !worn.item.is_empty())
+}
+
 fn worn_rows(items: &ItemsState) -> Vec<Row> {
-    let mut rows = Vec::new();
-    let empty = |slot: &str| Row {
-        key: String::new(),
-        slot: Some(slot.to_owned()),
-        name: "Empty".into(),
-        count: 0,
-        flags: Vec::new(),
-        needs_level: None,
-        primary: None,
-        more: Vec::new(),
-        known: Vec::new(),
-    };
-    for slot in items.slots.iter() {
-        let in_slot = items.worn.iter().filter(|worn| worn.slot == *slot);
-        let filled: Vec<&WornItem> = in_slot.filter(|worn| !worn.item.is_empty()).collect();
-        if filled.is_empty() {
-            rows.push(empty(slot));
+    (filled_slots(items))
+        .map(|worn| worn_row(items, worn))
+        .collect()
+}
+
+/// The plugin's slots with nothing in them, in its order, even those the
+/// game hasn't listed yet.
+fn empty_slots(items: &ItemsState) -> Vec<String> {
+    let filled =
+        |slot: &String| (items.worn.iter()).any(|worn| worn.slot == *slot && !worn.item.is_empty());
+    (items.slots.iter())
+        .filter(|slot| !filled(slot))
+        .cloned()
+        .collect()
+}
+
+/// What `worn` adds up to, each item's stats or `None` where nothing is
+/// known; nothing when nothing is worn.
+fn worn_total(worn: impl IntoIterator<Item = Option<ItemStats>>) -> Option<String> {
+    let mut total = text::StatRanges::new();
+    let (mut count, mut unknown) = (0, 0);
+    for stats in worn {
+        count += 1;
+        let Some(stats) = stats else {
+            unknown += 1;
+            continue;
+        };
+        for (stat, range) in text::stat_ranges(&stats) {
+            let sum = total.entry(stat).or_insert(0..=0);
+            *sum = sum.start() + range.start()..=sum.end() + range.end();
         }
-        rows.extend(filled.into_iter().map(|worn| worn_row(items, worn)));
     }
-    let others = items
-        .worn
-        .iter()
-        .filter(|worn| !items.slots.contains(&worn.slot));
-    let others = others.filter(|worn| !worn.item.is_empty());
-    rows.extend(others.map(|worn| worn_row(items, worn)));
-    rows
+    (count > 0).then(|| text::worn_total(&total, unknown))
 }
 
 /// The commands for what a carried item can do, its slot's first.
@@ -247,30 +265,43 @@ fn carried_row(items: &ItemsState, copies: &[&CarriedItem], level: Option<i64>) 
     } else {
         primary
     };
-    let mut flags = tags(&first.name);
-    let same = |worn: &&WornItem| plain_name(&worn.item) == key;
-    let in_use = items.worn.iter().filter(same).count();
-    if let Some(worn) = items.worn.iter().find(same) {
-        flags.push(format!("{in_use} in use as your {}", worn.slot));
-    }
-    let in_slot = (items.worn.iter())
+    let in_use = (items.worn.iter())
+        .filter(|worn| plain_name(&worn.item) == key)
+        .count();
+    let in_slot: Vec<ItemRef> = (items.worn.iter())
         .filter(|worn| Some(&worn.slot) == slot.as_ref() && !worn.item.is_empty())
-        .map(|worn| ItemRef {
-            name: &worn.item,
-            copy: worn.copy.as_deref(),
-        });
-    let compared = items.book.compare(item, in_slot);
-    let mut known_lines = vec![what_is_known(items, item)];
+        .map(worn_item)
+        .collect();
+    let compared = items.book.compare(item, in_slot.iter().copied());
+    let stats = items.book.stats(item);
+    let mut line = Marked::default();
+    line.push(&text::brief(stats.as_ref()));
+    if !compared.is_empty() {
+        line.push(" → ");
+        for (at, comparison) in compared.iter().enumerate() {
+            if at > 0 {
+                line.push(" or ");
+            }
+            line.push_comparison(comparison);
+        }
+    } else if let Some(slot) = slot.as_ref().filter(|_| in_slot.is_empty()) {
+        line.push(&format!(" → {slot} empty"));
+    }
+    if in_use > 0 {
+        line.push(&format!(" · {in_use} worn"));
+    }
+    let mut known_lines = vec![what_is_known(stats.as_ref())];
     known_lines.extend(compared.iter().map(text::comparison));
     Row {
         key,
         slot: None,
         name: shown_name(&first.name).into(),
         count: copies.len(),
-        flags,
+        tags: tags(&first.name),
         needs_level,
         primary,
         more,
+        line,
         known: known_lines,
     }
 }
@@ -300,6 +331,10 @@ pub struct GearPanel {
     /// The row open, by its key.
     open: Option<String>,
     worn: Vec<Row>,
+    /// The plugin's slots nothing is worn in.
+    empty: Vec<String>,
+    /// What's worn adds up to.
+    total: Option<String>,
     carried: Vec<Row>,
     sets: Vec<sets::SetRow>,
     /// The set being made or changed: it takes the panel's place.
@@ -322,6 +357,8 @@ impl GearPanel {
             locked: false,
             open: None,
             worn: Vec::new(),
+            empty: Vec::new(),
+            total: None,
             carried: Vec::new(),
             sets: Vec::new(),
             editor: None,
@@ -367,6 +404,9 @@ impl GearPanel {
 
     fn rebuild(&mut self, cx: &mut Context<GearPanel>) {
         self.worn = worn_rows(&self.items);
+        self.empty = empty_slots(&self.items);
+        let worn = filled_slots(&self.items).map(|worn| self.items.book.stats(worn_item(worn)));
+        self.total = worn_total(worn);
         self.carried = carried_rows(&self.items, self.level);
         self.sets = sets::set_rows(&self.items);
         self.refresh_editor(cx);
@@ -444,12 +484,12 @@ impl GearPanel {
     fn render_views(&self, theme: &Theme, cx: &mut Context<GearPanel>) -> impl IntoElement {
         let tabs = View::ALL.map(|view| {
             let selected = view == self.view;
-            let name = view.name();
-            button(("gear-view", view as usize), name.into(), theme)
+            let name: SharedString = self.tab_name(view).into();
+            button(("gear-view", view as usize), name.clone(), theme)
                 .role(Role::Tab)
                 .aria_selected(selected)
-                .h(FILTER_HEIGHT)
-                .px_3()
+                .h(TAB_HEIGHT)
+                .px(px(10.))
                 .border_color(theme.segment)
                 .text_size(px(12.))
                 .text_color(theme.text_muted)
@@ -475,22 +515,19 @@ impl GearPanel {
             .children(tabs)
     }
 
+    /// A button that sends `action` for `row`'s item, unstyled for its place.
     fn action_button(
         &self,
         id: ElementId,
         action: &Action,
         row: &Row,
-        primary: bool,
         theme: &Theme,
         cx: &mut Context<GearPanel>,
     ) -> Stateful<Div> {
         let label = format!("{} {}", action.name, row.name);
         let pressed = action.clone();
         let button = button(id, label.into(), theme)
-            .h(BUTTON_HEIGHT)
-            .px_3()
             .font_weight(FontWeight::MEDIUM)
-            .text_color(if primary { theme.accent } else { theme.text })
             .child(action.name);
         if self.locked {
             button.opacity(0.5).aria_description(LOCKED_NOTE)
@@ -519,7 +556,10 @@ impl GearPanel {
         });
         let actions = row.more.iter().enumerate().map(|(at, action)| {
             let id = ElementId::NamedInteger("gear-more".into(), (index * 10 + at) as u64);
-            self.action_button(id, action, row, false, theme, cx)
+            self.action_button(id, action, row, theme, cx)
+                .h(BUTTON_HEIGHT)
+                .px_3()
+                .text_color(theme.text)
         });
         div()
             .flex()
@@ -538,76 +578,170 @@ impl GearPanel {
         cx: &mut Context<GearPanel>,
     ) -> Stateful<Div> {
         let is_open = self.open.as_deref() == Some(row.key.as_str());
-        let flags = row.flag_line();
-        let second_line = (!flags.is_empty() || row.needs_level.is_some()).then(|| {
-            div()
-                .flex()
-                .gap_1()
-                .text_size(px(12.))
-                .text_color(theme.text_muted)
-                .child(flags.clone())
-                .children(
-                    row.needs_level
-                        .map(|level| div().text_color(theme.warning).child(needs_level(level))),
-                )
-        });
         let slot = row.slot.clone().map(|slot| {
             div()
                 .flex_none()
-                .w(px(60.))
-                .text_size(px(12.))
+                .self_start()
+                .w(SLOT_WIDTH)
+                .pt(px(1.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(11.5))
                 .text_color(theme.text_muted)
                 .child(slot)
         });
+        let tags = (row.tags.iter()).map(|tag| chip(tag.clone(), theme.text_muted, theme.border));
+        let count = (row.count > 1).then(|| {
+            div()
+                .flex_none()
+                .text_size(px(12.))
+                .text_color(theme.text_muted)
+                .child(format!("×{}", row.count))
+        });
+        let lock = row.needs_level.map(|level| {
+            let lock = chip(
+                format!("Lv {level}"),
+                theme.warning,
+                theme.warning.opacity(0.35),
+            );
+            lock.id(("gear-lock", index))
+                .debug_selector(move || format!("gear-lock-{index}"))
+                .bg(theme.warning_ground)
+        });
         let primary = row.primary.as_ref().map(|action| {
             let id = ElementId::NamedInteger("gear-primary".into(), index as u64);
-            self.action_button(id, action, row, true, theme, cx)
+            self.action_button(id, action, row, theme, cx)
+                .h(ROW_BUTTON_HEIGHT)
+                .px(px(6.))
+                .rounded(px(4.))
+                .border_color(transparent_black())
+                .text_size(px(12.))
+                .text_color(theme.accent)
+                .group_hover(ROW_GROUP, |style| style.bg(theme.hover))
         });
         let key = row.key.clone();
-        let more = (!row.is_empty_slot()).then(|| {
-            let label = format!("More about {}", row.name);
-            button(("gear-open", index), label.into(), theme)
-                .aria_expanded(is_open)
-                .h(BUTTON_HEIGHT)
-                .w(BUTTON_HEIGHT)
-                .border_color(theme.surface)
-                .text_color(theme.text_muted)
-                .on_click(cx.listener(move |panel, _, _, cx| panel.toggle(&key, cx)))
-                .child("···")
-        });
-        let name_color = if row.is_empty_slot() {
-            theme.text_muted
-        } else {
-            theme.text
-        };
+        let label = format!("More about {}", row.name);
+        let more = button(("gear-open", index), label.into(), theme)
+            .aria_expanded(is_open)
+            .h(ROW_BUTTON_HEIGHT)
+            .w(px(22.))
+            .rounded(px(4.))
+            .border_color(transparent_black())
+            .text_color(theme.text_muted)
+            .on_click(cx.listener(move |panel, _, _, cx| panel.toggle(&key, cx)))
+            .child("···");
         div()
             .id(("gear-row", index))
             .debug_selector(move || format!("gear-row-{index}"))
+            .group(ROW_GROUP)
             .role(Role::ListItem)
             .aria_label(SharedString::from(row.label()))
             .flex()
             .flex_col()
-            .py_2()
+            .px_1()
+            .rounded(px(5.))
+            .hover(|style| style.bg(theme.hover))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .py(px(2.))
                     .children(slot)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(name_color)
-                            .child(row_name(row.counted_name().into()))
-                            .children(second_line),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .text_size(px(13.5))
+                                    .line_height(px(17.))
+                                    .text_color(theme.text)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(row.name.clone()),
+                                    )
+                                    .children(tags)
+                                    .children(count)
+                                    .children(lock),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.5))
+                                    .line_height(px(15.))
+                                    .text_color(theme.text_muted)
+                                    .child(marked(&row.line, theme)),
+                            ),
                     )
                     .children(primary)
-                    .children(more),
+                    .child(more),
             )
             .when(is_open, |open| {
                 open.child(self.render_open(index, row, theme, cx))
             })
+    }
+
+    /// What's worn adds up to, above the worn rows.
+    fn render_total(&self, theme: &Theme) -> Option<impl IntoElement + use<>> {
+        let total = self.total.clone()?;
+        let heading = HighlightStyle {
+            color: Some(theme.text),
+            font_weight: Some(FontWeight::MEDIUM),
+            ..HighlightStyle::default()
+        };
+        let text =
+            StyledText::new(total.clone()).with_highlights([(0..text::WORN_TOTAL.len(), heading)]);
+        Some(
+            div()
+                .id("gear-total")
+                .debug_selector(|| "gear-total".to_owned())
+                .role(Role::Label)
+                .aria_value(SharedString::from(total))
+                .flex_none()
+                .px_2()
+                .py(px(5.))
+                .rounded(px(6.))
+                .bg(theme.surface_raised)
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(text),
+        )
+    }
+
+    /// The slots nothing is worn in, below the worn rows.
+    fn render_empty(&self, theme: &Theme) -> Option<impl IntoElement + use<>> {
+        if self.empty.is_empty() {
+            return None;
+        }
+        let empty = format!("{EMPTY} · {}", self.empty.join(" · "));
+        let heading = HighlightStyle {
+            color: Some(theme.placeholder),
+            font_weight: Some(FontWeight::MEDIUM),
+            ..HighlightStyle::default()
+        };
+        let text = StyledText::new(empty.clone()).with_highlights([(0..EMPTY.len(), heading)]);
+        Some(
+            div()
+                .id("gear-empty-slots")
+                .debug_selector(|| "gear-empty-slots".to_owned())
+                .role(Role::Label)
+                .aria_value(SharedString::from(empty))
+                .flex_none()
+                .text_size(px(11.5))
+                .text_color(theme.text_muted)
+                .child(text),
+        )
     }
 
     /// The items the chat named, each saying what its tooltip says.
@@ -667,19 +801,19 @@ impl GearPanel {
         notes
     }
 
-    fn section_name(&self) -> String {
-        match self.view {
-            View::Worn => "WORN".to_owned(),
+    /// "Worn", or "Carrying · 23".
+    fn tab_name(&self, view: View) -> String {
+        match view {
+            View::Worn => view.name().to_owned(),
             View::Carrying => {
                 let count: usize = self.carried.iter().map(|row| row.count).sum();
-                let noun = if count == 1 { "ITEM" } else { "ITEMS" };
-                format!("CARRYING · {count} {noun}")
+                format!("{} · {count}", view.name())
             }
         }
     }
 }
 
-/// The panel's heading.
+/// The set editor's heading.
 fn render_heading(name: &'static str, theme: &Theme) -> impl IntoElement + use<> {
     div()
         .id("gear-heading")
@@ -691,6 +825,33 @@ fn render_heading(name: &'static str, theme: &Theme) -> impl IntoElement + use<>
         .text_size(px(21.))
         .text_color(theme.text)
         .child(name)
+}
+
+/// A tag or a lock after an item's name.
+fn chip(text: String, color: Hsla, border: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px(px(4.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(border)
+        .text_size(px(10.5))
+        .line_height(px(14.))
+        .text_color(color)
+        .child(text)
+}
+
+/// `line`, its gains and losses in the theme's colors.
+fn marked(line: &Marked, theme: &Theme) -> StyledText {
+    let highlights = line.marks.iter().map(|(range, better)| {
+        let color = if *better { theme.better } else { theme.worse };
+        let style = HighlightStyle {
+            color: Some(color),
+            ..HighlightStyle::default()
+        };
+        (range.clone(), style)
+    });
+    StyledText::new(line.text.clone()).with_highlights(highlights)
 }
 
 impl Render for GearPanel {
@@ -712,29 +873,22 @@ impl Render for GearPanel {
                 .text_color(theme.text_muted)
                 .child(note)
         });
+        let worn = self.view == View::Worn;
         div()
             .id("gear-panel")
             .track_focus(&self.focus_handle)
+            .role(Role::Group)
+            .aria_label("Gear")
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(px(10.))
             .p_4()
             .overflow_y_scroll()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_between()
-                    .child(render_heading("Gear", &theme))
-                    .child(self.render_views(&theme, cx)),
-            )
-            .when(self.view == View::Worn, |panel| {
-                panel.child(self.render_sets(&theme, cx))
-            })
-            .child(section_label(&self.section_name(), &theme))
+            .child(div().flex().child(self.render_views(&theme, cx)))
+            .when(worn, |panel| panel.child(self.render_sets(&theme, cx)))
             .children(notes)
+            .when(worn, |panel| panel.children(self.render_total(&theme)))
             .child(
                 div()
                     .id("gear-rows")
@@ -744,6 +898,7 @@ impl Render for GearPanel {
                     .flex_col()
                     .children(rows),
             )
+            .when(worn, |panel| panel.children(self.render_empty(&theme)))
             .children(self.render_named(&theme))
             .into_any_element()
     }

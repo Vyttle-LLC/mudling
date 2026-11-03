@@ -15,7 +15,7 @@ use crate::room_panel::{button, row_name, section_label};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Pixels, Role,
-    SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    SharedString, Stateful, Subscription, Window, div, prelude::*, px, transparent_black,
 };
 use mudling_core::gear::sets::{Candidate, WearPlan, candidates, match_pieces};
 use mudling_core::gear::{plain_name, shown_name};
@@ -24,9 +24,10 @@ use mudling_core::session::GearEdit;
 use mudling_core::store::ItemsState;
 
 const SMALL_BUTTON_HEIGHT: Pixels = px(24.);
+/// A set's chip, inside its border.
+const CHIP_HEIGHT: Pixels = px(20.);
 const NO_CHARACTER_NOTE: &str = "Sets are kept per character, once the game says who's playing.";
-const NO_SETS_NOTE: &str = "Put on what you wear for levelling, tanking or hitting and save it as \
-                            a set. One press then finds each piece, even in a bag.";
+const NO_SETS_NOTE: &str = "Save what you're wearing as a set.";
 const NEW_SET: &str = "New set";
 const NAME_LABEL: &str = "Set name";
 const NAME_PLACEHOLDER: &str = "Set name, like Levelling, Tank or Hit";
@@ -472,8 +473,12 @@ impl GearPanel {
             format!("Edit {}", row.name).into(),
             theme,
         )
-        .h(BUTTON_HEIGHT)
-        .px_3()
+        .h(CHIP_HEIGHT)
+        .px(px(6.))
+        .rounded_full()
+        .border_color(transparent_black())
+        .text_size(px(11.))
+        .text_color(theme.text_muted)
         .on_click(cx.listener(move |panel, _, window, cx| {
             let set = panel.items.sets.iter().find(|set| set.id == edit_id);
             panel.open_editor(set.cloned(), window, cx);
@@ -485,12 +490,14 @@ impl GearPanel {
             format!("Wear {}", row.name).into(),
             theme,
         )
-        .h(BUTTON_HEIGHT)
-        .px_3()
-        .border_color(theme.accent)
-        .text_color(theme.accent)
-        .font_weight(FontWeight::MEDIUM)
-        .child("Wear");
+        .h(CHIP_HEIGHT)
+        .pl(px(10.))
+        .pr(px(4.))
+        .rounded_full()
+        .border_color(transparent_black())
+        .text_size(px(12.))
+        .text_color(theme.text)
+        .child(row.name.clone());
         let wear = if self.locked {
             wear.opacity(0.5).aria_description(LOCKED_NOTE)
         } else {
@@ -505,43 +512,23 @@ impl GearPanel {
             .aria_label(SharedString::from(format!("{}: {}", row.name, row.summary)))
             .flex()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded_lg()
+            .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_color(theme.text)
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(row_name(row.name.clone())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme.text_muted)
-                            .child(row.summary.clone()),
-                    ),
-            )
-            .child(edit)
             .child(wear)
+            .child(edit)
     }
 
-    /// The section above Worn.
+    /// The line above Worn: a chip per set, pressed to wear it.
     pub(super) fn render_sets(&self, theme: &Theme, cx: &mut Context<GearPanel>) -> Div {
         let no_one = self.items.character.is_empty();
         let new_set = button("gear-set-new", NEW_SET.into(), theme)
-            .h(BUTTON_HEIGHT)
-            .px_3()
-            .child(NEW_SET);
+            .h(CHIP_HEIGHT + px(2.))
+            .px(px(10.))
+            .rounded_full()
+            .text_size(px(12.))
+            .text_color(theme.accent)
+            .child("+ New");
         let new_set = if no_one {
             new_set.opacity(0.5).aria_description(NO_CHARACTER_NOTE)
         } else {
@@ -571,26 +558,27 @@ impl GearPanel {
             .flex()
             .flex_col()
             .flex_none()
-            .gap_2()
+            .gap_1()
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .justify_between()
-                    .child(section_label("GEAR SETS", theme))
+                    .gap(px(6.))
+                    .child(section_label("SETS", theme))
+                    .child(
+                        div()
+                            .id("gear-sets")
+                            .role(Role::List)
+                            .aria_label("Gear sets")
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(6.))
+                            .children(rows),
+                    )
                     .child(new_set),
             )
             .children(note)
-            .child(
-                div()
-                    .id("gear-sets")
-                    .role(Role::List)
-                    .aria_label("Gear sets")
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .children(rows),
-            )
     }
 
     fn small_button(
