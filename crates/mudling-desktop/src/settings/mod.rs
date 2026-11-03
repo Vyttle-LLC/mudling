@@ -19,6 +19,7 @@ mod server_plugins;
 mod servers;
 mod shortcuts;
 mod triggers;
+mod updates;
 mod vault;
 
 pub use add_plugin::{Added, AddedPlugin, shown_path};
@@ -27,12 +28,14 @@ pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};
 pub use servers::SavedServer;
+pub use updates::UpdateAsk;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::input;
 use crate::shell::{FocusHotbar, PinCommand, ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::{Appearance, CHAT_FONTS, Theme};
 use crate::title_bar::{FindInScrollback, OpenSettings, problems_text};
+use crate::update::UpdateStatus;
 use gpui::{
     AnyElement, App, Bounds, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight, Hsla,
     KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Size, Stateful, Task,
@@ -203,6 +206,7 @@ pub enum SheetEvent {
     SyncNow,
     LockAfter(LockAfter),
     VaultUnlocked,
+    Update(UpdateAsk),
 }
 
 /// What the pane shows: its section, or a page opened from it.
@@ -423,6 +427,9 @@ pub struct SettingsSheet {
     /// The approval open over the sheet, which keeps the keyboard until it's
     /// answered.
     asking: Option<directory::Approval>,
+    update: UpdateStatus,
+    /// What restarting would drop, while Restart to update asks about it.
+    asking_restart: Option<SharedString>,
     dialog: FocusHandle,
     tabs: [FocusHandle; Section::ALL.len()],
     close: FocusHandle,
@@ -476,6 +483,8 @@ impl SettingsSheet {
             directory: directory::DirectoryPane::new(cx),
             add: add_plugin::AddPane::new(window, cx),
             asking: None,
+            update: UpdateStatus::default(),
+            asking_restart: None,
             dialog: cx.focus_handle(),
             tabs: std::array::from_fn(|_| cx.focus_handle()),
             close: cx.focus_handle(),
@@ -703,8 +712,8 @@ impl SettingsSheet {
 
     /// Moves `step` stops on, round the sheet, and brings the stop into view.
     fn walk(&mut self, step: isize, window: &mut Window, cx: &mut Context<SettingsSheet>) {
-        // An approval keeps the keyboard on its own buttons.
-        let fixed = if self.asking.is_some() {
+        // An approval or a question keeps the keyboard on its own buttons.
+        let fixed = if self.asking.is_some() || self.asking_to_restart() {
             0
         } else {
             self.tabs.len() + 1
@@ -851,7 +860,10 @@ impl SettingsSheet {
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
             (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
             (Page::AddPlugin, _) => self.fill_add_plugin(&mut pane, theme, cx),
-            (Page::Section, section) => self.fill_section(section, &mut pane, theme, cx),
+            (Page::Section, section) => {
+                self.fill_update_card(&mut pane, theme, cx);
+                self.fill_section(section, &mut pane, theme, cx);
+            }
         }
 
         if let Some(wanted) = self.reveal.take()
@@ -964,26 +976,19 @@ impl gpui::Render for SettingsSheet {
         let width = sheet.width;
         let scrim_click = cx.listener(|sheet, _, window, cx| {
             window.prevent_default();
-            sheet.close(cx);
+            if sheet.asking_to_restart() {
+                sheet.answer_restart(false, window, cx);
+            } else {
+                sheet.close(cx);
+            }
         });
         let dialog = div()
             .id("settings-sheet")
             .debug_selector(|| "settings-sheet".to_owned())
             .key_context(CONTEXT)
-            .role(Role::Dialog)
-            .aria_label("Settings")
             .a11y_synthetic_children(|builder| builder.parent_node().set_modal())
             .track_focus(&self.dialog)
             .occlude()
-            .w(width)
-            .h(sheet.height)
-            .flex()
-            .overflow_hidden()
-            .rounded_xl()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface)
-            .shadow(theme.floating_shadow())
             .font_family(UI_FONT)
             .text_color(theme.text)
             // Tab in a text field is a stop like any other here.
@@ -992,7 +997,9 @@ impl gpui::Render for SettingsSheet {
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|sheet, _: &CloseSettings, window, cx| {
-                if sheet.asking.is_some() {
+                if sheet.asking_to_restart() {
+                    sheet.answer_restart(false, window, cx);
+                } else if sheet.asking.is_some() {
                     sheet.answer(false, false, window, cx);
                 } else {
                     sheet.close(cx);
@@ -1017,11 +1024,31 @@ impl gpui::Render for SettingsSheet {
             .on_action(|_: &OpenSettings, _, _| {})
             .on_action(|_: &FocusHotbar, _, _| {})
             .on_action(|_: &PinCommand, _, _| {});
-        let dialog = match self.render_approval(&theme, cx) {
-            Some(approval) => dialog.child(approval),
-            None => dialog
-                .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
-                .child(self.render_pane(&theme, cx)),
+        let dialog = match self.render_restart_question(&theme, cx) {
+            Some(question) => dialog
+                .role(Role::AlertDialog)
+                .aria_label(updates::RESTART_TITLE)
+                .child(question),
+            None => {
+                let dialog = dialog
+                    .role(Role::Dialog)
+                    .aria_label("Settings")
+                    .w(width)
+                    .h(sheet.height)
+                    .flex()
+                    .overflow_hidden()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.surface)
+                    .shadow(theme.floating_shadow());
+                match self.render_approval(&theme, cx) {
+                    Some(approval) => dialog.child(approval),
+                    None => dialog
+                        .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
+                        .child(self.render_pane(&theme, cx)),
+                }
+            }
         };
         div()
             .id("settings-scrim")
