@@ -29,8 +29,9 @@ fn needs_no_hooks_and_asks_only_to_send_gmcp() {
     assert!(plugin.manifest.hooks.files.is_empty());
 }
 
-/// What `mudling plugin test` runs, and what the app runs on a plugin added
-/// from a link: it loads, its own tests match, and its hooks don't fail.
+/// Most of what `mudling plugin test` and the app run on a plugin added from
+/// a link: it loads, its own tests match, and its hooks don't fail. Its cost a
+/// line is `timing_keeps_within_its_line_budget`, below.
 #[test]
 fn passes_its_own_tests() {
     check::own_tests_except_cost(&load(), &own_files())

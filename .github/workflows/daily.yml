@@ -3,8 +3,9 @@
 # so no absolute number is gated here: the benchmark is recorded, and what
 # fails the run is a comparison of two builds measured in turns on one
 # machine, or a timing test that failed every attempt. A red run is
-# GitHub's own failure notice for a scheduled workflow, sent to those who
-# watch the repository's Actions. docs/ci.md says how to run all of it locally.
+# GitHub's own failure notice for a scheduled workflow, sent only to the user
+# who created it or last changed the cron line below; others see it on the
+# Actions tab. docs/ci.md says how to run all of it locally.
 name: Daily performance
 
 on:

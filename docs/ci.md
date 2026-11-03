@@ -35,10 +35,11 @@ A comparison runs both builds in turns on one machine, so a slow spell hits
 both alike. The timing tests run up to three times, and a retry reruns only
 the tests that failed.
 
-A failed job turns the run red. GitHub sends its own failure notice for a
-scheduled workflow, to whoever last changed the schedule and to those who watch
-the repository's Actions. Open the run to see which job failed; the reports
-and test logs are its artifacts.
+A failed job turns the run red. GitHub's own failure notice for a scheduled
+workflow goes only to the user who created the workflow or last changed its
+`cron` line: in practice, whoever's commit last touched the `schedule:` line.
+Everyone else sees a failure on the Actions tab. Open the run to see which job
+failed; the reports and test logs are its artifacts.
 
 ## Timing tests
 
@@ -57,7 +58,10 @@ Run them locally, on a quiet machine:
 cargo test --workspace -- --ignored timing_
 ```
 
-`cargo test -- --ignored` with no filter runs the other ignored tests too.
+Always use the `timing_` filter. An unfiltered `cargo test -- --ignored` also
+runs tests that rewrite the committed fixture
+`crates/mudling-core/src/vault/testdata/format-1.vault`, and tests that reach
+the GPU (image files) and the live registry.
 
 ## Holding the budgets locally
 
