@@ -252,7 +252,8 @@ impl SettingsSheet {
                         },
                     )),
             )
-            .child(div().flex_none().w(row.took.width).child(painted(
+            // Rounded up, as gpui rounds an explicit width to the nearest pixel.
+            .child(div().flex_none().w(row.took.width.ceil()).child(painted(
                 &row.took,
                 CHAT_FONTS[0],
                 theme.text_muted,
