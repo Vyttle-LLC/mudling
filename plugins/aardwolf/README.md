@@ -125,15 +125,17 @@ see the [reference](../../docs/plugins/reference.md#what-a-replay-does-and-doesn
 ## Cost
 
 Measured as Avatar's was, in a release build on an Apple Silicon Mac shared
-with other builds (load average 14 to 19), on 2026-11-02:
+with other builds (load average 10 to 12), on 2026-11-02, with its channel
+and its request:
 
 | Measure | Text | Added per line at p99 |
 | --- | --- | --- |
-| `mudling plugin test` | `tests/sample.txt`, 12 lines | +0.75 µs |
-| `mudling-bench --plugin` | the bench's fixture, 5,059 lines | +0.00 µs (Avatar: +0.13 µs) |
+| `mudling plugin test` | `tests/sample.txt`, 12 lines | +0.58 µs (Avatar: +1.71 µs) |
+| `mudling-bench --plugin` | the bench's fixture, 5,059 lines | +0.00 µs (Avatar: +1.42 µs) |
 
-Its GMCP fields cost no line anything: the core reads them only when a GMCP
-message arrives.
+Its GMCP fields, its channel and its request cost no line anything: the core
+reads them only when a GMCP message arrives. A channel's line then costs what
+any line read by the text rules does.
 
 Both are within the 5 µs budget. The bench's fixture is Avatar-like text,
 which these patterns mostly don't match, so the sample is the closer
