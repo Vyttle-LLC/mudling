@@ -5574,15 +5574,26 @@ pub mod tests {
         syncer.quit().wait();
     }
 
-    /// A folder of the player's own holding a plugin with the id `id`.
-    fn plugin_folder(id: &str) -> TempDir {
-        let folder = TempDir::new().unwrap();
+    /// A plugin with the id `id`, fetched as if from a link.
+    fn fetched(id: &str) -> Arc<mudling_core::registry::Fetched> {
         let manifest = format!(
             "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = 1\n\
              license = \"MIT\"\nlayer = \"default\"\n"
         );
-        std::fs::write(folder.path().join("plugin.toml"), manifest).unwrap();
-        folder
+        let files: mudling_core::git::FolderFiles =
+            [("plugin.toml".to_owned(), manifest.into_bytes())].into();
+        let plugin = Plugin::from_files(|name| {
+            let bytes = (files.get(name)).ok_or_else(|| std::io::Error::other(name.to_owned()))?;
+            Ok(String::from_utf8(bytes.clone()).unwrap())
+        })
+        .unwrap();
+        Arc::new(mudling_core::registry::Fetched {
+            hash: mudling_core::registry::content_hash(&files),
+            source: mudling_core::registry::Source::Link(format!("https://example.org/{id}.git")),
+            commit: mudling_core::git::Oid::ZERO_SHA1,
+            files,
+            plugin,
+        })
     }
 
     #[gpui::test]
@@ -5593,31 +5604,33 @@ pub mod tests {
         shell.update_in(cx, |shell, window, cx| {
             shell.use_launcher(launcher, window, cx);
         });
-        let (first, second) = (plugin_folder("first"), plugin_folder("second"));
-        let added = |shell: &Shell| -> Vec<PathBuf> {
-            let launcher = shell.launcher.as_ref().unwrap();
-            (launcher.added_folders().iter())
-                .map(|added| added.path.clone())
-                .collect()
+        let installed = |shell: &Shell| -> Vec<String> {
+            let versions = shell.launcher.as_ref().unwrap().installed_versions();
+            versions.into_keys().collect()
         };
         let settled = |shell: &Shell, _: &App| shell.plugin_work.is_none();
 
         shell.update(cx, |shell, cx| {
-            shell.add_folder(first.path().to_owned(), cx);
-            shell.add_folder(second.path().to_owned(), cx);
+            shell.install_plugin(fetched("first"), false, cx);
+            shell.install_plugin(fetched("second"), false, cx);
         });
-        applied_until(&shell, cx, "both added", settled);
-        let both = [first.path().to_owned(), second.path().to_owned()];
-        assert_eq!(shell.read_with(cx, |shell, _| added(shell)), both);
+        applied_until(&shell, cx, "both installed", settled);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| installed(shell)),
+            ["first", "second"]
+        );
 
-        // A save's reload, then a removal before it ends.
+        // An install, then a removal before it ends.
         shell.update(cx, |shell, cx| {
-            shell.reload_folders(vec![first.path().to_owned()], cx);
-            shell.forget_folder(None, first.path().to_owned(), cx);
+            shell.install_plugin(fetched("third"), false, cx);
+            let third = PluginId::try_from("third".to_owned()).unwrap();
+            shell.remove_plugin(third, "third".into(), cx);
         });
-        applied_until(&shell, cx, "the first forgotten", settled);
-        let left = [second.path().to_owned()];
-        assert_eq!(shell.read_with(cx, |shell, _| added(shell)), left);
+        applied_until(&shell, cx, "the third removed", settled);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| installed(shell)),
+            ["first", "second"]
+        );
     }
 
     #[gpui::test]
