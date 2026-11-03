@@ -74,6 +74,7 @@ impl Shell {
             .map(|saved| saved.update_choices())
             .unwrap_or_default();
         let swap_failed = start.failed.is_some();
+        let checking_on = choices.check;
         let updates = Updates::new(start.eligibility, choices, start.failed);
         let daily = cx.spawn(async move |shell, cx| {
             loop {
@@ -99,7 +100,8 @@ impl Shell {
         if swap_failed {
             self.save_update_choices();
         }
-        if self.updates_due() {
+        // Every launch checks; the daily timer waits for a day since the last.
+        if checking_on {
             self.check_for_updates(false, cx);
         }
         self.show_update(cx);
