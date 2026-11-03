@@ -27,11 +27,7 @@ pub struct TouchIdKeyStore;
 
 impl KeyStore for TouchIdKeyStore {
     fn load(&self, account: &str) -> Result<Option<VaultKey>, KeyStoreError> {
-        match entry(account)?.get_secret() {
-            Ok(secret) => Ok(VaultKey::from_slice(&Zeroizing::new(secret))),
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(error) => Err(failure(error)),
-        }
+        loaded(entry(account)?.get_secret())
     }
 
     fn load_without_prompt(&self, _: &str) -> Result<Option<VaultKey>, KeyStoreError> {
@@ -59,6 +55,20 @@ impl KeyStore for TouchIdKeyStore {
     }
 }
 
+/// What a read found. A build that can't reach this Keychain has no copy
+/// there, so the vault stays locked for the master password.
+fn loaded(read: Result<Vec<u8>, KeyringError>) -> Result<Option<VaultKey>, KeyStoreError> {
+    match read {
+        Ok(secret) => Ok(VaultKey::from_slice(&Zeroizing::new(secret))),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) if code(&error) == Some(ERR_MISSING_ENTITLEMENT) => {
+            say_unsigned();
+            Ok(None)
+        }
+        Err(error) => Err(failure(error)),
+    }
+}
+
 fn code(error: &KeyringError) -> Option<i32> {
     match error {
         KeyringError::PlatformFailure(inner) | KeyringError::NoStorageAccess(inner) => inner
@@ -74,18 +84,65 @@ fn entry(account: &str) -> Result<keyring_core::Entry, KeyStoreError> {
 }
 
 fn failure(error: KeyringError) -> KeyStoreError {
-    static UNSIGNED: Once = Once::new();
     match code(&error) {
         Some(ERR_USER_CANCELED | ERR_AUTH_FAILED) => KeyStoreError::Cancelled,
         Some(ERR_MISSING_ENTITLEMENT) => {
-            UNSIGNED.call_once(|| {
-                eprintln!(
-                    "this build isn't signed for the Keychain, so it keeps no copy of the \
-                     vault key and every unlock takes the master password"
-                );
-            });
+            say_unsigned();
             error.into()
         }
         _ => error.into(),
+    }
+}
+
+fn say_unsigned() {
+    static UNSIGNED: Once = Once::new();
+    UNSIGNED.call_once(|| {
+        eprintln!(
+            "this build isn't signed for the Keychain, so it keeps no copy of the vault key \
+             and every unlock takes the master password"
+        );
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{AutoLock, EntryKey, Error, FILE_NAME, Vault, VaultState};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Reads as a build without the Keychain entitlement does.
+    struct Unsigned;
+
+    impl KeyStore for Unsigned {
+        fn load(&self, _: &str) -> Result<Option<VaultKey>, KeyStoreError> {
+            let refused = security_framework::base::Error::from_code(ERR_MISSING_ENTITLEMENT);
+            loaded(Err(KeyringError::PlatformFailure(Box::new(refused))))
+        }
+        fn save(&self, _: &str, _: &VaultKey) -> Result<(), KeyStoreError> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), KeyStoreError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn without_the_entitlement_auto_login_waits_on_a_locked_vault() {
+        let folder = tempfile::TempDir::new().unwrap();
+        let path = folder.path().join(FILE_NAME);
+        std::fs::write(&path, include_str!("../testdata/format-1.vault")).unwrap();
+        let vault = Vault::open(path, Arc::new(Unsigned), AutoLock::NEVER);
+
+        assert!(matches!(
+            vault.unlock_from_device().await,
+            Err(Error::NotCached)
+        ));
+
+        assert_eq!(vault.state(), VaultState::Locked);
+        let fikus = EntryKey::new("mud.example.org", "Fikus");
+        let auto_login = vault.password(&fikus);
+        let waited = tokio::time::timeout(Duration::from_millis(50), auto_login).await;
+        assert!(waited.is_err(), "auto-login waits for the master password");
     }
 }
