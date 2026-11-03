@@ -10,7 +10,7 @@ cargo run --release -p mudling-desktop -- --synthetic --ax-check
 ```
 
 `--ax-check` (macOS) runs the window off screen, never taking focus, walks it
-through 54 stops (every panel, the HUD in each place, every settings section,
+through 56 stops (every panel, the HUD in each place, every settings section,
 page and question it can reach without a real game) and prints a JSON report.
 It exits 1 if a check fails. It checks two ways:
 
@@ -27,13 +27,13 @@ It exits 1 if a check fails. It checks two ways:
 
 | | |
 |---|---|
-| Stops | 54 |
-| Elements, rows folded together (the inventory below) | 163 |
+| Stops | 56 |
+| Elements, rows folded together (the inventory below) | 167 |
 | Controls seen in the audit's tree dumps, counting each row's copy (48 stops, before the update card) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
 | Gaps found | 18 |
 | Gaps fixed | 18 |
-| Checks in `--ax-check`, before and after (with the update card's two) | 82 and 100 |
+| Checks in `--ax-check`, before and after (with the update card's two) | 82 and 102 |
 
 ## Gaps found and fixed
 
@@ -42,7 +42,7 @@ It exits 1 if a check fails. It checks two ways:
 | The trigger, alias and Logs switches were all named "…, on", so an off switch said "on" | Switches are named for what they turn on; on or off is their state |
 | Plugin switches said on or off twice, in the name and the state | Named for the plugin alone |
 | Check for updates, the same | Named "Check for updates" |
-| Restart to update's question was a plain box, not a dialog | An alert dialog named "Restart to update?" |
+| Where to today?'s update card offered a bare "Restart" | Named "Restart to update", as in Settings |
 | HUD meters read "3,120/4,300" | They read "3,120 of 4,300" |
 | The HUD's top strip drew the opponent as text no screen reader could reach | It's a label, read with its health |
 | Tab and Shift-Tab skipped the hotbar: its chips and Add a chip held focus handles that weren't tab stops | They are tab stops, between the left panel and the command bar |
@@ -254,7 +254,9 @@ control with several rows, one per item or rule, is one line here.
 | Check for updates | Switch | Check for updates | named |
 | Check now | Button | Check now | named |
 | When it checks, last checked | Label | *words* | named |
-| Restart's question | AlertDialog with Heading, Buttons | Restart to update?; *what restarting does*; Cancel, Restart | named, focus |
+| Restart's question, in place of the sheet | AlertDialog with Heading, Buttons | Restart to update?; *what restarting does*; Cancel, Restart | named, focus |
+| An update that didn't go in, at the top of every section | Group with Alert | *title*; *why*, You're still on *version* | named |
+| Its OK | Button | OK | named |
 | **Vault:** Reveal, Change, Remove | Button | Reveal / Change / Remove the password for *character on server* | named |
 | Its question | Buttons | Keep the password for…, Remove the password for… | named |
 | Add a password | Button | Add a password | named |
@@ -272,6 +274,8 @@ control with several rows, one per item or rule, is one line here.
 | Quick connect | TextInput, Button | Quick connect, Connect | named |
 | Add form | TextInput, Buttons | Server address, Save, Cancel | named, focus |
 | Settings | Button | Settings | named |
+| Update card, with an update ready | Group, Heading, Label | MUDling *version* is ready; Restart now, or it goes in when you quit. | named |
+| Its Later and Restart | Button | Later, Restart to update | named |
 
 ### What the check doesn't reach
 

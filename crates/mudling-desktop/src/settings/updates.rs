@@ -342,9 +342,6 @@ impl SettingsSheet {
         self.stops = pane.stops;
         Some(
             div()
-                .id("restart-question")
-                .role(Role::AlertDialog)
-                .aria_label(RESTART_TITLE)
                 .w(px(420.))
                 .p_5()
                 .rounded_xl()

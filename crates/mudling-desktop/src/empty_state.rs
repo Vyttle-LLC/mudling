@@ -290,6 +290,7 @@ impl EmptyState {
             cx.listener(|_, _, _, cx| cx.emit(EmptyStateEvent::Update(UpdateAsk::Later))),
         );
         let restart = text_button("empty-update-restart", "Restart", false, theme)
+            .aria_label("Restart to update")
             .border_color(theme.accent)
             .text_color(theme.accent)
             .on_click(

@@ -19,6 +19,7 @@ use crate::measure;
 use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
+use crate::update::UpdateStatus;
 use gpui::{App, AsyncApp, Context, Entity, Keystroke, Window, px};
 use mudling_core::logs::{Kind, LogFile};
 use mudling_core::persist::{self, Timestamp};
@@ -378,6 +379,13 @@ const RESTART_QUESTION: &str = "You're connected to mud.example as Sample. Resta
                                 disconnects you. MUDling saves everything first, and opens the \
                                 same server again afterwards.";
 const RESTART_CONTROLS: [&str; 3] = ["Restart to update?", "Cancel", "Restart"];
+/// The empty state's card for a ready update: its name and buttons.
+const EMPTY_UPDATE_CONTROLS: [&str; 3] = ["MUDling 0.9.0 is ready", "Later", "Restart to update"];
+/// A made-up update that didn't go in: its card's title, and why.
+const UPDATE_FAILURE: [&str; 2] = [
+    "MUDling 0.9.0 didn't install",
+    "The download didn't match its checksum.",
+];
 /// What a screen reader must find in Vault, filled with made-up rows.
 const VAULT_CONTROLS: [&str; 7] = [
     "Reveal the password for Sample on mud.example",
@@ -1990,6 +1998,20 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
             detail: format!("{focused:?}"),
         });
+        cx.update(|cx| {
+            let empty_state = shell.read(cx).empty_state();
+            empty_state.update(cx, |empty_state, cx| {
+                empty_state.show_update(Some("0.9.0".into()), cx);
+            });
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let missing = named_in(&tree, &EMPTY_UPDATE_CONTROLS);
+        checks.push(Check {
+            name: "Where to today? says an update is ready, with Later and Restart to update",
+            passed: missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
 
         // Last, as the update renames the sprocket the walks above look for.
         let shown = in_window(
@@ -2055,6 +2077,35 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .as_ref()
                 .is_some_and(|tree| !tree.find(dialog).is_empty()),
             detail: String::new(),
+        });
+
+        let shown = in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.answer_restart(false, window, cx);
+                    let failure = (UPDATE_FAILURE[0].to_owned(), UPDATE_FAILURE[1].to_owned());
+                    let status = UpdateStatus {
+                        failure: Some(failure),
+                        ..UpdateStatus::default()
+                    };
+                    sheet.show_update(status, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let missing = named_in(&tree, &[UPDATE_FAILURE[0], "OK"]);
+        let alerted = tree.as_ref().is_some_and(|tree| {
+            let says = |e: &AxElement| {
+                (e.value.as_deref()).is_some_and(|value| value.starts_with(UPDATE_FAILURE[1]))
+            };
+            !tree.find(says).is_empty()
+        });
+        checks.push(Check {
+            name: "an update that didn't go in says why, with its OK",
+            passed: shown.is_some() && missing.is_empty() && alerted,
+            detail: format!("not found: {missing:?}, reason read: {alerted}"),
         });
 
         checks.push(sweep.check());
