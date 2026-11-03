@@ -9,6 +9,7 @@
 //! opening (PRD §8), so Reduce Motion has nothing to turn off here.
 
 mod camera;
+mod forget;
 pub mod harness;
 mod join;
 mod model;
@@ -69,6 +70,7 @@ pub struct MapView {
     review_first: FocusHandle,
     join_button: FocusHandle,
     undo_button: FocusHandle,
+    forget: forget::Forgetting,
     /// Review was open at the last draw, so a join may just have ended it.
     review_open: bool,
     /// A timer will ask about duplicates again.
@@ -98,6 +100,7 @@ impl MapView {
             review_first: cx.focus_handle().tab_stop(true),
             join_button: cx.focus_handle().tab_stop(true),
             undo_button: cx.focus_handle().tab_stop(true),
+            forget: forget::Forgetting::new(cx),
             review_open: false,
             scan_waiting: false,
         };
@@ -503,6 +506,7 @@ fn chevron(up: bool, color: Hsla) -> impl IntoElement {
 impl Render for MapView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<MapView>) -> impl IntoElement {
         self.keep_focus(window, cx);
+        self.drop_stale_question();
         let theme = *cx.global::<Theme>();
         let colors = theme.map;
         let review = self.model.review_pair();
