@@ -8,24 +8,44 @@ use super::plugins::micros;
 use super::{Page, Pane, Section, SettingsSheet, SheetEvent, muted_line, text_button};
 use crate::assets::UI_FONT;
 use crate::theme::{CHAT_FONTS, Theme};
-use gpui::{Context, Pixels, Role, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    ContentMask, Context, DecorationRun, Hsla, LineLayout, Pixels, Role, SharedString, TextAlign,
+    TextRun, Window, canvas, div, font, point, prelude::*, px,
+};
 use mudling_core::plugin::inspect::{Claim, InspectedLine};
-use mudling_core::store::{INSPECTED_LINES, InspectorChange, InspectorState, StoreState};
+use mudling_core::store::{INSPECTED_LINES, InspectorChange};
+use std::collections::VecDeque;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 const NOTHING_CLAIMED: &str = "Nothing claimed this line";
 const NOTHING_YET: &str = "Lines the game sends will show here.";
 /// What a claim says when a plugin only colored the line.
 const COLORED: &str = "coloring";
+const ELLIPSIS: &str = "…";
 const ROW_HEIGHT: Pixels = px(52.);
+const LINE_SIZE: Pixels = px(13.);
+const NOTE_SIZE: Pixels = px(12.);
 /// How soon the page shows lines that came after it last drew. A draw of the
-/// sheet costs a frame 2 to 3 ms, and more than one frame in a hundred over
+/// sheet costs a frame 1 to 2 ms, and more than one frame in a hundred over
 /// the 8 ms budget misses it, so this can't be much shorter.
 pub(super) const REFRESH_EVERY: Duration = Duration::from_secs(1);
 /// The tallest sheet shows 13 rows, one of them cut off at the top.
 const ROWS_DRAWN: usize = 16;
 const ROWS_BEYOND_THE_VIEW: usize = 2;
+
+/// A recorded line, shaped when it arrived. Each draw shows up to 16 lines it
+/// hasn't shown before, and shaping them all in that one frame took more than
+/// the rest of the draw, so the work is spread over the frames lines arrive in.
+pub(super) struct InspectedRow {
+    text: Arc<LineLayout>,
+    who: Arc<LineLayout>,
+    took: Arc<LineLayout>,
+    claimed: bool,
+    /// What a screen reader hears for the row.
+    said: SharedString,
+}
 
 /// Which of `lines` rows to draw with the first `scrolled` above the view.
 /// Lines arrive on every frame, so the rest only hold the list's height.
@@ -47,6 +67,79 @@ fn claimed_by(claims: &[Claim], name_of: impl Fn(&str) -> SharedString) -> Optio
     (!said.is_empty()).then_some(said)
 }
 
+fn shaped(text: &str, family: &'static str, size: Pixels, window: &Window) -> Arc<LineLayout> {
+    let run = TextRun {
+        len: text.len(),
+        font: font(family),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window.text_system().layout_line(text, size, &[run], None)
+}
+
+/// gpui's default line height for text of `size`.
+fn line_height(size: Pixels) -> Pixels {
+    size * 1.618
+}
+
+/// How much of `layout` to show in `width`: up to the glyph that would cross it.
+fn cut_short(layout: &LineLayout, width: Pixels) -> Pixels {
+    let crossing = layout.index_for_x(width).unwrap_or(layout.len);
+    layout.x_for_index(crossing)
+}
+
+/// Paints a line shaped beforehand, cut short with an ellipsis where it
+/// doesn't fit.
+fn painted(layout: &Arc<LineLayout>, family: &'static str, color: Hsla) -> impl IntoElement {
+    let layout = layout.clone();
+    let height = line_height(layout.font_size);
+    let paint = move |bounds: gpui::Bounds<Pixels>, (), window: &mut Window, cx: &mut gpui::App| {
+        let in_color = |len: usize| {
+            [DecorationRun {
+                len: len as u32,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }]
+        };
+        let mut shown = bounds;
+        if layout.width > bounds.size.width {
+            let ellipsis = shaped(ELLIPSIS, family, layout.font_size, window);
+            shown.size.width = cut_short(&layout, bounds.size.width - ellipsis.width);
+            let after = point(bounds.origin.x + shown.size.width, bounds.origin.y);
+            let decorations = in_color(ellipsis.len);
+            (ellipsis.paint(
+                after,
+                height,
+                TextAlign::Left,
+                None,
+                &decorations,
+                window,
+                cx,
+            ))
+            .ok();
+        }
+        let decorations = in_color(layout.len);
+        window.with_content_mask(Some(ContentMask { bounds: shown }), |window| {
+            let origin = bounds.origin;
+            (layout.paint(
+                origin,
+                height,
+                TextAlign::Left,
+                None,
+                &decorations,
+                window,
+                cx,
+            ))
+            .ok();
+        });
+    };
+    canvas(|_, _, _| {}, paint).w_full().h(height)
+}
+
 impl SettingsSheet {
     pub fn open_inspector(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         cx.emit(SheetEvent::Inspect(true));
@@ -56,8 +149,13 @@ impl SettingsSheet {
     /// New lines from the session, for as long as the page is open. The page
     /// draws at once, then no more often than `REFRESH_EVERY`: the sheet is
     /// laid out afresh each time, and lines arrive on every frame.
-    pub fn show_inspected(&mut self, change: &InspectorChange, cx: &mut Context<SettingsSheet>) {
-        if !self.inspector.apply(change) {
+    pub fn show_inspected(
+        &mut self,
+        change: &InspectorChange,
+        window: &Window,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        if !self.record(change, window) {
             return;
         }
         if self.inspector_cooldown.is_some() {
@@ -84,9 +182,25 @@ impl SettingsSheet {
         }));
     }
 
+    /// Keeps the newest `INSPECTED_LINES`, and says whether that changed them.
+    fn record(&mut self, change: &InspectorChange, window: &Window) -> bool {
+        let cleared = change.clear && !self.inspector.is_empty();
+        if change.clear {
+            self.inspector.clear();
+        }
+        let kept = change.lines.len().saturating_sub(INSPECTED_LINES);
+        let rows = change.lines[kept..].iter();
+        let rows = rows.map(|line| self.inspected_row(line, window));
+        let rows = rows.collect::<Vec<_>>();
+        self.inspector.extend(rows);
+        let overflow = self.inspector.len().saturating_sub(INSPECTED_LINES);
+        self.inspector.drain(..overflow);
+        cleared || !change.lines.is_empty()
+    }
+
     /// Drops the lines, and any draw that was waiting to show them.
     pub(super) fn forget_inspected(&mut self) {
-        self.inspector = InspectorState::default();
+        self.inspector = VecDeque::new();
         self.inspector_cooldown = None;
         self.inspector_late = false;
     }
@@ -97,23 +211,26 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    fn inspected_row(
-        &self,
-        number: usize,
-        inspected: &InspectedLine,
-        theme: &Theme,
-    ) -> impl IntoElement + use<> {
-        let text = SharedString::from(inspected.line.plain().to_owned());
+    fn inspected_row(&self, inspected: &InspectedLine, window: &Window) -> InspectedRow {
+        let text = inspected.line.plain();
         let claimed = claimed_by(&inspected.claims, |id| self.display_name(id));
         let took = micros(inspected.took.as_secs_f64() * 1e6);
-        let who = claimed
-            .clone()
-            .unwrap_or_else(|| NOTHING_CLAIMED.to_owned());
+        let who = claimed.as_deref().unwrap_or(NOTHING_CLAIMED);
+        InspectedRow {
+            text: shaped(text, CHAT_FONTS[0], LINE_SIZE, window),
+            who: shaped(who, UI_FONT, NOTE_SIZE, window),
+            took: shaped(&took, CHAT_FONTS[0], NOTE_SIZE, window),
+            claimed: claimed.is_some(),
+            said: format!("{text}, {who}, {took}").into(),
+        }
+    }
+
+    fn render_inspected(number: usize, row: &InspectedRow, theme: &Theme) -> impl IntoElement {
         div()
             .id(("inspected", number))
             .debug_selector(move || format!("inspected-{number}"))
             .role(Role::Label)
-            .aria_value(format!("{text}, {who}, {took}"))
+            .aria_value(row.said.clone())
             .h(ROW_HEIGHT)
             .flex()
             .items_center()
@@ -125,35 +242,21 @@ impl SettingsSheet {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .truncate()
-                            .font_family(CHAT_FONTS[0])
-                            .text_size(px(13.))
-                            .text_color(theme.text)
-                            .child(text),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .font_family(UI_FONT)
-                            .text_size(px(12.))
-                            .text_color(if claimed.is_some() {
-                                theme.accent
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(who),
-                    ),
+                    .child(painted(&row.text, CHAT_FONTS[0], theme.text))
+                    .child(painted(
+                        &row.who,
+                        UI_FONT,
+                        match row.claimed {
+                            true => theme.accent,
+                            false => theme.text_muted,
+                        },
+                    )),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(CHAT_FONTS[0])
-                    .text_size(px(12.))
-                    .text_color(theme.text_muted)
-                    .child(took),
-            )
+            .child(div().flex_none().w(row.took.width).child(painted(
+                &row.took,
+                CHAT_FONTS[0],
+                theme.text_muted,
+            )))
     }
 
     pub(super) fn fill_inspector(
@@ -174,19 +277,19 @@ impl SettingsSheet {
             ),
             theme,
         ));
-        if self.inspector.lines.is_empty() {
+        if self.inspector.is_empty() {
             pane.row(muted_line(NOTHING_YET, theme));
             return;
         }
-        let lines = self.inspector.lines.len();
+        let lines = self.inspector.len();
         let scrolled = (-self.scroll.offset().y / ROW_HEIGHT).max(0.) as usize;
         let shown = rows_in_view(scrolled, lines);
         let height = |rows: usize| ROW_HEIGHT * rows as f32;
-        let newest_first = self.inspector.lines.iter().rev().enumerate();
+        let newest_first = self.inspector.iter().rev().enumerate();
         let rows = newest_first
             .skip(shown.start)
             .take(shown.len())
-            .map(|(number, line)| self.inspected_row(number, line, theme));
+            .map(|(number, row)| Self::render_inspected(number, row, theme));
         pane.row(
             div()
                 .id("inspected-lines")
@@ -206,8 +309,9 @@ impl SettingsSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::tests::window_with_keys;
+    use gpui::{FontId, GlyphId, ShapedGlyph, ShapedRun, TestAppContext};
     use mudling_core::plugin::PluginId;
-    use std::sync::Arc;
 
     fn id(name: &str) -> PluginId {
         PluginId::try_from(name.to_owned()).unwrap()
@@ -224,6 +328,47 @@ mod tests {
             2..2,
             "scrolled past a list that shrank"
         );
+    }
+
+    #[gpui::test]
+    fn a_line_is_shaped_as_it_arrives_not_when_the_page_draws(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        let line = crate::measure::sample_inspected().swap_remove(0);
+        let change = InspectorChange {
+            clear: false,
+            lines: vec![line.clone()],
+        };
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.show_inspected(&change, window, cx);
+            let newest = sheet.inspector.back().expect("the line is recorded");
+            assert_eq!(newest.text.len, line.line.plain().len(), "before any draw");
+            assert!(newest.who.width > px(0.) && newest.took.width > px(0.));
+        });
+    }
+
+    #[test]
+    fn a_long_line_is_cut_before_the_glyph_that_crosses_the_width() {
+        let glyph = |index: usize| ShapedGlyph {
+            id: GlyphId(0),
+            position: point(px(10. * index as f32), px(0.)),
+            index,
+            is_emoji: false,
+        };
+        let layout = LineLayout {
+            font_size: px(13.),
+            width: px(50.),
+            runs: vec![ShapedRun {
+                font_id: FontId(0),
+                glyphs: (0..5).map(glyph).collect(),
+            }],
+            len: 5,
+            ..LineLayout::default()
+        };
+        assert_eq!(cut_short(&layout, px(35.)), px(30.));
+        assert_eq!(cut_short(&layout, px(30.)), px(30.));
+        assert_eq!(cut_short(&layout, px(5.)), px(0.));
     }
 
     #[test]

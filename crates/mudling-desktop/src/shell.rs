@@ -1516,8 +1516,9 @@ impl Shell {
             self.show_rules(cx);
         }
         if let Some(inspector) = &batch.inspector {
-            self.settings
-                .update(cx, |sheet, cx| sheet.show_inspected(&inspector.change, cx));
+            self.settings.update(cx, |sheet, cx| {
+                sheet.show_inspected(&inspector.change, window, cx);
+            });
         }
         if let Some(cues) = batch.cues.as_ref().filter(|_| !self.is_replaying()) {
             cues.change.iter().for_each(|sound| self.play_sound(sound));
