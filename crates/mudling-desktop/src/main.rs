@@ -461,7 +461,11 @@ fn launcher_updates(options: &Options, keeps_settings: bool) -> Option<UpdateSta
     let cache = update::cache_folder()?;
     let eligibility = update::this_copy();
     let failed = match &eligibility {
-        Eligibility::Updates(installed) => update::after_last_exit(installed, &cache),
+        Eligibility::Updates(installed) => {
+            let path = installed.path.clone();
+            std::thread::spawn(move || update::remove_old_copies(&path));
+            update::after_last_exit(&cache)
+        }
         _ => None,
     };
     // A restart opens the new copy on the same data folder.

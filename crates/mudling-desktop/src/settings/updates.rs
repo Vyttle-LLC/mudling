@@ -102,7 +102,8 @@ fn setting_row(
         .children(control)
 }
 
-/// The card's frame: Moss-edged, because nothing is wrong.
+/// The card's frame, edged in `edge`: Moss for a release that's ready,
+/// because nothing is wrong, and the plain border for one that didn't go in.
 fn card(id: &'static str, title: SharedString, edge: gpui::Hsla, theme: &Theme) -> Stateful<Div> {
     div()
         .id(id)

@@ -66,8 +66,11 @@ for the vault as at any launch.
   aside, moves the new one in, and puts the old one back if that fails.
 - **Windows**: a running `.exe` can't be overwritten, but it can be renamed. The
   new `MUDling.exe` waits beside the old one as `MUDling.exe.new`; on exit the
-  old one becomes `MUDling.exe.old` and the new one takes its name. The next
-  launch removes `MUDling.exe.old`.
+  old one becomes `MUDling.exe.old` and the new one takes its name. After a
+  restart the old copy may still be exiting, so the new launch tries for a
+  few seconds, off the UI thread, to remove it. A stale `.old` the next swap
+  can't delete is renamed aside with a time stamp and removed later, so it
+  never stops an update.
 - **Linux**: the same two renames, for the AppImage.
 
 Downloads wait in the OS's cache folder (on macOS

@@ -268,12 +268,66 @@ fn a_verified_appimage_waits_beside_the_installed_one() {
 
     swap_file(&appimage, &staged.path).unwrap();
     assert_eq!(fs::read_to_string(&appimage).unwrap(), "new");
-    let cache = folder.path().join("cache");
-    assert_eq!(after_last_exit(&staged.installed, &cache), None);
+    assert_eq!(after_last_exit(&folder.path().join("cache")), None);
+    remove_old_copies(&appimage);
     assert!(
         !with_suffix(&appimage, ".old").exists(),
         "the next launch tidies up"
     );
+}
+
+#[test]
+fn a_stale_old_copy_never_stops_the_next_update() {
+    let folder = TempDir::new().unwrap();
+    let exe = folder.path().join("MUDling.exe");
+    let new = folder.path().join("MUDling.exe.new");
+    let old = with_suffix(&exe, ".old");
+    // One that can't be deleted, as Windows holds a copy still running: a
+    // folder with a file in it refuses `remove_file` on every OS.
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("held"), "").unwrap();
+    fs::write(&exe, "0.8.2").unwrap();
+    fs::write(&new, "0.9.0").unwrap();
+
+    swap_file(&exe, &new).unwrap();
+    assert_eq!(fs::read_to_string(&exe).unwrap(), "0.9.0");
+    assert_eq!(fs::read_to_string(&old).unwrap(), "0.8.2");
+    let aside = fs::read_dir(folder.path())
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("MUDling.exe.old-")
+        })
+        .count();
+    assert_eq!(aside, 1, "the held copy was renamed out of the way");
+
+    // And the update after that, over a plain stale `.old`.
+    fs::write(&new, "0.9.1").unwrap();
+    swap_file(&exe, &new).unwrap();
+    assert_eq!(fs::read_to_string(&exe).unwrap(), "0.9.1");
+}
+
+#[test]
+fn old_copies_go_once_nothing_holds_them() {
+    let folder = TempDir::new().unwrap();
+    let exe = folder.path().join("MUDling.exe");
+    for name in [
+        "MUDling.exe",
+        "MUDling.exe.old",
+        "MUDling.exe.old-1793680000",
+    ] {
+        fs::write(folder.path().join(name), "").unwrap();
+    }
+    remove_old_copies(&exe);
+    let left: Vec<_> = fs::read_dir(folder.path())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    assert_eq!(left, ["MUDling.exe"]);
 }
 
 #[test]
@@ -289,15 +343,14 @@ fn a_swap_that_fails_leaves_the_installed_copy_in_place() {
 #[test]
 fn a_failed_swap_is_said_once_on_the_next_launch() {
     let folder = TempDir::new().unwrap();
-    let copy = installed(LINUX_X64, folder.path().join("MUDling.AppImage"));
     fs::write(
         folder.path().join(FAILED_SWAP),
         "0.9.0\nThe new copy couldn't be moved into place.\n",
     )
     .unwrap();
-    let failure = after_last_exit(&copy, folder.path()).unwrap();
+    let failure = after_last_exit(folder.path()).unwrap();
     assert_eq!(failure.version.as_deref(), Some("0.9.0"));
-    assert_eq!(after_last_exit(&copy, folder.path()), None);
+    assert_eq!(after_last_exit(folder.path()), None);
 }
 
 #[cfg(unix)]

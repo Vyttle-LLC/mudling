@@ -176,7 +176,7 @@ pub struct Ran {
 
 /// Where releases come from: GitHub, or a fake in tests.
 pub trait Feed {
-    /// The latest release's JSON, as the releases API returns it.
+    /// The latest release, read from the releases API's answer.
     fn latest(&self) -> Result<Release, String>;
     fn download(&self, url: &str, to: &Path) -> Result<(), String>;
 }
@@ -616,10 +616,19 @@ impl Staged {
 }
 
 /// Moves `installed` aside to `<name>.old` and `new` into its place, or puts
-/// it back. The next launch removes the old copy.
+/// it back. A stale `.old` that can't be deleted is renamed out of the way
+/// first. The next launch removes the old copies ([`remove_old_copies`]).
 fn swap_file(installed: &Path, new: &Path) -> Result<(), String> {
     let old = with_suffix(installed, ".old");
-    let _ = fs::remove_file(&old);
+    // A copy the last restart left may still be running, so Windows won't
+    // delete it, but it will rename it out of the way.
+    if fs::remove_file(&old).is_err() && old.exists() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let _ = fs::rename(&old, with_suffix(&old, &format!("-{stamp}")));
+    }
     fs::rename(installed, &old)
         .map_err(|error| format!("{} couldn't be moved aside: {error}", installed.display()))?;
     if let Err(error) = fs::rename(new, installed) {
@@ -631,10 +640,35 @@ fn swap_file(installed: &Path, new: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the last exit's swap left: the old copy it moved aside, which goes
-/// now, and if the swap failed, the version and why, to say once.
-pub fn after_last_exit(installed: &Installed, cache: &Path) -> Option<Failure> {
-    let _ = fs::remove_file(with_suffix(&installed.path, ".old"));
+/// Removes the old copies past swaps moved aside: `<name>.old`, and any
+/// `<name>.old-<stamp>` a swap had to rename out of the way. Windows holds
+/// one while the copy it ran is still exiting, as after a restart, so this
+/// tries a few times over the first seconds. Blocks: run it on a thread.
+pub fn remove_old_copies(installed: &Path) {
+    let (Some(folder), Some(name)) = (installed.parent(), installed.file_name()) else {
+        return;
+    };
+    let mut prefix = name.to_owned();
+    prefix.push(".old");
+    let prefix = prefix.to_string_lossy().into_owned();
+    for _ in 0..10 {
+        let Ok(entries) = fs::read_dir(folder) else {
+            return;
+        };
+        let old: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|entry| entry.path())
+            .collect();
+        if old.iter().all(|path| fs::remove_file(path).is_ok()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// If the last exit's swap failed, the version and why, to say once.
+pub fn after_last_exit(cache: &Path) -> Option<Failure> {
     let failed = cache.join(FAILED_SWAP);
     let written = fs::read_to_string(&failed).ok()?;
     let _ = fs::remove_file(&failed);
