@@ -74,6 +74,12 @@ items. Without it, the app is signed without entitlements and still launches,
 but without Touch ID: macOS kills an app at launch that claims an entitlement no
 profile allows.
 
+Make the profile in the Apple Developer portal for team `34674BKS72`, as a
+Developer ID profile whose App ID is exactly `com.vyttle.mudling`, not a
+wildcard. The entitlements claim that App ID
+(`com.apple.application-identifier` is `34674BKS72.com.vyttle.mudling`) and
+team; a profile for any other App ID gets the app killed at launch.
+
 ### Windows: add before a public release
 
 Windows builds ship unsigned for now. Before a public release, add these for
