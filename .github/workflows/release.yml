@@ -155,7 +155,7 @@ jobs:
     runs-on: windows-latest
     env:
       MUDLING_VERSION: ${{ needs.version.outputs.version }}
-    # Each secret reaches only the signing steps, never the third-party build actions.
+    # Each Azure secret reaches only the check below and the signing steps, never the third-party build actions.
     steps:
       # Signing goes ahead only with every Azure Trusted Signing secret; otherwise the builds ship unsigned.
       # A step's `if` cannot read secrets, so the answer is passed as an output.
@@ -282,7 +282,6 @@ jobs:
     permissions:
       contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -294,6 +293,8 @@ jobs:
           merge-multiple: true
 
       - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           ls -l dist
           # A release drafted in GitHub's UI already exists; attach the builds to it.
