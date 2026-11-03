@@ -585,6 +585,12 @@ impl LiveMap {
         self.tracker.unconfirmed_rooms()
     }
 
+    /// Commands still waiting for the Room.Info they bring.
+    #[cfg(test)]
+    pub(super) fn pending_commands(&self) -> usize {
+        self.tracker.pending()
+    }
+
     pub fn mobs(&self) -> &MobMemory {
         &self.mobs
     }

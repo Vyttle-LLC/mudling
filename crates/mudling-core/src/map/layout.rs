@@ -312,6 +312,14 @@ impl Layout {
         self.matches_identity(stored, step) && stored.exit_directions() == step.exit_directions()
     }
 
+    /// The same identity and set of exits, and the very description shown:
+    /// nothing left to tell the two apart.
+    pub fn reads_exactly(&self, stored: &MapRoom, step: &Step) -> bool {
+        !step.description.is_empty()
+            && stored.description == step.description
+            && self.matches_exactly(stored, step)
+    }
+
     /// Known rooms the step's room could be; those with the very same
     /// description first-class, when there are any.
     pub fn candidates(&self, step: &Step) -> Vec<RoomId> {
@@ -328,7 +336,7 @@ impl Layout {
             .collect();
         let described: Vec<RoomId> = possible
             .iter()
-            .filter(|room| !step.description.is_empty() && room.description == step.description)
+            .filter(|room| self.reads_exactly(room, step))
             .map(|room| room.id)
             .collect();
         let mut ids = if described.is_empty() {
@@ -347,14 +355,26 @@ impl Layout {
         if let Some(number) = step.number {
             return self.contains(number).then_some(number);
         }
-        if step.description.is_empty() {
-            return None;
-        }
-        let mut matches = self.look_alikes(&step.name, &step.zone).filter(|room| {
-            room.description == step.description && room.exit_directions() == step.exit_directions()
-        });
+        let mut matches = self
+            .look_alikes(&step.name, &step.zone)
+            .filter(|room| self.reads_exactly(room, step));
         let only = matches.next()?;
         matches.next().is_none().then_some(only.id)
+    }
+
+    /// The one room besides `room` with its very name, area, description
+    /// and set of exits; `None` when there's none, or several.
+    pub fn exact_twin(&self, room: &MapRoom) -> Option<RoomId> {
+        if room.description.is_empty() {
+            return None;
+        }
+        let mut twins = self.look_alikes(&room.name, &room.zone).filter(|other| {
+            other.id != room.id
+                && other.description == room.description
+                && other.exit_directions() == room.exit_directions()
+        });
+        let only = twins.next()?;
+        twins.next().is_none().then_some(only.id)
     }
 
     // MARK: Placing rooms
@@ -562,20 +582,11 @@ impl Layout {
             .into_iter()
             .collect();
         for other in merged {
-            for (from, direction) in self.inbound(*other).to_vec() {
-                self.update(from, |room| room.links.insert(direction, maze));
-            }
-            let Some(room) = self.remove(*other) else {
+            let Some(room) = self.absorb(maze, *other) else {
                 continue;
             };
             self.update(maze, |maze| {
-                for (direction, to) in room.links.iter() {
-                    if !maze.links.contains(direction) {
-                        maze.links.insert(direction, *to);
-                    }
-                }
                 // What the player said of a room outlasts it.
-                maze.features.extend(room.features.iter().cloned());
                 if !room.notes.is_empty() && !notes.contains(&room.notes) {
                     notes.push(room.notes.clone());
                     maze.notes = notes.join("\n\n");
@@ -601,6 +612,60 @@ impl Layout {
             self.current = Some(maze);
         }
         true
+    }
+
+    /// Folds `fresh`, a room mapped while unsure, into `known`, the room it
+    /// turned out to be: its paths, what was seen in it and the player go
+    /// over to the known room.
+    pub fn fold(&mut self, fresh: RoomId, known: RoomId) {
+        let Some(room) = self.absorb(known, fresh) else {
+            return;
+        };
+        self.update(known, |known_room| {
+            for (mob, seen) in &room.sightings {
+                let last = known_room.sightings.entry(mob.clone()).or_insert(*seen);
+                *last = (*last).max(*seen);
+            }
+        });
+        if self.current == Some(fresh) {
+            self.current = Some(known);
+        }
+    }
+
+    /// Moves each room by `offset` when the square there is free; one whose
+    /// square is taken stays put, for straightening to sort out.
+    pub fn shift(&mut self, ids: &[RoomId], offset: GridPoint) {
+        for id in ids {
+            let Some(room) = self.room(*id) else {
+                continue;
+            };
+            let target = room.position + offset;
+            if self.room_at(target, &room.zone, room.building).is_none() {
+                self.update(*id, |room| room.position = target);
+            }
+        }
+    }
+
+    /// Removes `other`, leaving `kept` with what hung off it: the paths
+    /// into it, its own paths where `kept` has none that way, and its
+    /// features. Paths between the two go with it, rather than becoming
+    /// paths from `kept` to itself. Returns the room removed.
+    fn absorb(&mut self, kept: RoomId, other: RoomId) -> Option<Arc<MapRoom>> {
+        for (from, direction) in self.inbound(other).to_vec() {
+            if from != kept {
+                self.update(from, |room| room.links.insert(direction, kept));
+            }
+        }
+        let room = self.remove(other)?;
+        self.update(kept, |kept_room| {
+            for (direction, to) in room.links.iter() {
+                if *to != other && *to != kept && !kept_room.links.contains(direction) {
+                    kept_room.links.insert(direction, *to);
+                }
+            }
+            kept_room.features.extend(room.features.iter().cloned());
+        });
+        Some(room)
     }
 
     /// Whether a flat path from the room doesn't line up on the grid.

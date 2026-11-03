@@ -6,6 +6,11 @@
 //! when it could be one of several, the tracker keeps every explanation and
 //! lets the next rooms decide. Each area has a grid of its own, and so does
 //! each building within an area.
+//!
+//! The tracker never joins rooms the map already holds. The only rooms it
+//! folds by itself are ones it added during the unsure walk for a room shown
+//! before its description: once the description is read and shows a known
+//! room exactly, the two are one (see `join` for the player's own joins).
 
 use super::geometry::{Direction, GridPoint};
 use super::layout::{Arrival, Landing, Layout, Step, refresh};
@@ -88,6 +93,9 @@ struct Guess {
     path: Vec<RoomId>,
     score: i32,
     arrival: Arrival,
+    /// Rooms this explanation added, for an arrival nothing explained,
+    /// before their description was shown.
+    undescribed: Vec<RoomId>,
 }
 
 impl Guess {
@@ -97,8 +105,63 @@ impl Guess {
             path: Vec::new(),
             score: 0,
             arrival: Arrival::default(),
+            undescribed: Vec::new(),
         }
     }
+
+    /// Folds each undescribed room whose description has since been read
+    /// into the one known room it then reads exactly like. The rooms walked
+    /// to from it go along, so no long path is left back to its island.
+    /// Returns whether any was folded.
+    fn fold_described(&mut self, origin: &Layout) -> bool {
+        let layout = &mut self.layout;
+        let mut folded = false;
+        self.undescribed.retain(|id| {
+            let Some(room) = layout.room(*id) else {
+                return false;
+            };
+            if room.description.is_empty() {
+                return true;
+            }
+            let twin = origin.exact_twin(room).and_then(|known| layout.room(known));
+            if let Some(known) = twin {
+                let offset = known.position - room.position;
+                let known = known.id;
+                let walked = added_with(layout, origin, *id);
+                layout.fold(*id, known);
+                layout.shift(&walked, offset);
+                folded = true;
+            }
+            false
+        });
+        folded
+    }
+}
+
+/// The rooms added since `origin` that hang together with `fresh` on its
+/// map, by paths that don't pass through a room `origin` holds.
+fn added_with(layout: &Layout, origin: &Layout, fresh: RoomId) -> Vec<RoomId> {
+    let Some(start) = layout.room(fresh) else {
+        return Vec::new();
+    };
+    let same_map = |id: RoomId| {
+        layout
+            .room(id)
+            .is_some_and(|room| room.zone == start.zone && room.building == start.building)
+    };
+    let mut found = HashSet::from([fresh]);
+    let mut queue = vec![fresh];
+    while let Some(id) = queue.pop() {
+        for next in layout.neighbors(id) {
+            if !origin.contains(next) && same_map(next) && found.insert(next) {
+                queue.push(next);
+            }
+        }
+    }
+    found.remove(&fresh);
+    let mut rooms: Vec<RoomId> = found.into_iter().collect();
+    rooms.sort_unstable();
+    rooms
 }
 
 /// The walk since the map was last sure where the player was.
@@ -164,6 +227,12 @@ impl Tracker {
         if adrift {
             self.expected.clear();
         }
+    }
+
+    /// Commands still waiting for the Room.Info they bring.
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.expected.len()
     }
 
     pub fn is_in_dark(&self) -> bool {
@@ -282,6 +351,12 @@ impl Tracker {
             _ => None,
         };
         step.landing = dark_walk.as_ref().and_then(|walk| walk.landing(step_taken));
+        let refused_then_looked =
+            step_taken
+                .zip(previous.as_ref())
+                .is_some_and(|(direction, here)| {
+                    text_denies_move(&self.layout, here, &step, direction)
+                });
         let mut maze_exit = None;
         if let (Some(maze), Some(direction)) =
             (previous.as_ref().filter(|room| room.maze), step_taken)
@@ -302,6 +377,7 @@ impl Tracker {
             // The rooms walked in the dark were never seen, so nothing
             // links to this one: it's placed where the moves lead.
         } else if let Some(direction) = step_taken
+            && !refused_then_looked
             && !previous
                 .as_ref()
                 .is_some_and(|room| number_denies_move(room, &step, direction))
@@ -311,7 +387,18 @@ impl Tracker {
             && self.layout.matches_exactly(previous, &step)
         {
             // A look, or a Room.Info nobody asked for, showing the same room.
+            // After a refused move, it answers the look sent behind it too.
+            if refused_then_looked
+                && self
+                    .expected
+                    .front()
+                    .is_some_and(|pending| pending.expectation == Expectation::Stay)
+            {
+                self.expected.pop_front();
+                self.start_waiting(now);
+            }
             self.update_current_rooms(|room| refresh(room, &step));
+            self.fold_described();
             return arrived;
         }
 
@@ -334,6 +421,9 @@ impl Tracker {
                 .iter()
                 .flat_map(|guess| branches(guess, &step))
                 .collect();
+        }
+        for guess in &mut guesses {
+            guess.fold_described(&doubt.origin);
         }
         let earlier_path = std::mem::take(&mut doubt.guesses[0].path);
         doubt.guesses = strongest(guesses, &doubt.origin);
@@ -403,6 +493,25 @@ impl Tracker {
                 self.settled_areas.clear();
             }
             self.settled_areas.insert(after.fingerprint);
+        }
+    }
+
+    /// Folds the rooms added while unsure into the known rooms a look has
+    /// since shown them to be, in every explanation.
+    fn fold_described(&mut self) {
+        let Some(Doubt {
+            origin, guesses, ..
+        }) = &mut self.doubt
+        else {
+            return;
+        };
+        let mut best_folded = false;
+        for (index, guess) in guesses.iter_mut().enumerate() {
+            let folded = guess.fold_described(origin);
+            best_folded |= folded && index == 0;
+        }
+        if best_folded {
+            self.layout = guesses[0].layout.clone();
         }
     }
 
@@ -479,18 +588,6 @@ impl Tracker {
     }
 }
 
-/// Every way `guess` could explain arriving in the step's room, each with
-/// its own copy of the map updated and its evidence scored. Empty when the
-/// guess's room has no exit the way the player moved.
-///
-/// Evidence: following a known path into the room it leads to counts for
-/// (+2), less when other rooms look the same (+1); closing a loop where the
-/// grid expects counts a little (+1), and so does the very same description
-/// (+1); a new room that looks exactly like the one known room of its kind
-/// is a small coincidence (-1); a known room somewhere the grid doesn't
-/// expect it, a stretched path, is a bigger one (-2); an exit that led
-/// somewhere else before, or a way back that leads somewhere else, counts
-/// strongly against (-3), since only a maze or a wrong guess does that.
 /// Whether the game's room numbers say the player didn't make the move the
 /// map expected from `here`: the room is `here` again (the move was refused
 /// without a word), or the numbers already known say that way leads
@@ -512,6 +609,33 @@ fn number_denies_move(here: &MapRoom, step: &Step, direction: Direction) -> bool
         }
 }
 
+/// Whether the room shown reads exactly like `here`, description and all,
+/// though the map knows the way moved leads to another room: the game
+/// refused the move in words its rules don't know, and this is a look.
+/// Taken for a move, it would map the player's room a second time.
+fn text_denies_move(layout: &Layout, here: &MapRoom, step: &Step, direction: Direction) -> bool {
+    layout.reads_exactly(here, step)
+        && here
+            .links
+            .get_copied(direction)
+            .and_then(|to| layout.room(to))
+            .is_some_and(|to| !layout.matches_identity(to, step))
+}
+
+/// Every way `guess` could explain arriving in the step's room, each with
+/// its own copy of the map updated and its evidence scored. Empty when the
+/// guess's room has no exit the way the player moved.
+///
+/// Evidence: following a known path into the room it leads to counts for
+/// (+2), less when other rooms look the same (+1); closing a loop where the
+/// grid expects counts a little (+1), and so does the very same description
+/// (+1); a new room that looks exactly like the one known room of its kind
+/// is a small coincidence (-1); a known room somewhere the grid doesn't
+/// expect it, a stretched path, is a bigger one (-2); an exit that led
+/// somewhere else before, or a way back that leads somewhere else, counts
+/// strongly against (-3), since only a maze or a wrong guess does that. An
+/// arrival no move explains is never a new room when known rooms read
+/// exactly like it, description and all.
 fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
     let layout = &guess.layout;
     let mut known = layout.candidates(step);
@@ -588,9 +712,17 @@ fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
     } else if known.len() == 1 {
         vec![(Some(known[0]), 0)]
     } else {
-        // Followed, summoned, recalled: a known room nearby is likeliest; a
-        // room new to the map starts a far-off island, so it's least. Out
-        // of the dark, so is the room the moves lead to.
+        // Followed, summoned, recalled: a known room nearby is likeliest,
+        // and out of the dark, so is the room the moves lead to. A room new
+        // to the map starts a far-off island, so it's least, and out of the
+        // question when known rooms read exactly like it, description and all.
+        let exact = !known.is_empty()
+            && known.iter().all(|id| {
+                layout
+                    .room(*id)
+                    .is_some_and(|room| layout.reads_exactly(room, step))
+            });
+        let new_room = (!exact).then_some((None, -1));
         let landing = step.landing.map(|landing| landing.position);
         let near = |id: RoomId| {
             let neighbor = here.is_some_and(|here| here.links.values().any(|to| *to == id));
@@ -602,10 +734,12 @@ fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
         known
             .iter()
             .map(|id| (Some(*id), near(*id)))
-            .chain([(None, -1)])
+            .chain(new_room)
             .collect()
     };
 
+    let half_seen =
+        step.number.is_none() && step.direction.is_none() && step.description.is_empty();
     choices
         .into_iter()
         .map(|(identity, evidence)| {
@@ -613,6 +747,9 @@ fn branches(guess: &Guess, step: &Step) -> Vec<Guess> {
             next.arrival = next.layout.arrive(step, identity);
             next.path.push(next.layout.current.unwrap_or(0));
             next.score += evidence;
+            if next.arrival.new_room && half_seen {
+                next.undescribed.extend(next.layout.current);
+            }
             next
         })
         .collect()
