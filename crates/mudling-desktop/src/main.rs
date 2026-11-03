@@ -52,7 +52,6 @@ mod assets;
 mod character_panel;
 mod chat;
 mod dock;
-mod dpad;
 mod empty_state;
 mod find_panel;
 mod gear_panel;

@@ -329,6 +329,11 @@ impl MapModel {
         self.camera.zoom_at(factor, anchor, size);
     }
 
+    /// Zooms about the middle of the view, so a followed player stays there.
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.camera.zoom_by(factor);
+    }
+
     /// Fits the sheet in a view of `size` pixels.
     pub fn fit(&mut self, size: (f32, f32)) {
         if let Some(extent) = self.sheet.extent() {
@@ -849,6 +854,15 @@ mod tests {
 
         model.follow();
         assert_ne!(model.camera().center, panned);
+    }
+
+    #[test]
+    fn zooming_about_the_middle_keeps_following_the_player() {
+        let mut model = grid_model();
+        model.zoom_by(1.25);
+        move_to(&mut model, 5, 2);
+        let (square, _) = model.you().expect("the player is on this sheet");
+        assert_eq!(model.camera().center, (square.0 as f32, square.1 as f32));
     }
 
     #[test]

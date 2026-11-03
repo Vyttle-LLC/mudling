@@ -3833,7 +3833,7 @@ pub mod tests {
 
         played.click("Go north");
         assert_eq!(played.heard_command(), "north");
-        played.click("dpad-east");
+        played.click("Open the door and go east");
         assert_eq!(played.heard_command(), "pry east");
         assert_eq!(played.heard_command(), "east");
     }
@@ -3921,7 +3921,8 @@ pub mod tests {
         press_key("enter", played.cx);
         assert_eq!(played.heard_command(), "north");
 
-        played.cx.simulate_keystrokes("tab tab");
+        // Past the map's zoom keys, then north, to the closed door east.
+        played.cx.simulate_keystrokes("tab tab tab tab");
         press_key("enter", played.cx);
         assert_eq!(played.heard_command(), "open east");
         assert_eq!(played.heard_command(), "east");
