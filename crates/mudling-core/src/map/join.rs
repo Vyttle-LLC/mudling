@@ -109,7 +109,7 @@ pub(crate) fn not_same_in(meta: &[Meta]) -> BTreeSet<RoomPair> {
 }
 
 /// Whether the map may join `id`: only a room the game gave no number.
-pub fn can_join(id: RoomId) -> bool {
+pub(super) fn can_join(id: RoomId) -> bool {
     id >= UNNUMBERED_IDS
 }
 

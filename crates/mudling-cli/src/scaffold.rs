@@ -16,9 +16,13 @@ const FILES: [(&str, &str); 4] = [
     ),
 ];
 
-/// Makes `<parent>/<id>/`. It must not exist: nothing gets overwritten.
+/// Makes `<parent>/<id>/`. It must not exist: nothing gets overwritten. The
+/// built-in defaults' id is taken, since a plugin with it wouldn't load.
 pub fn create(id: &str, parent: &Path) -> Result<PathBuf, String> {
     let id = PluginId::try_from(id.to_owned())?;
+    if id == *mudling_core::defaults::plugin().id() {
+        return Err(format!("{id} is the built-in defaults' id: choose another"));
+    }
     let folder = parent.join(id.as_str());
     let could_not = |error| format!("couldn't create {}: {error}", folder.display());
     fs::create_dir_all(parent).map_err(could_not)?;

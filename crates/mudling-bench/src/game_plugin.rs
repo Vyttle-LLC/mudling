@@ -5,11 +5,11 @@
 //! hosts read each line in turn, so both see the same machine state. Its
 //! Luau hooks run on their own thread, off the line, and aren't counted.
 
-use crate::plugin_host::{Counter, PLUGIN_BUDGET_US, realistic_plugins, split};
+use crate::plugin_host::{Counter, realistic_plugins, split};
 use crate::verdict;
 use mudling_core::line::Line;
 use mudling_core::plugin::{Plugin, PluginHost};
-use mudling_core::stats::Summary;
+use mudling_core::stats::{PLUGIN_BUDGET_US, Summary};
 use serde::Serialize;
 use std::path::Path;
 use std::time::{Duration, Instant};

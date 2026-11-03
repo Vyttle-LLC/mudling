@@ -13,13 +13,12 @@ use mudling_core::plugin::luau::{
     HookLimits, HookOutput, HookRunner, HookSink, LuauHooks, OVERRUNS_TO_TURN_OFF, StateView, Value,
 };
 use mudling_core::plugin::{Plugin, PluginEvent, PluginHost, PluginSink};
-use mudling_core::stats::Summary;
+use mudling_core::stats::{PLUGIN_BUDGET_US, Summary};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const PLUGIN_BUDGET_US: f64 = 5.0;
 /// One line in this many reaches the hook: a table row now and then.
 pub const HOOKED_EVERY: f64 = 20.0;
 const CALLS: usize = 100_000;

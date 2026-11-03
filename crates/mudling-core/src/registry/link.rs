@@ -4,7 +4,9 @@
 //! one of the data folder's plugins like any other, so it syncs, and another
 //! device holds it back until the player there trusts it.
 
-use super::{Fetched, InstallError, REGISTRY_FOLDER, Source, content_hash, hex, load_files};
+use super::{
+    Fetched, InstallError, InstalledPlugins, REGISTRY_FOLDER, Source, content_hash, hex, load_files,
+};
 use crate::git::{GitError, Limit, Mirror};
 use crate::plugin::check;
 use sha2::{Digest, Sha256};
@@ -17,7 +19,7 @@ const LINKS_FOLDER: &str = "links";
 /// Enough of a link's hash to name its mirror.
 const NAME_LENGTH: usize = 16;
 /// The most a link's fetch may download. A plugin is a few small text
-/// files; its folder is held to [`crate::git::FOLDER_LIMITS`] too.
+/// files; the mirror holds its folder to limits of its own too.
 const MOST_DOWNLOAD: u64 = 16 * 1024 * 1024;
 
 /// Fetches the plugin `url` points to and checks it: its manifest and
@@ -33,8 +35,9 @@ pub fn fetch_link(data_folder: &Path, url: &str, limit: &Limit) -> Result<Fetche
         )));
     }
     let fetched = fetch_into_mirror(data_folder, url, limit);
-    if fetched.is_err() {
-        // What a link that failed left behind is no use to anyone.
+    // What a link that failed left behind is no use to anyone, unless a
+    // plugin installed from it is kept up to date from there.
+    if fetched.is_err() && !InstalledPlugins::in_data_folder(data_folder).has_link(url) {
         let _ = forget_link(data_folder, url);
     }
     fetched

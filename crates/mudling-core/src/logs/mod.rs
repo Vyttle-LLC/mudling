@@ -256,7 +256,6 @@ impl Logs {
         }
     }
 
-    /// Copies `log` to where the player picked.
     pub fn export(&self, log: &LogFile, to: &Path) -> io::Result<()> {
         fs::copy(&log.path, to).map(drop)
     }
@@ -283,7 +282,6 @@ impl Logs {
         Ok(())
     }
 
-    /// Where a new log goes.
     fn new_path(&self, kind: Kind, host: &str, started: Timestamp) -> PathBuf {
         let host: String = host
             .chars()

@@ -2,5 +2,5 @@
 -- its pattern matched.
 
 function on_welcome(event)
-	mud.store("character", "name", event.captures.name)
+    mud.store("character", "name", event.captures.name)
 end

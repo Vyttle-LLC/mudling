@@ -23,18 +23,18 @@ pub type FolderFiles = BTreeMap<String, Vec<u8>>;
 /// How big a folder may be read: generous for a plugin, which is a few
 /// small text files, and small enough that no repo can fill the memory or
 /// the stack.
-pub struct FolderLimits {
+struct FolderLimits {
     /// Folders inside folders.
-    pub depth: usize,
+    depth: usize,
     /// Folders in all, counted each time one is visited: git can list one
     /// folder object under many names, so a small repo can name millions.
-    pub folders: usize,
-    pub files: usize,
-    pub bytes: u64,
-    pub largest_file: u64,
+    folders: usize,
+    files: usize,
+    bytes: u64,
+    largest_file: u64,
 }
 
-pub const FOLDER_LIMITS: FolderLimits = FolderLimits {
+const FOLDER_LIMITS: FolderLimits = FolderLimits {
     depth: 16,
     folders: 2_000,
     files: 1_000,
@@ -161,24 +161,23 @@ impl Mirror {
                 .map_err(|_| GitError::Failed(format!("{folder} isn't a folder")))?
                 .id()
         };
-        collect(&repo, tree, &FOLDER_LIMITS)
+        collect(&repo, tree)
     }
 }
 
 /// The files under the tree `root`, read one folder at a time from a list
 /// rather than by recursion, so no depth of folders can use up the stack.
-fn collect(repo: &Repository, root: Oid, limits: &FolderLimits) -> Result<FolderFiles> {
-    let too_large = |why: String| GitError::TooLarge(why);
+fn collect(repo: &Repository, root: Oid) -> Result<FolderFiles> {
     let odb = repo.odb()?;
     let mut files = FolderFiles::new();
     let mut bytes = 0;
     let mut folders = vec![(root, String::new(), 0)];
     let mut visited = 0;
     while let Some((tree, prefix, depth)) = folders.pop() {
-        if depth > limits.depth {
-            return Err(too_large(format!(
+        if depth > FOLDER_LIMITS.depth {
+            return Err(GitError::TooLarge(format!(
                 "its folders go more than {} deep",
-                limits.depth
+                FOLDER_LIMITS.depth
             )));
         }
         for entry in repo.find_tree(tree)?.iter() {
@@ -189,10 +188,10 @@ fn collect(repo: &Repository, root: Oid, limits: &FolderLimits) -> Result<Folder
             match (entry.kind(), entry.filemode()) {
                 (Some(ObjectType::Tree), _) => {
                     visited += 1;
-                    if visited > limits.folders {
-                        return Err(too_large(format!(
+                    if visited > FOLDER_LIMITS.folders {
+                        return Err(GitError::TooLarge(format!(
                             "it has more than {} folders",
-                            limits.folders
+                            FOLDER_LIMITS.folders
                         )));
                     }
                     folders.push((entry.id(), format!("{path}/"), depth + 1));
@@ -206,22 +205,22 @@ fn collect(repo: &Repository, root: Oid, limits: &FolderLimits) -> Result<Folder
                     let (size, _) = odb.read_header(entry.id())?;
                     let size = size as u64;
                     bytes += size;
-                    if size > limits.largest_file {
-                        return Err(too_large(format!(
+                    if size > FOLDER_LIMITS.largest_file {
+                        return Err(GitError::TooLarge(format!(
                             "{path} is more than {} MB",
-                            limits.largest_file / MB
+                            FOLDER_LIMITS.largest_file / MB
                         )));
                     }
-                    if bytes > limits.bytes {
-                        return Err(too_large(format!(
+                    if bytes > FOLDER_LIMITS.bytes {
+                        return Err(GitError::TooLarge(format!(
                             "its files come to more than {} MB",
-                            limits.bytes / MB
+                            FOLDER_LIMITS.bytes / MB
                         )));
                     }
-                    if files.len() == limits.files {
-                        return Err(too_large(format!(
+                    if files.len() == FOLDER_LIMITS.files {
+                        return Err(GitError::TooLarge(format!(
                             "it has more than {} files",
-                            limits.files
+                            FOLDER_LIMITS.files
                         )));
                     }
                     files.insert(path, repo.find_blob(entry.id())?.content().to_vec());

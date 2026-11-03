@@ -472,6 +472,7 @@ impl Worker {
     /// the master password or recovery key. It locks whatever state the file
     /// is in; an unreadable file only fails this if nothing here has unlocked
     /// the vault, so there's no telling which key to remove.
+    #[cfg(test)]
     pub fn forget_device(&mut self) -> Result<(), Error> {
         self.lock();
         let account = match (self.read(), self.account.take()) {

@@ -62,7 +62,8 @@ mygame/
 
 Every file the manifest names must be inside the folder. Loading checks
 everything, every pattern included, and rejects the plugin at the first
-problem, naming the file and line. A plugin that loads can't fail later because
+problem, naming the file, and the line where the TOML can say it. A plugin that
+loads can't fail later because
 of a bad pattern.
 
 ## `plugin.toml`
@@ -358,7 +359,7 @@ do so cheaply: every row counts against its budget.
 | Key | What it is |
 | --- | --- |
 | `aggro` | Event rules: a mob attacks on sight, captured as `name`. |
-| `room_title` | Rules that turn a room title into a mob name, captured as `name`. They read titles, not lines, so they can't name a hook. The highest layer's rule that matches wins. |
+| `room_title` | Rules that turn a room title into a mob name, captured as `name`. Each rule needs a `name` key as well, for its event. They read titles, not lines, so they can't name a hook. The highest layer's rule that matches wins. |
 
 ### UI
 
@@ -389,7 +390,7 @@ global function as a rule's or reader's `hook`:
 
 ```lua
 function on_welcome(event)
-	mud.store("character", "name", event.captures.name)
+    mud.store("character", "name", event.captures.name)
 end
 ```
 
@@ -509,7 +510,9 @@ It runs the line pipeline, the plugin host beside the built-in defaults, and
 your hooks, with the pager answered and the plugin approved. It has no
 connection, so `mud.state` returns `nil` and GMCP is skipped. `area_name` and
 `room_title` read GMCP, so they show as `skipped`. The commands' rate limit is
-off, because a log doesn't arrive at the pace it was sent.
+off, because a log doesn't arrive at the pace it was sent. A log holds no GA or
+EOR, so a table reader with no `end` pattern ends in `.cut` rather than `.end`,
+unless the plugin declares a `[[prompt]]` shape.
 
 ### Output
 
@@ -518,7 +521,7 @@ Each line starts with a fixed word, or is indented under a `caught` line, and a
 
 | Line | Meaning |
 | --- | --- |
-| `plugin <id> <version>` | It loaded. |
+| `plugin <id> <version>` | Its manifest and patterns loaded. Its hooks start once the replay does, so a `fail load` can still follow. |
 | `log <file>: <n> lines` | A replay starts. |
 | `caught <n> <place>#<i> [<event>]` | The `i`th pattern of that list matched `n` lines. Up to three follow, indented, each with its captures. `0` is no failure: a log needn't reach every pattern. |
 | `skipped <place>#<i>: <why>` | A log can't show this pattern. |

@@ -48,7 +48,7 @@ pub use find::{
 pub use geometry::{DirMap, DirSet, Direction, GridPoint};
 pub use info::{ExitInfo, RoomInfo};
 pub use join::{
-    Duplicates, JoinDone, JoinFacts, LastJoin, RoomPair, VERSION_JOIN, can_join, likely_duplicates,
+    Duplicates, JoinDone, JoinFacts, LastJoin, RoomPair, VERSION_JOIN, likely_duplicates,
     mapper_of, room_pair,
 };
 pub(crate) use join::{

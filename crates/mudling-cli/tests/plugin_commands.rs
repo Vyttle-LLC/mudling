@@ -98,6 +98,21 @@ fn a_new_plugin_loads_and_passes_its_own_test() {
 }
 
 #[test]
+fn a_new_plugin_can_not_take_the_built_in_defaults_id() {
+    let parent = TempDir::new().unwrap();
+    let run = mudling(&[
+        "plugin",
+        "new",
+        "mudling-defaults",
+        "--dir",
+        text(parent.path()),
+    ]);
+    assert_eq!(run.code, 2, "{}{}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("built-in defaults"), "{}", run.stderr);
+    assert!(!parent.path().join("mudling-defaults").exists());
+}
+
+#[test]
 fn a_log_shows_what_each_pattern_caught_and_what_it_missed() {
     let (_parent, plugin) = scaffolded();
     let run = test_log(

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// A half-written file. A crash can leave one behind; the next export
 /// sweeps it away.
-pub(super) const TEMP_SUFFIX: &str = ".mudling-tmp";
+pub(crate) const TEMP_SUFFIX: &str = ".mudling-tmp";
 
 /// Writes each file whose bytes differ from the disk, returning those paths.
 pub(super) fn write_changed(
@@ -30,7 +30,7 @@ pub(super) fn write_changed(
 
 /// The file on disk is always the old one or the whole new one: the bytes
 /// reach the disk under a temporary name, then a rename swaps them in.
-fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

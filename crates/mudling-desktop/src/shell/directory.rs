@@ -1,16 +1,19 @@
 //! The shell's side of the plugin directory and approvals: everything that
 //! touches the network or the disk runs off the UI thread, and the sheet is
 //! told what came of it.
+//!
+//! Every change to the plugins runs in turn, each on the launcher the one
+//! before left: two at once would each start from a copy without the
+//! other's, and the second to finish would undo the first.
 
 use super::Shell;
-use crate::launcher::Launcher;
+use crate::launcher::{InstalledVersions, Launcher};
 use crate::settings::{AddedPlugin, Listing, PluginRow};
 use gpui::{AppContext, Context, SharedString, Window};
 use mudling_core::git::Limit;
 use mudling_core::persist::Timestamp;
 use mudling_core::plugin::PluginId;
 use mudling_core::registry::{Entry, Fetched, Index};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,10 +23,38 @@ const REGISTRY_WAIT: Duration = Duration::from_secs(60);
 const ARRIVED_NOTE: &str = "It arrived from another device in a copy this device didn't install.";
 const NOT_SIGNED: &str = "The directory doesn't list this copy.";
 
+/// A change to the plugins, waiting its turn.
+pub(super) struct PluginChange {
+    change: Box<dyn FnOnce(Launcher) -> Result<Launcher, String> + Send>,
+    shown: Shown,
+}
+
+/// Who made a change, which decides how it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// An install the player chose, which the directory shows as busy
+    /// until it ends.
+    Install,
+    /// Another change the player made: the session running needs a new
+    /// connect to follow, and a problem shows on the page.
+    ByPlayer,
+    /// A save in a folder the player added: the session needs a new connect
+    /// too, but the sheet's other work is left alone.
+    FolderSaved,
+    /// What a sync brought, or the copies trusted now.
+    Synced,
+}
+
+impl Shown {
+    fn needs_connect(self) -> bool {
+        self != Shown::Synced
+    }
+}
+
 /// What the installed plugins are now, read off the UI thread.
 struct PluginsNow {
     launcher: Launcher,
-    installed: BTreeMap<String, Option<String>>,
+    installed: InstalledVersions,
     added: Vec<AddedPlugin>,
     /// The rows of the server being played, if there's one.
     rows: Option<Vec<PluginRow>>,
@@ -87,7 +118,7 @@ impl Shell {
                 .map_err(|error| format!("{} wasn't installed: {error}.", entry.name))?;
             Ok(launcher.downloaded(fetched))
         });
-        self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
+        self.plugin_fetch = Some(cx.spawn_in(window, async move |shell, cx| {
             let fetched = fetch.await;
             let _ = shell.update_in(cx, |shell, window, cx| {
                 shell
@@ -103,33 +134,16 @@ impl Shell {
         approve: bool,
         cx: &mut Context<Shell>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let install = cx.background_spawn(async move {
-            let launcher = launcher.install(&fetched, approve)?;
-            PluginsNow::read(launcher, host.as_deref())
-        });
-        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
-            let now = install.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
-        }));
+        self.change_plugins(
+            Shown::Install,
+            move |launcher| launcher.install(&fetched, approve),
+            cx,
+        );
     }
 
     /// Reads the installed plugins again, as a sync may have brought some.
     pub(super) fn reload_plugins(&mut self, cx: &mut Context<Shell>) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let reload = cx.background_spawn(async move {
-            PluginsNow::read(launcher.with_installed(), host.as_deref())
-        });
-        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
-            let now = reload.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, false, cx));
-        }));
+        self.change_plugins(Shown::Synced, |launcher| Ok(launcher.with_installed()), cx);
     }
 
     /// Takes `plugin` out of the data folder, from `folder`, the one its row
@@ -141,24 +155,17 @@ impl Shell {
         folder: SharedString,
         cx: &mut Context<Shell>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
         // A copy held back beside the one that runs never ran.
-        if let Some(game) = &self.game
+        if let (Some(game), Some(launcher)) = (&self.game, &self.launcher)
             && launcher.runs_from_folder(&plugin, &folder)
         {
             game.session.set_approved(plugin.clone(), false);
         }
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let remove = cx.background_spawn(async move {
-            let launcher = launcher.uninstall(&plugin, &folder)?;
-            PluginsNow::read(launcher, host.as_deref())
-        });
-        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
-            let now = remove.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
-        }));
+        self.change_plugins(
+            Shown::ByPlayer,
+            move |launcher| launcher.uninstall(&plugin, &folder),
+            cx,
+        );
     }
 
     /// Hands the sheet what was added from links and folders.
@@ -181,7 +188,6 @@ impl Shell {
             let fetched = launcher.fetch_link(&url, &Limit::after(REGISTRY_WAIT))?;
             Ok(launcher.downloaded(fetched))
         });
-        // Its own task, so other plugin work started meanwhile can't drop it.
         self.link_check = Some(cx.spawn_in(window, async move |shell, cx| {
             let checked = fetch.await;
             let _ = shell.update_in(cx, |shell, window, cx| {
@@ -199,39 +205,22 @@ impl Shell {
             .as_ref()
             .and_then(|link| link.choices.repo.clone());
         self.change_plugins(
+            Shown::ByPlayer,
             move |launcher| launcher.add_folder(&folder, repo.as_deref()),
             cx,
         );
     }
 
-    /// Reads `folders` again, as a file in each changed. It has its own
-    /// task, and leaves the sheet's other work alone, so a save neither
-    /// cancels nor ends an install.
+    /// Reads `folders` again, as a file in each changed.
     pub(super) fn reload_folders(&mut self, folders: Vec<PathBuf>, cx: &mut Context<Shell>) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let reload = cx.background_spawn(async move {
-            let reloaded =
-                (folders.iter()).fold(launcher, |launcher, folder| launcher.reload_folder(folder));
-            PluginsNow::read(reloaded, host.as_deref())
-        });
-        self.folder_reload = Some(cx.spawn(async move |shell, cx| {
-            let now = reload.await;
-            let _ = shell.update(cx, |shell, cx| match now {
-                Ok(now) => {
-                    shell.launcher = Some(now.launcher);
-                    shell.settings.update(cx, |sheet, cx| {
-                        sheet.show_added(now.added, cx);
-                        if let Some(rows) = now.rows {
-                            sheet.refresh_plugins(rows, true, cx);
-                        }
-                    });
-                }
-                Err(problem) => eprintln!("couldn't show a reloaded plugin: {problem}"),
-            });
-        }));
+        self.change_plugins(
+            Shown::FolderSaved,
+            move |launcher| {
+                let reload = |launcher: Launcher, folder: &PathBuf| launcher.reload_folder(folder);
+                Ok(folders.iter().fold(launcher, reload))
+            },
+            cx,
+        );
     }
 
     /// Stops loading the folder at `path`, which held `plugin` if it ever
@@ -247,17 +236,37 @@ impl Shell {
         {
             game.session.set_approved(plugin, false);
         }
-        self.change_plugins(move |launcher| launcher.forget_folder(&path), cx);
+        self.change_plugins(
+            Shown::ByPlayer,
+            move |launcher| launcher.forget_folder(&path),
+            cx,
+        );
     }
 
-    /// Runs the player's `change` on the launcher off the UI thread, and
-    /// then shows what's installed after it.
+    /// Runs `change` on the launcher off the UI thread once the changes
+    /// before it are done, and then shows what's installed after it.
     fn change_plugins(
         &mut self,
+        shown: Shown,
         change: impl FnOnce(Launcher) -> Result<Launcher, String> + Send + 'static,
         cx: &mut Context<Shell>,
     ) {
+        self.plugin_changes.push_back(PluginChange {
+            change: Box::new(change),
+            shown,
+        });
+        self.next_plugin_change(cx);
+    }
+
+    /// Starts the next change waiting, unless one is running.
+    fn next_plugin_change(&mut self, cx: &mut Context<Shell>) {
+        if self.plugin_work.is_some() {
+            return;
+        }
         let Some(launcher) = self.launcher.clone() else {
+            return;
+        };
+        let Some(PluginChange { change, shown }) = self.plugin_changes.pop_front() else {
             return;
         };
         let host = self.game.as_ref().map(|game| game.target.host.clone());
@@ -265,7 +274,11 @@ impl Shell {
             .background_spawn(async move { PluginsNow::read(change(launcher)?, host.as_deref()) });
         self.plugin_work = Some(cx.spawn(async move |shell, cx| {
             let now = changed.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
+            let _ = shell.update(cx, |shell, cx| {
+                shell.plugin_work = None;
+                shell.show_plugins_now(now, shown, cx);
+                shell.next_plugin_change(cx);
+            });
         }));
     }
 
@@ -282,32 +295,31 @@ impl Shell {
         let Some(launcher) = self.launcher.clone() else {
             return;
         };
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
         let (checking, shown) = (folder.clone(), hash.clone());
         let check = cx.background_spawn(async move {
             let checked = launcher.registry().refresh(&Limit::after(REGISTRY_WAIT));
-            let launcher = launcher.with_installed();
-            let still_held = launcher.is_held_back(&checking, &shown);
-            let why = still_held.then(|| match checked {
+            let still_held = launcher.with_installed().is_held_back(&checking, &shown);
+            still_held.then(|| match checked {
                 Ok(_) => format!("{ARRIVED_NOTE} {NOT_SIGNED}"),
                 Err(refused) => {
                     format!("{ARRIVED_NOTE} The directory couldn't vouch for it: {refused}")
                 }
-            });
-            PluginsNow::read(launcher, host.as_deref()).map(|now| (now, why))
+            })
         });
-        self.plugin_work = Some(cx.spawn_in(window, async move |shell, cx| {
-            let checked = check.await;
-            let _ = shell.update_in(cx, |shell, window, cx| match checked {
-                Ok((now, why)) => {
-                    shell.show_plugins_now(Ok(now), why.is_none(), cx);
-                    if let Some(why) = why {
-                        shell.settings.update(cx, |sheet, cx| {
-                            sheet.ask_to_trust(&folder, &hash, why, window, cx);
-                        });
-                    }
+        self.arrival_check = Some(cx.spawn_in(window, async move |shell, cx| {
+            let why = check.await;
+            let _ = shell.update_in(cx, |shell, window, cx| {
+                // The index may have trusted it: load whatever is trusted now.
+                let shown = match why {
+                    None => Shown::ByPlayer,
+                    Some(_) => Shown::Synced,
+                };
+                shell.change_plugins(shown, |launcher| Ok(launcher.with_installed()), cx);
+                if let Some(why) = why {
+                    shell.settings.update(cx, |sheet, cx| {
+                        sheet.ask_to_trust(&folder, &hash, why, window, cx);
+                    });
                 }
-                Err(problem) => shell.show_plugins_now(Err(problem), false, cx),
             });
         }));
     }
@@ -320,44 +332,49 @@ impl Shell {
         hash: SharedString,
         cx: &mut Context<Shell>,
     ) {
-        let Some(launcher) = self.launcher.clone() else {
-            return;
-        };
-        let host = self.game.as_ref().map(|game| game.target.host.clone());
-        let trust = cx.background_spawn(async move {
-            PluginsNow::read(launcher.trust(&folder, &hash)?, host.as_deref())
-        });
-        self.plugin_work = Some(cx.spawn(async move |shell, cx| {
-            let now = trust.await;
-            let _ = shell.update(cx, |shell, cx| shell.show_plugins_now(now, true, cx));
-        }));
+        self.change_plugins(
+            Shown::ByPlayer,
+            move |launcher| launcher.trust(&folder, &hash),
+            cx,
+        );
     }
 
-    /// Shows what's installed now. `by_player` says the player changed it,
-    /// so the session running needs a new connect to follow.
+    /// Shows what's installed now, as `shown` says.
     fn show_plugins_now(
         &mut self,
         now: Result<PluginsNow, String>,
-        by_player: bool,
+        shown: Shown,
         cx: &mut Context<Shell>,
     ) {
-        match now {
-            Ok(now) => {
-                let refused = now.launcher.refused().to_vec();
-                self.watch_added_folders(now.launcher.added_folders(), cx);
-                self.launcher = Some(now.launcher);
-                self.settings.update(cx, |sheet, cx| {
-                    sheet.installed(now.installed, now.added, cx);
-                    sheet.show_refused(refused, cx);
-                    if let Some(rows) = now.rows {
-                        sheet.refresh_plugins(rows, by_player, cx);
+        let now = match now {
+            Ok(now) => now,
+            Err(problem) => {
+                return match shown {
+                    Shown::Install => self.settings.update(cx, |sheet, cx| {
+                        sheet.install_ended(Some(problem), cx);
+                    }),
+                    Shown::ByPlayer => self.settings.update(cx, |sheet, cx| {
+                        sheet.show_plugin_problem(problem, cx);
+                    }),
+                    Shown::FolderSaved | Shown::Synced => {
+                        eprintln!("couldn't show the plugins: {problem}");
                     }
-                });
+                };
             }
-            Err(problem) => self.settings.update(cx, |sheet, cx| {
-                sheet.install_failed(problem, cx);
-            }),
-        }
+        };
+        let refused = now.launcher.refused().to_vec();
+        self.watch_added_folders(now.launcher.added_folders(), cx);
+        self.launcher = Some(now.launcher);
+        self.settings.update(cx, |sheet, cx| {
+            sheet.show_installed(now.installed, now.added, cx);
+            sheet.show_refused(refused, cx);
+            if let Some(rows) = now.rows {
+                sheet.refresh_plugins(rows, shown.needs_connect(), cx);
+            }
+            if shown == Shown::Install {
+                sheet.install_ended(None, cx);
+            }
+        });
     }
 
     /// Saves whether `plugin` may send commands, and applies it to the

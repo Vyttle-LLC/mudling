@@ -317,6 +317,20 @@ fn muted_line(text: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
         .child(text)
 }
 
+/// A line saying what went wrong, read out as soon as it shows.
+fn problem_line(text: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
+    muted_line(text, theme)
+        .role(Role::Alert)
+        .text_color(theme.error)
+}
+
+/// A question to answer before going on, read out as soon as it shows.
+fn question_line(text: impl Into<SharedString>, theme: &Theme) -> Stateful<Div> {
+    muted_line(text, theme)
+        .role(Role::Alert)
+        .text_color(theme.text)
+}
+
 /// A control's shape: a stop of the sheet, marked when focus lands on it.
 fn control(
     id: impl Into<ElementId>,
@@ -513,7 +527,12 @@ impl SettingsSheet {
             self.section
         };
         self.select(opening_on, cx);
-        window.focus(&self.tabs[self.section as usize], cx);
+        self.focus_tab(self.section, window, cx);
+    }
+
+    /// Moves focus to `section`'s tab, as a control that held it goes away.
+    fn focus_tab(&self, section: Section, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        window.focus(&self.tabs[section as usize], cx);
     }
 
     pub fn select(&mut self, section: Section, cx: &mut Context<SettingsSheet>) {
@@ -568,7 +587,7 @@ impl SettingsSheet {
         text_button("page-back", "Back", &pane.stop(cx), theme).on_click(cx.listener(
             move |sheet, _, window, cx| {
                 sheet.leave_page(cx);
-                window.focus(&sheet.tabs[section as usize], cx);
+                sheet.focus_tab(section, window, cx);
             },
         ))
     }
@@ -607,7 +626,7 @@ impl SettingsSheet {
     /// Whether the player changed a switch for the session running, which
     /// won't follow it.
     pub fn reconnect_to_apply(&self) -> bool {
-        self.installs_changed || self.plugins.iter().any(|row| row.flips > 0)
+        self.installs_changed || self.plugins.iter().any(PluginRow::is_switched)
     }
 
     #[cfg(test)]
@@ -844,8 +863,7 @@ impl SettingsSheet {
             leading: None,
             trailing: None,
         };
-        let page = self.page.clone();
-        match (&page, self.section) {
+        match (&self.page, self.section) {
             (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
             (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
@@ -2041,6 +2059,24 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_switch_flipped_and_flipped_back_leaves_nothing_to_reconnect_for(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        let flip = |cx: &mut VisualTestContext| {
+            sheet.update(cx, |sheet, cx| {
+                let row = (sheet.plugins.iter())
+                    .find(|row| row.sending == Sending::Approved)
+                    .expect("one is let to send")
+                    .clone();
+                sheet.set_plugin("mud.example".into(), row.id, !row.on, cx);
+            });
+            sheet.read_with(cx, |sheet, _| sheet.reconnect_to_apply())
+        };
+
+        assert!(flip(cx), "a change waits for the next connect");
+        assert!(!flip(cx), "flipped back, nothing changed");
+    }
+
+    #[gpui::test]
     fn a_copy_that_arrived_is_reviewed_and_trusted_only_as_the_player_chooses(
         cx: &mut TestAppContext,
     ) {
@@ -2097,8 +2133,8 @@ mod tests {
             sheet.open_add_plugin(window, cx);
             sheet.add.checking = true;
             // A directory install that ends meanwhile, either way.
-            sheet.installed(std::collections::BTreeMap::new(), Vec::new(), cx);
-            sheet.install_failed("Other wasn't installed.".to_owned(), cx);
+            sheet.show_installed(std::collections::BTreeMap::new(), Vec::new(), cx);
+            sheet.install_ended(Some("Other wasn't installed.".to_owned()), cx);
             assert!(sheet.add.checking, "the link is still being checked");
 
             let why = "The plugin at x wasn't added: it failed a check.".to_owned();

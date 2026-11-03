@@ -28,7 +28,7 @@ use super::rooms::RoomMoves;
 use crate::map::{
     LiveMap, RoomId, RoomPair, VERSION_JOIN, join_label, joined_key, joins_in, undo_key, undo_value,
 };
-use crate::persist::{Batch, Key, Keyed, MapRows, Meta, Reader, Record, Room, Timestamp};
+use crate::persist::{Batch, Key, Keyed, MapRows, Meta, Reader, Record, Timestamp};
 use crate::repo::format::ServerRows;
 use std::collections::{BTreeMap, HashSet};
 
@@ -158,68 +158,52 @@ pub(crate) fn undo_join(
     batch.delete(Key::Meta(joined_key(retired)));
     batch.delete(Key::Meta(undo_key(created)));
     batch.delete(Key::MapVersion(version_id));
-    let batch_ = &mut batch;
     put_back(
-        batch_,
+        &mut batch,
         &before.rooms,
         &joined.rooms,
         &current.rooms,
-        |row| Room { updated: at, ..row },
+        stamped_at(at),
     );
     put_back(
-        batch_,
+        &mut batch,
         &before.exits,
         &joined.exits,
         &current.exits,
-        |mut row| {
-            row.updated = at;
-            row
-        },
+        stamped_at(at),
     );
     put_back(
-        batch_,
+        &mut batch,
         &before.links,
         &joined.links,
         &current.links,
-        |mut row| {
-            row.updated = at;
-            row
-        },
+        stamped_at(at),
     );
     put_back(
-        batch_,
+        &mut batch,
         &before.doorways,
         &joined.doorways,
         &current.doorways,
-        |mut row| {
-            row.updated = at;
-            row
-        },
+        stamped_at(at),
     );
     put_back(
-        batch_,
+        &mut batch,
         &before.notes,
         &joined.notes,
         &current.notes,
-        |mut row| {
-            row.updated = at;
-            row
-        },
+        stamped_at(at),
     );
     put_back(
-        batch_,
+        &mut batch,
         &before.features,
         &joined.features,
         &current.features,
-        |mut row| {
-            row.updated = at;
-            row
-        },
+        stamped_at(at),
     );
     // A sighting's time says when the mob was seen, so it moves only as far
     // as it must to outlive the room's tombstone.
     put_back(
-        batch_,
+        &mut batch,
         &before.sightings,
         &joined.sightings,
         &current.sightings,
@@ -250,6 +234,14 @@ fn leading_to_rooms_held(before: &MapRows, rows: &ServerRows, retired: RoomId) -
     }
     (before.links).retain(|link| held.contains(&link.room_id) && held.contains(&link.to_room));
     before
+}
+
+/// A row as it was, updated at `at`.
+fn stamped_at<T: Keyed>(at: Timestamp) -> impl Fn(T) -> T {
+    move |mut row| {
+        *row.updated_mut() = at;
+        row
+    }
 }
 
 /// Takes one record type back from what the join made it to what it was,

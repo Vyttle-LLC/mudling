@@ -32,7 +32,8 @@ mssp_names = ["Avatar"]
 `[points]` then names a file for each extension point it uses, one file for
 each kind of thing the game says. A small plugin can stop at `text.toml`.
 
-Its `permissions` are the stores its hooks write. Avatar needs no
+Its `permissions` are `read_state`, so its hooks can read the character, and
+the stores its hooks write. Avatar needs no
 `send_commands`: it reads the game, and leaves talking to it to the player and
 the core's background commands.
 

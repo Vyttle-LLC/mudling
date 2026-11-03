@@ -15,8 +15,8 @@
 use super::appearance::toggled;
 use super::saved::LockAfter;
 use super::{
-    Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, section_heading,
-    text_button,
+    Pane, Section, SettingsSheet, SheetEvent, chosen_ground, control, muted_line, question_line,
+    section_heading, text_button,
 };
 use crate::assets::UI_FONT;
 use crate::input::{CommandInput, InputEvent};
@@ -360,7 +360,7 @@ impl SettingsSheet {
     /// keeps the keyboard. A focused stop means the sheet is on the screen.
     fn keep_focus_in_sheet(&self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         if self.a_stop_of_the_section_has_focus(window) {
-            window.focus(&self.tabs[Section::Vault as usize], cx);
+            self.focus_tab(Section::Vault, window, cx);
         }
     }
 
@@ -703,7 +703,7 @@ impl SettingsSheet {
         };
         self.vault.removing = None;
         // This stop goes with the question.
-        window.focus(&self.tabs[Section::Vault as usize], cx);
+        self.focus_tab(Section::Vault, window, cx);
         self.vault_job(
             async move { vault.remove_password(entry).await },
             |sheet, _, _, cx| sheet.list_vault(cx),
@@ -856,11 +856,7 @@ impl SettingsSheet {
                 "{host} is waiting to log in. Unlock the vault, or close settings to connect \
                  without logging in."
             );
-            pane.row(
-                muted_line(waiting, theme)
-                    .role(Role::Alert)
-                    .text_color(theme.text),
-            );
+            pane.row(question_line(waiting, theme));
         }
         if let Some(problem) = self.vault.problem.clone() {
             pane.row(
@@ -925,7 +921,7 @@ impl SettingsSheet {
             |sheet, window, cx| {
                 sheet.vault.recovery = None;
                 // This stop goes with the key.
-                window.focus(&sheet.tabs[Section::Vault as usize], cx);
+                sheet.focus_tab(Section::Vault, window, cx);
                 cx.notify();
             },
         );
@@ -1084,7 +1080,7 @@ impl SettingsSheet {
             |sheet, window, cx| {
                 sheet.close_vault_form(cx);
                 // This stop goes with the form.
-                window.focus(&sheet.tabs[Section::Vault as usize], cx);
+                sheet.focus_tab(Section::Vault, window, cx);
                 cx.notify();
             },
         )

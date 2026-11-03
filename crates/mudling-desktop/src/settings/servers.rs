@@ -5,7 +5,9 @@
 //! Keep, which takes the place of the Remove button, so focus lands on the
 //! choice that loses nothing.
 
-use super::{Pane, Section, SettingsSheet, SheetEvent, muted_line, text_button};
+use super::{
+    Pane, Section, SettingsSheet, SheetEvent, muted_line, problem_line, question_line, text_button,
+};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use gpui::{Context, FontWeight, Role, SharedString, div, prelude::*, px};
@@ -72,12 +74,7 @@ impl SettingsSheet {
             pane.row(muted_line(NOTHING_SAVED, theme));
         }
         if let Some(problem) = self.servers_problem.clone() {
-            pane.row(
-                muted_line(problem, theme)
-                    .debug_selector(|| "servers-problem".to_owned())
-                    .role(Role::Alert)
-                    .text_color(theme.error),
-            );
+            pane.row(problem_line(problem, theme).debug_selector(|| "servers-problem".to_owned()));
         }
         for (number, server) in self.servers.clone().iter().enumerate() {
             let row = self.server_row(number, server, pane, theme, cx);
@@ -150,11 +147,7 @@ impl SettingsSheet {
             let host = server.host.clone();
             div()
                 .pt_2()
-                .child(
-                    muted_line(server.removal_question(), theme)
-                        .role(Role::Alert)
-                        .text_color(theme.text),
-                )
+                .child(question_line(server.removal_question(), theme))
                 .child(
                     div()
                         .flex()

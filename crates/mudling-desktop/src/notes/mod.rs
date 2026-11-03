@@ -18,16 +18,16 @@
 mod book;
 
 use crate::assets::HEADING_FONT;
+use crate::dock::cached_unless_reader;
 use crate::input::CommandInput;
 use crate::room_panel::{button, row_name, section_label};
 use crate::theme::Theme;
 use book::NoteBook;
 pub use book::NoteRow;
 use gpui::{
-    AnyView, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, MouseButton, Role, ScrollStrategy, SharedString, Stateful, StyleRefinement,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px,
-    uniform_list,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    MouseButton, Role, ScrollStrategy, SharedString, Stateful, StyleRefinement, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, actions, div, prelude::*, px, uniform_list,
 };
 use mudling_core::map::{MapRoom, RoomId, WalkStep, feature, speedwalk};
 use mudling_core::session::{MapEdit, RuleEdit};
@@ -640,13 +640,8 @@ impl Render for NotesPanel {
         let count = notes.book.rows().len();
         let notepad = render_note(notes, &entity, NoteTarget::Notepad, Host::NotesTab, &theme);
         let message = notes.message.clone();
-        let list: AnyView = list.into();
-        let list = if window.is_a11y_active() {
-            list.into_any_element()
-        } else {
-            list.cached(StyleRefinement::default().size_full())
-                .into_any_element()
-        };
+        let list =
+            cached_unless_reader(list.into(), StyleRefinement::default().size_full(), window);
         div()
             .id("notes-panel")
             .debug_selector(|| "notes-panel".to_owned())
