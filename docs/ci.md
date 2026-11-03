@@ -13,7 +13,7 @@ workflow first, so a tag only builds from a correct `main`.
 | Job | What it runs |
 | --- | --- |
 | Format and clippy | `cargo fmt --all --check`, then clippy with `-D warnings` |
-| Build and test (macOS, Windows, Ubuntu) | `cargo build --workspace --release`, then `cargo test --workspace --no-fail-fast`; on macOS, `mudling-desktop --synthetic --ax-check` |
+| Build, test and bench (macOS, Windows, Ubuntu); the name is from before the benchmark moved, kept so a ruleset's required checks by it still report | `cargo build --workspace --release`, then `cargo test --workspace --no-fail-fast`; on macOS, `mudling-desktop --synthetic --ax-check` |
 | iOS core build | The XCFramework and Swift bindings, then a Swift type-check |
 
 `--no-fail-fast` keeps one failing test binary from hiding the failures in the

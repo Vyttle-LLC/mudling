@@ -29,7 +29,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --release -- -D warnings
 
   build:
-    name: Build and test (${{ matrix.os }})
+    # The name keeps "bench" from before the benchmark moved to daily.yml, so
+    # a ruleset's required checks by this name still report.
+    name: Build, test and bench (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:

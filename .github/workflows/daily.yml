@@ -144,7 +144,11 @@ jobs:
             echo "::endgroup::"
             cat attempt.log >> timing-tests.log
             [ "$status" = 0 ] && exit 0
-            mapfile -t failed < <(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' attempt.log | sort -u)
+            # A loop, not mapfile: the macOS runners' bash is 3.2.
+            failed=()
+            while IFS= read -r name; do
+              failed+=("$name")
+            done < <(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' attempt.log | sort -u)
             [ "${#failed[@]}" -gt 0 ] || exit 1 # A build error, not a slow spell.
             pending=(--exact "${failed[@]}")
           done
