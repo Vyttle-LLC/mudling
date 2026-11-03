@@ -378,13 +378,19 @@ fn a_rooms_description_comes_from_the_text_before_its_room_info() {
 }
 
 #[test]
-fn links_stay_when_a_room_later_lists_fewer_exits() {
+fn a_doorway_keeps_its_link_when_the_room_later_lists_fewer_exits() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["e", "w"]);
     walk.go("e", "A study", &["w"]);
     walk.go("w", "A hall", &["e", "w"]);
+    let now = walk.now();
+    walk.map.sent("look", now);
+    walk.map.room_info(
+        &info("A hall", FIELDS, "field", &[("e", "C"), ("w", "O")]),
+        now,
+    );
     walk.go("w", "A yard", &["e"]);
-    // Back in: the way east is gone from the listing now (shut and hidden).
+    // Back in: the door east is gone from the listing now (shut and hidden).
     walk.go("e", "A hall", &["w"]);
     assert_eq!(walk.count(), 3);
     let hall = walk.current();
@@ -392,6 +398,79 @@ fn links_stay_when_a_room_later_lists_fewer_exits() {
     assert_eq!(
         hall.links.get_copied(Direction::East),
         Some(walk.id_of("A study"))
+    );
+}
+
+/// ```text
+///             Tree
+///              │ (its way south really leads east)
+///     Pond ── Meadow ── Meadow
+///                         │
+///                       Rocks
+/// ```
+///
+/// Two meadows of one name, their text unread, so only their exits tell
+/// them apart. The tree's crooked path takes the player into the east
+/// meadow while the map follows its link into the west one, which takes on
+/// the east one's exits; the move south then gives the west meadow a path
+/// the game never lists there.
+#[test]
+fn a_sure_revisit_drops_a_path_the_room_no_longer_lists() {
+    let meadow = "Southern Meadow";
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    let west = walk.current().id;
+    walk.go("e", meadow, &["w", "s"]);
+    let east = walk.current().id;
+    walk.go("s", "Rocks", &["n"]);
+    let rocks = walk.current().id;
+    walk.go("n", meadow, &["w", "s"]);
+    walk.go("w", meadow, &["n", "e", "w"]);
+    walk.go("n", "A tree", &["s"]);
+    walk.go("s", meadow, &["w", "s"]);
+    assert_eq!(walk.current().id, west, "the crooked path fooled the map");
+    walk.go("s", "Rocks", &["n"]);
+    assert!(
+        walk.map
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
+    );
+    let now = walk.now();
+    let (_folder, database, writer) = saved(&mut walk.map, now);
+
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    assert!(!walk.map.whereabouts().unsure);
+    assert_eq!(walk.current().id, west);
+    assert!(!walk.current().links.contains(Direction::South));
+    assert!(
+        walk.map
+            .rooms()
+            .all(|room| room.links.get_copied(Direction::North) != Some(west)),
+        "no room south of the west meadow links back to it"
+    );
+    let east_south = walk
+        .map
+        .room(east)
+        .unwrap()
+        .links
+        .get_copied(Direction::South);
+    assert_eq!(east_south, Some(rocks), "the east meadow's path stays");
+
+    writer
+        .submit(walk.map.commit(walk.now()).unwrap().batch)
+        .unwrap();
+    writer.flush().unwrap();
+    let reopened = reopened(&database);
+    assert!(
+        !reopened
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
     );
 }
 
@@ -771,6 +850,49 @@ fn copies_of_one_crossroads_that_never_meet_are_not_a_maze() {
     layout.insert(crossroads(3, 20));
     assert!(!layout.collapse_maze(1));
     assert_eq!(layout.len(), 3);
+}
+
+/// A maze's squares list different exits, and it shows only the last one's,
+/// so a sure visit drops none of its ways in or out, from either side.
+#[test]
+fn a_maze_keeps_its_links_when_its_last_square_lists_fewer_exits() {
+    let mut layout = layout::Layout::new(1);
+    let (clearing, maze, hill) = (1, 2, 3);
+    layout.insert(crossroads(clearing, 0));
+    let mut last_square = MapRoom {
+        maze: true,
+        ..crossroads(maze, 1)
+    };
+    last_square
+        .exits
+        .retain(|direction, _| direction == Direction::East);
+    layout.insert(last_square);
+    layout.insert(MapRoom::empty(hill));
+    layout.update(clearing, |room| room.links.insert(Direction::North, maze));
+    layout.update(maze, |room| {
+        room.links.insert(Direction::South, clearing);
+        room.links.insert(Direction::West, hill);
+    });
+    layout.update(hill, |room| room.links.insert(Direction::East, maze));
+
+    layout.drop_unlisted_links(maze);
+    layout.drop_unlisted_links(hill);
+
+    let maze_room = layout.room(maze).unwrap();
+    assert_eq!(maze_room.links.get_copied(Direction::South), Some(clearing));
+    assert_eq!(maze_room.links.get_copied(Direction::West), Some(hill));
+    assert_eq!(
+        layout
+            .room(clearing)
+            .unwrap()
+            .links
+            .get_copied(Direction::North),
+        Some(maze)
+    );
+    assert!(
+        !layout.room(hill).unwrap().links.contains(Direction::East),
+        "the hill lists no way east, so its own path goes"
+    );
 }
 
 #[test]
