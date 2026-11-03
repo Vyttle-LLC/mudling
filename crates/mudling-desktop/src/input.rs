@@ -1,7 +1,9 @@
 //! The command input: text through the platform's input handler, so IME
-//! composition (marked text) works as in any native field. Return sends,
-//! Shift+Return starts a new line, and long lines wrap; the field grows with
-//! them, up to [`MOST_ROWS`] rows, then scrolls to keep the caret in view.
+//! composition (marked text) works as in any native field. Return sends and
+//! leaves the command in the field, selected, so Return again sends it again
+//! and typing replaces it. Shift+Return starts a new line, and long lines
+//! wrap; the field grows with them, up to [`MOST_ROWS`] rows, then scrolls to
+//! keep the caret in view.
 //!
 //! The platform talks in UTF-16 offsets (`NSTextInputClient` on macOS, TSF on
 //! Windows, text-input on Wayland); the content is stored as UTF-8. Adapted
@@ -167,6 +169,8 @@ pub struct CommandInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
+    /// The command Return last sent and left in the field; see [`Self::is_kept`].
+    sent: Option<String>,
     /// The first row in view, once the field has stopped growing.
     first_row: usize,
     alias_preview: Option<SharedString>,
@@ -192,6 +196,7 @@ impl CommandInput {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            sent: None,
             first_row: 0,
             alias_preview: None,
             last_layout: None,
@@ -274,6 +279,21 @@ impl CommandInput {
         self.masked
     }
 
+    /// Whether the field holds the command Return just sent, selected whole.
+    /// Told from the text and selection themselves, so any edit or caret move
+    /// ends it.
+    fn is_kept(&self) -> bool {
+        !self.content.is_empty()
+            && self.selected_range == (0..self.content.len())
+            && self.sent.as_deref() == Some(self.content.as_str())
+    }
+
+    /// Whether the field holds something the player is writing: not empty,
+    /// and not just the command already sent.
+    pub fn is_typing(&self) -> bool {
+        !self.content.is_empty() && !self.is_kept()
+    }
+
     /// Replaces what's in the field: a recalled command or a completion, with
     /// the caret at byte offset `cursor`.
     pub fn show(
@@ -294,7 +314,7 @@ impl CommandInput {
     /// What the row shows beside the text: the alias preview, else the
     /// speedwalk the text would walk.
     pub(crate) fn hint(&self) -> Option<SharedString> {
-        if self.masked {
+        if self.masked || self.is_kept() {
             return None;
         }
         self.alias_preview.clone().or_else(|| {
@@ -390,12 +410,18 @@ impl CommandInput {
         if !self.accepts_commands() && !self.is_notepad() {
             return;
         }
-        match self.offset_rows_away(-1.) {
+        // A sent command is browsed past like an empty line, not searched for.
+        let kept = self.is_kept();
+        match self.offset_rows_away(-1.).filter(|_| !kept) {
             Some(offset) => self.move_to(offset, window, cx),
             None if self.is_notepad() => {}
             None => cx.emit(InputEvent::Older {
                 line: self.content.clone(),
-                prefix: self.content[..self.cursor_offset()].to_owned(),
+                prefix: if kept {
+                    String::new()
+                } else {
+                    self.content[..self.cursor_offset()].to_owned()
+                },
             }),
         }
     }
@@ -404,7 +430,7 @@ impl CommandInput {
         if !self.accepts_commands() && !self.is_notepad() {
             return;
         }
-        match self.offset_rows_away(1.) {
+        match self.offset_rows_away(1.).filter(|_| !self.is_kept()) {
             Some(offset) => self.move_to(offset, window, cx),
             None if self.is_notepad() => {}
             None => cx.emit(InputEvent::Newer {
@@ -498,8 +524,18 @@ impl CommandInput {
             cx.emit(InputEvent::Submitted(submitted));
             return;
         }
-        let command = std::mem::take(&mut self.content);
-        self.selected_range = 0..0;
+        // A password is never kept; any other command stays, selected, to be
+        // sent again or typed over.
+        let command = if self.masked {
+            self.sent = None;
+            self.selected_range = 0..0;
+            std::mem::take(&mut self.content)
+        } else {
+            self.sent = Some(self.content.clone());
+            self.selected_range = 0..self.content.len();
+            self.content.clone()
+        };
+        self.selection_reversed = false;
         window.notify_text_input_changed(&self.focus_handle);
         cx.emit(InputEvent::Submitted(command));
         cx.notify();
@@ -1202,6 +1238,113 @@ mod tests {
             input.submit(&Submit, window, cx);
             assert_eq!(input.content, "にほん");
         });
+    }
+
+    #[gpui::test]
+    fn return_keeps_the_command_selected_and_sends_it_again(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _hearing = cx.update(|_, cx| {
+            let sent = sent.clone();
+            cx.subscribe(&input, move |_, event: &InputEvent, _| {
+                if let InputEvent::Submitted(text) = event {
+                    sent.borrow_mut().push(text.clone());
+                }
+            })
+        });
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "n", window, cx);
+            input.submit(&Submit, window, cx);
+            assert_eq!(input.content, "n");
+            assert_eq!(input.selected_range, 0..1);
+            assert!(!input.is_typing());
+
+            input.submit(&Submit, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*sent.borrow(), ["n", "n"]);
+    }
+
+    #[gpui::test]
+    fn typing_or_pasting_replaces_the_kept_command(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("look".to_owned()));
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "n", window, cx);
+            input.submit(&Submit, window, cx);
+            input.replace_text_in_range(None, "s", window, cx);
+            assert_eq!(input.content, "s");
+            assert!(input.is_typing());
+
+            input.submit(&Submit, window, cx);
+            input.paste(&Paste, window, cx);
+            assert_eq!(input.content, "look");
+
+            input.submit(&Submit, window, cx);
+            input.delete(&Delete, window, cx);
+            assert_eq!(input.content, "");
+        });
+    }
+
+    #[gpui::test]
+    fn a_recalled_command_is_edited_not_replaced(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "kill goblin", window, cx);
+            input.submit(&Submit, window, cx);
+            input.delete(&Delete, window, cx);
+            input.show("kill goblin".to_owned(), 11, window, cx);
+            input.backspace(&Backspace, window, cx);
+            assert_eq!(input.content, "kill gobli");
+        });
+    }
+
+    #[gpui::test]
+    fn moving_the_caret_ends_the_kept_command(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "look", window, cx);
+            input.submit(&Submit, window, cx);
+            input.end(&End, window, cx);
+            assert_eq!(input.selected_range, 4..4);
+            assert!(input.is_typing());
+        });
+    }
+
+    #[gpui::test]
+    fn a_password_is_not_kept_after_return(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.set_masked(true, window, cx);
+            input.replace_text_in_range(None, "hunter2", window, cx);
+            input.submit(&Submit, window, cx);
+            assert_eq!(input.content, "");
+            assert_eq!(input.selected_range, 0..0);
+        });
+    }
+
+    #[gpui::test]
+    fn up_from_the_kept_command_browses_history_with_no_prefix(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let _hearing = cx.update(|_, cx| {
+            let asked = asked.clone();
+            cx.subscribe(&input, move |_, event: &InputEvent, _| {
+                if let InputEvent::Older { line, prefix } = event {
+                    *asked.borrow_mut() = Some((line.clone(), prefix.clone()));
+                }
+            })
+        });
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "look", window, cx);
+            input.submit(&Submit, window, cx);
+            input.up(&Up, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            asked.borrow().clone(),
+            Some(("look".to_owned(), String::new()))
+        );
     }
 
     #[gpui::test]
