@@ -189,8 +189,11 @@ fn a_hook_that_raises_an_error_fails() {
     assert_fails(&run, "write_store:elsewhere");
 }
 
+// Whether 100 catch-all patterns cost more than the budget depends on the
+// machine's speed.
 #[test]
-fn a_plugin_over_its_line_budget_fails() {
+#[ignore = "timing: runs daily"]
+fn timing_a_plugin_over_its_line_budget_fails() {
     let (_parent, plugin) = scaffolded();
     let rules: String = (0..100)
         .map(|rule| format!("[[pattern]]\nname = \"slow-{rule}\"\npattern = '''(?<all>.*)'''\n\n"))
@@ -241,8 +244,11 @@ fn a_plugin_with_no_tests_fails() {
     assert_fails(&test_plugin(&plugin), "fail tests: ");
 }
 
+// The registry's CI judges the cost a line too, so this does; plugins/avatar's
+// own tests cover the rest on every pull request.
 #[test]
-fn the_avatar_plugin_passes_the_command_registry_ci_runs() {
+#[ignore = "timing: runs daily"]
+fn timing_the_avatar_plugin_passes_the_command_registry_ci_runs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let run = test_plugin(&root.join("plugins/avatar"));
     assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);

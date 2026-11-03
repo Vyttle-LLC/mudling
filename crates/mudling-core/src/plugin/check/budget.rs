@@ -120,3 +120,23 @@ impl PluginSink for Discard {
         std::hint::black_box(event);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cost(without_us: f64, with_us: f64) -> Cost {
+        Cost {
+            without_us,
+            with_us,
+            budget_us: 5.0,
+        }
+    }
+
+    #[test]
+    fn a_plugin_is_judged_by_what_it_adds_to_the_host() {
+        assert!(cost(10.0, 15.0).within_budget());
+        assert!(!cost(10.0, 15.1).within_budget());
+        assert!(cost(10.0, 8.0).within_budget(), "a faster run adds nothing");
+    }
+}

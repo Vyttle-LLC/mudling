@@ -129,7 +129,19 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_that_never_answers_costs_only_the_time_left() {
+    fn an_agent_that_never_answers_has_no_keys() {
+        probe_a_silent_agent();
+    }
+
+    #[test]
+    #[ignore = "timing: runs daily"]
+    fn timing_an_agent_that_never_answers_costs_only_the_time_left() {
+        assert!(probe_a_silent_agent() < Duration::from_secs(1));
+    }
+
+    /// Probes an agent that never answers twice on one deadline; returns how
+    /// long that took.
+    fn probe_a_silent_agent() -> Duration {
         let folder = tempfile::tempdir().unwrap();
         let socket = folder.path().join("silent");
         let _listening = UnixListener::bind(&socket).unwrap();
@@ -138,6 +150,6 @@ mod tests {
         let deadline = started + PROBE_BUDGET;
         assert!(!has_keys(&socket, deadline));
         assert!(!has_keys(&socket, deadline), "nothing is left to wait for");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        started.elapsed()
     }
 }

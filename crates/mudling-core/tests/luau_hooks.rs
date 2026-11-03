@@ -770,7 +770,20 @@ impl StateView for Gate {
 }
 
 #[test]
-fn a_full_queue_drops_new_events_without_waiting_and_counts_them() {
+fn a_full_queue_drops_new_events_and_counts_them() {
+    fill_a_full_queue();
+}
+
+#[test]
+#[ignore = "timing: runs daily"]
+fn timing_a_full_queue_drops_new_events_without_waiting() {
+    assert!(fill_a_full_queue() < Duration::from_millis(100));
+}
+
+/// Sends nine events to a plugin whose worker is stuck on the first and
+/// whose queue holds two; checks the other seven are dropped and counted.
+/// Returns how long the line thread spent sending.
+fn fill_a_full_queue() -> Duration {
     let plugin = hooked(
         &["read_state", "write_store:s"],
         "function on_go(event) mud.state('k') mud.store('s', 'ran', true) end",
@@ -797,10 +810,7 @@ fn a_full_queue_drops_new_events_without_waiting_and_counts_them() {
         host.read_line(&go, &mut hooks);
     }
     hooks.set_approved(plugin.id(), true);
-    assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "the line thread waited"
-    );
+    let waited = started.elapsed();
     assert_eq!(hooks.dropped().get(plugin.id()), Some(&7));
 
     for _ in 0..3 {
@@ -808,6 +818,7 @@ fn a_full_queue_drops_new_events_without_waiting_and_counts_them() {
     }
     hooks.wait_until_idle();
     assert_eq!(writes(&received.try_iter().collect::<Vec<_>>()).len(), 3);
+    waited
 }
 
 // ---- The manifest doc's example ----

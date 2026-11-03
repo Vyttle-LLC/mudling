@@ -1,12 +1,34 @@
 //! The plugin itself: it loads, its patterns compile, and the declared
 //! points say what the README says.
 
+use mudling_core::git::FolderFiles;
 use mudling_core::line::LinePipeline;
+use mudling_core::plugin::check;
 use mudling_core::plugin::luau::{HookLimits, HookOutput, LuauHooks, StateView, Value};
 use mudling_core::plugin::{Layer, PluginHost, ServerInfo};
-use mudling_plugin_avatar::load;
+use mudling_plugin_avatar::{load, plugin_dir};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{Arc, mpsc};
+
+/// What `mudling plugin test` runs: it replays its own test log to what's
+/// expected, and its hooks don't fail. Its cost a line is the CLI's timing
+/// test, `timing_the_avatar_plugin_passes_the_command_registry_ci_runs`.
+#[test]
+fn passes_its_own_tests() {
+    let mut files = FolderFiles::new();
+    for folder in [plugin_dir(), plugin_dir().join("tests")] {
+        for entry in fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.strip_prefix(plugin_dir()).unwrap();
+                let name = name.to_str().unwrap().replace('\\', "/");
+                files.insert(name, fs::read(&path).unwrap());
+            }
+        }
+    }
+    check::own_tests_except_cost(&load(), &files).unwrap_or_else(|failure| panic!("{failure}"));
+}
 
 #[test]
 fn loads_with_every_pattern_compiled_and_every_hook_defined() {
