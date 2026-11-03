@@ -539,6 +539,8 @@ const PICK_CONTROLS: [&str; 3] = [
 const FORGET_ROOM: &str = "Forget room Square 1, 1";
 /// The question's Cancel, then its Forget.
 const FORGET_CONTROLS: [&str; 2] = ["Keep Square 1, 1", "Forget Square 1, 1"];
+/// What `MapView::show_sample_join` says went in.
+const JOINED: &str = "Joined two copies of Square 1, 1";
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// The Character tab on its sample, by accessibility role and name.
 const CHARACTER_CONTROLS: [(&str, &str); 2] = [
@@ -1625,6 +1627,25 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .as_ref()
                 .is_some_and(|(_, label)| label == FORGET_ROOM),
             detail: format!("{focused:?}"),
+        });
+        in_window(
+            &|shell, _, cx| shell.map().update(cx, |map, cx| map.show_sample_join(cx)),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let unnamed = missing(&["Undo the join"], &tree);
+        let said = tree.as_ref().map_or(0, |tree| {
+            let says = |text: &Option<String>| text.as_deref() == Some(JOINED);
+            tree.find(|e| {
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+            .len()
+        });
+        checks.push(Check {
+            name: "a join that went in says so, with a named Undo the join",
+            passed: unnamed.is_empty() && said > 0,
+            detail: format!("not found: {unnamed:?}, {said} status(es) saying it"),
         });
 
         in_window(

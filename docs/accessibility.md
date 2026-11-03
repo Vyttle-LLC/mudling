@@ -10,7 +10,7 @@ cargo run --release -p mudling-desktop -- --synthetic --ax-check
 ```
 
 `--ax-check` (macOS) runs the window off screen, never taking focus, walks it
-through 56 stops (every panel, the HUD in each place, every settings section,
+through 57 stops (every panel, the HUD in each place, every settings section,
 page and question it can reach without a real game) and prints a JSON report.
 It exits 1 if a check fails. It checks two ways:
 
@@ -27,13 +27,13 @@ It exits 1 if a check fails. It checks two ways:
 
 | | |
 |---|---|
-| Stops | 56 |
-| Elements, rows folded together (the inventory below) | 167 |
+| Stops | 57 |
+| Elements, rows folded together (the inventory below) | 168 |
 | Controls seen in the audit's tree dumps, counting each row's copy (48 stops, before the update card) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
 | Gaps found | 18 |
 | Gaps fixed | 18 |
-| Checks in `--ax-check`, before and after (with the update card's two) | 82 and 102 |
+| Checks in `--ax-check`, before and after (with the update card's two) | 82 and 103 |
 
 ## Gaps found and fixed
 
@@ -133,6 +133,7 @@ control with several rows, one per item or rule, is one line here.
 | Pick a room to join | Button, toggled | Pick *room* to join | named |
 | Picked | Status (live) | *n* rooms picked | named |
 | Join the rooms picked, Clear the rooms picked | Button | *same* | named |
+| A join that went in, in Review's note and the pill | Status (live) with Button | *what was joined*; Undo the join | named |
 | Forget room | Button | Forget room *room* | named, focus |
 | Forget's question | Alert with Buttons | Keep *room*, Forget *room* | named, focus |
 | Add a note here | Button | Add a note here | sweep |
