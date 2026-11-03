@@ -14,6 +14,7 @@ use gpui::{
 };
 use mudling_core::plugin::inspect::{Claim, InspectedLine};
 use mudling_core::store::{INSPECTED_LINES, InspectorChange};
+use std::cell::OnceCell;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -35,16 +36,34 @@ pub(super) const REFRESH_EVERY: Duration = Duration::from_secs(1);
 const ROWS_DRAWN: usize = 16;
 const ROWS_BEYOND_THE_VIEW: usize = 2;
 
-/// A recorded line, shaped when it arrived. Each draw shows up to 16 lines it
-/// hasn't shown before, and shaping them all in that one frame took more than
-/// the rest of the draw, so the work is spread over the frames lines arrive in.
+/// A recorded line. Each draw shows up to 16 lines it hasn't shown before, and
+/// shaping them all in that one frame took more than the rest of the draw, so
+/// the newest lines of each batch are shaped as they arrive. An older line is
+/// shaped when a draw first shows it.
 pub(super) struct InspectedRow {
-    text: Arc<LineLayout>,
-    who: Arc<LineLayout>,
-    took: Arc<LineLayout>,
+    text: SharedString,
+    who: SharedString,
+    took: SharedString,
     claimed: bool,
     /// What a screen reader hears for the row.
     said: SharedString,
+    shaped: OnceCell<ShapedRow>,
+}
+
+struct ShapedRow {
+    text: Arc<LineLayout>,
+    who: Arc<LineLayout>,
+    took: Arc<LineLayout>,
+}
+
+impl InspectedRow {
+    fn shaped(&self, window: &Window) -> &ShapedRow {
+        self.shaped.get_or_init(|| ShapedRow {
+            text: shaped(&self.text, CHAT_FONTS[0], LINE_SIZE, window),
+            who: shaped(&self.who, UI_FONT, NOTE_SIZE, window),
+            took: shaped(&self.took, CHAT_FONTS[0], NOTE_SIZE, window),
+        })
+    }
 }
 
 /// Which of `lines` rows to draw with the first `scrolled` above the view.
@@ -190,8 +209,12 @@ impl SettingsSheet {
         }
         let kept = change.lines.len().saturating_sub(INSPECTED_LINES);
         let rows = change.lines[kept..].iter();
-        let rows = rows.map(|line| self.inspected_row(line, window));
+        let rows = rows.map(|line| self.inspected_row(line));
         let rows = rows.collect::<Vec<_>>();
+        let unshown = rows.len().saturating_sub(ROWS_DRAWN);
+        rows[unshown..]
+            .iter()
+            .for_each(|row| _ = row.shaped(window));
         self.inspector.extend(rows);
         let overflow = self.inspector.len().saturating_sub(INSPECTED_LINES);
         self.inspector.drain(..overflow);
@@ -211,21 +234,28 @@ impl SettingsSheet {
         cx.notify();
     }
 
-    fn inspected_row(&self, inspected: &InspectedLine, window: &Window) -> InspectedRow {
+    fn inspected_row(&self, inspected: &InspectedLine) -> InspectedRow {
         let text = inspected.line.plain();
         let claimed = claimed_by(&inspected.claims, |id| self.display_name(id));
         let took = micros(inspected.took.as_secs_f64() * 1e6);
         let who = claimed.as_deref().unwrap_or(NOTHING_CLAIMED);
         InspectedRow {
-            text: shaped(text, CHAT_FONTS[0], LINE_SIZE, window),
-            who: shaped(who, UI_FONT, NOTE_SIZE, window),
-            took: shaped(&took, CHAT_FONTS[0], NOTE_SIZE, window),
-            claimed: claimed.is_some(),
             said: format!("{text}, {who}, {took}").into(),
+            text: SharedString::from(text.to_owned()),
+            who: SharedString::from(who.to_owned()),
+            took: took.into(),
+            claimed: claimed.is_some(),
+            shaped: OnceCell::new(),
         }
     }
 
-    fn render_inspected(number: usize, row: &InspectedRow, theme: &Theme) -> impl IntoElement {
+    fn render_inspected(
+        number: usize,
+        row: &InspectedRow,
+        theme: &Theme,
+        window: &Window,
+    ) -> impl IntoElement {
+        let shaped = row.shaped(window);
         div()
             .id(("inspected", number))
             .debug_selector(move || format!("inspected-{number}"))
@@ -242,9 +272,9 @@ impl SettingsSheet {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(painted(&row.text, CHAT_FONTS[0], theme.text))
+                    .child(painted(&shaped.text, CHAT_FONTS[0], theme.text))
                     .child(painted(
-                        &row.who,
+                        &shaped.who,
                         UI_FONT,
                         match row.claimed {
                             true => theme.accent,
@@ -253,8 +283,8 @@ impl SettingsSheet {
                     )),
             )
             // Rounded up, as gpui rounds an explicit width to the nearest pixel.
-            .child(div().flex_none().w(row.took.width.ceil()).child(painted(
-                &row.took,
+            .child(div().flex_none().w(shaped.took.width.ceil()).child(painted(
+                &shaped.took,
                 CHAT_FONTS[0],
                 theme.text_muted,
             )))
@@ -264,6 +294,7 @@ impl SettingsSheet {
         &self,
         pane: &mut Pane,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<SettingsSheet>,
     ) {
         let back = self.back_button(Section::Plugins, pane, theme, cx);
@@ -290,7 +321,7 @@ impl SettingsSheet {
         let rows = newest_first
             .skip(shown.start)
             .take(shown.len())
-            .map(|(number, row)| Self::render_inspected(number, row, theme));
+            .map(|(number, row)| Self::render_inspected(number, row, theme, window));
         pane.row(
             div()
                 .id("inspected-lines")
@@ -331,22 +362,45 @@ mod tests {
         );
     }
 
+    fn shaped_rows(sheet: &SettingsSheet) -> usize {
+        let shaped = sheet
+            .inspector
+            .iter()
+            .filter(|row| row.shaped.get().is_some());
+        shaped.count()
+    }
+
     #[gpui::test]
-    fn a_line_is_shaped_as_it_arrives_not_when_the_page_draws(cx: &mut TestAppContext) {
+    fn a_batch_shapes_only_the_lines_a_draw_can_show(cx: &mut TestAppContext) {
         let (shell, cx) = window_with_keys(cx);
+        shell.update_in(cx, |shell, window, cx| shell.open_settings(window, cx));
         let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
         sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
+        cx.run_until_parked();
         let line = crate::measure::sample_inspected().swap_remove(0);
         let change = InspectorChange {
             clear: false,
-            lines: vec![line.clone()],
+            lines: vec![line; INSPECTED_LINES + 50],
         };
         sheet.update_in(cx, |sheet, window, cx| {
             sheet.show_inspected(&change, window, cx);
+            assert_eq!(sheet.inspector.len(), INSPECTED_LINES);
+            assert_eq!(shaped_rows(sheet), ROWS_DRAWN, "before any draw");
             let newest = sheet.inspector.back().expect("the line is recorded");
-            assert_eq!(newest.text.len, line.line.plain().len(), "before any draw");
-            assert!(newest.who.width > px(0.) && newest.took.width > px(0.));
+            assert!(newest.shaped.get().is_some(), "the newest is shaped");
         });
+
+        sheet.update(cx, |sheet, _| {
+            sheet.scroll.set_offset(point(px(0.), -ROW_HEIGHT * 100.))
+        });
+        sheet.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let shaped = sheet.read_with(cx, |sheet, _| shaped_rows(sheet));
+        assert_eq!(
+            shaped,
+            ROWS_DRAWN * 2,
+            "an older line is shaped once it shows"
+        );
     }
 
     #[test]

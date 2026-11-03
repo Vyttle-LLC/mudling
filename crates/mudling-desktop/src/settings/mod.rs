@@ -836,6 +836,7 @@ impl SettingsSheet {
     fn render_pane(
         &mut self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let mut stops = std::mem::take(&mut self.stops);
@@ -848,7 +849,7 @@ impl SettingsSheet {
         };
         let page = self.page.clone();
         match (&page, self.section) {
-            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
+            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, window, cx),
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
             (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
             (Page::AddPlugin, _) => self.fill_add_plugin(&mut pane, theme, cx),
@@ -1022,7 +1023,7 @@ impl gpui::Render for SettingsSheet {
             Some(approval) => dialog.child(approval),
             None => dialog
                 .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
-                .child(self.render_pane(&theme, cx)),
+                .child(self.render_pane(&theme, window, cx)),
         };
         div()
             .id("settings-scrim")
