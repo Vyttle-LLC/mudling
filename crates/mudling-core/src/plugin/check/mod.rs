@@ -82,16 +82,15 @@ impl From<PluginError> for Failure {
     }
 }
 
-/// Replays `lines` through `plugin` and measures its cost a line. An error
-/// means the plugin can't run at all.
-pub fn replay_and_measure(
-    plugin: &Plugin,
-    lines: &[String],
-) -> Result<(Replay, Cost), PluginError> {
-    Ok((
-        replay::replay(plugin, lines)?,
-        budget::measure(plugin, lines)?,
-    ))
+/// Replays `lines` through `plugin`. An error means the plugin can't run at
+/// all.
+pub fn replay(plugin: &Plugin, lines: &[String]) -> Result<Replay, PluginError> {
+    replay::replay(plugin, lines)
+}
+
+/// Measures `plugin`'s cost a line over `lines`.
+pub fn measure_cost(plugin: &Plugin, lines: &[String]) -> Result<Cost, PluginError> {
+    budget::measure(plugin, lines)
 }
 
 /// What the hooks did wrong in `replay`.
@@ -154,12 +153,12 @@ fn check_own_tests(plugin: &Plugin, files: &FolderFiles, judge_cost: bool) -> Re
         if lines.is_empty() {
             return Err(Failure::Tests(format!("{path} has no server text")));
         }
-        let replay = replay::replay(plugin, &lines)?;
+        let replay = replay(plugin, &lines)?;
         if let Some(failure) = hook_failures(&replay).into_iter().next() {
             return Err(failure);
         }
         if judge_cost {
-            let cost = budget::measure(plugin, &lines)?;
+            let cost = measure_cost(plugin, &lines)?;
             if !cost.within_budget() {
                 return Err(Failure::Budget(cost.to_string()));
             }
