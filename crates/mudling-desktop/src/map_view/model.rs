@@ -783,6 +783,10 @@ impl MapModel {
         Some((index, *self.duplicates.pairs.get(index)?))
     }
 
+    pub fn reviewed_pair(&self) -> Option<RoomPair> {
+        self.reviewed().map(|(_, pair)| pair)
+    }
+
     /// Both rooms of the pair in Review.
     fn review_copies(&self) -> Option<[&MapRoom; 2]> {
         let (_, pair) = self.reviewed()?;

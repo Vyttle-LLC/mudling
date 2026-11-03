@@ -82,8 +82,8 @@ pub struct MapView {
     forget: forget::Forgetting,
     /// Review was open at the last draw, so a join may just have ended it.
     review_open: bool,
-    /// The pair Review last framed the map on.
-    framed: Option<RoomPair>,
+    /// The pair Review last framed the map on, and the map's size then.
+    framed: Option<(RoomPair, (f32, f32))>,
     /// A timer will ask about duplicates again.
     scan_waiting: bool,
 }
@@ -294,27 +294,22 @@ impl MapView {
         cx: &mut Context<MapView>,
     ) -> impl IntoElement + use<> {
         let theme = *cx.global::<Theme>();
-        let model = &self.model;
-        let scene = paint::Scene {
-            sheet: model.sheet().clone(),
-            camera: model.camera(),
-            you: model.you(),
-            selected: model
-                .selection()
-                .and_then(|selection| model.sheet().square_of(selection.room)),
-            marked: model.marked().clone(),
-            picked: (model.picks().iter())
-                .filter_map(|room| model.sheet().square_of(*room))
-                .collect(),
-            copies: model.review_squares(),
-            colors,
-        };
-        let bounds = self.bounds.clone();
+        let view = cx.entity().downgrade();
+        // The scene is taken once the map's bounds are known, so Review can
+        // frame its pair in the size it's about to paint.
         let surface = canvas(
-            |_, _, _| {},
-            move |painted, _, window, cx| {
-                bounds.set(painted);
-                paint::paint(&scene, painted, window, cx);
+            move |painted, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.bounds.set(painted);
+                    view.frame_review(cx);
+                    view.scene(colors)
+                })
+                .ok()
+            },
+            move |painted, scene, window, cx| {
+                if let Some(scene) = scene {
+                    paint::paint(&scene, painted, window, cx);
+                }
             },
         )
         .size_full();
@@ -349,28 +344,42 @@ impl MapView {
         }
     }
 
-    /// Frames the pair in Review once, when it comes up, so the player can
-    /// pan and zoom from there.
-    fn frame_review(
-        &mut self,
-        pair: Option<RoomPair>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if pair.is_none() || pair == self.framed {
-            self.framed = pair;
+    /// Frames the pair in Review when it comes up or the map changes size,
+    /// and otherwise leaves the player to pan and zoom from there.
+    fn frame_review(&mut self, cx: &mut Context<Self>) {
+        let Some(pair) = self.model.reviewed_pair() else {
+            self.framed = None;
+            return;
+        };
+        let size = self.view_size();
+        if self.framed == Some((pair, size)) {
             return;
         }
-        let width = self.view_size().0;
-        if width == 0. {
-            // Not painted yet: there's no width to frame in.
-            window.request_animation_frame();
-            return;
-        }
-        self.model
-            .look_at_review((width, f32::from(REVIEW_MAP_HEIGHT)));
-        self.framed = pair;
+        self.model.look_at_review(size);
+        self.framed = Some((pair, size));
         self.start_work(cx);
+    }
+
+    /// What the map paints this frame.
+    fn scene(&self, colors: MapColors) -> paint::Scene {
+        let model = &self.model;
+        let square_of = |room: RoomId| model.sheet().square_of(room);
+        paint::Scene {
+            sheet: model.sheet().clone(),
+            camera: model.camera(),
+            you: model.you(),
+            selected: model
+                .selection()
+                .and_then(|selection| square_of(selection.room)),
+            marked: model.marked().clone(),
+            picked: model
+                .picks()
+                .iter()
+                .filter_map(|room| square_of(*room))
+                .collect(),
+            copies: model.review_squares(),
+            colors,
+        }
     }
 
     /// The inset's + over −, in its bottom-right corner.
@@ -592,9 +601,6 @@ impl Render for MapView {
         let theme = *cx.global::<Theme>();
         let colors = theme.map;
         let review = self.model.review_pair();
-        if self.layout == MapLayout::Panel {
-            self.frame_review(review.as_ref().map(|shown| shown.pair), window, cx);
-        }
         let selected = self.model.selection().map(|selection| selection.room);
         let card_shown = selected.is_some() && review.is_none();
         match self.layout {
@@ -1021,6 +1027,22 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(copies_in_view(&view, cx), [false, false]);
         click_on("Skip this pair", cx);
+        assert_eq!(copies_in_view(&view, cx), [true, true]);
+    }
+
+    #[gpui::test]
+    fn a_short_window_keeps_reviews_actions_and_both_copies_in_view(cx: &mut TestAppContext) {
+        let (view, cx) = duplicated_view(cx);
+        let short = gpui::size(px(480.), px(340.));
+        cx.simulate_resize(short);
+        cx.run_until_parked();
+        click_on("Review duplicates", cx);
+
+        for action in ["Skip this pair", "Not the same", "Join these rooms"] {
+            let bounds = cx.debug_bounds(action).expect("Review offers it");
+            assert!(bounds.size.height > px(0.), "{action} has room");
+            assert!(bounds.bottom() <= short.height, "{action} is in the window");
+        }
         assert_eq!(copies_in_view(&view, cx), [true, true]);
     }
 

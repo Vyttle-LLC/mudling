@@ -256,8 +256,9 @@ impl MapView {
                             })),
                     ),
             )
-            .child(div().flex_none().h(REVIEW_MAP_HEIGHT).child(map))
-            // Only what's under the map scrolls: the map stays in view.
+            // In a short window the map gives way, and the actions stay.
+            .child(div().h(REVIEW_MAP_HEIGHT).min_h_0().child(map))
+            // Only the comparison scrolls: the map and actions stay in view.
             .child(
                 div()
                     .id("map-review-details")
@@ -278,10 +279,10 @@ impl MapView {
                             .text_size(px(12.))
                             .text_color(theme.text_muted)
                             .child(pair.join_note),
-                    )
-                    .child(self.review_actions(rooms, theme, cx))
-                    .children(self.review_note(theme, cx)),
+                    ),
             )
+            .child(self.review_actions(rooms, theme, cx))
+            .children(self.review_note(theme, cx))
     }
 
     fn review_actions(
