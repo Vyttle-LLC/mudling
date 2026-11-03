@@ -852,6 +852,49 @@ fn copies_of_one_crossroads_that_never_meet_are_not_a_maze() {
     assert_eq!(layout.len(), 3);
 }
 
+/// A maze's squares list different exits, and it shows only the last one's,
+/// so a sure visit drops none of its ways in or out, from either side.
+#[test]
+fn a_maze_keeps_its_links_when_its_last_square_lists_fewer_exits() {
+    let mut layout = layout::Layout::new(1);
+    let (clearing, maze, hill) = (1, 2, 3);
+    layout.insert(crossroads(clearing, 0));
+    let mut last_square = MapRoom {
+        maze: true,
+        ..crossroads(maze, 1)
+    };
+    last_square
+        .exits
+        .retain(|direction, _| direction == Direction::East);
+    layout.insert(last_square);
+    layout.insert(MapRoom::empty(hill));
+    layout.update(clearing, |room| room.links.insert(Direction::North, maze));
+    layout.update(maze, |room| {
+        room.links.insert(Direction::South, clearing);
+        room.links.insert(Direction::West, hill);
+    });
+    layout.update(hill, |room| room.links.insert(Direction::East, maze));
+
+    layout.drop_unlisted_links(maze);
+    layout.drop_unlisted_links(hill);
+
+    let maze_room = layout.room(maze).unwrap();
+    assert_eq!(maze_room.links.get_copied(Direction::South), Some(clearing));
+    assert_eq!(maze_room.links.get_copied(Direction::West), Some(hill));
+    assert_eq!(
+        layout
+            .room(clearing)
+            .unwrap()
+            .links
+            .get_copied(Direction::North),
+        Some(maze)
+    );
+    assert!(
+        !layout.room(hill).unwrap().links.contains(Direction::East),
+        "the hill lists no way east, so its own path goes"
+    );
+}
+
 #[test]
 fn a_maze_message_makes_the_room_one_square() {
     let mut walk = Walk::new(text_map());

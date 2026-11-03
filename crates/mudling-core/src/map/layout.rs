@@ -478,9 +478,12 @@ impl Layout {
 
     /// Drops the room's paths the game no longer lists, and the far rooms'
     /// ways back along them, so a path a wrong guess gave the room doesn't
-    /// outlive it. A doorway keeps its path: a shut door may go unlisted.
+    /// outlive it. A doorway keeps its path: a shut door may go unlisted. So
+    /// does a maze, whose exits are only those of the square last seen.
     pub fn drop_unlisted_links(&mut self, id: RoomId) {
-        let Some(room) = self.room(id) else { return };
+        let Some(room) = self.room(id).filter(|room| !room.maze) else {
+            return;
+        };
         let unlisted: Vec<(Direction, RoomId)> = room
             .links
             .iter()
@@ -493,7 +496,7 @@ impl Layout {
             self.update(id, |room| room.links.remove(direction));
             let back = direction.opposite();
             if self.room(to).is_some_and(|far| {
-                far.links.get_copied(back) == Some(id) && !far.doorways.contains(back)
+                !far.maze && far.links.get_copied(back) == Some(id) && !far.doorways.contains(back)
             }) {
                 self.update(to, |far| far.links.remove(back));
             }
