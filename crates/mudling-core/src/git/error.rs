@@ -66,6 +66,8 @@ pub enum GitError {
         path: String,
         field: String,
     },
+    /// A mirror's download or folder went past its cap, so it was stopped.
+    TooLarge(String),
     Failed(String),
 }
 
@@ -84,6 +86,7 @@ impl fmt::Display for GitError {
             Self::PasswordInFile { path, field } => {
                 write!(f, "not pushed: {path} seems to hold a password in {field}")
             }
+            Self::TooLarge(detail) => write!(f, "it's too large for a plugin: {detail}"),
             Self::Failed(detail) => f.write_str(detail),
         }
     }

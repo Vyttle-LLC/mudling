@@ -14,7 +14,9 @@ use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{duplicated_map, sample_map};
 use crate::measure;
-use crate::settings::{PluginRow, SavedServer as SheetServer, Section};
+use crate::settings::{
+    Downloaded, Listing, PluginRow, SavedServer as SheetServer, Section, Sending,
+};
 use crate::shell::Shell;
 use crate::theme::Theme;
 use crate::title_bar::SessionLabel;
@@ -28,12 +30,14 @@ use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
 use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+use mudling_core::git::FolderFiles;
 use mudling_core::logs::LogSettings;
 use mudling_core::map::FindFilter;
 use mudling_core::net::DisconnectReason;
 use mudling_core::persist::{SavedCharacter, SavedServer, SavedServers, Timestamp};
 use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
-use mudling_core::plugin::{Layer, PluginCost, PluginId};
+use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId};
+use mudling_core::registry::{self, Fetched, IndexError};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
     ConnectionStatus, Diff, Revision, RulesState, SettingsState, TerminalChange, TerminalState,
@@ -91,6 +95,62 @@ fn sample_plugin(id: &str, name: &str, layer: Layer, on: bool) -> PluginRow {
         on,
         flips: 0,
         elsewhere: None,
+        sending: Sending::No,
+        asks: Vec::new(),
+        folder: None,
+        added_from: None,
+        source: None,
+        problem: None,
+        held_back: None,
+    }
+}
+
+/// A made-up plugin that sends commands, approved or waiting.
+fn sample_sender(id: &str, name: &str, sending: Sending) -> PluginRow {
+    PluginRow {
+        sending,
+        asks: measure::sample_asks(),
+        folder: Some(id.to_owned().into()),
+        ..sample_plugin(id, name, Layer::Game, true)
+    }
+}
+
+/// A made-up plugin that sends commands, as if just downloaded and checked.
+fn sample_fetched() -> Fetched {
+    let files: FolderFiles = [
+        (
+            "plugin.toml",
+            "id = \"avatar-extras\"\nname = \"Avatar extras\"\nversion = \"0.4.1\"\napi = 1\n\
+             license = \"Apache-2.0\"\nlayer = \"game\"\n\
+             permissions = [\"send_commands\", \"read_state\", \"write_store:extras\"]\n\
+             [servers]\nmssp_names = [\"Avatar\"]\n\
+             [points]\ntext = \"text.toml\"\n[hooks]\nfiles = [\"hooks.luau\"]\n",
+        ),
+        (
+            "text.toml",
+            "[[pattern]]\nname = \"tell\"\npattern = '''^\\w+ tells you'''\n",
+        ),
+        ("hooks.luau", "function on_tell() end\n"),
+    ]
+    .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+    .into();
+    let plugin = Plugin::from_files(|name| {
+        let bytes = files
+            .get(name)
+            .ok_or_else(|| std::io::Error::other(name.to_owned()))?;
+        Ok(String::from_utf8(bytes.clone()).expect("the sample is text"))
+    })
+    .expect("the sample plugin loads");
+    let (Listing::Listed { index, .. }, _) = measure::sample_directory() else {
+        unreachable!("the sample directory is listed");
+    };
+    let entry = index.plugins[1].clone();
+    Fetched {
+        hash: entry.hash.clone(),
+        source: registry::Source::Directory(entry),
+        commit: index.commit,
+        files,
+        plugin,
     }
 }
 
@@ -127,6 +187,13 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
                 sample_plugin("sample-tweaks", "Sample's tweaks", Layer::Override, true),
                 sample_plugin("sample-game", "Sample game", Layer::Game, true),
                 sample_plugin("sample-helper", "Sample helper", Layer::Game, true),
+                sample_sender("sample-extras", "Sample extras", Sending::Approved),
+                sample_sender("sample-chat", "Sample chat", Sending::Waiting),
+                PluginRow {
+                    folder: Some("sample-notes".into()),
+                    held_back: Some("sha256:sample-notes-from-elsewhere".into()),
+                    ..sample_plugin("sample-notes", "Sample notes", Layer::Game, false)
+                },
                 sample_plugin("sample-defaults", "MUDling defaults", Layer::Default, true),
             ],
             cx,
@@ -755,6 +822,80 @@ fn window_images() {
             measure::open_sample_inspector(shell, &measure::sample_inspected(), window, cx);
         });
     }
+    for (name, appearance) in [
+        ("settings-directory-dark", Dark),
+        ("settings-directory-light", Light),
+    ] {
+        render(name, appearance, WIDE, measure::open_sample_directory);
+    }
+    render(
+        "settings-directory-refused-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_directory(shell, window, cx);
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                let why = IndexError::Forged.to_string().into();
+                sheet.show_directory(Listing::Refused(why), BTreeMap::new(), cx);
+            });
+        },
+    );
+    for (name, appearance) in [
+        ("settings-add-plugin-dark", Dark),
+        ("settings-add-plugin-light", Light),
+    ] {
+        render(name, appearance, WIDE, measure::open_sample_add_plugin);
+    }
+    render(
+        "settings-add-plugin-forget-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_section(shell, Section::Plugins, window, cx);
+            let colors = PluginId::try_from("sample-colors".to_owned()).expect("a valid id");
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.confirm_remove(&colors, window, cx);
+            });
+        },
+    );
+    for (name, appearance) in [
+        ("settings-approval-dark", Dark),
+        ("settings-approval-light", Light),
+    ] {
+        render(name, appearance, WIDE, measure::open_sample_approval);
+    }
+    render(
+        "settings-approval-install-dark",
+        Dark,
+        WIDE,
+        |shell, window, cx| {
+            measure::open_sample_directory(shell, window, cx);
+            let downloaded = Downloaded {
+                fetched: Arc::new(sample_fetched()),
+                keeps_approval: false,
+                replaces: None,
+            };
+            shell.settings_sheet().update(cx, |sheet, cx| {
+                sheet.fetched(Ok(downloaded), window, cx);
+            });
+        },
+    );
+    render("settings-trust-dark", Dark, WIDE, |shell, window, cx| {
+        measure::open_sample_section(shell, Section::Plugins, window, cx);
+        shell.settings_sheet().update(cx, |sheet, cx| {
+            let why = "It arrived from another device in a copy this device didn't \
+                       install. The directory doesn't list this copy.";
+            let shown = "sha256:sample-notes-from-elsewhere";
+            sheet.ask_to_trust("sample-notes", shown, why.to_owned(), window, cx);
+        });
+    });
+    render("settings-remove-dark", Dark, WIDE, |shell, window, cx| {
+        measure::open_sample_section(shell, Section::Plugins, window, cx);
+        let helper = PluginId::try_from("sample-helper".to_owned()).expect("a valid id");
+        shell.settings_sheet().update(cx, |sheet, cx| {
+            sheet.confirm_remove(&helper, window, cx);
+        });
+    });
     for (name, appearance) in [
         ("settings-server-plugins-dark", Dark),
         ("settings-server-plugins-light", Light),

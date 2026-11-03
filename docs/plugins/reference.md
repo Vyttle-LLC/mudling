@@ -1,7 +1,21 @@
 # Plugin API reference
 
-This is API v1, the one MUDling implements today. The
-[cookbook](cookbook.md) works through a real plugin; this page lists what
+This is API v1, and it's stable: two games from opposite ends of the range
+are written against it alone, [Avatar](../../plugins/avatar), a Merc-derived
+game read mostly from its text, and [Aardwolf](../../plugins/aardwolf), a
+customized ROM read mostly from GMCP. The core holds neither game's names
+for the character or the fight: each plugin's [HUD](#hud) point says where
+its game keeps them.
+
+Additions to come won't break a v1 plugin, as each is a new key or point a
+plugin can leave out:
+
+- **Chat channels**: a point for a game's channels, such as Aardwolf's
+  `comm.channel`.
+- **GMCP requests**: a way for a plugin to send GMCP, such as Aardwolf's
+  `request area`, which brings the area names `room.info` leaves out.
+
+The [cookbook](cookbook.md) works through a real plugin; this page lists what
 there is. A plugin is a folder of TOML with, where patterns aren't enough, a
 few Luau hooks. Nothing here needs you to read the core.
 
@@ -20,6 +34,20 @@ target/release/mudling plugin test mygame
 
 That makes a folder that loads and passes its own test. Edit its files, then
 run `plugin test` again. See [Commands](#commands).
+
+To try it in MUDling, open Settings › Plugins › Browse directory › Add from
+a link or folder, and choose the folder. MUDling reloads it whenever a file
+in it changes, and a session runs the reloaded copy from its next connect. If
+a reload breaks the plugin, its row says why and the last working copy keeps
+running. A folder stays on its device: it never syncs, and removing it leaves
+the folder and its files where they are.
+
+Once it's in a git repo, with `plugin.toml` at the root of the default
+branch, anyone can add it from that repo's link. MUDling checks it first as
+`plugin test` does, from git's own copy of the files: it must load, pass its
+own tests, have no failing hooks and keep within its
+[budget](#the-line-budget). A plugin from a link syncs to the player's other
+devices, and each asks the player there before it loads.
 
 ## The plugin folder
 
@@ -236,15 +264,35 @@ has refused it.
 
 ### HUD
 
-MUDling learns the common vitals from the first `Char.Vitals` by itself. These
-are for a game that doesn't use the common names.
+Where GMCP holds what MUDling shows of the character. A field is the
+package, then the key: `"Char.Vitals.hp"`, the package in any case. For each
+key, the highest layer's field wins.
+
+MUDling learns the common vitals from the first `Char.Vitals` by itself, so
+`vitals` is for a game that doesn't use the common names. The core knows no
+game's names for the rest. The built-in defaults name only the two most GMCP
+games share, `name = "Char.Name.name"` and `level = "Char.Status.level"`; a
+game's plugin names the others.
 
 <!-- keys: hud.toml root -->
 | Key | What it is |
 | --- | --- |
 | `vitals` | A table of each vital and the GMCP field that holds it: `hp = "Char.Vitals.hp"`. |
-| `opponent` | The opponent bar's fields, the same way. See [Declared, not used yet](#declared-not-used-yet). |
+| `character` | A table of each character sheet key and its field: `str = "Char.Stats.str"`. `name` names the character, `level` is a number, and `position`, such as `"Stand"` or `"Fight"`, tells quiet reads when the character is busy. Any other key is a stat on the sheet. |
+| `opponent` | The `[opponent]` table: the opponent bar's fields. |
 | `affects` | The GMCP field that lists affects: `"Char.Status.affects"`. It should hold an object of each affect and how long it lasts. |
+
+<!-- keys: hud.toml [opponent] -->
+| `[opponent]` key | What it is |
+| --- | --- |
+| `name` | Who the character is fighting. Empty ends the fight. |
+| `level` | Its level. |
+| `health` | Its health. |
+| `max_health` | What `health` is out of. |
+| `percent` | Its health as a percentage, for a game that sends no maximum. |
+
+A game may send only the fields that changed. A new name keeps the rest of
+the opponent until they change.
 
 ### Map
 
@@ -328,7 +376,6 @@ preparing for a later release:
 | Field | Status |
 | --- | --- |
 | `ui.toml`'s `panels` and `character_fields` | Nothing reads them, so the point changes nothing. |
-| `hud.toml`'s `opponent` | Nothing reads it. The opponent bar is filled from GMCP without it. |
 | `gear.toml`'s `containers` | Nothing reads it. |
 | `commands.toml`'s `doors`, other than `open` | `close`, `unlock` and `lock` are kept but nothing sends them. |
 
@@ -378,7 +425,7 @@ its top level, as it loads, goes nowhere.
 | --- | --- |
 | `read_state` | `mud.state` and `mud.refresh_inventory`. |
 | `write_store:<name>` | `mud.store` to that store. |
-| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. Today only the desktop app's `--enable` approves a plugin: one turned on in Settings stays loaded with its hooks off until then. |
+| `send_commands` | `mud.send`. The plugin's hooks don't run until it's approved. The player approves it when they install or turn it on, or later from its row in Settings › Plugins, and can take that back there; the desktop app's `--enable` approves it too. An approval stays on the device it was given on, and holds only for the copy it was given for: a plugin whose files change in any way, patterns included, asks again, unless the player updated it from where it came: the directory, or the same link. A plugin from anywhere else with the same id asks again, and says what it replaces. A folder added from the device is the player's own, so its approval holds through every save. A `--plugin` folder can send only with `--enable`. |
 
 A plugin with no hooks needs no permissions.
 

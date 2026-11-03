@@ -5,7 +5,8 @@
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
-//!                            [--settings-section plugins|inspector|server-plugins|data|vault|logs]
+//!                            [--settings-section plugins|inspector|server-plugins|directory|
+//!                                                approval|add-plugin|data|vault|logs]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -86,7 +87,7 @@ use gpui::{
     App, AppContext, AsyncApp, Bounds, Entity, KeyBinding, Task, TitlebarOptions, WindowBounds,
     WindowDecorations, WindowOptions, actions, px, size,
 };
-use launcher::{Launcher, Target, bundled_plugins, installed_plugins, replaced};
+use launcher::{Launcher, Target, bundled_plugins};
 use measure::HudRun;
 use measure::SamplePage;
 use mudling_core::git;
@@ -112,7 +113,8 @@ const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --rep
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] \
-                     [--settings-section plugins|inspector|server-plugins|data|vault|logs] \
+                     [--settings-section plugins|inspector|server-plugins|directory|approval|\
+                     add-plugin|data|vault|logs] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
@@ -317,6 +319,15 @@ fn main() -> ExitCode {
                                 (Some(SamplePage::ServerPlugins), _) => {
                                     measure::open_sample_server_plugins(shell, window, cx);
                                 }
+                                (Some(SamplePage::Directory), _) => {
+                                    measure::open_sample_directory(shell, window, cx);
+                                }
+                                (Some(SamplePage::Approval), _) => {
+                                    measure::open_sample_approval(shell, window, cx);
+                                }
+                                (Some(SamplePage::AddPlugin), _) => {
+                                    measure::open_sample_add_plugin(shell, window, cx);
+                                }
                                 (None, Some(section)) => {
                                     measure::open_sample_section(shell, section, window, cx);
                                 }
@@ -450,7 +461,8 @@ fn open_replay(
     let plugins = command_line_plugins(options)?;
     let enabled = enabled_plugins(&plugins, &options.enable)?;
     let verbs = Verbs::of(&plugins, &enabled);
-    let plugin_rows = PluginRow::for_session(&plugins, &enabled, &[], REPLAY_HOST);
+    let mut plugin_rows = PluginRow::for_session(&plugins, &enabled, &[], REPLAY_HOST);
+    PluginRow::approve(&mut plugin_rows, &enabled);
     if let Some(rooms) = options.sample_map {
         measure::save_sample_map(folder.path(), REPLAY_HOST, rooms)
             .map_err(|error| format!("couldn't save the sample map: {error}"))?;
@@ -485,9 +497,11 @@ fn launcher_for(
     let folder = data_folder(options)?;
     let named = command_line_plugins(options)?;
     let enabled = enabled_plugins(&named, &options.enable)?;
-    let plugins = replaced(bundled_plugins(), installed_plugins(&folder));
-    let plugins = replaced(plugins, named);
-    Ok(Launcher::new(folder, plugins, enabled, waker))
+    let launcher = Launcher::new(folder, bundled_plugins(), enabled, waker);
+    Ok(launcher
+        .with_named(named)
+        .with_installed()
+        .with_added_folders())
 }
 
 fn command_line_plugins(options: &Options) -> Result<Vec<Plugin>, String> {
@@ -592,9 +606,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     "logs" => options.settings_section = Some(Section::Logs),
                     "inspector" => options.settings_page = Some(SamplePage::Inspector),
                     "server-plugins" => options.settings_page = Some(SamplePage::ServerPlugins),
+                    "directory" => options.settings_page = Some(SamplePage::Directory),
+                    "approval" => options.settings_page = Some(SamplePage::Approval),
+                    "add-plugin" => options.settings_page = Some(SamplePage::AddPlugin),
                     _ => {
                         return Err("--settings-section needs plugins, inspector, \
-                                    server-plugins, data, vault or logs"
+                                    server-plugins, directory, approval, add-plugin, data, \
+                                    vault or logs"
                             .into());
                     }
                 }

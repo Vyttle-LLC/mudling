@@ -9,6 +9,9 @@
 //! comes from a core thread; each wake asks for the next frame, and that
 //! frame drains the stores once, so updates apply at most once per frame.
 
+mod directory;
+mod watch;
+
 use crate::assets::UI_FONT;
 use crate::character_panel::{CharacterPanel, RefreshCharacter};
 use crate::chat::{self, Chat, CloseFind, column_width};
@@ -304,6 +307,16 @@ pub struct Shell {
     /// The one job running off the UI thread: a session ending, another
     /// opening, a server being saved.
     job: Option<Task<()>>,
+    /// The directory's index being fetched and checked.
+    directory_read: Option<Task<()>>,
+    /// A plugin being fetched or installed, or the installed ones read again.
+    plugin_work: Option<Task<()>>,
+    /// A link being fetched and checked.
+    link_check: Option<Task<()>>,
+    /// The plugin folders the player added, watched for changes.
+    folder_watch: Option<watch::FolderWatch>,
+    /// Those of them a change is being read from.
+    folder_reload: Option<Task<()>>,
     /// What the player asked for while a job ran, to run in turn.
     waiting: VecDeque<Request>,
     /// What the last job ran into, for a window on a game.
@@ -469,6 +482,31 @@ impl Shell {
                         };
                         shell.ask(request, window, cx);
                     }
+                    SheetEvent::OpenDirectory => shell.refresh_directory(cx),
+                    SheetEvent::Fetch { index, entry } => {
+                        shell.fetch_plugin(index.clone(), entry.clone(), window, cx);
+                    }
+                    SheetEvent::Install { fetched, approve } => {
+                        shell.install_plugin(fetched.clone(), *approve, cx);
+                    }
+                    SheetEvent::SetApproved { plugin, approved } => {
+                        shell.set_approved(plugin.clone(), *approved, cx);
+                    }
+                    SheetEvent::Remove { plugin, folder } => {
+                        shell.remove_plugin(plugin.clone(), folder.clone(), cx);
+                    }
+                    SheetEvent::OpenAddPlugin => shell.show_added(cx),
+                    SheetEvent::AddLink(url) => shell.add_link(url.clone(), window, cx),
+                    SheetEvent::AddFolder(folder) => shell.add_folder(folder.clone(), cx),
+                    SheetEvent::ForgetFolder { plugin, path } => {
+                        shell.forget_folder(plugin.clone(), path.clone(), cx);
+                    }
+                    SheetEvent::ReviewArrival { folder, hash } => {
+                        shell.review_arrival(folder.clone(), hash.clone(), window, cx);
+                    }
+                    SheetEvent::Trust { folder, hash } => {
+                        shell.trust_plugin(folder.clone(), hash.clone(), cx);
+                    }
                     SheetEvent::Edit(edit) => shell.edit_rules(edit.clone()),
                     SheetEvent::TrySound(sound) => shell.play_sound(sound),
                     SheetEvent::LoggingChanged => shell.logging_changed(),
@@ -560,6 +598,11 @@ impl Shell {
             sync: None,
             waiting_for_vault: None,
             job: None,
+            directory_read: None,
+            plugin_work: None,
+            link_check: None,
+            folder_watch: None,
+            folder_reload: None,
             waiting: VecDeque::new(),
             trouble: None,
             listed: SavedServers::default(),
@@ -747,8 +790,14 @@ impl Shell {
         cx: &mut Context<Shell>,
     ) {
         let logs = launcher.logs();
-        self.settings
-            .update(cx, |sheet, cx| sheet.use_logs(logs, cx));
+        let refused = launcher.refused().to_vec();
+        let added = launcher.added_plugins();
+        self.settings.update(cx, |sheet, cx| {
+            sheet.use_logs(logs, cx);
+            sheet.show_refused(refused, cx);
+            sheet.show_added(added, cx);
+        });
+        self.watch_added_folders(launcher.added_folders(), cx);
         self.launcher = Some(launcher);
         self.show_where_things_stand(cx);
         self.off_the_ui_thread(
@@ -837,6 +886,7 @@ impl Shell {
             link.listed_after = synced;
             // On the job path the launcher's reads always take: never here.
             self.ask(Request::ListServers, window, cx);
+            self.reload_plugins(cx);
         }
     }
 
@@ -988,8 +1038,11 @@ impl Shell {
         if outcome.only_listing {
             if !self.left {
                 self.show_listing(&outcome.saved, cx);
+                // A page that arrives after the sheet closed would take the
+                // keyboard from the game.
+                let sheet_open = self.settings_open;
                 self.settings.update(cx, |sheet, cx| {
-                    if let Some(plugins) = outcome.server_plugins {
+                    if let Some(plugins) = outcome.server_plugins.filter(|_| sheet_open) {
                         sheet.show_server_plugins(plugins, window, cx);
                     }
                     match (outcome.switch, outcome.problem) {
@@ -3962,7 +4015,7 @@ pub mod tests {
     fn wearing_a_set_is_refused_while_the_shell_sees_echo_off(cx: &mut TestAppContext) {
         let mut played = play(cx);
         played.connected();
-        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Name {"name": "Bren"}"#);
         played.gmcp(r#"Char.Items.List {"location": "inv", "items": [{"id": "7", "name": "a linen robe"}]}"#);
         played.frames_until("the robe", |shell, _| {
             !shell.copies.items.value().carried.is_empty()
@@ -4873,6 +4926,30 @@ pub mod tests {
     }
 
     #[gpui::test]
+    fn a_servers_plugins_arriving_after_the_sheet_closed_leave_the_keyboard_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.frames_until("the servers to load", |shell, _| shell.job.is_none());
+        let after_closing = launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.open_settings(window, cx);
+            shell
+                .settings
+                .update(cx, |sheet, cx| sheet.select(Section::Servers, cx));
+            shell.ask(Request::ServerPlugins("mud.example".to_owned()), window, cx);
+            shell.close_settings(window, cx);
+            window.focused(cx)
+        });
+        assert!(after_closing.is_some());
+        launched.frames_until("the server's plugins", |shell, _| shell.job.is_none());
+
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            assert!(!shell.settings.read(cx).on_a_page());
+            assert_eq!(window.focused(cx), after_closing);
+        });
+    }
+
+    #[gpui::test]
     fn a_plugin_the_core_turned_off_here_is_a_plain_switch_on_another_server(
         cx: &mut TestAppContext,
     ) {
@@ -5102,7 +5179,7 @@ pub mod tests {
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.settings.read(cx).rules().character, "");
         });
-        played.gmcp(r#"Char.Status {"character_name": "Bren"}"#);
+        played.gmcp(r#"Char.Name {"name": "Bren"}"#);
         played.frames_until("the rules to know who plays", |shell, cx| {
             shell.settings.read(cx).rules().character == "bren"
         });

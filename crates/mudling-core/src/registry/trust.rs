@@ -1,0 +1,171 @@
+//! Which copies of a plugin this device trusts to load, kept on this device
+//! only, so nothing that can write to the repo can add to it.
+//!
+//! A copy is trusted by its content hash: one this device installed itself,
+//! one an index this device verified listed, or one the player chose to
+//! trust. A plugin that arrives by sync in any other shape stays unloaded
+//! until the player reviews it.
+//!
+//! A folder with no record is the player's own only if it began on this
+//! device: [`Origins`] remembers which did, and which sync wrote. It also
+//! keeps the folders elsewhere on this device the player added as plugins,
+//! which load from where they are, so they never reach the repo.
+
+use super::Entry;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+
+const TRUST_FILE: &str = "plugin-trust.json";
+const ORIGINS_FILE: &str = "plugin-origins.json";
+
+/// Where this device's plugin folders with no record began, by id, and the
+/// player's own plugin folders elsewhere on it.
+#[derive(Clone, Debug)]
+pub struct Origins {
+    path: PathBuf,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Known {
+    /// Made on this device: the player's own.
+    local: BTreeSet<String>,
+    /// Written by sync, so from another device or the repo.
+    arrived: BTreeSet<String>,
+    /// Folders the player added from this device, loaded where they are.
+    #[serde(default)]
+    added_folders: BTreeSet<PathBuf>,
+}
+
+impl Origins {
+    pub fn in_data_folder(data_folder: &Path) -> Origins {
+        Origins {
+            path: data_folder.join(ORIGINS_FILE),
+        }
+    }
+
+    /// Changes what's known, then saves it if `change` says it changed. A
+    /// file that's there but can't be read fails the call and is left as it
+    /// is, so nothing is taken for the player's own, and no arrival is lost.
+    /// Reloads and sync run on different threads, so each change is whole.
+    fn change<T>(&self, change: impl FnOnce(&mut Known) -> (T, bool)) -> io::Result<T> {
+        static CHANGING: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = CHANGING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut known = match fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Known::default(),
+            Err(error) => return Err(error),
+        };
+        let (result, changed) = change(&mut known);
+        if changed {
+            let bytes = serde_json::to_vec_pretty(&known).expect("origins serialize");
+            super::save(&self.path, &bytes)?;
+        }
+        Ok(result)
+    }
+
+    /// Whether the folder `id` is the player's own. One never seen before,
+    /// and not written by sync, began here, and is remembered as such.
+    pub fn is_local(&self, id: &str) -> io::Result<bool> {
+        self.change(|known| {
+            if known.arrived.contains(id) {
+                return (false, false);
+            }
+            (true, known.local.insert(id.to_owned()))
+        })
+    }
+
+    /// Sync is about to write these plugins' files. Call it before writing,
+    /// so a crash between the two can't pass them off as the player's own.
+    pub fn mark_arrived<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
+        self.change(|known| {
+            let mut changed = false;
+            for id in ids {
+                changed |= known.local.remove(id);
+                changed |= known.arrived.insert(id.to_owned());
+            }
+            ((), changed)
+        })
+    }
+
+    pub fn forget(&self, id: &str) -> io::Result<()> {
+        self.change(|known| ((), known.arrived.remove(id) | known.local.remove(id)))
+    }
+
+    /// The plugin folders the player added from this device, in path order.
+    pub fn added_folders(&self) -> io::Result<Vec<PathBuf>> {
+        self.change(|known| (known.added_folders.iter().cloned().collect(), false))
+    }
+
+    pub fn add_folder(&self, folder: &Path) -> io::Result<()> {
+        self.change(|known| ((), known.added_folders.insert(folder.to_owned())))
+    }
+
+    /// Forgets `folder`, leaving it and its files where they are.
+    pub fn forget_folder(&self, folder: &Path) -> io::Result<()> {
+        self.change(|known| ((), known.added_folders.remove(folder)))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Trusted {
+    path: PathBuf,
+}
+
+impl Trusted {
+    pub fn in_data_folder(data_folder: &Path) -> Trusted {
+        Trusted {
+            path: data_folder.join(TRUST_FILE),
+        }
+    }
+
+    /// Each plugin's id, with the hashes trusted for it.
+    fn all(&self) -> BTreeMap<String, BTreeSet<String>> {
+        fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn trusts(&self, id: &str, hash: &str) -> bool {
+        self.all()
+            .get(id)
+            .is_some_and(|hashes| hashes.contains(hash))
+    }
+
+    pub fn trust(&self, id: &str, hash: &str) -> io::Result<()> {
+        self.trust_all([(id, hash)])
+    }
+
+    /// Trusts every copy a verified index lists.
+    pub fn trust_index(&self, entries: &[Entry]) -> io::Result<()> {
+        self.trust_all(
+            entries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.hash.as_str())),
+        )
+    }
+
+    fn trust_all<'a>(
+        &self,
+        copies: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> io::Result<()> {
+        let mut all = self.all();
+        let mut added = false;
+        for (id, hash) in copies {
+            added |= all
+                .entry(id.to_owned())
+                .or_default()
+                .insert(hash.to_owned());
+        }
+        if !added {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec_pretty(&all).expect("trusted hashes serialize");
+        super::save(&self.path, &bytes)
+    }
+}

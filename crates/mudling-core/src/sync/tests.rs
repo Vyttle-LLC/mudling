@@ -1583,3 +1583,222 @@ fn a_session_opened_while_a_sync_runs_follows_that_syncs_merge() {
     session.quit().wait().unwrap();
     sync.quit().wait();
 }
+
+impl Device {
+    /// Puts a plugin's files in the data folder, as an install does.
+    fn install_plugin(&self, id: &str, files: &[(&str, &str)]) {
+        let folder = self.data.join("plugins").join(id);
+        let _ = fs::remove_dir_all(&folder);
+        for (name, text) in files {
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join(name), text).unwrap();
+        }
+        let record = self.data.join("plugins").join(format!("{id}.json"));
+        fs::write(
+            record,
+            format!("{{\"from\": \"registry\", \"version\": \"{id}\"}}"),
+        )
+        .unwrap();
+    }
+
+    /// Each file of `id` in the data folder, with what it holds.
+    fn plugin(&self, id: &str) -> Vec<(String, String)> {
+        let Ok(entries) = fs::read_dir(self.data.join("plugins").join(id)) else {
+            return Vec::new();
+        };
+        let mut files: Vec<(String, String)> = entries
+            .flatten()
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, fs::read_to_string(entry.path()).unwrap())
+            })
+            .collect();
+        files.sort();
+        files
+    }
+}
+
+#[test]
+fn a_plugin_installed_on_one_device_reaches_the_other_and_so_does_its_removal() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", "tells")]);
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(
+        world.ipad.plugin("tells"),
+        [("plugin.toml".into(), "tells".into())]
+    );
+    assert!(world.ipad.data.join("plugins/tells.json").exists());
+
+    fs::remove_dir_all(world.mac.data.join("plugins/tells")).unwrap();
+    fs::remove_file(world.mac.data.join("plugins/tells.json")).unwrap();
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(world.ipad.plugin("tells").is_empty());
+    assert!(!world.ipad.data.join("plugins/tells.json").exists());
+}
+
+#[test]
+fn two_devices_updating_one_plugin_keep_one_whole_version_of_it() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("tells", &[("a.toml", "1"), ("b.toml", "1")]);
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    world
+        .mac
+        .install_plugin("tells", &[("a.toml", "2"), ("b.toml", "2")]);
+    world
+        .ipad
+        .install_plugin("tells", &[("a.toml", "3"), ("c.toml", "3")]);
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(world.mac.sync().problem, None);
+
+    let kept = world.mac.plugin("tells");
+    let whole = |version: &str, names: [&str; 2]| -> Vec<(String, String)> {
+        names
+            .map(|name| (name.to_owned(), version.to_owned()))
+            .into()
+    };
+    assert!(
+        kept == whole("2", ["a.toml", "b.toml"]) || kept == whole("3", ["a.toml", "c.toml"]),
+        "{kept:?}"
+    );
+    assert_eq!(world.ipad.plugin("tells"), kept);
+}
+
+#[test]
+fn a_plugin_from_another_device_waits_until_this_one_trusts_it() {
+    let world = two_devices();
+    let manifest = "id = \"tells\"\nname = \"Tells\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", manifest)]);
+    let on_mac = crate::registry::InstalledPlugins::in_data_folder(&world.mac.data);
+    let shown = on_mac.load().arrived[0].hash.clone();
+    on_mac.trust("tells", &shown).unwrap();
+    assert_eq!(on_mac.load().plugins.len(), 1);
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let on_ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    let loaded = on_ipad.load();
+    assert!(loaded.plugins.is_empty(), "the Mac's trust didn't travel");
+    assert_eq!(loaded.arrived.len(), 1);
+}
+
+#[test]
+fn a_folder_plugin_never_reaches_the_repo_or_another_device() {
+    let world = two_devices();
+    let mine = TempDir::new().unwrap();
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    fs::write(mine.path().join("plugin.toml"), manifest).unwrap();
+    crate::registry::Origins::in_data_folder(&world.mac.data)
+        .add_folder(mine.path())
+        .unwrap();
+    world
+        .mac
+        .install_plugin("tells", &[("plugin.toml", "tells")]);
+
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(world.mac.repo.join("plugins/tells").exists(), "it synced");
+    for device in [&world.mac.repo, &world.ipad.repo, &world.ipad.data] {
+        assert!(
+            !device.join("plugins/mine").exists(),
+            "{}",
+            device.display()
+        );
+    }
+    let on_ipad = crate::registry::Origins::in_data_folder(&world.ipad.data);
+    assert!(on_ipad.added_folders().unwrap().is_empty());
+}
+
+#[test]
+fn a_folder_with_no_record_is_the_player_s_own_only_where_it_was_made() {
+    let world = two_devices();
+    let made_here = world.mac.data.join("plugins/mine");
+    fs::create_dir_all(&made_here).unwrap();
+    let manifest = "id = \"mine\"\nname = \"Mine\"\nversion = \"1.0.0\"\napi = 1\n\
+                    license = \"MIT\"\nlayer = \"default\"\n";
+    fs::write(made_here.join("plugin.toml"), manifest).unwrap();
+    let on_mac = crate::registry::InstalledPlugins::in_data_folder(&world.mac.data);
+    assert_eq!(
+        on_mac.load().plugins.len(),
+        1,
+        "made on the Mac, so the Mac's own"
+    );
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert_eq!(world.ipad.sync().problem, None);
+
+    let on_ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    let loaded = on_ipad.load();
+    assert!(
+        loaded.plugins.is_empty(),
+        "the repo brought it, with no record"
+    );
+    assert_eq!(loaded.arrived.len(), 1);
+    assert_eq!(
+        on_mac.load().plugins.len(),
+        1,
+        "the round trip left it the Mac's"
+    );
+}
+
+#[test]
+fn a_folder_that_was_the_player_s_own_and_changed_by_sync_waits_again() {
+    let world = two_devices();
+    let manifest = |version: &str| {
+        format!(
+            "id = \"mine\"\nname = \"Mine\"\nversion = \"{version}\"\napi = 1\n\
+             license = \"MIT\"\nlayer = \"default\"\n"
+        )
+    };
+    let on_ipad = world.ipad.data.join("plugins/mine");
+    fs::create_dir_all(&on_ipad).unwrap();
+    fs::write(on_ipad.join("plugin.toml"), manifest("1.0.0")).unwrap();
+    let ipad = crate::registry::InstalledPlugins::in_data_folder(&world.ipad.data);
+    assert_eq!(ipad.load().plugins.len(), 1);
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(world.mac.sync().problem, None);
+
+    // Someone with the repo changes it under the same name.
+    fs::write(
+        world.mac.data.join("plugins/mine/plugin.toml"),
+        manifest("6.6.6"),
+    )
+    .unwrap();
+    assert_eq!(world.mac.sync().problem, None);
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(ipad.load().plugins.is_empty());
+}
+
+#[test]
+fn approvals_never_leave_the_device() {
+    let world = two_devices();
+    world
+        .mac
+        .install_plugin("extras", &[("plugin.toml", "extras")]);
+    let approved_copy = "sha256:the-copy-approved-here";
+    crate::registry::Approvals::in_data_folder(&world.mac.data)
+        .approve("extras", approved_copy)
+        .unwrap();
+
+    assert_eq!(world.mac.sync().problem, None);
+
+    assert!(remote_files(&world.remote).contains(&"extras.json".to_owned()));
+    assert!(!remote_ever_held(&world.remote, approved_copy));
+}

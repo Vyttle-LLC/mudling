@@ -1,6 +1,9 @@
-//! What standard GMCP says about the game in play: who the character is, who
-//! it's fighting, and who and what is in the room. Kept for the connection
-//! and never saved.
+//! What GMCP says about the game in play: who the character is, who it's
+//! fighting, and who and what is in the room. Kept for the connection and
+//! never saved.
+//!
+//! The character and the fight are read where the HUD points' [`GameFields`]
+//! say, so no game's names for them are here.
 //!
 //! `Room.Players` lists players by name and mobs by a number. `Char.Items`
 //! with location `room` lists what's on the ground. Neither gives the word
@@ -10,15 +13,17 @@
 
 use super::inventory::{self, Change, List};
 use crate::ansi;
+use crate::defaults::hud::{Field, GameFields};
 use crate::map::mob_name;
 use crate::plugin::luau::Value;
+use crate::plugin::points::OpponentField;
 use crate::store::{
     CHARACTER_LEVEL, CHARACTER_NAME, CHARACTER_POSITION, Item, Occupant, RoomContents, Target,
     TargetState,
 };
 use crate::telnet::gmcp;
 use serde::Deserialize;
-use serde_json::Value as Json;
+use serde_json::{Map, Value as Json};
 use std::collections::BTreeMap;
 
 const ROOM: &str = "room";
@@ -27,49 +32,13 @@ const ARTICLES: [&str; 4] = ["a", "an", "the", "some"];
 const PHRASE_ENDS: [&str; 7] = ["is", "are", "of", "here", "who", "that", "with"];
 /// Words that follow the noun in an item's name.
 const ITEM_NOUN_ENDS: [&str; 3] = ["of", "that", "with"];
-/// What Char.Status says for the character sheet, under the same names.
-const SHEET_FIELDS: [&str; 20] = [
-    "race",
-    "class",
-    "str",
-    "int",
-    "wis",
-    "dex",
-    "con",
-    "str_perm",
-    "int_perm",
-    "wis_perm",
-    "dex_perm",
-    "con_perm",
-    "gold",
-    "practice",
-    "hitroll",
-    "damroll",
-    "ac",
-    "saves",
-    "alignment",
-    "wimpy",
-];
+/// What a sheet key is filed under in the characters store.
+const SHEET: &str = "character.";
 
 #[derive(Deserialize)]
 struct RoomPlayer {
     name: Option<String>,
     fullname: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Status {
-    character_name: Option<String>,
-    level: Option<Json>,
-    opponent_name: Option<String>,
-    opponent_level: Option<Json>,
-    opponent_health: Option<Json>,
-    opponent_health_max: Option<Json>,
-}
-
-#[derive(Deserialize)]
-struct Vitals {
-    position: Option<String>,
 }
 
 /// Someone the server listed in the room.
@@ -142,14 +111,21 @@ impl GameFeed {
         self.target.is_some()
     }
 
-    pub(super) fn read(&mut self, package: &str, json: &str) -> Heard {
+    pub(super) fn read(&mut self, package: &str, json: &str, fields: &GameFields) -> Heard {
         let is = |name: &str| package.eq_ignore_ascii_case(name);
         let mut heard = Heard::default();
-        if is("Char.Vitals") {
-            self.read_vitals(json, &mut heard);
-        } else if is("Char.Status") {
-            self.read_status(json, &mut heard);
-        } else if is("Room.Info") {
+        if fields.read_from(package)
+            && let Some(message) = gmcp::from_json::<Map<String, Json>>(json)
+        {
+            // What this message holds at a field, if it's the field's message.
+            let value = |field: &Field| {
+                let here = field.package.eq_ignore_ascii_case(package);
+                here.then(|| message.get(&field.key)).flatten()
+            };
+            self.read_character(&fields.character, value, &mut heard);
+            self.read_opponent(&fields.opponent, value, &mut heard);
+        }
+        if is("Room.Info") {
             // What's listed next is the new room's.
             self.present.clear();
             self.items.clear();
@@ -227,49 +203,65 @@ impl GameFeed {
         }
     }
 
-    fn read_vitals(&mut self, json: &str, heard: &mut Heard) {
-        let Some(Vitals {
-            position: Some(position),
-        }) = gmcp::from_json(json)
-        else {
-            return;
-        };
-        if self.position.as_ref() != Some(&position) {
-            let value = Value::Text(position.clone());
-            heard.character.insert(CHARACTER_POSITION.to_owned(), value);
-            self.position = Some(position);
+    /// The sheet's values a message holds. A game may send only what changed.
+    fn read_character<'a>(
+        &mut self,
+        fields: &BTreeMap<String, Field>,
+        value: impl Fn(&Field) -> Option<&'a Json>,
+        heard: &mut Heard,
+    ) {
+        for (key, field) in fields {
+            let Some(value) = value(field) else { continue };
+            let filed = format!("{SHEET}{key}");
+            if filed == CHARACTER_NAME {
+                let Some(name) = value.as_str().map(ansi::plain) else {
+                    continue;
+                };
+                if !name.is_empty() {
+                    heard.character.insert(filed, Value::Text(name));
+                    heard.contents = true;
+                }
+            } else if filed == CHARACTER_LEVEL {
+                if let Some(level) = number(Some(value)) {
+                    heard.character.insert(filed, Value::Number(level as f64));
+                }
+            } else if filed == CHARACTER_POSITION {
+                let Some(position) = value.as_str() else {
+                    continue;
+                };
+                if self.position.as_deref() != Some(position) {
+                    heard
+                        .character
+                        .insert(filed, Value::Text(position.to_owned()));
+                    self.position = Some(position.to_owned());
+                }
+            } else if let Some(value) = sheet_value(value) {
+                heard.character.insert(filed, value);
+            }
         }
     }
 
-    /// Char.Status carries only what changed.
-    fn read_status(&mut self, json: &str, heard: &mut Heard) {
-        let Some(status) = gmcp::from_json::<Status>(json) else {
-            return;
+    /// The fight's state a message holds. A game may send only what changed,
+    /// so a switch of opponent keeps what the message leaves out.
+    fn read_opponent<'a>(
+        &mut self,
+        fields: &BTreeMap<OpponentField, Field>,
+        value: impl Fn(&Field) -> Option<&'a Json>,
+        heard: &mut Heard,
+    ) {
+        let sent = |which: OpponentField| {
+            let value = fields.get(&which).and_then(&value);
+            value.filter(|value| !value.is_null())
         };
-        if let Some(fields) = gmcp::from_json::<BTreeMap<String, Json>>(json) {
-            for field in SHEET_FIELDS {
-                if let Some(value) = fields.get(field).and_then(sheet_value) {
-                    heard.character.insert(format!("character.{field}"), value);
-                }
-            }
-        }
-        if let Some(name) = status.character_name.as_deref().map(ansi::plain)
-            && !name.is_empty()
-        {
-            let value = Value::Text(name);
-            heard.character.insert(CHARACTER_NAME.to_owned(), value);
-            heard.contents = true;
-        }
-        if let Some(level) = number(status.level.as_ref()) {
-            let value = Value::Number(level as f64);
-            heard.character.insert(CHARACTER_LEVEL.to_owned(), value);
-        }
-        let level = number(status.opponent_level.as_ref()).filter(|level| *level > 0);
-        let health = number(status.opponent_health.as_ref());
-        let max_health = number(status.opponent_health_max.as_ref()).filter(|max| *max > 0);
-        match status.opponent_name.as_deref().map(ansi::plain) {
+        let level = number(sent(OpponentField::Level)).filter(|level| *level > 0);
+        let percent = number(sent(OpponentField::Percent));
+        let health = number(sent(OpponentField::Health)).or(percent);
+        let max_health = number(sent(OpponentField::MaxHealth))
+            .or(percent.map(|_| 100))
+            .filter(|max| *max > 0);
+        let name = sent(OpponentField::Name).and_then(Json::as_str);
+        match name.map(ansi::plain) {
             Some(name) if name.is_empty() => self.target = None,
-            // A switch of opponent keeps what this message leaves out.
             Some(name) => self.target.get_or_insert_default().name = name,
             None => {}
         }
@@ -278,11 +270,7 @@ impl GameFeed {
             target.health = health.or(target.health);
             target.max_health = max_health.or(target.max_health);
         }
-        let about_the_fight = status.opponent_name.is_some()
-            || status.opponent_level.is_some()
-            || status.opponent_health.is_some()
-            || status.opponent_health_max.is_some();
-        if about_the_fight {
+        if fields.keys().any(|which| sent(*which).is_some()) {
             heard.target = Some(TargetState(self.target.clone()));
         }
     }
@@ -292,7 +280,7 @@ fn room_change(json: &str) -> Option<Change> {
     gmcp::from_json::<Change>(json).filter(|change| change.location == ROOM)
 }
 
-/// A Char.Status field as the sheet keeps it: a number if it is one.
+/// A field as the sheet keeps it: a number if it is one.
 fn sheet_value(value: &Json) -> Option<Value> {
     if let Some(number) = number(Some(value)) {
         return Some(Value::Number(number as f64));
@@ -380,9 +368,33 @@ mod tests {
     fn feed(messages: &[(&str, &str)]) -> GameFeed {
         let mut feed = GameFeed::default();
         for (package, json) in messages {
-            feed.read(package, json);
+            feed.hear(package, json);
         }
         feed
+    }
+
+    /// A game's fields as its HUD point names them, over the defaults'.
+    const HUD: &str = r#"
+        [character]
+        name = "Char.Status.character_name"
+        position = "Char.Vitals.position"
+        race = "Char.Status.race"
+        hitroll = "Char.Status.hitroll"
+        ac = "Char.Status.ac"
+        gold = "Char.Status.gold"
+        [opponent]
+        name = "Char.Status.opponent_name"
+        level = "Char.Status.opponent_level"
+        health = "Char.Status.opponent_health"
+        max_health = "Char.Status.opponent_health_max"
+    "#;
+
+    impl GameFeed {
+        fn hear(&mut self, package: &str, json: &str) -> Heard {
+            let defaults = crate::defaults::plugin().points.hud.unwrap();
+            let game = toml::from_str(HUD).unwrap();
+            self.read(package, json, &GameFields::from_huds([&defaults, &game]))
+        }
     }
 
     fn targets(contents: &RoomContents) -> Vec<&str> {
@@ -416,7 +428,7 @@ mod tests {
         let mut feed = feed(&[("Room.Players", players)]);
         assert_eq!(targets(&feed.contents(None)), ["wolf", "bren", "mira"]);
 
-        let heard = feed.read("Char.Status", r#"{"character_name": "Bren"}"#);
+        let heard = feed.hear("Char.Status", r#"{"character_name": "Bren"}"#);
         assert!(heard.contents, "the list changes with the name");
         let contents = feed.contents(Some("bren"));
         assert_eq!(targets(&contents), ["wolf", "mira"]);
@@ -430,20 +442,20 @@ mod tests {
     fn a_mob_is_seen_when_it_comes_and_gone_when_it_leaves() {
         let mut feed = GameFeed::default();
         let bear = r#"{"222": {"name": "222", "fullname": "A brown bear stands here."}}"#;
-        let heard = feed.read("Room.AddPlayer", bear);
+        let heard = feed.hear("Room.AddPlayer", bear);
         assert_eq!(heard.mobs, ["A brown bear stands here."]);
         assert!(heard.contents);
         assert_eq!(targets(&feed.contents(None)), ["bear"]);
 
-        assert!(feed.read("Room.RemovePlayer", r#""222""#).contents);
+        assert!(feed.hear("Room.RemovePlayer", r#""222""#).contents);
         assert!(feed.contents(None).occupants.is_empty());
-        assert!(!feed.read("Room.RemovePlayer", r#""222""#).contents);
+        assert!(!feed.hear("Room.RemovePlayer", r#""222""#).contents);
     }
 
     #[test]
     fn players_are_no_sightings() {
         let mut feed = GameFeed::default();
-        let heard = feed.read(
+        let heard = feed.hear(
             "Room.Players",
             r#"{"Mira": {"name": "Mira", "fullname": "Mira is here."}}"#,
         );
@@ -463,12 +475,12 @@ mod tests {
         assert_eq!((items[1].target.as_str(), items[1].count), ("corpse", 1));
 
         let carried = r#"{"location": "inv", "item": {"id": "9", "name": "a rope"}}"#;
-        assert!(!feed.read("Char.Items.Add", carried).contents);
+        assert!(!feed.hear("Char.Items.Add", carried).contents);
         let gone = r#"{"location": "room", "item": {"id": "1", "name": "a silver ring"}}"#;
-        assert!(feed.read("Char.Items.Remove", gone).contents);
+        assert!(feed.hear("Char.Items.Remove", gone).contents);
         assert_eq!(feed.contents(None).items[0].count, 1);
         let added = r#"{"location": "room", "item": {"id": "4", "name": "a portal"}}"#;
-        feed.read("Char.Items.Add", added);
+        feed.hear("Char.Items.Add", added);
         assert_eq!(feed.contents(None).items[2].target, "portal");
     }
 
@@ -484,7 +496,7 @@ mod tests {
                 r#"{"location": "room", "items": [{"id": "1", "name": "a lamp"}]}"#,
             ),
         ]);
-        assert!(feed.read("Room.Info", "{}").contents);
+        assert!(feed.hear("Room.Info", "{}").contents);
         assert_eq!(feed.contents(None), RoomContents::default());
     }
 
@@ -556,7 +568,7 @@ mod tests {
     #[test]
     fn the_character_comes_from_status_and_vitals() {
         let mut feed = GameFeed::default();
-        let heard = feed.read(
+        let heard = feed.hear(
             "Char.Status",
             r#"{"character_name": "Bren", "level": "22"}"#,
         );
@@ -566,22 +578,22 @@ mod tests {
         );
         assert_eq!(heard.character[CHARACTER_LEVEL], Value::Number(22.0));
 
-        let heard = feed.read("Char.Status", r#"{"level": 23, "affects": null}"#);
+        let heard = feed.hear("Char.Status", r#"{"level": 23, "affects": null}"#);
         assert_eq!(heard.character[CHARACTER_LEVEL], Value::Number(23.0));
 
         let stand = r#"{"hp": "30", "position": "Stand", "monhp": null}"#;
-        let heard = feed.read("Char.Vitals", stand);
+        let heard = feed.hear("Char.Vitals", stand);
         assert_eq!(
             heard.character[CHARACTER_POSITION],
             Value::Text("Stand".to_owned())
         );
-        assert!(feed.read("Char.Vitals", stand).character.is_empty());
+        assert!(feed.hear("Char.Vitals", stand).character.is_empty());
     }
 
     #[test]
     fn status_fields_for_the_sheet_keep_their_type() {
         let mut feed = GameFeed::default();
-        let heard = feed.read(
+        let heard = feed.hear(
             "Char.Status",
             r#"{"hitroll": "12", "ac": -4, "race": "Harpy", "gold": null, "room_name": "A hall"}"#,
         );
@@ -598,11 +610,11 @@ mod tests {
     fn a_fight_starts_goes_on_and_ends_in_status_diffs() {
         let mut feed = GameFeed::default();
         assert!(
-            feed.read("Char.Status", r#"{"gold": "3"}"#)
+            feed.hear("Char.Status", r#"{"gold": "3"}"#)
                 .target
                 .is_none()
         );
-        let heard = feed.read(
+        let heard = feed.hear(
             "Char.Status",
             r#"{"opponent_name": "A Trog", "opponent_level": "15",
                 "opponent_health": "100", "opponent_health_max": "100"}"#,
@@ -611,12 +623,12 @@ mod tests {
         assert_eq!(target.name, "A Trog");
         assert_eq!(target.level, Some(15));
 
-        let heard = feed.read("Char.Status", r#"{"opponent_health": "36"}"#);
+        let heard = feed.hear("Char.Status", r#"{"opponent_health": "36"}"#);
         let target = heard.target.unwrap().0.unwrap();
         assert_eq!((target.name.as_str(), target.health), ("A Trog", Some(36)));
         assert_eq!(target.max_health, Some(100));
 
-        let heard = feed.read(
+        let heard = feed.hear(
             "Char.Status",
             r#"{"opponent_name": "A Trog Child", "opponent_health": "90"}"#,
         );
@@ -628,17 +640,50 @@ mod tests {
         assert_eq!(target.max_health, Some(100), "unchanged, so left out");
         assert_eq!(target.level, Some(15), "unchanged, so left out");
 
-        let heard = feed.read(
+        let heard = feed.hear(
             "Char.Status",
             r#"{"opponent_name": "", "opponent_level": "0",
                 "opponent_health": "0", "opponent_health_max": "0"}"#,
         );
         assert_eq!(heard.target, Some(TargetState(None)));
-        let heard = feed.read("Char.Status", r#"{"opponent_health": "5"}"#);
+        let heard = feed.hear("Char.Status", r#"{"opponent_health": "5"}"#);
         assert_eq!(heard.target, Some(TargetState(None)), "no fight, no target");
 
-        let heard = feed.read("Char.Status", r#"{"opponent_name": "A Trog"}"#);
+        let heard = feed.hear("Char.Status", r#"{"opponent_name": "A Trog"}"#);
         let target = heard.target.unwrap().0.unwrap();
         assert_eq!(target.max_health, None, "a new fight starts clean");
+    }
+
+    #[test]
+    fn with_no_game_plugin_only_the_shared_fields_are_read() {
+        let defaults = crate::defaults::plugin().points.hud.unwrap();
+        let fields = GameFields::from_huds([&defaults]);
+        let mut feed = GameFeed::default();
+        let status =
+            r#"{"character_name": "Bren", "level": 3, "str": 9, "opponent_name": "A rat"}"#;
+        let heard = feed.read("Char.Status", status, &fields);
+        assert_eq!(Vec::from_iter(heard.character.keys()), [CHARACTER_LEVEL]);
+        assert_eq!(heard.target, None);
+
+        let heard = feed.read("Char.Name", r#"{"name": "Bren"}"#, &fields);
+        let named = heard.character.get(CHARACTER_NAME);
+        assert_eq!(named, Some(&Value::Text("Bren".to_owned())));
+    }
+
+    #[test]
+    fn a_percentage_is_health_out_of_a_hundred() {
+        let hud = "[opponent]\nname = \"char.status.enemy\"\npercent = \"char.status.enemypct\"";
+        let fields = GameFields::from_huds([&toml::from_str(hud).unwrap()]);
+        let mut feed = GameFeed::default();
+        let heard = feed.read(
+            "char.status",
+            r#"{"enemy": "an owl", "enemypct": 93}"#,
+            &fields,
+        );
+        let target = heard.target.unwrap().0.unwrap();
+        assert_eq!((target.health, target.max_health), (Some(93), Some(100)));
+
+        let heard = feed.read("char.status", r#"{"enemy": "", "enemypct": 0}"#, &fields);
+        assert_eq!(heard.target, Some(TargetState(None)));
     }
 }

@@ -29,13 +29,16 @@ const NOT_SYNCED_YET: &str = "Not synced yet.";
 const SYNCING: &str = "Syncing…";
 /// The history lists this many sessions, the newest first.
 const HISTORY_LENGTH: usize = 50;
-/// PRD §10's list, said as it is. Installed plugins and which are on stay on
-/// the device until plugin folders sync, which is Phase 7. Nothing here comes
-/// from a game.
-const WHATS_KEPT: [(&str, &str); 4] = [
+/// PRD §10's list, said as it is. Plugins installed from the directory or a
+/// link sync; folders added as plugins, which are on for a server, which may
+/// send commands and which copies may load stay with the device that chose.
+/// Nothing here comes from a game.
+const WHATS_KEPT: [(&str, &str); 6] = [
     ("Maps, characters and notes", "Synced"),
     ("Triggers, aliases and settings", "Synced"),
-    ("Plugins", "On this device"),
+    ("Installed plugins", "Synced"),
+    ("Plugin folders you added", "On this device"),
+    ("Plugin switches, approvals and trust", "On this device"),
     ("Game logs and typing", "Never synced"),
 ];
 
@@ -94,7 +97,7 @@ pub(super) fn last_sync_words(last_sync: Option<Timestamp>, now: Timestamp) -> S
     })
 }
 
-fn ago(at: Timestamp, now: Timestamp) -> String {
+pub(super) fn ago(at: Timestamp, now: Timestamp) -> String {
     let minutes = (now.0 - at.0).max(0) / 60_000;
     let plural = |count: i64, unit: &str| match count {
         1 => format!("1 {unit} ago"),
@@ -454,13 +457,13 @@ mod tests {
     }
 
     #[test]
-    fn plugins_are_said_to_stay_on_this_device_not_to_sync() {
+    fn installed_plugins_sync_and_approvals_stay_on_this_device() {
         let how = |what: &str| WHATS_KEPT.iter().find(|row| row.0 == what).map(|row| row.1);
-        assert_eq!(how("Plugins"), Some("On this device"));
-        assert!(
-            WHATS_KEPT
-                .iter()
-                .all(|(what, how)| *how != "Synced" || !what.contains("lugins"))
+        assert_eq!(how("Installed plugins"), Some("Synced"));
+        assert_eq!(how("Plugin folders you added"), Some("On this device"));
+        assert_eq!(
+            how("Plugin switches, approvals and trust"),
+            Some("On this device")
         );
     }
 

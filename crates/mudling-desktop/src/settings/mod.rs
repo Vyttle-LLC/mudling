@@ -7,8 +7,10 @@
 //! control scrolled out of view back in. The arrow and page keys scroll what
 //! has no control to land on, like the list of shortcuts.
 
+mod add_plugin;
 mod appearance;
 mod data;
+mod directory;
 mod inspector;
 mod logs;
 mod plugins;
@@ -19,7 +21,9 @@ mod shortcuts;
 mod triggers;
 mod vault;
 
-pub use plugins::PluginRow;
+pub use add_plugin::{Added, AddedPlugin, shown_path};
+pub use directory::{Downloaded, Listing};
+pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};
 pub use servers::SavedServer;
@@ -36,10 +40,12 @@ use gpui::{
 };
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
+use mudling_core::registry::{Entry, Fetched, Index, Refused};
 use mudling_core::session::RuleEdit;
 use mudling_core::stats::Summary;
 use mudling_core::store::{InspectorState, RulesState, SettingsState};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const WIDTH: Pixels = px(1000.);
 const HEIGHT: Pixels = px(716.);
@@ -137,6 +143,53 @@ pub enum SheetEvent {
         plugin: PluginId,
         on: bool,
     },
+    /// The directory opened: fetch and check its index.
+    OpenDirectory,
+    /// Download `entry` and check it against `index`.
+    Fetch {
+        index: Arc<Index>,
+        entry: Entry,
+    },
+    /// Put a checked plugin in place, letting it send commands if `approve`.
+    Install {
+        fetched: Arc<Fetched>,
+        approve: bool,
+    },
+    /// Whether `plugin` may send commands, to save and to apply at once.
+    SetApproved {
+        plugin: PluginId,
+        approved: bool,
+    },
+    /// Take `plugin` out of the data folder, from `folder`, the one its row
+    /// came from, as the player confirmed.
+    Remove {
+        plugin: PluginId,
+        folder: SharedString,
+    },
+    /// The page that adds a plugin opened: show what was added.
+    OpenAddPlugin,
+    /// Fetch the plugin at this git link and check it.
+    AddLink(String),
+    /// Load the plugin in this folder on this device from now on.
+    AddFolder(PathBuf),
+    /// Stop loading the folder the player added, and `plugin`, the one it
+    /// held, if it ever loaded. The folder stays.
+    ForgetFolder {
+        plugin: Option<PluginId>,
+        path: PathBuf,
+    },
+    /// Check the copy in `folder`, shown with `hash`, against the directory,
+    /// or else ask the player whether to trust it.
+    ReviewArrival {
+        folder: SharedString,
+        hash: SharedString,
+    },
+    /// Load the copy in `folder`, as long as it's still the one shown with
+    /// `hash`, as the player chose.
+    Trust {
+        folder: SharedString,
+        hash: SharedString,
+    },
     /// A change to the player's rules, for the session.
     Edit(RuleEdit),
     /// A sound was chosen: the player hears what they chose.
@@ -158,6 +211,8 @@ enum Page {
     Section,
     Inspector,
     Server(ServerPlugins),
+    Directory,
+    AddPlugin,
 }
 
 /// The pane's stops. Controls' handles are kept between frames, so a control
@@ -292,11 +347,12 @@ fn control(
 /// An outlined button with its label as its text.
 pub(crate) fn text_button(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     stop: &FocusHandle,
     theme: &Theme,
 ) -> Stateful<Div> {
-    control(id, label, stop, theme)
+    let label = label.into();
+    control(id, label.clone(), stop, theme)
         .h(px(36.))
         .px_3()
         .border_color(theme.border)
@@ -335,6 +391,11 @@ pub struct SettingsSheet {
     /// The host whose removal is being asked about.
     removing: Option<SharedString>,
     plugins: Vec<PluginRow>,
+    /// The player installed, updated or removed a plugin since the session
+    /// opened, which it won't follow.
+    installs_changed: bool,
+    /// Installed plugins that weren't loaded, and why.
+    refused: Vec<Refused>,
     rules: RulesState,
     logs: logs::LogsPanel,
     form: triggers::Form,
@@ -357,6 +418,11 @@ pub struct SettingsSheet {
     fonts: Vec<&'static str>,
     data: data::DataPane,
     vault: vault::VaultPane,
+    directory: directory::DirectoryPane,
+    add: add_plugin::AddPane,
+    /// The approval open over the sheet, which keeps the keyboard until it's
+    /// answered.
+    asking: Option<directory::Approval>,
     dialog: FocusHandle,
     tabs: [FocusHandle; Section::ALL.len()],
     close: FocusHandle,
@@ -390,6 +456,8 @@ impl SettingsSheet {
             playing: None,
             removing: None,
             plugins: Vec::new(),
+            installs_changed: false,
+            refused: Vec::new(),
             rules: RulesState::default(),
             logs: logs::LogsPanel::default(),
             form: triggers::Form::new(window, cx),
@@ -405,6 +473,9 @@ impl SettingsSheet {
             fonts: vec![CHAT_FONTS[0]],
             data: data::DataPane::default(),
             vault: vault::VaultPane::new(window, cx),
+            directory: directory::DirectoryPane::new(cx),
+            add: add_plugin::AddPane::new(window, cx),
+            asking: None,
             dialog: cx.focus_handle(),
             tabs: std::array::from_fn(|_| cx.focus_handle()),
             close: cx.focus_handle(),
@@ -467,6 +538,7 @@ impl SettingsSheet {
     /// Back to the section. Leaving the inspector ends its recording, and
     /// forgets what it held.
     pub fn leave_page(&mut self, cx: &mut Context<SettingsSheet>) {
+        self.drop_approval();
         if self.page == Page::Inspector {
             self.forget_inspected();
             cx.emit(SheetEvent::Inspect(false));
@@ -506,6 +578,8 @@ impl SettingsSheet {
             Page::Section => self.section.title().into(),
             Page::Inspector => "Inspector".into(),
             Page::Server(page) => format!("Plugins for {}", page.host).into(),
+            Page::Directory => directory::DIRECTORY_TITLE.into(),
+            Page::AddPlugin => add_plugin::ADD_TITLE.into(),
         }
     }
 
@@ -533,7 +607,7 @@ impl SettingsSheet {
     /// Whether the player changed a switch for the session running, which
     /// won't follow it.
     pub fn reconnect_to_apply(&self) -> bool {
-        self.plugins.iter().any(|row| row.flips > 0)
+        self.installs_changed || self.plugins.iter().any(|row| row.flips > 0)
     }
 
     #[cfg(test)]
@@ -570,8 +644,10 @@ impl SettingsSheet {
         }
     }
 
+    /// A new session's plugins, which run whatever was installed before it.
     pub fn show_plugins(&mut self, plugins: Vec<PluginRow>, cx: &mut Context<SettingsSheet>) {
         self.plugins = plugins;
+        self.installs_changed = false;
         cx.notify();
     }
 
@@ -627,9 +703,15 @@ impl SettingsSheet {
 
     /// Moves `step` stops on, round the sheet, and brings the stop into view.
     fn walk(&mut self, step: isize, window: &mut Window, cx: &mut Context<SettingsSheet>) {
-        let fixed = self.tabs.len() + 1;
+        // An approval keeps the keyboard on its own buttons.
+        let fixed = if self.asking.is_some() {
+            0
+        } else {
+            self.tabs.len() + 1
+        };
         let order: Vec<&FocusHandle> = (self.tabs.iter())
             .chain([&self.close])
+            .skip(self.tabs.len() + 1 - fixed)
             .chain(self.stops.in_use())
             .collect();
         let at = order.iter().position(|stop| stop.is_focused(window));
@@ -637,7 +719,7 @@ impl SettingsSheet {
             (at as isize + step).rem_euclid(order.len() as isize) as usize
         });
         window.focus(order[next], cx);
-        if let Some(stop) = next.checked_sub(fixed) {
+        if let Some(stop) = next.checked_sub(fixed).filter(|_| self.asking.is_none()) {
             self.scroll.scroll_to_item(self.stops.rows[stop]);
             cx.notify();
         }
@@ -766,6 +848,8 @@ impl SettingsSheet {
         match (&page, self.section) {
             (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
+            (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
+            (Page::AddPlugin, _) => self.fill_add_plugin(&mut pane, theme, cx),
             (Page::Section, section) => self.fill_section(section, &mut pane, theme, cx),
         }
 
@@ -906,7 +990,13 @@ impl gpui::Render for SettingsSheet {
                 sheet.walk(1, window, cx);
                 cx.stop_propagation();
             }))
-            .on_action(cx.listener(|sheet, _: &CloseSettings, _, cx| sheet.close(cx)))
+            .on_action(cx.listener(|sheet, _: &CloseSettings, window, cx| {
+                if sheet.asking.is_some() {
+                    sheet.answer(false, false, window, cx);
+                } else {
+                    sheet.close(cx);
+                }
+            }))
             .on_action(cx.listener(|sheet, _: &NextStop, window, cx| sheet.walk(1, window, cx)))
             .on_action(
                 cx.listener(|sheet, _: &PreviousStop, window, cx| sheet.walk(-1, window, cx)),
@@ -925,9 +1015,13 @@ impl gpui::Render for SettingsSheet {
             .on_action(|_: &FindInScrollback, _, _| {})
             .on_action(|_: &OpenSettings, _, _| {})
             .on_action(|_: &FocusHotbar, _, _| {})
-            .on_action(|_: &PinCommand, _, _| {})
-            .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
-            .child(self.render_pane(&theme, cx));
+            .on_action(|_: &PinCommand, _, _| {});
+        let dialog = match self.render_approval(&theme, cx) {
+            Some(approval) => dialog.child(approval),
+            None => dialog
+                .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
+                .child(self.render_pane(&theme, cx)),
+        };
         div()
             .id("settings-scrim")
             .debug_selector(|| "settings-scrim".to_owned())
@@ -1775,5 +1869,329 @@ mod tests {
         click("open-settings", cx);
         click("notice-turn-on-0", cx);
         assert_eq!(*asked.borrow(), Some(plugin));
+    }
+
+    #[gpui::test]
+    fn tab_brings_the_last_switch_into_view_however_many_plugins_there_are(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, cx) = window_with_keys(cx);
+        cx.simulate_resize(size(px(1000.), px(500.)));
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        let plugins = crate::measure::sample_plugins();
+        assert!(plugins.len() >= 7);
+        sheet.update(cx, |sheet, cx| {
+            sheet.show_plugins(plugins, cx);
+            sheet.select(Section::Plugins, cx);
+        });
+        open(&shell, cx);
+
+        // Back from the Plugins tab, round the tabs, to the pane's last stop.
+        cx.simulate_keystrokes("shift-tab shift-tab");
+        cx.run_until_parked();
+
+        let switch = cx.debug_bounds("switch-sample-vitals").expect("drawn");
+        let sheet_bounds = cx.debug_bounds("settings-sheet").expect("open");
+        assert!(
+            switch.bottom() <= sheet_bounds.bottom() && switch.top() >= sheet_bounds.top(),
+            "{switch:?} is outside {sheet_bounds:?}"
+        );
+    }
+
+    /// The approval-related events the sheet sends, said in a few words.
+    fn approval_events(
+        sheet: &Entity<SettingsSheet>,
+        cx: &mut VisualTestContext,
+    ) -> (Rc<RefCell<Vec<String>>>, gpui::Subscription) {
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let keep = Rc::clone(&said);
+        let watching = cx.update(|_, cx| {
+            cx.subscribe(sheet, move |_, event: &SheetEvent, _| {
+                let words = match event {
+                    SheetEvent::SetPlugin { plugin, on, .. } => format!("{plugin} on: {on}"),
+                    SheetEvent::SetApproved { plugin, approved } => {
+                        format!("{plugin} approved: {approved}")
+                    }
+                    _ => return,
+                };
+                keep.borrow_mut().push(words);
+            })
+        });
+        (said, watching)
+    }
+
+    /// The Plugins section of a session on mud.example, its waiting plugin off.
+    fn plugins_with_one_waiting(
+        cx: &mut TestAppContext,
+    ) -> (Entity<SettingsSheet>, &mut VisualTestContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        // Few enough that every switch is in view, so a click lands on it.
+        let mut plugins = crate::measure::sample_plugins();
+        plugins.retain(|row| row.sending != Sending::No);
+        for row in &mut plugins {
+            row.on &= row.sending != Sending::Waiting;
+        }
+        let session = SettingsState {
+            server: Some("mud.example".to_owned()),
+            ..SettingsState::default()
+        };
+        sheet.update(cx, |sheet, cx| {
+            sheet.show_plugins(plugins, cx);
+            sheet.show_session(&session, cx);
+            sheet.select(Section::Plugins, cx);
+        });
+        open(&shell, cx);
+        (sheet, cx)
+    }
+
+    #[gpui::test]
+    fn turning_on_a_plugin_waiting_for_approval_asks_first(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        let (said, _watching) = approval_events(&sheet, cx);
+
+        click("switch-sample-chat", cx);
+        assert!(cx.debug_bounds("approval").is_some());
+        assert!(
+            said.borrow().is_empty(),
+            "nothing's saved until the player answers"
+        );
+        click("approval-without", cx);
+        assert!(cx.debug_bounds("approval").is_none());
+        assert_eq!(*said.borrow(), ["sample-chat on: true"]);
+
+        click("switch-sample-chat", cx);
+        click("switch-sample-chat", cx);
+        click("approval-allow", cx);
+        assert_eq!(
+            said.borrow()[1..],
+            [
+                "sample-chat on: false",
+                "sample-chat approved: true",
+                "sample-chat on: true"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn an_approval_is_taken_back_from_its_row_and_cancel_changes_nothing(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        let (said, _watching) = approval_events(&sheet, cx);
+
+        click("approval-sample-helper", cx);
+        assert_eq!(*said.borrow(), ["sample-helper approved: false"]);
+        let sending = |cx: &mut VisualTestContext| {
+            sheet.read_with(cx, |sheet, _| {
+                let row = sheet
+                    .plugins
+                    .iter()
+                    .find(|row| row.id.as_str() == "sample-helper");
+                row.unwrap().sending
+            })
+        };
+        assert_eq!(sending(cx), Sending::Waiting);
+
+        click("approval-sample-helper", cx);
+        assert!(cx.debug_bounds("approval").is_some(), "Review asks again");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("approval").is_none());
+        assert!(
+            cx.debug_bounds("settings-sheet").is_some(),
+            "Esc leaves the sheet open"
+        );
+        assert_eq!(said.borrow().len(), 1);
+        assert_eq!(sending(cx), Sending::Waiting);
+    }
+
+    #[gpui::test]
+    fn remove_takes_a_plugin_out_and_says_it_applies_at_the_next_connect(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        let removed = Rc::new(RefCell::new(None));
+        let keep = Rc::clone(&removed);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::Remove { plugin, folder } = event {
+                    *keep.borrow_mut() = Some(format!("{plugin} from {folder}"));
+                }
+            })
+        });
+        assert!(cx.debug_bounds("reconnect-note").is_none());
+
+        click("remove-sample-helper", cx);
+        assert!(removed.borrow().is_none(), "it asks first");
+        click("approval-cancel", cx);
+        assert!(removed.borrow().is_none());
+        click("remove-sample-helper", cx);
+        click("approval-allow", cx);
+        assert_eq!(
+            removed.borrow().as_deref(),
+            Some("sample-helper from sample-helper")
+        );
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            rows.retain(|row| row.id.as_str() != "sample-helper");
+            sheet.refresh_plugins(rows, true, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("remove-sample-helper").is_none());
+        assert!(cx.debug_bounds("reconnect-note").is_some());
+        assert!(sheet.read_with(cx, |sheet, _| sheet.reconnect_to_apply()));
+    }
+
+    #[gpui::test]
+    fn a_copy_that_arrived_is_reviewed_and_trusted_only_as_the_player_chooses(
+        cx: &mut TestAppContext,
+    ) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            let arrived = rows.iter_mut().find(|row| row.id.as_str() == "sample-chat");
+            arrived.unwrap().held_back = Some("sha256:shown".into());
+            sheet.refresh_plugins(rows, false, cx);
+        });
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let keep = Rc::clone(&said);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| match event {
+                SheetEvent::ReviewArrival { folder, hash } => {
+                    keep.borrow_mut().push(format!("review {folder} {hash}"))
+                }
+                SheetEvent::Trust { folder, hash } => {
+                    keep.borrow_mut().push(format!("trust {folder} {hash}"))
+                }
+                _ => {}
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("switch-sample-chat").is_none(),
+            "nothing to switch"
+        );
+
+        // A held-back copy's elements are told by its folder too.
+        click("arrival-sample-chat-in-sample-chat", cx);
+        assert_eq!(*said.borrow(), ["review sample-chat sha256:shown"]);
+        // The directory didn't vouch for it, so the shell asks the player.
+        sheet.update_in(cx, |sheet, window, cx| {
+            let why = "The directory doesn't list this copy.".to_owned();
+            sheet.ask_to_trust("sample-chat", "sha256:shown", why, window, cx);
+        });
+        cx.run_until_parked();
+        click("approval-allow", cx);
+
+        assert_eq!(
+            *said.borrow(),
+            [
+                "review sample-chat sha256:shown",
+                "trust sample-chat sha256:shown"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn a_link_check_ends_only_with_its_own_result(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.open_add_plugin(window, cx);
+            sheet.add.checking = true;
+            // A directory install that ends meanwhile, either way.
+            sheet.installed(std::collections::BTreeMap::new(), Vec::new(), cx);
+            sheet.install_failed("Other wasn't installed.".to_owned(), cx);
+            assert!(sheet.add.checking, "the link is still being checked");
+
+            let why = "The plugin at x wasn't added: it failed a check.".to_owned();
+            sheet.link_checked(Err(why.clone()), window, cx);
+            assert!(!sheet.add.checking);
+            assert_eq!(sheet.add.problem.as_deref(), Some(why.as_str()));
+        });
+    }
+
+    #[gpui::test]
+    fn removing_an_added_folder_asks_then_forgets_only_that_folder(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.open_add_plugin(window, cx);
+            sheet.show_sample_added(cx);
+        });
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let keep = Rc::clone(&said);
+        let _watching = cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::ForgetFolder { plugin, path } = event {
+                    let plugin = plugin.as_ref().map(PluginId::as_str);
+                    keep.borrow_mut()
+                        .push(format!("forget {plugin:?} {}", path.display()));
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        click("remove-folder-/Users/sample/plugins/prompts", cx);
+        assert!(said.borrow().is_empty(), "it asks first");
+        click("approval-allow", cx);
+
+        assert_eq!(
+            *said.borrow(),
+            ["forget Some(\"prompts\") /Users/sample/plugins/prompts"]
+        );
+    }
+
+    #[gpui::test]
+    fn a_copy_no_longer_shown_is_not_asked_about(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let mut rows = sheet.plugins.clone();
+            let arrived = rows.iter_mut().find(|row| row.id.as_str() == "sample-chat");
+            arrived.unwrap().held_back = Some("sha256:newer".into());
+            sheet.refresh_plugins(rows, false, cx);
+        });
+
+        // The review was for the copy shown before a sync replaced it.
+        sheet.update_in(cx, |sheet, window, cx| {
+            let why = "The directory doesn't list this copy.".to_owned();
+            sheet.ask_to_trust("sample-chat", "sha256:shown", why, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("approval").is_none());
+    }
+
+    #[gpui::test]
+    fn a_plugin_refused_at_load_says_why_on_the_plugins_page(cx: &mut TestAppContext) {
+        let (sheet, cx) = plugins_with_one_waiting(cx);
+        sheet.update(cx, |sheet, cx| {
+            let refused = Refused {
+                id: "extras".to_owned(),
+                why: "its files aren't the ones the directory signed for".to_owned(),
+            };
+            sheet.show_refused(vec![refused], cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("plugin-refused").is_some());
+    }
+
+    #[gpui::test]
+    fn a_directory_that_did_not_check_out_lists_nothing(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        shell.update_in(cx, |shell, window, cx| {
+            crate::measure::open_sample_directory(shell, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("directory-get-aardwolf").is_some());
+
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| {
+            let why = mudling_core::registry::IndexError::Forged
+                .to_string()
+                .into();
+            sheet.show_directory(Listing::Refused(why), Default::default(), cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("directory-refused").is_some());
+        assert!(cx.debug_bounds("directory-get-aardwolf").is_none());
     }
 }

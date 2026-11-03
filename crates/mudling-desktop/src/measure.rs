@@ -21,7 +21,8 @@
 //!
 //! `--settings-open` runs all of this with the settings sheet open, and
 //! `--settings-section` with Plugins, Data & sync, Vault or Logs open and
-//! filled, the Inspector recording every line, or a server's plugins.
+//! filled, the Inspector recording every line, a server's plugins, the
+//! plugin directory, an approval, or the page that adds a plugin.
 //!
 //! `--hud <where>` runs all of this with [`sample_hud`]'s HUD at that place,
 //! its numbers changing on every frame, and a prompt on every read. `open` is
@@ -64,17 +65,19 @@ use crate::find_panel::FindPanel;
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
-use crate::settings::{PluginRow, Section, ServerPlugins, SuggestedPlugin};
+use crate::settings::{Listing, PluginRow, Section, Sending, ServerPlugins, SuggestedPlugin};
 use crate::shell::Shell;
 use crate::stream;
 use gpui::{
-    ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, Window, point, px,
+    ActivityGuard, AnyWindowHandle, App, Context, Entity, EntityInputHandler, SharedString, Window,
+    point, px,
 };
 use mudling_core::Line;
 use mudling_core::defaults::detect::Source;
 use mudling_core::defaults::hud::Vital;
 use mudling_core::gear::sets::GearRules;
 use mudling_core::gear::{GearBook, ItemMatcher, ItemRef, Reading};
+use mudling_core::git::Oid;
 use mudling_core::logs::{Kind, LogFile, LogSettings};
 use mudling_core::map::{CURRENT_ROOM, FindStores, LiveMap, Mark, MarkChange, PlainRules};
 use mudling_core::persist::{
@@ -84,6 +87,7 @@ use mudling_core::plugin::inspect::{Claim, InspectedLine};
 use mudling_core::plugin::luau::Value;
 use mudling_core::plugin::points::Keywords;
 use mudling_core::plugin::{Layer, PluginId};
+use mudling_core::registry::{Entry, Games, Index};
 use mudling_core::replay::ReplayFeed;
 use mudling_core::session::{Engine, SessionConfig};
 use mudling_core::stats::Summary;
@@ -1203,6 +1207,92 @@ pub fn open_sample_section(
 pub enum SamplePage {
     Inspector,
     ServerPlugins,
+    Directory,
+    Approval,
+    AddPlugin,
+}
+
+/// Opens the page that adds a plugin, with made-up additions: one from a
+/// link, a folder reloaded just now, and one whose last reload broke it.
+pub fn open_sample_add_plugin(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_sample_directory(shell, window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.open_add_plugin(window, cx);
+        sheet.show_sample_added(cx);
+    });
+}
+
+/// Opens the plugin directory on a made-up index, as if it had checked out.
+/// Nothing is fetched: there's no launcher behind a measured window.
+pub fn open_sample_directory(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_sample_section(shell, Section::Plugins, window, cx);
+    shell.settings_sheet().update(cx, |sheet, cx| {
+        sheet.open_directory(window, cx);
+        let (listing, installed) = sample_directory();
+        sheet.show_directory(listing, installed, cx);
+    });
+}
+
+/// Opens the approval for a made-up plugin waiting to send commands.
+pub fn open_sample_approval(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
+    open_sample_section(shell, Section::Plugins, window, cx);
+    let waiting = PluginId::try_from(SAMPLE_WAITING.to_owned()).expect("the id is valid");
+    shell
+        .settings_sheet()
+        .update(cx, |sheet, cx| sheet.review(&waiting, window, cx));
+}
+
+/// The id of the made-up plugin waiting for approval.
+pub const SAMPLE_WAITING: &str = "sample-chat";
+
+/// A made-up index, four minutes old, as the design draws it: one plugin
+/// with an update, one installed, and two not.
+pub fn sample_directory() -> (Listing, BTreeMap<String, Option<String>>) {
+    let entry = |id: &str, name: &str, game: Option<&str>, version: &str, license: &str| Entry {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        version: version.to_owned(),
+        license: license.to_owned(),
+        games: Games {
+            hosts: Vec::new(),
+            mssp_names: game.map(str::to_owned).into_iter().collect(),
+        },
+        source: format!("plugins/{id}"),
+        hash: format!("sha256:{id}-{version}"),
+        permissions: Vec::new(),
+    };
+    let extras = Entry {
+        permissions: vec!["send_commands".to_owned(), "read_state".to_owned()],
+        ..entry(
+            "avatar-extras",
+            "Avatar extras",
+            Some("Avatar"),
+            "0.4.1",
+            "Apache-2.0",
+        )
+    };
+    let index = Index {
+        commit: Oid::ZERO_SHA1,
+        published_at: "2026-11-02T17:04:31Z".to_owned(),
+        plugins: vec![
+            entry("aardwolf", "Aardwolf", Some("Aardwolf"), "1.2.0", "MIT"),
+            extras,
+            entry("quest-notes", "Quest notes", Some("Avatar"), "0.2.0", "MIT"),
+            entry("tells", "Tell highlighter", None, "1.0.0", "MIT"),
+        ],
+    };
+    let installed = [
+        ("avatar-extras", Some("sha256:avatar-extras-0.3.0")),
+        ("quest-notes", Some("sha256:quest-notes-0.2.0")),
+    ]
+    .map(|(id, hash)| (id.to_owned(), hash.map(str::to_owned)))
+    .into();
+    let four_minutes_ago = Timestamp(Timestamp::now().0 - 4 * 60_000);
+    let listing = Listing::Listed {
+        index: Arc::new(index),
+        at: four_minutes_ago,
+    };
+    (listing, installed)
 }
 
 /// Opens the Inspector with made-up plugins. In a measured run the session
@@ -1301,6 +1391,19 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         on: true,
         flips: 0,
         elsewhere: None,
+        sending: Sending::No,
+        asks: Vec::new(),
+        folder: None,
+        added_from: None,
+        source: None,
+        problem: None,
+        held_back: None,
+    };
+    let sender = |name: &str, sending| PluginRow {
+        sending,
+        asks: sample_asks(),
+        folder: Some(name.to_lowercase().replace(' ', "-").into()),
+        ..row(name, Layer::Game)
     };
     let mut rows = vec![
         PluginRow {
@@ -1308,10 +1411,25 @@ pub fn sample_plugins() -> Vec<PluginRow> {
             ..row("Sample tweaks", Layer::Override)
         },
         row("Sample game", Layer::Game),
-        row("Sample helper", Layer::Game),
-        row("Sample maps", Layer::Game),
-        row("Sample colors", Layer::Game),
-        row("Sample chat", Layer::Game),
+        sender("Sample helper", Sending::Approved),
+        PluginRow {
+            folder: Some("sample-maps".into()),
+            source: Some("From https://github.com/someone/sample-maps.git".into()),
+            ..row("Sample maps", Layer::Game)
+        },
+        PluginRow {
+            added_from: Some("/Users/sample/plugins/sample-colors".into()),
+            source: Some("From ~/plugins/sample-colors".into()),
+            problem: Some("text.toml: pattern 2 doesn't compile: unclosed group".into()),
+            ..row("Sample colors", Layer::Game)
+        },
+        sender("Sample chat", Sending::Waiting),
+        PluginRow {
+            folder: Some("sample-notes".into()),
+            held_back: Some("sha256:sample-notes-from-elsewhere".into()),
+            on: false,
+            ..row("Sample notes", Layer::Game)
+        },
         row("Sample vitals", Layer::Game),
     ];
     let defaults = mudling_core::defaults::plugin();
@@ -1321,6 +1439,15 @@ pub fn sample_plugins() -> Vec<PluginRow> {
         ..row("MUDling defaults", Layer::Default)
     });
     rows
+}
+
+/// What a made-up plugin that sends commands asks to do.
+pub fn sample_asks() -> Vec<SharedString> {
+    vec![
+        "send commands to the game, which show in the chat like yours and are rate-limited".into(),
+        "read your character's state".into(),
+        "keep its own notes in the store \"extras\"".into(),
+    ]
 }
 
 /// Made-up logs with no files behind them.

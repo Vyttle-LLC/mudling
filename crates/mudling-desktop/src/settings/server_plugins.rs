@@ -140,7 +140,7 @@ impl SettingsSheet {
         row_shape(first, theme)
             .child(words)
             .child(cost_label(cost, theme))
-            .when(!row.always_on, |shape| {
+            .when(!row.always_on && row.held_back.is_none(), |shape| {
                 shape.child(self.plugin_switch(row, row.on, pane, theme, cx))
             })
     }
@@ -248,6 +248,13 @@ mod tests {
             on,
             flips: 0,
             elsewhere: None,
+            sending: crate::settings::Sending::No,
+            asks: Vec::new(),
+            folder: None,
+            added_from: None,
+            source: None,
+            problem: None,
+            held_back: None,
         }
     }
 

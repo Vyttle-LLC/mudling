@@ -66,6 +66,7 @@
 //! player waits for the next sync.
 
 mod pass;
+mod plugins;
 mod run;
 mod summary;
 mod vault;
@@ -74,7 +75,7 @@ mod vault;
 mod tests;
 
 pub use crate::store::SyncState;
-pub use pass::{Pass, repo_holds_data_folder};
+pub use pass::{Pass, is_within, repo_holds_data_folder};
 
 use crate::repo::AppSettings;
 use crate::session::{HeldSession, SessionLink};

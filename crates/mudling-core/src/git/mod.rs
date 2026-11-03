@@ -16,6 +16,7 @@
 mod credentials;
 mod error;
 mod locks;
+mod mirror;
 #[cfg(unix)]
 mod ssh_agent;
 
@@ -24,6 +25,7 @@ mod tests;
 
 pub use error::GitError;
 pub use git2::Oid;
+pub use mirror::{FOLDER_LIMITS, FolderFiles, FolderLimits, Mirror};
 
 use crate::merge;
 use git2::{
@@ -311,29 +313,7 @@ impl Repo {
         limit: &Limit,
         work: impl FnOnce(&Repository) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let folder = self.repo.path().to_owned();
-        let (done, finished) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("mudling-git".to_owned())
-            .spawn(move || {
-                let _ = done.send(
-                    Repository::open(folder)
-                        .map_err(GitError::from)
-                        .and_then(|repo| work(&repo)),
-                );
-            })?;
-        loop {
-            match finished.recv_timeout(LIMIT_POLL) {
-                // A helper killed at the limit reads as a refusal, and isn't one.
-                Ok(Err(_)) if limit.is_up() => return Err(timed_out()),
-                Ok(result) => return result,
-                Err(RecvTimeoutError::Timeout) if limit.is_up() => return Err(timed_out()),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(GitError::Failed("the git thread stopped".to_owned()));
-                }
-            }
-        }
+        on_own_thread(self.repo.path().to_owned(), limit, work)
     }
 
     /// Whether the repo has a remote of this name.
@@ -659,6 +639,38 @@ fn init(folder: &Path) -> Result<Repository> {
     let mut options = RepositoryInitOptions::new();
     options.initial_head(DEFAULT_BRANCH);
     Ok(Repository::init_opts(folder, &options)?)
+}
+
+/// Runs `work` on a thread with a handle of its own to the repo at `folder`,
+/// and waits for it until `limit` is up. The thread is then left to end by
+/// itself.
+fn on_own_thread<T: Send + 'static>(
+    folder: PathBuf,
+    limit: &Limit,
+    work: impl FnOnce(&Repository) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (done, finished) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("mudling-git".to_owned())
+        .spawn(move || {
+            let _ = done.send(
+                Repository::open(folder)
+                    .map_err(GitError::from)
+                    .and_then(|repo| work(&repo)),
+            );
+        })?;
+    loop {
+        match finished.recv_timeout(LIMIT_POLL) {
+            // A helper killed at the limit reads as a refusal, and isn't one.
+            Ok(Err(_)) if limit.is_up() => return Err(timed_out()),
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) if limit.is_up() => return Err(timed_out()),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(GitError::Failed("the git thread stopped".to_owned()));
+            }
+        }
+    }
 }
 
 /// `path` as git writes it, with `/` on every OS.

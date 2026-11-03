@@ -8,10 +8,7 @@
 //! and 2 the command itself couldn't run. docs/plugins/reference.md has the
 //! details; a change here belongs there too.
 
-mod budget;
 mod check;
-mod patterns;
-mod replay;
 mod scaffold;
 
 use check::Mode;

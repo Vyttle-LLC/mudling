@@ -2,8 +2,9 @@
 //! learning rather than asking (PRD §11, "Defaults that adapt").
 //!
 //! What the plugin API can express is a built-in plugin, [`plugin`], in the
-//! default layer: text passes through uncolored, and the common pager
-//! prompts are its pager, which a game plugin's replaces. What must be
+//! default layer: text passes through uncolored, the common pager prompts
+//! are its pager, which a game plugin's replaces, and its HUD point names the
+//! character fields GMCP games share, which a game plugin's add to. What must be
 //! learned at runtime is Rust, reading the same lines and settings:
 //!
 //! - [`prompt`]: the prompt, from the text after GMCP `Char.Vitals`;
@@ -51,6 +52,7 @@ pub fn plugin() -> Plugin {
     Plugin::from_files(|file| match file {
         "plugin.toml" => Ok(include_str!("plugin/plugin.toml").to_owned()),
         "text.toml" => Ok(include_str!("plugin/text.toml").to_owned()),
+        "hud.toml" => Ok(include_str!("plugin/hud.toml").to_owned()),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             file.to_owned(),

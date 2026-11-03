@@ -248,6 +248,7 @@ enum Input {
     HoldWrites(SyncSender<()>),
     ReleaseWrites(RoomMoves),
     TurnPluginOn(PluginId),
+    Approve(PluginId, bool),
     Inspect(bool),
     LoggingChanged,
     RestoreMap(i64),
@@ -487,6 +488,12 @@ impl Session {
         self.queue(Input::TurnPluginOn(plugin));
     }
 
+    /// Lets a plugin's hooks send commands, or takes that back, from the next
+    /// event on and for the rest of the session.
+    pub fn set_approved(&self, plugin: PluginId, approved: bool) {
+        self.queue(Input::Approve(plugin, approved));
+    }
+
     /// Opens or closes the plugin inspector: lines fill `InspectorState`
     /// only while it's open, and closing it empties that.
     pub fn inspect(&self, open: bool) {
@@ -645,6 +652,7 @@ async fn run(mut engine: Engine, mut inputs: UnboundedReceiver<Input>) -> Result
                 Some(Input::HoldWrites(done)) => engine.hold_writes(done),
                 Some(Input::ReleaseWrites(moves)) => engine.release_writes(&moves),
                 Some(Input::TurnPluginOn(plugin)) => engine.turn_plugin_on(&plugin),
+                Some(Input::Approve(plugin, approved)) => engine.set_approved(plugin, approved),
                 Some(Input::Inspect(open)) => engine.inspect(open),
                 Some(Input::LoggingChanged) => engine.logging_changed(),
                 Some(Input::RestoreMap(version_id)) => {
