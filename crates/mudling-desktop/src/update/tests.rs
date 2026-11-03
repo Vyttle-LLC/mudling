@@ -16,7 +16,7 @@ const LINUX_X64: Platform = Platform {
     os: Os::Linux,
     arch: "x86_64",
 };
-const TEAM: &str = "ABCDE12345";
+const TEAM: &str = VYTTLE_TEAM;
 
 /// A release feed with one release and the bytes of its downloads.
 struct FakeFeed {
@@ -51,17 +51,16 @@ impl Feed for FakeFeed {
     }
 }
 
-/// Programs that succeed, with codesign reporting `team` for the new bundle
-/// and [`TEAM`] for the installed one.
+/// Programs that succeed, with codesign reporting `team` as the signer.
 struct FakeRunner {
-    new_team: &'static str,
+    team: &'static str,
     ran: RefCell<Vec<String>>,
 }
 
 impl FakeRunner {
-    fn signed_by(new_team: &'static str) -> FakeRunner {
+    fn signed_by(team: &'static str) -> FakeRunner {
         FakeRunner {
-            new_team,
+            team,
             ran: RefCell::default(),
         }
     }
@@ -76,14 +75,12 @@ impl Runner for FakeRunner {
         self.ran
             .borrow_mut()
             .push(format!("{} {}", program.display(), words.join(" ")));
-        let target = words.last().cloned().unwrap_or_default();
-        let team = match Path::new(&target).ends_with("update/MUDling.app") {
-            true => self.new_team,
-            false => TEAM,
-        };
         Ok(Ran {
             stdout: Vec::new(),
-            stderr: format!("Identifier=com.vyttle.mudling\nTeamIdentifier={team}\n"),
+            stderr: format!(
+                "Identifier=com.vyttle.mudling\nTeamIdentifier={}\n",
+                self.team
+            ),
         })
     }
 }
@@ -221,7 +218,7 @@ fn a_bundle_signed_by_another_team_is_refused() {
     assert!(
         failure
             .reason
-            .contains(&format!("isn't signed by team {TEAM}"))
+            .contains("isn't signed by Vyttle's team, 34674BKS72")
     );
 
     let runner = FakeRunner::signed_by(TEAM);
@@ -233,7 +230,7 @@ fn a_bundle_signed_by_another_team_is_refused() {
         &runner,
     );
     let Ok(Checked::Ready(staged)) = ready else {
-        panic!("the same team's bundle is taken");
+        panic!("Vyttle's bundle is taken");
     };
     assert_eq!(staged.version, "0.9.0");
     assert_eq!(staged.summary, ["Chat channels"]);

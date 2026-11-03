@@ -10,8 +10,8 @@
 //!
 //! Every download is checked against the SHA-256 digest GitHub publishes for
 //! the asset, and one without a digest is refused. On macOS the new bundle
-//! must also pass `codesign --verify --deep --strict` and be signed by the
-//! running copy's team. Windows and Linux builds are unsigned for now, so
+//! must also pass `codesign --verify --deep --strict` and be signed by
+//! Vyttle's team. Windows and Linux builds are unsigned for now, so
 //! there the digest is the whole check.
 
 mod asset;
@@ -32,6 +32,8 @@ const LATEST_RELEASE: &str = "https://api.github.com/repos/Vyttle-LLC/mudling/re
 /// What a swap that failed leaves for the next launch to say: the version on
 /// the first line, why on the rest.
 const FAILED_SWAP: &str = "update-failed";
+/// The Developer ID team that signs MUDling for macOS.
+const VYTTLE_TEAM: &str = "34674BKS72";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -409,7 +411,7 @@ fn stage(
                 staging.as_os_str(),
             ])?;
             let app = staging.join(asset::MAC_APP);
-            verify_signature(&app, &installed.path, runner)?;
+            verify_signature(&app, runner)?;
             Ok(app)
         }
         // Unsigned for now: the digest above is the check.
@@ -445,34 +447,22 @@ fn put_beside(installed: &Path, new: &Path) -> Result<PathBuf, String> {
     Ok(beside)
 }
 
-/// The new bundle must pass Gatekeeper's own check and be signed by the team
-/// that signed the running one.
-fn verify_signature(app: &Path, installed: &Path, runner: &impl Runner) -> Result<(), String> {
+/// The new bundle must pass Gatekeeper's own check and be signed by Vyttle's
+/// team, as `scripts/install.sh` requires: Gatekeeper accepts any Developer ID.
+fn verify_signature(app: &Path, runner: &impl Runner) -> Result<(), String> {
     let codesign = tool(Os::Mac, "codesign");
     let strict = ["--verify", "--deep", "--strict"].map(OsStr::new);
     runner
         .run(&codesign, &[&strict[..], &[app.as_os_str()]].concat())
         .map_err(|error| format!("The new MUDling.app isn't signed properly: {error}"))?;
-    let team = |bundle: &Path| {
-        let details = [
-            OsStr::new("-d"),
-            OsStr::new("--verbose=2"),
-            bundle.as_os_str(),
-        ];
-        let ran = runner.run(&codesign, &details).map_err(|error| {
-            format!(
-                "Couldn't read the signature of {}: {error}",
-                bundle.display()
-            )
-        })?;
-        // codesign writes the details to standard error.
-        Ok::<_, String>(parse_team(&ran.stderr))
-    };
-    let (running, new) = (team(installed)?, team(app)?);
-    if running != new {
-        let running = running.as_deref().unwrap_or("none");
+    let details = [OsStr::new("-d"), OsStr::new("--verbose=2"), app.as_os_str()];
+    let ran = runner
+        .run(&codesign, &details)
+        .map_err(|error| format!("Couldn't read the new MUDling.app's signature: {error}"))?;
+    // codesign writes the details to standard error.
+    if parse_team(&ran.stderr).as_deref() != Some(VYTTLE_TEAM) {
         return Err(format!(
-            "The new MUDling.app isn't signed by team {running}."
+            "The new MUDling.app isn't signed by Vyttle's team, {VYTTLE_TEAM}."
         ));
     }
     Ok(())

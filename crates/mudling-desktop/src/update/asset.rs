@@ -11,7 +11,9 @@ pub const MAC_APP: &str = "MUDling.app";
 /// The asset this platform updates from, or `None` if no release builds for
 /// it: `MUDling-<version>-macos-<arm64|x86_64>.zip`,
 /// `MUDling-<version>-windows-<x64|arm64>.zip` (the plain zip, not the
-/// installer) or `MUDling-<version>-linux-<x64|arm64>.AppImage`.
+/// `-setup.exe` installer beside it) or
+/// `MUDling-<version>-linux-<x64|arm64>.AppImage` (not the `.tar.gz`, which
+/// doesn't update itself).
 pub fn name(version: &str, platform: Platform) -> Option<String> {
     let (os, extension) = match platform.os {
         Os::Mac => ("macos", "zip"),

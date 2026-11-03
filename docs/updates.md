@@ -33,8 +33,12 @@ attached yet isn't an update.
 | OS | Asset |
 |---|---|
 | macOS | `MUDling-<version>-macos-<arm64\|x86_64>.zip`, holding `MUDling.app` |
-| Windows | `MUDling-<version>-windows-<x64\|arm64>.zip`, holding `MUDling-<version>-windows-<arch>\MUDling.exe` (not the installer) |
-| Linux | `MUDling-<version>-linux-<x64\|arm64>.AppImage` |
+| Windows | `MUDling-<version>-windows-<x64\|arm64>.zip`, holding `MUDling-<version>-windows-<arch>\MUDling.exe` (not the `-setup.exe` installer) |
+| Linux | `MUDling-<version>-linux-<x64\|arm64>.AppImage` (not the `.tar.gz`) |
+
+Updating from the zip keeps the installer's per-user install in place, so
+Windows' list of installed apps keeps the version first installed until the
+installer runs again; uninstalling still works.
 
 ## How a download is checked
 
@@ -42,8 +46,9 @@ Every download must match the SHA-256 `digest` GitHub publishes for the asset.
 An asset without a digest is refused before it downloads.
 
 On macOS the unpacked bundle must also pass
-`codesign --verify --deep --strict`, and its team identifier must match the
-running copy's.
+`codesign --verify --deep --strict`, and its team identifier must be Vyttle's,
+`34674BKS72`, as `scripts/install.sh` requires: Gatekeeper accepts any
+Developer ID.
 
 Windows and Linux builds are unsigned for now, so there the digest is the
 whole check. When they are signed, the check belongs beside macOS's in

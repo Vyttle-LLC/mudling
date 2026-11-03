@@ -38,6 +38,7 @@ release, and you publish it when you're ready.
 
 GitHub publishes each asset's SHA-256 digest, and self-update checks a
 download against it. Never rename or replace an asset by hand after upload.
+[updates.md](updates.md) says which assets an installed MUDling updates from.
 
 Release builds embed `MUDLING_VERSION`, the tag without its `v`. Settings shows
 it; a local build leaves it unset and shows the workspace version with `dev`.
