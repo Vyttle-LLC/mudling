@@ -1312,7 +1312,7 @@ pub fn open_sample_inspector(
             clear: false,
             lines: lines.to_vec(),
         };
-        sheet.show_inspected(&change, cx);
+        sheet.show_inspected(&change, window, cx);
     });
 }
 

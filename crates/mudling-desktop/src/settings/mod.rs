@@ -38,12 +38,14 @@ use gpui::{
     KeyBinding, MouseButton, Pixels, Role, ScrollHandle, SharedString, Size, Stateful, Task,
     Window, actions, div, point, prelude::*, px, size, transparent_black,
 };
+use inspector::InspectedRow;
 use mudling_core::plugin::luau::PluginDisabled;
 use mudling_core::plugin::{PluginCost, PluginId};
 use mudling_core::registry::{Entry, Fetched, Index, Refused};
 use mudling_core::session::RuleEdit;
 use mudling_core::stats::Summary;
-use mudling_core::store::{InspectorState, RulesState, SettingsState};
+use mudling_core::store::{RulesState, SettingsState};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -418,8 +420,8 @@ pub struct SettingsSheet {
     costs: Vec<PluginCost>,
     /// What all the plugins cost a line together.
     line_cost: Option<Summary>,
-    /// The inspector's lines, while its page is open.
-    inspector: InspectorState,
+    /// The inspector's lines, newest last, while its page is open.
+    inspector: VecDeque<InspectedRow>,
     /// Held while the inspector has drawn lately, so new lines wait their turn.
     inspector_cooldown: Option<Task<()>>,
     /// Lines arrived during the cooldown, so the page is out of date.
@@ -479,7 +481,7 @@ impl SettingsSheet {
             turned_off: Vec::new(),
             costs: Vec::new(),
             line_cost: None,
-            inspector: InspectorState::default(),
+            inspector: VecDeque::new(),
             inspector_cooldown: None,
             inspector_late: false,
             switch_problem: None,
@@ -646,7 +648,7 @@ impl SettingsSheet {
 
     #[cfg(test)]
     pub fn inspected_lines(&self) -> usize {
-        self.inspector.lines.len()
+        self.inspector.len()
     }
 
     #[cfg(test)]
@@ -853,6 +855,7 @@ impl SettingsSheet {
     fn render_pane(
         &mut self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let mut stops = std::mem::take(&mut self.stops);
@@ -864,7 +867,7 @@ impl SettingsSheet {
             trailing: None,
         };
         match (&self.page, self.section) {
-            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, cx),
+            (Page::Inspector, _) => self.fill_inspector(&mut pane, theme, window, cx),
             (Page::Server(page), _) => self.fill_server_plugins(page, &mut pane, theme, cx),
             (Page::Directory, _) => self.fill_directory(&mut pane, theme, cx),
             (Page::AddPlugin, _) => self.fill_add_plugin(&mut pane, theme, cx),
@@ -1038,7 +1041,7 @@ impl gpui::Render for SettingsSheet {
             Some(approval) => dialog.child(approval),
             None => dialog
                 .child(self.render_nav(NAV_WIDTH.min(width * NAV_SHARE), &theme, cx))
-                .child(self.render_pane(&theme, cx)),
+                .child(self.render_pane(&theme, window, cx)),
         };
         div()
             .id("settings-scrim")
@@ -1164,6 +1167,12 @@ mod tests {
         }
     }
 
+    fn inspect(sheet: &Entity<SettingsSheet>, lines: usize, cx: &mut VisualTestContext) {
+        sheet.update_in(cx, |sheet, window, cx| {
+            sheet.show_inspected(&inspected(lines), window, cx);
+        });
+    }
+
     #[gpui::test]
     fn the_inspector_draws_on_a_schedule_however_many_lines_arrive(cx: &mut TestAppContext) {
         let (shell, cx) = window_with_keys(cx);
@@ -1175,7 +1184,7 @@ mod tests {
 
         let apart = Duration::from_millis(30);
         for _ in 0..100 {
-            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+            inspect(&sheet, 1, cx);
             cx.run_until_parked();
             cx.executor().advance_clock(apart);
         }
@@ -1191,14 +1200,14 @@ mod tests {
         assert!(cx.debug_bounds("inspected-0").is_some(), "the newest shows");
 
         let settled = renders(&sheet, cx);
-        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        inspect(&sheet, 1, cx);
         cx.run_until_parked();
         assert_eq!(
             renders(&sheet, cx),
             settled + 1,
             "the first line draws at once"
         );
-        sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
+        inspect(&sheet, 1, cx);
         cx.run_until_parked();
         assert_eq!(renders(&sheet, cx), settled + 1, "the next waits its turn");
         cx.executor().advance_clock(REFRESH_EVERY);
@@ -1212,9 +1221,7 @@ mod tests {
         open(&shell, cx);
         let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
         sheet.update_in(cx, |sheet, window, cx| sheet.open_inspector(window, cx));
-        (0..2).for_each(|_| {
-            sheet.update(cx, |sheet, cx| sheet.show_inspected(&inspected(1), cx));
-        });
+        (0..2).for_each(|_| inspect(&sheet, 1, cx));
         sheet.update(cx, |sheet, cx| sheet.leave_page(cx));
         cx.run_until_parked();
         let left = renders(&sheet, cx);
