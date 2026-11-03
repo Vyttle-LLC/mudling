@@ -28,7 +28,7 @@ It exits 1 if a check fails. It checks two ways:
 | | |
 |---|---|
 | Stops | 52 |
-| Elements, rows folded together (the inventory below) | 154 |
+| Elements, rows folded together (the inventory below) | 155 |
 | Controls seen in the audit's tree dumps, counting each row's copy (48 stops) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
 | Gaps found | 16 |
@@ -231,6 +231,7 @@ control with several rows, one per item or rule, is one line here.
 | Remove an added plugin | Button | Remove *plugin* | named |
 | **Approval, remove, trust, install** | AlertDialog | *question* | named |
 | Its asks | List | send commands to the game… | named |
+| A plugin that only asks for GMCP data | the same rows and asks | "Asks the game for data" in place of sending commands | unit tests (`settings::plugins`); the check's sample plugins all send commands |
 | Cancel, Allow / Remove / Trust / Install | Button | *same* | named, focus |
 | **Triggers & aliases:** a rule's switch | Switch | *pattern or alias* | named |
 | Edit, Remove | Button | Edit *rule*, Remove *rule* | named |
