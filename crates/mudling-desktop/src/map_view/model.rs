@@ -78,17 +78,6 @@ fn listed(words: &[&str]) -> String {
     }
 }
 
-/// The ways two rooms lead to different places. Joined, the newer link stays.
-fn ways_that_differ(first: &MapRoom, second: &MapRoom) -> Vec<Direction> {
-    Direction::ALL
-        .into_iter()
-        .filter(|way| {
-            let (a, b) = (first.links.get_copied(*way), second.links.get_copied(*way));
-            a.is_some() && b.is_some() && a != b
-        })
-        .collect()
-}
-
 /// Where the copies are from each other, as one sentence under the map.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -260,13 +249,33 @@ impl Comparison<'_> {
         })
     }
 
+    /// The room `way` leads to from `room`. A link to a room that's been
+    /// forgotten leads nowhere the map knows.
+    fn leads_to(&self, room: &MapRoom, way: Direction) -> Option<&MapRoom> {
+        let next = room.links.get_copied(way)?;
+        self.map.room(next).map(|next| &**next)
+    }
+
+    /// The ways the copies lead to different rooms. Joined, the newer link
+    /// stays.
+    fn ways_that_differ(&self) -> Vec<Direction> {
+        Direction::ALL
+            .into_iter()
+            .filter(|way| match self.both(|room| self.leads_to(room, *way)) {
+                [Some(first), Some(second)] => first.id != second.id,
+                _ => false,
+            })
+            .collect()
+    }
+
     /// Where `way` leads from each copy. It differs by the room it reaches,
-    /// as [`ways_that_differ`] does; two rooms of one name say where each is.
+    /// as [`Self::ways_that_differ`] does; two rooms of one name say where
+    /// each is.
     fn way_row(&self, way: Direction) -> CompareRow {
-        let targets = self.both(|room| room.links.get_copied(way));
-        let rooms = targets.map(|id| id.and_then(|id| self.map.room(id)));
+        let rooms = self.both(|room| self.leads_to(room, way));
         let names = rooms.map(|room| room.map(|room| room.name.as_str()));
-        let differs = targets[0] != targets[1];
+        let [first, second] = rooms.map(|room| room.map(|room| room.id));
+        let differs = first != second;
         let derived = self.map.derived().map(|derived| &**derived);
         let values = rooms.map(|room| match room {
             None => NOT_WALKED.to_owned(),
@@ -293,7 +302,7 @@ impl Comparison<'_> {
     }
 
     fn join_note(&self) -> String {
-        let ways = ways_that_differ(self.copies[0], self.copies[1]);
+        let ways = self.ways_that_differ();
         if ways.is_empty() {
             return KEEPS_BOTH.to_owned();
         }
@@ -1686,11 +1695,36 @@ mod tests {
 
     #[test]
     fn review_warns_of_a_way_that_leads_two_places() {
-        let (mut first, mut second) = (room(1 << 40, 0, 0), room((1 << 40) + 1, 0, 0));
+        let (mut first, mut second) = (copy(FIRST, 0, 0), copy(SECOND, 3, 0));
         first.links.insert(Direction::North, 5);
         second.links.insert(Direction::North, 6);
         second.links.insert(Direction::East, 7);
-        assert_eq!(ways_that_differ(&first, &second), [Direction::North]);
+        let rooms = vec![first, second, named(5, "A"), named(6, "B"), named(7, "C")];
+        assert_eq!(compare(rooms, |c| c.ways_that_differ()), [Direction::North]);
+    }
+
+    #[test]
+    fn links_to_forgotten_rooms_read_not_walked_and_do_not_differ() {
+        let (mut first, mut second) = (copy(FIRST, 0, 0), copy(SECOND, 3, 0));
+        // 5 and 6 were forgotten; 7 is still on the map.
+        first.links.insert(Direction::North, 5);
+        second.links.insert(Direction::North, 6);
+        first.links.insert(Direction::South, 5);
+        second.exits.insert(Direction::South, exit());
+        first.links.insert(Direction::East, 6);
+        second.links.insert(Direction::East, 7);
+        let rooms = vec![first, second, named(7, "The Well")];
+        let (rows, note) = compare(rooms, |c| (c.rows(), c.join_note()));
+
+        for way in ["North to", "South to"] {
+            let row = row(&rows, way);
+            assert_eq!(row.values, [NOT_WALKED, NOT_WALKED]);
+            assert!(!row.differs(), "{way} shows no ≠ over two alike cells");
+        }
+        let east = row(&rows, "East to");
+        assert_eq!(east.values, [NOT_WALKED, "The Well"]);
+        assert!(east.differs());
+        assert_eq!(note, KEEPS_BOTH, "no two known rooms to choose between");
     }
 
     fn answered(attempt: u64, outcome: Result<JoinDone, String>) -> Diff<MapState> {
