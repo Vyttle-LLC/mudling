@@ -9,8 +9,9 @@
 //!
 //! Network steps run on a thread of their own, with a handle of their own, so
 //! a [`Limit`] can end the wait for anything: a stalled server, a helper, or an
-//! agent waiting on a finger. A step given up on may still finish later, which
-//! is harmless: a fetch moves a tracking ref, and a push is one atomic step.
+//! agent waiting on a finger. A step given up on keeps running on its thread,
+//! holding git's locks, so the next network step on the same repo waits for it
+//! to end, within its own limit.
 //!
 //! Call [`prepare`] once at startup.
 
