@@ -260,6 +260,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          # Only the builds: CI, run first, uploads its bench reports to this run too.
+          pattern: '{macos,windows,linux}-*'
           merge-multiple: true
 
       - name: Publish

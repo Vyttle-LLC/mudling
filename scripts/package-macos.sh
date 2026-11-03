@@ -23,7 +23,6 @@ entitlements="$repo_root/apple/MUDling.entitlements"
 profile="${PROVISIONING_PROFILE:-}"
 if [ -n "$profile" ]; then
     [ "$identity" != "-" ] || { echo "A provisioning profile needs a Developer ID (CODESIGN_IDENTITY)." >&2; exit 1; }
-    [ -f "$entitlements" ] || { echo "A provisioning profile needs $entitlements." >&2; exit 1; }
 fi
 cargo build --locked --release -p mudling-desktop
 # Cargo reads a relative CARGO_TARGET_DIR against the working directory, the repository root.
