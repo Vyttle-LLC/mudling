@@ -341,6 +341,28 @@ fn sample_log() -> LogFile {
 const DATA_CONTROLS: [&str; 3] = ["Sync now", "Hide history", "Stop syncing"];
 /// Text Data & sync shows, read from its nodes' values.
 const DATA_TEXT: [&str; 3] = ["ssh-agent", "Last synced", "Never synced"];
+/// What a screen reader must find of `measure::sample_update`: the card on top of the
+/// sheet, its buttons and summary, the sprocket's name, and Data & sync's rows.
+const UPDATE_CONTROLS: [&str; 9] = [
+    "MUDling 0.9.0 is ready",
+    "Release notes",
+    "Later",
+    "Restart to update",
+    "Chat channels from Aardwolf's GMCP",
+    "What's new",
+    "Settings, MUDling 0.9.0 is ready",
+    "Check for updates, on",
+    "Check now",
+];
+const UPDATE_TEXT: [&str; 3] = [
+    "It goes in when you quit. You're on 0.8.2.",
+    "Daily and at launch, from GitHub Releases. Version 0.8.2.",
+    "Last checked",
+];
+const RESTART_QUESTION: &str = "You're connected to mud.example as Sample. Restarting \
+                                disconnects you. MUDling saves everything first, and opens the \
+                                same server again afterwards.";
+const RESTART_CONTROLS: [&str; 3] = ["Restart to update?", "Cancel", "Restart"];
 /// What a screen reader must find in Vault, filled with made-up rows.
 const VAULT_CONTROLS: [&str; 7] = [
     "Reveal the password for Sample on mud.example",
@@ -1671,6 +1693,58 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 ADD_FORM_CONTROLS[0],
             ),
             detail: format!("{focused:?}"),
+        });
+
+        // Last, as the update renames the sprocket the walks above look for.
+        let shown = in_window(
+            &|shell, window, cx| {
+                shell.show_sample_update(measure::sample_update(), cx);
+                measure::open_sample_section(shell, Section::Data, window, cx);
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &UPDATE_CONTROLS);
+        let unread: Vec<_> = UPDATE_TEXT
+            .into_iter()
+            .filter(|text| {
+                let reads = |e: &AxElement| e.value.as_deref().is_some_and(|v| v.contains(*text));
+                tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
+            })
+            .collect();
+        checks.push(Check {
+            name: "the update card, the sprocket and Data & sync's rows say an update is ready",
+            passed: shown.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
+        });
+
+        let asked = in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.ask_restart(RESTART_QUESTION.to_owned(), window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = window_tree();
+        let missing = named_in(&tree, &RESTART_CONTROLS);
+        let unread = tree.as_ref().is_none_or(|tree| {
+            let reads = |e: &AxElement| e.value.as_deref() == Some(RESTART_QUESTION);
+            tree.find(reads).is_empty()
+        });
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "Restart to update asks with its question and buttons, focus on Cancel",
+            passed: asked.is_some()
+                && missing.is_empty()
+                && !unread
+                && focused.as_ref().is_some_and(|(_, label)| label == "Cancel"),
+            detail: format!(
+                "not found: {missing:?}, question read: {}, {focused:?}",
+                !unread
+            ),
         });
 
         let passed = checks.iter().all(|check| check.passed);

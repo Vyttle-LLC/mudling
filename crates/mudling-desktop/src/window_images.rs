@@ -13,7 +13,7 @@ use crate::assets::{Assets, load_fonts};
 use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::map_view::harness::{duplicated_map, sample_map};
-use crate::measure;
+use crate::measure::{self, sample_update};
 use crate::settings::{
     Downloaded, Listing, PluginRow, SavedServer as SheetServer, Section, Sending,
 };
@@ -1042,5 +1042,57 @@ fn window_images() {
                 move |shell, window, cx| sample_fight(placement, open, shell, window, cx),
             );
         }
+    }
+    update_images();
+}
+
+/// The update's scenes, as the design draws them. A test of their own runs
+/// just these:
+///
+/// ```text
+/// cargo test -p mudling-desktop update_images -- --ignored
+/// ```
+#[test]
+#[ignore = "needs a GPU; writes image files"]
+fn update_images() {
+    use WindowAppearance::{Dark, Light};
+    render("update-dot-dark", Dark, DEFAULT, |shell, _, cx| {
+        shell.show_sample_update(sample_update(), cx);
+    });
+    for (name, appearance) in [
+        ("update-settings-dark", Dark),
+        ("update-settings-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            shell.show_sample_update(sample_update(), cx);
+            open_sheet(shell, Section::Servers, window, cx);
+        });
+    }
+    // With no repo, so the update rows show without scrolling.
+    render("update-data-dark", Dark, WIDE, |shell, window, cx| {
+        shell.show_sample_update(sample_update(), cx);
+        open_sheet(shell, Section::Data, window, cx);
+    });
+    render("update-restart-dark", Dark, DEFAULT, |shell, window, cx| {
+        shell.show_sample_update(sample_update(), cx);
+        shell.open_settings(window, cx);
+        shell.settings_sheet().update(cx, |sheet, cx| {
+            sheet.ask_restart(
+                "You're connected to mud.example as Sample. Restarting disconnects you. \
+                 MUDling saves everything first, and opens the same server again afterwards."
+                    .to_owned(),
+                window,
+                cx,
+            );
+        });
+    });
+    for (name, appearance) in [
+        ("update-empty-state-dark", Dark),
+        ("update-empty-state-light", Light),
+    ] {
+        render(name, appearance, WIDE, |shell, window, cx| {
+            shell.show_sample_empty_state(&sample_saved(), window, cx);
+            shell.show_sample_update(sample_update(), cx);
+        });
     }
 }

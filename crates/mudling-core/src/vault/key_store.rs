@@ -19,10 +19,9 @@ use zeroize::Zeroizing;
 const SERVICE: &str = "com.vyttle.mudling.vault";
 
 /// Whether [`device_key_store`] guards the key: only a macOS release build
-/// does, and only the release pipeline sets `MUDLING_VERSION`. Everywhere
-/// else, whoever can use this computer can read the device's copy.
-pub const DEVICE_KEY_GUARDED: bool =
-    cfg!(target_os = "macos") && option_env!("MUDLING_VERSION").is_some();
+/// does, and only the release pipeline sets [`crate::RELEASE_VERSION`].
+/// Everywhere else, whoever can use this computer can read the device's copy.
+pub const DEVICE_KEY_GUARDED: bool = cfg!(target_os = "macos") && crate::RELEASE_VERSION.is_some();
 
 /// The store this device keeps its vault keys in. A guarded one asks for
 /// Touch ID, or the login password where there's none, before every read.

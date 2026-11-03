@@ -10,7 +10,10 @@
 //! frame drains the stores once, so updates apply at most once per frame.
 
 mod directory;
+mod updates;
 mod watch;
+
+pub use updates::UpdateStart;
 
 use crate::assets::UI_FONT;
 use crate::character_panel::{CharacterPanel, RefreshCharacter};
@@ -371,6 +374,8 @@ pub struct Shell {
     saved_settings: Option<SavedSettings>,
     /// Opened with the first sound: most sessions may never ring one.
     speaker: Option<Speaker>,
+    /// Checks for updates, in a window that keeps the player's settings.
+    updates: Option<updates::UpdateLink>,
     _subscriptions: [Subscription; 20],
     _woken: Task<()>,
 }
@@ -524,6 +529,7 @@ impl Shell {
                     SheetEvent::LockAfter(lock_after) => shell.keep_lock_after(*lock_after),
                     SheetEvent::KeepKeyOnDevice(keep) => shell.keep_key_on_device(*keep),
                     SheetEvent::VaultUnlocked => shell.go_on_after_unlock(window, cx),
+                    SheetEvent::Update(ask) => shell.on_update_ask(*ask, window, cx),
                 },
             );
         let front = cx.observe_window_activation(window, |shell, window, cx| {
@@ -537,11 +543,19 @@ impl Shell {
                     .update(cx, |sheet, cx| sheet.hide_passwords(cx));
             }
         });
+        // A quit the OS asks for, which skips `main`'s own.
         let quitting = cx.on_app_quit(|shell, cx| {
             let saved = shell.leave(cx);
+            let update = saved
+                .is_some()
+                .then(|| shell.take_update_for_exit())
+                .flatten();
             async move {
                 if let Some(saved) = saved {
                     saved.await;
+                }
+                if let Some(update) = update {
+                    update.install();
                 }
             }
         });
@@ -579,6 +593,7 @@ impl Shell {
                 EmptyStateEvent::Add(target) => {
                     shell.ask(Request::Save(target.clone()), window, cx);
                 }
+                EmptyStateEvent::Update(ask) => shell.on_update_ask(*ask, window, cx),
             },
         );
         let hud = cx.new(Hud::new);
@@ -646,6 +661,7 @@ impl Shell {
             focus_before_settings: None,
             saved_settings: None,
             speaker: None,
+            updates: None,
             _subscriptions: [
                 typing,
                 edited,
@@ -2342,7 +2358,9 @@ impl Render for Shell {
             cx,
         );
         // A screen reader reads the lines the chat draws, seen or not.
-        let covered = (self.settings_open && !window.is_a11y_active())
+        // The restart question is smaller than the sheet, and shows the chat.
+        let asking_to_restart = self.settings.read(cx).asking_to_restart();
+        let covered = (self.settings_open && !window.is_a11y_active() && !asking_to_restart)
             .then(|| hidden_under_sheet(window.viewport_size()));
         self.chat.update(cx, |chat, _| chat.set_covered(covered));
         let theme = *cx.global::<Theme>();
@@ -2483,8 +2501,9 @@ pub mod tests {
     use crate::chat::{COLUMN_WIDTH, LINE_HEIGHT, min_column_width};
     use crate::notes::NoteTarget;
     use crate::room_panel::press_key;
-    use crate::settings::Section;
+    use crate::settings::{Section, UpdateAsk};
     use crate::theme::ThemeChoice;
+    use crate::update::Staged;
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use gpui::{
         Modifiers, MouseButton, Pixels, ScrollDelta, ScrollEvent, TestAppContext,
@@ -5833,5 +5852,80 @@ pub mod tests {
         played.cx.simulate_input("k rat");
         played.cx.run_until_parked();
         assert_eq!(hint(&mut played), None);
+    }
+
+    fn restart_question(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+        shell.read_with(cx, |shell, cx| {
+            (shell.settings.read(cx).restart_question()).map(str::to_owned)
+        })
+    }
+
+    #[gpui::test]
+    fn restarting_while_connected_asks_first_then_reopens_the_server(cx: &mut TestAppContext) {
+        let mut played = play(cx);
+        played.connected();
+        let ask = |ask: UpdateAsk, played: &mut Played<'_>| {
+            played.shell.update_in(played.cx, |shell, window, cx| {
+                shell.on_update_ask(ask, window, cx);
+            });
+            played.cx.run_until_parked();
+        };
+        played.shell.update(played.cx, |shell, cx| {
+            shell.show_sample_update(Staged::sample("0.9.0", &[]), cx);
+        });
+        ask(UpdateAsk::Restart, &mut played);
+        let question = restart_question(&played.shell, played.cx).expect("it asks first");
+        assert!(question.starts_with("You're connected to 127.0.0.1."));
+
+        let cancel = played
+            .cx
+            .debug_bounds("restart-cancel")
+            .expect("Cancel is drawn");
+        played.cx.simulate_click(cancel.center(), Modifiers::none());
+        played.cx.run_until_parked();
+        assert_eq!(restart_question(&played.shell, played.cx), None);
+        assert!(
+            played
+                .shell
+                .read_with(played.cx, |shell, _| shell.game.is_some())
+        );
+
+        ask(UpdateAsk::RestartNow, &mut played);
+        let target = played.shell.read_with(played.cx, |shell, _| {
+            shell.game.as_ref().unwrap().target.to_string()
+        });
+        let update = played
+            .shell
+            .update(played.cx, |shell, _| shell.take_update_for_exit())
+            .expect("the update goes in on exit");
+        assert_eq!(
+            update.relaunch(),
+            Some(&["--reopen".to_owned(), target][..])
+        );
+    }
+
+    #[gpui::test]
+    fn later_hides_the_empty_states_card_and_the_dot_stays(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        launched.shell.update(launched.cx, |shell, cx| {
+            shell.show_sample_update(Staged::sample("0.9.0", &[]), cx);
+        });
+        assert!(launched.is_drawn("empty-update"));
+        assert!(launched.is_drawn("update-dot"));
+
+        launched.click("empty-update-later");
+        assert!(!launched.is_drawn("empty-update"));
+        assert!(launched.is_drawn("update-dot"));
+
+        // Not connected, Restart doesn't ask, and there's no server to reopen.
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.on_update_ask(UpdateAsk::Restart, window, cx);
+        });
+        assert_eq!(restart_question(&launched.shell, launched.cx), None);
+        let update = launched
+            .shell
+            .update(launched.cx, |shell, _| shell.take_update_for_exit())
+            .expect("the update goes in on exit");
+        assert_eq!(update.relaunch(), Some(&[][..]));
     }
 }

@@ -1,5 +1,6 @@
 //! The Data & sync section: the repo and how this device signs in to it, the
-//! last sync and what changed, Sync now, View history and what's kept. The
+//! last sync and what changed, Sync now, View history, what's kept, and
+//! updates (see `updates`). The
 //! shell feeds it `SyncState`, so it only draws and asks: everything that
 //! touches the disk runs off the UI thread.
 
@@ -265,6 +266,7 @@ impl SettingsSheet {
     ) {
         if !self.data.running {
             pane.row(muted_line(NO_SYNC, theme));
+            self.fill_update_rows(pane, theme, cx);
             return;
         }
         if let Some(problem) = self.data.sync.problem.clone() {
@@ -301,6 +303,7 @@ impl SettingsSheet {
                     .child(div().text_color(theme.text_muted).child(how)),
             );
         }
+        self.fill_update_rows(pane, theme, cx);
     }
 
     fn fill_repo(
