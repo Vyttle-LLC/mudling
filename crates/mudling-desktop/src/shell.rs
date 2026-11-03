@@ -3022,6 +3022,9 @@ pub mod tests {
         played.cx.simulate_keystrokes("down");
         assert_eq!(typed(&mut played), "look");
 
+        played
+            .cx
+            .simulate_keystrokes("backspace backspace backspace backspace");
         played.cx.simulate_input("drop la");
         played.cx.simulate_keystrokes("tab");
         assert_eq!(typed(&mut played), "drop lantern");

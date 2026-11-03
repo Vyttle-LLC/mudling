@@ -303,14 +303,8 @@ impl CommandInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Down past the newest entry brings the sent command back as it was.
-        let sent_again = cursor == line.len() && self.sent.as_deref() == Some(line.as_str());
-        self.selected_range = if sent_again {
-            0..cursor
-        } else {
-            cursor..cursor
-        };
         self.content = line;
+        self.selected_range = cursor..cursor;
         self.selection_reversed = false;
         self.marked_range = None;
         window.notify_text_input_changed(&self.focus_handle);
@@ -1289,6 +1283,19 @@ mod tests {
             input.submit(&Submit, window, cx);
             input.delete(&Delete, window, cx);
             assert_eq!(input.content, "");
+        });
+    }
+
+    #[gpui::test]
+    fn a_recalled_command_is_edited_not_replaced(cx: &mut TestAppContext) {
+        let (input, cx) = input_window(cx);
+        input.update_in(cx, |input, window, cx| {
+            input.replace_text_in_range(None, "kill goblin", window, cx);
+            input.submit(&Submit, window, cx);
+            input.delete(&Delete, window, cx);
+            input.show("kill goblin".to_owned(), 11, window, cx);
+            input.backspace(&Backspace, window, cx);
+            assert_eq!(input.content, "kill gobli");
         });
     }
 
