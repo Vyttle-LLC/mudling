@@ -33,12 +33,13 @@ use git2::{
     Commit, FetchOptions, Index, IndexAddOption, IndexEntry, IndexTime, ObjectType, PushOptions,
     Repository, RepositoryInitOptions, Signature, Tree,
 };
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -184,6 +185,9 @@ impl Limit {
 pub struct Repo {
     repo: Repository,
     _owner: File,
+    /// Disconnects once the last network step's git thread has ended. A step
+    /// given up on at its limit runs on, holding git's locks.
+    git_thread_ended: Cell<Option<Receiver<()>>>,
 }
 
 impl Repo {
@@ -201,6 +205,7 @@ impl Repo {
         Ok(Self {
             repo,
             _owner: owner,
+            git_thread_ended: Cell::new(None),
         })
     }
 
@@ -308,13 +313,26 @@ impl Repo {
     }
 
     /// Runs `work` on a thread with a handle of its own, and waits for it
-    /// until `limit` is up. The thread is then left to end by itself.
+    /// until `limit` is up. The thread is then left to end by itself, and the
+    /// next step waits for that within its own limit, so two never run at once.
     fn off_thread<T: Send + 'static>(
         &self,
         limit: &Limit,
         work: impl FnOnce(&Repository) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        on_own_thread(self.repo.path().to_owned(), limit, work)
+        if let Some(ended) = self.git_thread_ended.take() {
+            let waited = wait_for_end(&ended, limit);
+            if waited.is_err() {
+                self.git_thread_ended.set(Some(ended));
+            }
+            waited?;
+        }
+        let (ending, ended) = mpsc::channel::<()>();
+        self.git_thread_ended.set(Some(ended));
+        on_own_thread(self.repo.path().to_owned(), limit, move |repo| {
+            let _ending = ending;
+            work(repo)
+        })
     }
 
     pub fn has_remote(&self, remote: &str) -> bool {
@@ -669,6 +687,17 @@ fn on_own_thread<T: Send + 'static>(
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(GitError::Failed("the git thread stopped".to_owned()));
             }
+        }
+    }
+}
+
+/// Waits until `ended` disconnects, or `limit` is up.
+fn wait_for_end(ended: &Receiver<()>, limit: &Limit) -> Result<()> {
+    loop {
+        match ended.recv_timeout(LIMIT_POLL) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Timeout) if limit.is_up() => return Err(timed_out()),
+            Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }

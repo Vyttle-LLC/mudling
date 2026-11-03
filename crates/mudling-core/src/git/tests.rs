@@ -392,6 +392,48 @@ fn a_locked_branch_fails_as_locked() {
     assert!(matches!(failure, GitError::Locked(_)), "{failure:?}");
 }
 
+/// A sync quit during a fetch gives up on it, and its git thread still holds
+/// the tracking branch's lock when the quit's own fetch wants it.
+#[test]
+fn a_network_step_never_runs_beside_one_given_up_on() {
+    let (_folder, repo) = empty_repo();
+    let (entered, has_entered) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopper = thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            has_entered.recv().unwrap();
+            stop.store(true, Ordering::Relaxed);
+        }
+    });
+
+    let given_up = repo.off_thread(&Limit::stopped_by(NETWORK_LIMIT, stop), move |_| {
+        entered.send(()).unwrap();
+        let _ = released.recv();
+        Ok(())
+    });
+    stopper.join().unwrap();
+    let (ran, did_run) = mpsc::channel();
+    let beside = repo.off_thread(&Limit::after(Duration::ZERO), move |_| {
+        ran.send(()).unwrap();
+        Ok(())
+    });
+    drop(release);
+
+    assert!(
+        matches!(given_up, Err(GitError::TimedOut(_))),
+        "{given_up:?}"
+    );
+    assert!(matches!(beside, Err(GitError::TimedOut(_))), "{beside:?}");
+    assert!(
+        did_run.recv().is_err(),
+        "a step ran beside the one given up on"
+    );
+    let after = repo.off_thread(&Limit::after(NETWORK_LIMIT), |_| Ok(()));
+    assert!(after.is_ok(), "{after:?}");
+}
+
 /// A port on this machine that nothing listens on.
 fn dead_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
