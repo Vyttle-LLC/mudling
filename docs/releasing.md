@@ -108,6 +108,28 @@ keep it. `install.ps1` avoids both, since files `Invoke-WebRequest` downloads
 carry no mark of the web. A signed build names Vyttle LLC as the publisher; the
 SmartScreen warning fades as the signature builds reputation.
 
+## How the workflows protect the secrets
+
+Every action in `release.yml`, `ci.yml` and `daily.yml` is pinned to a full
+commit SHA, with its version in a trailing comment, so a moved tag can't change
+what runs with the release's secrets. To update one, look up the SHA of the
+new version's tag in the action's own repository and replace both the SHA and
+the comment:
+
+```sh
+gh api repos/actions/checkout/git/ref/tags/v4.4.0 --jq .object
+```
+
+An annotated tag shows `"type": "tag"`; fetch it from `git/tags/<sha>` to reach
+the commit. For `dtolnay/rust-toolchain`, which names a toolchain by branch,
+use the `stable` branch's commit.
+
+Secrets are passed per step, never in a job's `env`: each reaches only the
+steps that use it, and never the third-party actions that build and cache.
+A step's `if` can't read secrets, so the macOS provisioning profile and the
+Windows signing secrets are checked in a step that passes the answer on as an
+output.
+
 ## Building packages locally
 
 | Platform | Command | Output |
