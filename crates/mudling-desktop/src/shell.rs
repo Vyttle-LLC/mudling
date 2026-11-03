@@ -1661,7 +1661,7 @@ impl Shell {
     /// Tells the session whether the command field holds text, when that
     /// changes: quiet reads wait while it does.
     fn tell_of_typing(&mut self, cx: &mut Context<Shell>) {
-        let typing = !self.input.read(cx).content().is_empty();
+        let typing = self.input.read(cx).is_typing();
         if self.told_of_typing != typing {
             self.told_of_typing = typing;
             if let Some(game) = &self.game {
@@ -3006,16 +3006,21 @@ pub mod tests {
         played.cx.simulate_input("get lantern");
         played.cx.simulate_keystrokes("enter");
         assert_eq!(played.heard(), "get lantern");
+        played.cx.simulate_input("look");
+        played.cx.simulate_keystrokes("enter");
+        assert_eq!(played.heard(), "look");
         let typed = |played: &mut Played| {
             played.shell.read_with(played.cx, |shell, cx| {
                 shell.input.read(cx).content().to_owned()
             })
         };
 
+        // The sent command stays in the box; Up goes past it, Down comes back.
+        assert_eq!(typed(&mut played), "look");
         played.cx.simulate_keystrokes("up");
         assert_eq!(typed(&mut played), "get lantern");
         played.cx.simulate_keystrokes("down");
-        assert_eq!(typed(&mut played), "");
+        assert_eq!(typed(&mut played), "look");
 
         played.cx.simulate_input("drop la");
         played.cx.simulate_keystrokes("tab");
@@ -3974,7 +3979,11 @@ pub mod tests {
         played.shell.read_with(played.cx, |shell, cx| {
             assert_eq!(shell.dock(Side::Left).read(cx).state(), DockState::Open);
             assert_eq!(shell.find_panel.read(cx).rows_for_typed(cx), Some(1));
-            assert_eq!(shell.typed(cx), "", "the field took the typing");
+            assert_eq!(
+                shell.typed(cx),
+                "north",
+                "the Find field took the typing; the command line still holds the sent command"
+            );
         });
 
         click_walk_to_the_hall(&mut played);
