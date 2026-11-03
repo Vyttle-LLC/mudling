@@ -378,13 +378,19 @@ fn a_rooms_description_comes_from_the_text_before_its_room_info() {
 }
 
 #[test]
-fn links_stay_when_a_room_later_lists_fewer_exits() {
+fn a_doorway_keeps_its_link_when_the_room_later_lists_fewer_exits() {
     let mut walk = Walk::new(text_map());
     walk.arrive("A hall", &["e", "w"]);
     walk.go("e", "A study", &["w"]);
     walk.go("w", "A hall", &["e", "w"]);
+    let now = walk.now();
+    walk.map.sent("look", now);
+    walk.map.room_info(
+        &info("A hall", FIELDS, "field", &[("e", "C"), ("w", "O")]),
+        now,
+    );
     walk.go("w", "A yard", &["e"]);
-    // Back in: the way east is gone from the listing now (shut and hidden).
+    // Back in: the door east is gone from the listing now (shut and hidden).
     walk.go("e", "A hall", &["w"]);
     assert_eq!(walk.count(), 3);
     let hall = walk.current();
@@ -392,6 +398,79 @@ fn links_stay_when_a_room_later_lists_fewer_exits() {
     assert_eq!(
         hall.links.get_copied(Direction::East),
         Some(walk.id_of("A study"))
+    );
+}
+
+/// ```text
+///             Tree
+///              │ (its way south really leads east)
+///     Pond ── Meadow ── Meadow
+///                         │
+///                       Rocks
+/// ```
+///
+/// Two meadows of one name, their text unread, so only their exits tell
+/// them apart. The tree's crooked path takes the player into the east
+/// meadow while the map follows its link into the west one, which takes on
+/// the east one's exits; the move south then gives the west meadow a path
+/// the game never lists there.
+#[test]
+fn a_sure_revisit_drops_a_path_the_room_no_longer_lists() {
+    let meadow = "Southern Meadow";
+    let mut walk = Walk::new(text_map());
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    let west = walk.current().id;
+    walk.go("e", meadow, &["w", "s"]);
+    let east = walk.current().id;
+    walk.go("s", "Rocks", &["n"]);
+    let rocks = walk.current().id;
+    walk.go("n", meadow, &["w", "s"]);
+    walk.go("w", meadow, &["n", "e", "w"]);
+    walk.go("n", "A tree", &["s"]);
+    walk.go("s", meadow, &["w", "s"]);
+    assert_eq!(walk.current().id, west, "the crooked path fooled the map");
+    walk.go("s", "Rocks", &["n"]);
+    assert!(
+        walk.map
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
+    );
+    let now = walk.now();
+    let (_folder, database, writer) = saved(&mut walk.map, now);
+
+    walk.arrive("A pond", &["e"]);
+    walk.go("e", meadow, &["n", "e", "w"]);
+    assert!(!walk.map.whereabouts().unsure);
+    assert_eq!(walk.current().id, west);
+    assert!(!walk.current().links.contains(Direction::South));
+    assert!(
+        walk.map
+            .rooms()
+            .all(|room| room.links.get_copied(Direction::North) != Some(west)),
+        "no room south of the west meadow links back to it"
+    );
+    let east_south = walk
+        .map
+        .room(east)
+        .unwrap()
+        .links
+        .get_copied(Direction::South);
+    assert_eq!(east_south, Some(rocks), "the east meadow's path stays");
+
+    writer
+        .submit(walk.map.commit(walk.now()).unwrap().batch)
+        .unwrap();
+    writer.flush().unwrap();
+    let reopened = reopened(&database);
+    assert!(
+        !reopened
+            .room(west)
+            .unwrap()
+            .links
+            .contains(Direction::South)
     );
 }
 

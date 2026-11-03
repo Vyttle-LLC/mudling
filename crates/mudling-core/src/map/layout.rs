@@ -476,6 +476,30 @@ impl Layout {
         }
     }
 
+    /// Drops the room's paths the game no longer lists, and the far rooms'
+    /// ways back along them, so a path a wrong guess gave the room doesn't
+    /// outlive it. A doorway keeps its path: a shut door may go unlisted.
+    pub fn drop_unlisted_links(&mut self, id: RoomId) {
+        let Some(room) = self.room(id) else { return };
+        let unlisted: Vec<(Direction, RoomId)> = room
+            .links
+            .iter()
+            .filter(|(direction, _)| {
+                !room.exits.contains(*direction) && !room.doorways.contains(*direction)
+            })
+            .map(|(direction, to)| (direction, *to))
+            .collect();
+        for (direction, to) in unlisted {
+            self.update(id, |room| room.links.remove(direction));
+            let back = direction.opposite();
+            if self.room(to).is_some_and(|far| {
+                far.links.get_copied(back) == Some(id) && !far.doorways.contains(back)
+            }) {
+                self.update(to, |far| far.links.remove(back));
+            }
+        }
+    }
+
     pub fn mark_tangled(&mut self, ids: &[RoomId]) {
         for id in ids {
             self.update(*id, |room| room.tangled = true);

@@ -379,6 +379,12 @@ impl Tracker {
             || doubt.guesses[0].score - doubt.guesses[1].score >= CONVINCING_LEAD
             || doubt.steps >= LONGEST_DOUBT;
         self.doubt = (!convinced).then_some(doubt);
+        if convinced
+            && !adrift
+            && let Some(current) = self.layout.current
+        {
+            self.layout.drop_unlisted_links(current);
+        }
         arrived
     }
 

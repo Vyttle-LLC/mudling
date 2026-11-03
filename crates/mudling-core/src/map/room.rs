@@ -52,7 +52,8 @@ pub struct MapRoom {
     pub building: Option<RoomId>,
     /// The exits the room lists now.
     pub exits: DirMap<ExitState>,
-    /// Explored connections, which outlive the room's listing.
+    /// Explored connections. A sure visit drops those the room no longer
+    /// lists, except through a doorway.
     pub links: DirMap<RoomId>,
     /// Exits that have shown a door at some point, open or shut.
     pub doorways: DirSet,
@@ -117,8 +118,8 @@ impl MapRoom {
         self.exits.directions()
     }
 
-    /// Takes the exits the room lists now. Links stay: a room that lists
-    /// fewer exits later keeps the paths explored before.
+    /// Takes the exits the room lists now. Links stay until the map is sure
+    /// the player is here (see `Layout::drop_unlisted_links`).
     pub(super) fn note_exits(&mut self, exits: DirMap<ExitState>) {
         for (direction, exit) in exits.iter() {
             if exit.closed {
