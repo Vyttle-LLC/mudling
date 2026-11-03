@@ -13,7 +13,7 @@
 use crate::character_panel::CLOCK_TICK;
 use crate::chat::live_region;
 use crate::input::CommandInput;
-use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label};
+use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label, unavailable};
 use crate::shell::FocusNext;
 use crate::theme::Theme;
 use crate::title_bar::FocusPreviousControl;
@@ -469,7 +469,7 @@ impl SkillsPanel {
             .child("Practice")
             .map(|practice| {
                 if self.locked {
-                    practice.opacity(0.5).aria_description(LOCKED_NOTE)
+                    unavailable(practice, LOCKED_NOTE)
                 } else {
                     practice.on_click(cx.listener(move |panel, event, _, cx| {
                         panel.practice(index, ClickEvent::is_keyboard(event), cx);

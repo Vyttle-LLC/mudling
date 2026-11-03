@@ -7,7 +7,7 @@
 //! for a quiet read.
 
 use crate::assets::HEADING_FONT;
-use crate::room_panel::{button, row_name, section_label};
+use crate::room_panel::{button, row_name, section_label, unavailable};
 use crate::settings::{PageDown, PageUp, SCROLL_STEP, ScrollDown, ScrollUp};
 use crate::theme::Theme;
 use gpui::{
@@ -383,7 +383,7 @@ impl CharacterPanel {
                         });
                     }))
                 } else {
-                    refresh.opacity(0.5).aria_description(OFFLINE)
+                    unavailable(refresh, OFFLINE)
                 }
             });
         div()

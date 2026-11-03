@@ -8,6 +8,7 @@
 
 use crate::assets::{Icon, UI_FONT};
 use crate::input::{CommandInput, InputEvent};
+use crate::room_panel::unavailable;
 use crate::shell::{FocusCommandBar, FocusNext};
 use crate::theme::Theme;
 use gpui::{
@@ -127,7 +128,8 @@ impl Hotbar {
             chips: Vec::new(),
             locked: false,
             handles: Vec::new(),
-            add: cx.focus_handle(),
+            // gpui takes a tracked handle's Tab stop from the handle.
+            add: cx.focus_handle().tab_stop(true),
             editing: None,
             editor,
         }
@@ -156,7 +158,7 @@ impl Hotbar {
 
     fn keep_handles(&mut self, cx: &mut Context<Hotbar>) {
         while self.handles.len() < self.chips.len() {
-            self.handles.push(cx.focus_handle());
+            self.handles.push(cx.focus_handle().tab_stop(true));
         }
     }
 
@@ -245,6 +247,12 @@ impl Hotbar {
         cx.notify();
     }
 
+    /// Opens the editor for a new chip, as Add a chip does, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn start_adding(&mut self, window: &mut Window, cx: &mut Context<Hotbar>) {
+        self.start_editing(Editing::New, window, cx);
+    }
+
     /// Keeps what was typed. A chip emptied goes.
     fn finish_editing(&mut self, typed: &str, cx: &mut Context<Hotbar>) {
         let Some(editing) = self.editing.take() else {
@@ -292,12 +300,12 @@ impl Hotbar {
             .key_context(CONTEXT)
             .role(Role::Button)
             .aria_label(command.clone())
-            .aria_description(if self.locked { LOCKED_NOTE } else { CHIP_KEYS })
+            .aria_description(CHIP_KEYS)
             .aria_position_in_set(at + 1)
             .aria_size_of_set(self.chips.len())
             .track_focus(&self.handles[at])
             .tab_stop(true)
-            .when(self.locked, |chip| chip.opacity(0.5))
+            .when(self.locked, |chip| unavailable(chip, LOCKED_NOTE))
             .when(!self.locked, |chip| {
                 chip.hover(move |style| style.bg(hover))
             })

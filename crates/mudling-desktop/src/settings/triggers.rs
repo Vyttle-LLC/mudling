@@ -164,7 +164,7 @@ pub(super) fn switch(
     stop: &FocusHandle,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    control(id, format!("{what}, on"), stop, theme)
+    control(id, what.to_owned(), stop, theme)
         .role(Role::Switch)
         .aria_toggled(on.into())
         .w(SWITCH_WIDTH)
@@ -261,9 +261,23 @@ impl SettingsSheet {
     }
 
     /// Opens the form on the first trigger.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub fn edit_sample_trigger(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         let draft = Draft::Trigger(self.rules.triggers[0].clone());
+        self.open_draft(draft, window, cx);
+    }
+
+    /// Opens the form on the first alias, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn edit_sample_alias(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        let draft = Draft::Alias(self.rules.aliases[0].clone());
+        self.open_draft(draft, window, cx);
+    }
+
+    /// Opens the form on the first chip, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn edit_sample_chip(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        let draft = Draft::Chip(self.rules.hotbar.first().cloned());
         self.open_draft(draft, window, cx);
     }
 

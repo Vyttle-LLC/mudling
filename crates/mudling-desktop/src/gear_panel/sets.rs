@@ -11,7 +11,7 @@
 
 use super::{BUTTON_HEIGHT, GearPanel, LOCKED_NOTE};
 use crate::input::{CommandInput, InputEvent};
-use crate::room_panel::{button, row_name, section_label};
+use crate::room_panel::{button, row_name, section_label, unavailable};
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Pixels, Role,
@@ -499,7 +499,7 @@ impl GearPanel {
         .text_color(theme.text)
         .child(row.name.clone());
         let wear = if self.locked {
-            wear.opacity(0.5).aria_description(LOCKED_NOTE)
+            unavailable(wear, LOCKED_NOTE)
         } else {
             wear.on_click(cx.listener(move |panel, event: &gpui::ClickEvent, _, cx| {
                 panel.press_wear(&wear_id, event.is_keyboard(), cx);
@@ -530,7 +530,7 @@ impl GearPanel {
             .text_color(theme.accent)
             .child("+ New");
         let new_set = if no_one {
-            new_set.opacity(0.5).aria_description(NO_CHARACTER_NOTE)
+            unavailable(new_set, NO_CHARACTER_NOTE)
         } else {
             new_set.on_click(cx.listener(|panel, _, window, cx| {
                 panel.open_editor(None, window, cx);
@@ -1013,8 +1013,7 @@ impl GearPanel {
         let save = if can_save {
             save.on_click(cx.listener(|panel, _, window, cx| panel.save_set(window, cx)))
         } else {
-            save.opacity(0.5)
-                .aria_description("A set needs a name and at least one piece.")
+            unavailable(save, "A set needs a name and at least one piece.")
         };
         div()
             .id("gear-set-actions")

@@ -1234,12 +1234,12 @@ impl SettingsSheet {
         });
         let question = asking.then(|| {
             let asked = entry.clone();
-            let keep = text_button(id("keep"), "Keep", &pane.stop(cx), theme).on_click(
-                cx.listener(|sheet, _, _, cx| {
+            let keep = text_button(id("keep"), "Keep", &pane.stop(cx), theme)
+                .aria_label(format!("Keep the password for {name}"))
+                .on_click(cx.listener(|sheet, _, _, cx| {
                     sheet.vault.removing = None;
                     cx.notify();
-                }),
-            );
+                }));
             let confirm = text_button(id("confirm-remove"), "Remove", &pane.stop(cx), theme)
                 .aria_label(format!("Remove the password for {name}"))
                 .on_click(cx.listener(move |sheet, _, window, cx| {
@@ -1442,6 +1442,14 @@ impl SettingsSheet {
         self.vault.state = VaultState::Unlocked;
         self.vault.entries = entries;
         self.vault.stranded = stranded;
+        cx.notify();
+    }
+
+    /// Asks whether to remove the first password, as its Remove does, for
+    /// `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn ask_to_remove_sample_password(&mut self, cx: &mut Context<SettingsSheet>) {
+        self.vault.removing = self.vault.entries.first().cloned();
         cx.notify();
     }
 }

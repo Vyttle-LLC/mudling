@@ -1018,14 +1018,15 @@ mod tests {
     fn the_keyboard_walks_the_controls_and_esc_returns_to_the_command_bar(cx: &mut TestAppContext) {
         let (shell, cx) = window(cx);
 
-        // Back from the command bar past Settings to the right toggle. Windows
-        // draws its window buttons after Settings, and the walk goes through
-        // them too, without a press: Enter on one would minimize the window.
+        // Back from the command bar past the hotbar's Add a chip and Settings
+        // to the right toggle. Windows draws its window buttons after
+        // Settings, and the walk goes through them too, without a press: Enter
+        // on one would minimize the window.
         let window_buttons = ["window-minimize", "window-maximize", "window-close"]
             .into_iter()
             .filter(|id| cx.debug_bounds(id).is_some())
             .count();
-        cx.simulate_keystrokes(&"shift-tab ".repeat(2 + window_buttons));
+        cx.simulate_keystrokes(&"shift-tab ".repeat(3 + window_buttons));
         press_enter(cx);
         assert_eq!(dock_state(&shell, Side::Right, cx), DockState::Open);
         press_enter(cx);

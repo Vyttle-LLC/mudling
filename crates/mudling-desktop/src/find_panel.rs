@@ -15,7 +15,7 @@
 
 use crate::chat::live_region;
 use crate::input::CommandInput;
-use crate::room_panel::{SendCommand, button, row_name, section_label};
+use crate::room_panel::{SendCommand, button, row_name, section_label, unavailable};
 use crate::shell::FocusNext;
 use crate::theme::Theme;
 use crate::title_bar::FocusPreviousControl;
@@ -437,8 +437,8 @@ impl FindPanel {
                 let by_keyboard = ClickEvent::is_keyboard(event);
                 panel.walk_to(goal, by_keyboard, cx);
             })),
-            None if self.locked => walk.opacity(0.5).aria_description(LOCKED_NOTE),
-            None => walk.opacity(0.5).aria_description(no_walk(row.reach)),
+            None if self.locked => unavailable(walk, LOCKED_NOTE),
+            None => unavailable(walk, no_walk(row.reach)),
         });
         div()
             .id(("find-row", index))

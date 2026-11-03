@@ -522,6 +522,52 @@ pub fn sample_chips() -> Vec<String> {
         .into()
 }
 
+/// Triggers and aliases such as a player keeps. Made up.
+#[cfg(target_os = "macos")]
+pub fn sample_rules() -> mudling_core::store::RulesState {
+    use mudling_core::defaults::aliases::AliasRule;
+    use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
+    let trigger = |pattern: &str, color, hides, sound: Option<&str>, scope| TriggerRule {
+        color,
+        hides,
+        sound: sound.map(str::to_owned),
+        scope,
+        ..TriggerRule::new(pattern)
+    };
+    let character = || Scope::Character("sample".to_owned());
+    mudling_core::store::RulesState {
+        server: "mud.example".to_owned(),
+        character: "sample".to_owned(),
+        separator: None,
+        notepad: String::new(),
+        triggers: vec![
+            trigger(
+                "tells you",
+                Some(Highlight::Purple),
+                false,
+                Some("chime"),
+                Scope::All,
+            ),
+            trigger("flaps its wings", None, true, None, Scope::Server),
+            trigger(
+                "is DEAD!!",
+                Some(Highlight::Red),
+                false,
+                Some("bell"),
+                character(),
+            ),
+        ],
+        aliases: vec![
+            AliasRule::new("k", "kill $1;kick $1"),
+            AliasRule {
+                enabled: false,
+                ..AliasRule::new("gg", "get $2 $1;wear $2")
+            },
+        ],
+        hotbar: sample_chips(),
+    }
+}
+
 pub fn fill_hotbar(shell: &Shell, cx: &mut App) {
     shell
         .hotbar()

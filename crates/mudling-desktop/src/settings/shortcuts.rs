@@ -264,11 +264,36 @@ fn keystroke_label(keys: &str, mac: bool) -> String {
         .collect()
 }
 
+/// One keystroke as a screen reader says it, in words: `Command+,` on a Mac.
+/// Not every screen reader has a word for `⌘` or `↑`.
+fn spoken_keystroke(keys: &str, mac: bool) -> String {
+    keys.split('-')
+        .map(|part| match (part, mac) {
+            ("main", true) => "Command+".to_owned(),
+            ("shift", _) => "Shift+".to_owned(),
+            ("escape", _) => "Escape".to_owned(),
+            ("up", _) => "Up Arrow".to_owned(),
+            ("down", _) => "Down Arrow".to_owned(),
+            ("left", _) => "Left Arrow".to_owned(),
+            ("right", _) => "Right Arrow".to_owned(),
+            (part, _) => keystroke_label(part, mac),
+        })
+        .collect()
+}
+
 fn keys_label(keys: &[&str]) -> String {
     let labels = keys
         .iter()
         .map(|keys| keystroke_label(keys, cfg!(target_os = "macos")));
     labels.collect::<Vec<_>>().join("  ")
+}
+
+/// The keys that each do the same, as a screen reader says them.
+fn spoken_keys(keys: &[&str]) -> String {
+    let spoken = keys
+        .iter()
+        .map(|keys| spoken_keystroke(keys, cfg!(target_os = "macos")));
+    spoken.collect::<Vec<_>>().join(" or ")
 }
 
 pub(super) fn fill(pane: &mut Pane, theme: &Theme) {
@@ -282,7 +307,7 @@ pub(super) fn fill(pane: &mut Pane, theme: &Theme) {
                     .id((group, number))
                     .debug_selector(move || format!("shortcut-{}", shortcut.what))
                     .role(Role::Label)
-                    .aria_value(format!("{}: {keys}", shortcut.what))
+                    .aria_value(format!("{}: {}", shortcut.what, spoken_keys(shortcut.keys)))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -404,5 +429,14 @@ mod tests {
         assert_eq!(keystroke_label("escape", true), "Esc");
         assert_eq!(keystroke_label("up", false), "↑");
         assert_eq!(keystroke_label("backspace", false), "Backspace");
+    }
+
+    #[test]
+    fn a_screen_reader_hears_keys_in_words() {
+        assert_eq!(spoken_keystroke("main-l", true), "Command+L");
+        assert_eq!(spoken_keystroke("main-l", false), "Ctrl+L");
+        assert_eq!(spoken_keystroke("shift-enter", true), "Shift+Return");
+        assert_eq!(spoken_keystroke("up", true), "Up Arrow");
+        assert_eq!(spoken_keystroke("escape", false), "Escape");
     }
 }

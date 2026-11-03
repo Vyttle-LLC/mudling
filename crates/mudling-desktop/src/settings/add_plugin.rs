@@ -9,6 +9,7 @@ use super::{
     Page, Pane, SettingsSheet, SheetEvent, muted_line, problem_line, section_heading, text_button,
 };
 use crate::input::{CommandInput, InputEvent};
+use crate::room_panel::unavailable;
 use crate::theme::Theme;
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, PathPromptOptions, Role, SharedString,
@@ -284,7 +285,7 @@ impl SettingsSheet {
         working: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
     ) -> Stateful<Div> {
         if self.add.checking {
-            button.opacity(0.5).aria_description(WAITS_FOR_CHECK)
+            unavailable(button, WAITS_FOR_CHECK)
         } else {
             working(button)
         }

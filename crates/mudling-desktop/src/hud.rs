@@ -152,6 +152,14 @@ impl Meter {
             None => grouped(self.current).into(),
         }
     }
+
+    /// The value as a screen reader says it: "2,410 of 2,940", not a slash.
+    fn spoken(&self) -> SharedString {
+        match self.max {
+            Some(max) => format!("{} of {}", grouped(self.current), grouped(max)).into(),
+            None => grouped(self.current).into(),
+        }
+    }
 }
 
 fn fraction_of(part: i64, whole: i64) -> Option<f32> {
@@ -756,7 +764,7 @@ fn render_meter(meter: &Meter, width: Pixels, theme: &Theme) -> Stateful<Div> {
         .debug_selector(move || format!("meter-{label}"))
         .role(Role::Meter)
         .aria_label(name)
-        .aria_value(meter.value())
+        .aria_value(meter.spoken())
         .flex_none()
         .flex()
         .items_center()
@@ -845,10 +853,9 @@ impl Render for Hud {
                 .flex_none()
                 .bg(theme.surface)
                 .children(self.opponent.as_ref().map(|opponent| {
-                    div()
+                    elided(opponent.text())
                         .flex_none()
                         .text_color(theme.text_muted)
-                        .child(opponent.text())
                 }))
                 .into_any_element(),
             HudPlacement::Hidden => div().into_any_element(),
@@ -878,6 +885,7 @@ mod tests {
         let kinds: Vec<_> = meters.iter().map(|meter| meter.kind).collect();
         assert_eq!(kinds, [MeterKind::Hp, MeterKind::Moves]);
         assert_eq!(meters[0].value(), "30/42");
+        assert_eq!(meters[0].spoken(), "30 of 42");
         assert_eq!(meters[0].fraction(), Some(30. / 42.));
         assert_eq!(meters[1].fraction(), None, "no bar without a maximum");
     }
