@@ -580,9 +580,8 @@ impl SettingsSheet {
         // The core's list is of the session running, not of any other server.
         let overran = self.page_host() == self.server && row.overran(&self.turned_off);
         let on = on && !overran;
-        let state = if on { "on" } else { "off" };
         let id = SharedString::from(format!("switch-{}", row.key()));
-        control(id, format!("{}, {state}", row.name), &pane.stop(cx), theme)
+        control(id, row.name.clone(), &pane.stop(cx), theme)
             .role(Role::Switch)
             .aria_toggled(toggled(on))
             .child(switch(on, theme))

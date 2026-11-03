@@ -268,10 +268,9 @@ impl SettingsSheet {
             return;
         }
         let on = status.check_on;
-        let state = if on { "on" } else { "off" };
         let flip = control(
             "check-for-updates-switch",
-            format!("Check for updates, {state}"),
+            "Check for updates",
             &pane.stop(cx),
             theme,
         )

@@ -15,8 +15,8 @@ use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::chat::min_column_width;
 use crate::theme::Theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, Pixels, Role,
-    SharedString, Stateful, StyleRefinement, Window, deferred, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, DragMoveEvent, Entity, FontWeight, MouseButton, Pixels,
+    Role, SharedString, Stateful, StyleRefinement, Window, deferred, div, prelude::*, px,
 };
 use std::time::{Duration, Instant};
 
@@ -346,12 +346,19 @@ impl Dock {
             })
             .role(Role::Button)
             .aria_label(label)
+            .focusable()
+            .tab_stop(true)
+            // The mouse never moves focus here: typing stays with the bar.
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .size(px(28.))
             .flex()
             .items_center()
             .justify_center()
             .rounded_md()
+            .border_1()
+            .border_color(gpui::transparent_black())
             .hover(|style| style.bg(theme.hover))
+            .focus_visible(|style| style.border_color(theme.accent_hover))
             .on_click(cx.listener(move |dock, _, _, cx| on_click(dock, cx)))
             .child(icon.svg().size(px(16.)).text_color(theme.text_muted))
     }
@@ -423,6 +430,7 @@ impl Dock {
                 div()
                     .id("tabs")
                     .role(Role::TabList)
+                    .aria_label("Panels")
                     // The mouse never moves focus here: typing stays with the bar.
                     .capture_any_mouse_down(|_, window, _| window.prevent_default())
                     .flex_1()

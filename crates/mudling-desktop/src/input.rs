@@ -816,6 +816,8 @@ impl CommandInput {
             .id("send")
             .role(Role::Button)
             .aria_label("Send")
+            // Out of the Tab order, where Tab completes: these keys do the same.
+            .aria_keyshortcuts("Enter")
             .flex_none()
             .size(SEND_BUTTON_SIZE)
             .flex()
@@ -837,6 +839,7 @@ impl CommandInput {
             .debug_selector(|| "pin".to_owned())
             .role(Role::Button)
             .aria_label("Pin to the hotbar")
+            .aria_keyshortcuts(crate::title_bar::shortcut_name("p"))
             .flex_none()
             .size(SEND_BUTTON_SIZE)
             .flex()

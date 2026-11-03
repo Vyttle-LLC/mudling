@@ -677,6 +677,15 @@ pub fn button(id: impl Into<ElementId>, name: SharedString, theme: &Theme) -> St
         .focus_visible(move |style| style.bg(hover).border_color(focused))
 }
 
+/// Dims a control that does nothing for now, saying `why`. A screen reader
+/// hears it as unavailable, with the reason; the keyboard still reaches it.
+pub fn unavailable(control: Stateful<Div>, why: impl Into<SharedString>) -> Stateful<Div> {
+    control
+        .opacity(0.5)
+        .aria_description(why)
+        .a11y_synthetic_children(|builder| builder.parent_node().set_disabled())
+}
+
 /// gpui has no letter spacing, so the canvas's wide-set labels use thin spaces.
 pub fn section_label(text: &str, theme: &Theme) -> impl IntoElement {
     let spaced: Vec<String> = text.chars().map(String::from).collect();

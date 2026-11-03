@@ -71,6 +71,31 @@ impl MapView {
         cx.notify();
     }
 
+    /// Shows the core's answer to a join that went in, as after Join, which
+    /// takes the picks with it, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn show_sample_join(&mut self, cx: &mut Context<MapView>) {
+        self.model.clear_picks();
+        use mudling_core::map::{JoinDone, LastJoin, MapChange};
+        use mudling_core::persist::Timestamp;
+        use mudling_core::store::{Diff, Revision};
+        let joined = JoinDone::Joined {
+            label: "Joined two copies of Square 1, 1".to_owned(),
+            created: Timestamp::now(),
+        };
+        let diff = Diff {
+            revision: Revision(2),
+            change: MapChange {
+                last_join: Some(LastJoin {
+                    attempt: 1,
+                    outcome: Ok(joined),
+                }),
+                ..MapChange::default()
+            },
+        };
+        self.apply(&diff, cx);
+    }
+
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<MapView>) {
         self.model.open_review();
         self.review_open = true;

@@ -575,6 +575,7 @@ impl Chat {
             .debug_selector(|| "back-to-live".to_owned())
             .role(Role::Button)
             .aria_label(new_lines.clone())
+            .aria_keyshortcuts("Escape")
             .h(CHIP_HEIGHT)
             .px_3()
             .flex()

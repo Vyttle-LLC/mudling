@@ -64,6 +64,14 @@ impl SavedServer {
 }
 
 impl SettingsSheet {
+    /// Asks whether to remove `host`, as its Remove does, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn ask_to_remove_server(&mut self, host: &str, cx: &mut Context<SettingsSheet>) {
+        self.show_playing(None, cx);
+        self.removing = Some(host.to_owned().into());
+        cx.notify();
+    }
+
     pub(super) fn fill_servers(
         &mut self,
         pane: &mut Pane,
@@ -152,12 +160,14 @@ impl SettingsSheet {
                     div()
                         .flex()
                         .gap_2()
-                        .child(text_button(keep, "Keep", &pane.stop(cx), theme).on_click(
-                            cx.listener(|sheet, _, _, cx| {
-                                sheet.removing = None;
-                                cx.notify();
-                            }),
-                        ))
+                        .child(
+                            text_button(keep, "Keep", &pane.stop(cx), theme)
+                                .aria_label(format!("Keep {}", server.name))
+                                .on_click(cx.listener(|sheet, _, _, cx| {
+                                    sheet.removing = None;
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             text_button(confirm, "Remove", &pane.stop(cx), theme)
                                 .aria_label(format!("Remove {}", server.name))

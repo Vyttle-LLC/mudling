@@ -20,7 +20,7 @@ pub mod sets;
 pub mod text;
 
 use crate::assets::HEADING_FONT;
-use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label};
+use crate::room_panel::{SendCommand, Verbs, button, row_name, section_label, unavailable};
 use crate::theme::Theme;
 use gpui::{
     AnyView, App, ClickEvent, Context, Div, ElementId, EventEmitter, FocusHandle, FontWeight,
@@ -530,7 +530,7 @@ impl GearPanel {
             .font_weight(FontWeight::MEDIUM)
             .child(action.name);
         if self.locked {
-            button.opacity(0.5).aria_description(LOCKED_NOTE)
+            unavailable(button, LOCKED_NOTE)
         } else {
             button.on_click(cx.listener(move |panel, event, window, cx| {
                 panel.press(&pressed, event, window, cx);

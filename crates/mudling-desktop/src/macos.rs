@@ -1,14 +1,17 @@
 //! macOS's own answers. The Reduce Motion setting, and `--ax-check`: reads the
 //! window's accessibility tree from inside the app, through the same
 //! `NSAccessibility` methods the system calls for VoiceOver, and checks the
-//! chat, the input, the live region, the title bar, the Room panel's buttons, the
-//! HUD, find, the settings sheet and the empty state. Reading another app's tree
+//! chat, the input, the live region, the title bar, the panels, the HUD in each
+//! place, find, every section and page of the settings sheet and the empty
+//! state. At every stop it also sweeps gpui's AccessKit tree, the one NVDA and
+//! Orca get, for a control with no name, no way in by keyboard or no state.
+//! `docs/accessibility.md` lists what it covers. Reading another app's tree
 //! with `AXUIElement` needs the Accessibility permission; this needs none.
 
 // Objective-C messages to AppKit's accessibility protocol are unsafe calls.
 #![allow(unsafe_code)]
 
-use crate::dock::{Side, Slot};
+use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
 use crate::launcher::Launcher;
 use crate::map_view::harness::duplicated_map;
@@ -16,7 +19,8 @@ use crate::measure;
 use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
-use gpui::{App, AsyncApp, Context, Entity, Window, px};
+use crate::update::UpdateStatus;
+use gpui::{App, AsyncApp, Context, Entity, Keystroke, Window, px};
 use mudling_core::logs::{Kind, LogFile};
 use mudling_core::persist::{self, Timestamp};
 use mudling_core::plugin::PluginId;
@@ -39,6 +43,7 @@ pub struct AxElement {
     pub title: Option<String>,
     pub value: Option<String>,
     pub help: Option<String>,
+    pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<AxElement>,
 }
@@ -47,6 +52,7 @@ impl AxElement {
     fn read(element: &AnyObject) -> AxElement {
         // SAFETY: each getter returns nil or an object of the type asked for:
         // NSString for role, subrole and title, NSArray for children.
+        // `isAccessibilityEnabled` returns a BOOL, asked only of those that answer it.
         unsafe {
             let role: Option<Retained<NSString>> = getter(element, sel!(accessibilityRole));
             let subrole: Option<Retained<NSString>> = getter(element, sel!(accessibilitySubrole));
@@ -55,12 +61,16 @@ impl AxElement {
             let help: Option<Retained<NSString>> = getter(element, sel!(accessibilityHelp));
             let children: Option<Retained<NSArray<AnyObject>>> =
                 getter(element, sel!(accessibilityChildren));
+            let answers: bool =
+                msg_send![element, respondsToSelector: sel!(isAccessibilityEnabled)];
+            let enabled = answers.then(|| msg_send![element, isAccessibilityEnabled]);
             AxElement {
                 role: role.map(|s| s.to_string()),
                 subrole: subrole.map(|s| s.to_string()),
                 title: title.map(|s| s.to_string()),
                 value: value.map(|v| describe(&v)),
                 help: help.map(|s| s.to_string()),
+                enabled,
                 children: children
                     .map(|c| c.iter().map(|child| AxElement::read(&child)).collect())
                     .unwrap_or_default(),
@@ -241,7 +251,9 @@ const SETTINGS_CONTROLS: [&str; 14] = [
 const PLUGINS_TEXT: [&str; 2] = ["MUDling defaults, Built in: On", "a line"];
 
 /// What a screen reader must find on the Plugins page.
-const PLUGINS_CONTROLS: [&str; 2] = ["Inspector", "Sample game, on"];
+const PLUGINS_CONTROLS: [&str; 1] = ["Inspector"];
+/// Switches by name, and whether each must read on.
+const PLUGINS_SWITCHES: [(&str, bool); 1] = [("Sample game", true)];
 /// What a plugin turned off for overrunning says, and the buttons it offers.
 const OVERRUN_TEXT: [&str; 1] = ["Sample game was turned off."];
 const OVERRUN_CONTROLS: [&str; 2] = ["Details", "Turn on again"];
@@ -251,7 +263,8 @@ const INSPECTOR_TEXT: [&str; 2] = [
     "The Great Hall, Sample game · room.title, 3.0 µs",
     "You feel a little better., Nothing claimed this line, 1.0 µs",
 ];
-const SERVER_PLUGINS_CONTROLS: [&str; 3] = ["Back", "Turn on Sample game", "Sample game, off"];
+const SERVER_PLUGINS_CONTROLS: [&str; 2] = ["Back", "Turn on Sample game"];
+const SERVER_PLUGINS_SWITCHES: [(&str, bool); 1] = [("Sample game", false)];
 const SERVER_PLUGINS_TEXT: [&str; 2] = [
     "Sample game is suggested for this server",
     "2 triggers, 1 alias. Edit them in Triggers and aliases.",
@@ -317,9 +330,11 @@ const APPROVAL_CONTROLS: [&str; 4] = [
 /// The server the Logs section's sample log is for.
 const LOG_SERVER: &str = "mud.example";
 /// What a screen reader must find in the Logs section with one chat log kept.
-const LOGS_CONTROLS: [&str; 5] = [
-    "Keep debug logs, on",
-    "Keep chat logs for mud.example, on",
+const LOGS_SWITCHES: [(&str, bool); 2] = [
+    ("Keep debug logs", false),
+    ("Keep chat logs for mud.example", false),
+];
+const LOGS_CONTROLS: [&str; 3] = [
     "Clear chat logs",
     "Pin chat log of mud.example, 2026-03-01 00:04",
     "Export chat log of mud.example, 2026-03-01 00:04",
@@ -351,9 +366,10 @@ const UPDATE_CONTROLS: [&str; 9] = [
     "Chat channels from Aardwolf's GMCP",
     "What's new",
     "Settings, MUDling 0.9.0 is ready",
-    "Check for updates, on",
+    "Check for updates",
     "Check now",
 ];
+const UPDATE_SWITCHES: [(&str, bool); 1] = [("Check for updates", true)];
 const UPDATE_TEXT: [&str; 3] = [
     "It goes in when you quit. You're on 0.8.2.",
     "Daily and at launch, from GitHub Releases. Version 0.8.2.",
@@ -363,6 +379,13 @@ const RESTART_QUESTION: &str = "You're connected to mud.example as Sample. Resta
                                 disconnects you. MUDling saves everything first, and opens the \
                                 same server again afterwards.";
 const RESTART_CONTROLS: [&str; 3] = ["Restart to update?", "Cancel", "Restart"];
+/// The empty state's card for a ready update: its name and buttons.
+const EMPTY_UPDATE_CONTROLS: [&str; 3] = ["MUDling 0.9.0 is ready", "Later", "Restart to update"];
+/// A made-up update that didn't go in: its card's title, and why.
+const UPDATE_FAILURE: [&str; 2] = [
+    "MUDling 0.9.0 didn't install",
+    "The download didn't match its checksum.",
+];
 /// What a screen reader must find in Vault, filled with made-up rows.
 const VAULT_CONTROLS: [&str; 7] = [
     "Reveal the password for Sample on mud.example",
@@ -378,9 +401,9 @@ const TYPED_SECRET: &str = "ax-check typed secret";
 
 /// The HUD's meters, by name, with a value each must read as.
 const HUD_METERS: [(&str, &str); 4] = [
-    ("Hit points", "3,120/4,300"),
-    ("Mana", "1,040/1,800"),
-    ("Moves", "810/900"),
+    ("Hit points", "3,120 of 4,300"),
+    ("Mana", "1,040 of 1,800"),
+    ("Moves", "810 of 900"),
     ("Next level", "1,240 to go"),
 ];
 const CARD_NAME: &str = "Status card. The arrow keys move it.";
@@ -401,6 +424,8 @@ const FIND_PANEL_FIELD: &str = "Find on the map";
 const FIND_PANEL_CONTROLS: [&str; 5] =
     ["All", "Rooms", "Mobs", "Items", "Walk to The Market Square"];
 const FIND_PANEL_RESULT: &str = "The Market Square, The Old Town · 1 step away";
+/// The Walk of the room the sample stands in, which goes nowhere.
+const FIND_PANEL_HERE: &str = "Walk to A Stone Hall";
 /// Finds the sample's marked mob, which reads with its mark.
 const FIND_PANEL_MARKED_QUERY: &str = "wolf";
 const FIND_PANEL_MARKED: &str =
@@ -514,6 +539,8 @@ const PICK_CONTROLS: [&str; 3] = [
 const FORGET_ROOM: &str = "Forget room Square 1, 1";
 /// The question's Cancel, then its Forget.
 const FORGET_CONTROLS: [&str; 2] = ["Keep Square 1, 1", "Forget Square 1, 1"];
+/// What `MapView::show_sample_join` says went in.
+const JOINED: &str = "Joined two copies of Square 1, 1";
 const NEXT_MAP_RESTORE: &str = "Restore the map from Yesterday, 21:07, 9 rooms";
 /// The Character tab on its sample, by accessibility role and name.
 const CHARACTER_CONTROLS: [(&str, &str); 2] = [
@@ -529,6 +556,215 @@ const SKILLS_CONTROLS: [(&str, &str); 3] = [
 /// What the Add form adds, its field first.
 const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
 
+/// A stop on the check's way round: what it checks, how to get there, and
+/// what a screen reader must find there, by name or by value. A stop that
+/// must find nothing is there for the sweep alone.
+type Stop = (
+    &'static str,
+    fn(&mut Shell, &mut Window, &mut Context<Shell>),
+    &'static [&'static str],
+);
+
+/// The HUD's other places, the panels as rails, the session's rows and menu,
+/// and the hotbar's editor.
+fn main_window_stops() -> [Stop; 6] {
+    [
+        (
+            "the HUD as a strip reads its meters and the opponent",
+            |shell, window, cx| shell.place_hud(HudPlacement::TopStrip, false, window, cx),
+            &["Hit points", "Mana", "Moves", "the crazed goblin · 41%"],
+        ),
+        (
+            "the window with the HUD hidden",
+            |shell, window, cx| shell.place_hud(HudPlacement::Hidden, false, window, cx),
+            &[],
+        ),
+        (
+            "the panels as rails name each panel's button",
+            |shell, _, cx| {
+                for side in [Side::Left, Side::Right] {
+                    shell
+                        .dock(side)
+                        .update(cx, |dock, cx| dock.move_to(DockState::Rail, cx));
+                }
+            },
+            &[
+                "Map",
+                "Find",
+                "Room",
+                "Character",
+                "Gear",
+                "Skills",
+                "Notes",
+            ],
+        ),
+        (
+            "a closed connection says why, with its buttons",
+            |shell, _, cx| {
+                use mudling_core::defaults::detect::{Source, Suggestion};
+                use mudling_core::net::DisconnectReason;
+                use mudling_core::store::ConnectionStatus;
+                let settings = SettingsState {
+                    connection: ConnectionStatus::Closed(DisconnectReason::Failed(
+                        "connection refused".to_owned(),
+                    )),
+                    suggestion: Some(Suggestion {
+                        plugin: PluginId::try_from("sample".to_owned()).expect("a good id"),
+                        source: Source::Host,
+                    }),
+                    ..SettingsState::default()
+                };
+                shell.show_sample_offers(&settings, cx);
+            },
+            &[
+                "The connection failed: connection refused",
+                "Turn on and reconnect",
+                "Reconnect",
+                "All servers",
+            ],
+        ),
+        (
+            "the hotbar's editor is a named field",
+            |shell, window, cx| {
+                shell
+                    .hotbar()
+                    .update(cx, |hotbar, cx| hotbar.start_adding(window, cx));
+            },
+            &["Hotbar command"],
+        ),
+        (
+            "the session menu names itself and its rows",
+            |shell, window, cx| shell.open_session_menu(window, cx),
+            &["Sessions", "Recording"],
+        ),
+    ]
+}
+
+/// A saved server for the sheet to list. Made up.
+fn sample_server() -> crate::settings::SavedServer {
+    crate::settings::SavedServer {
+        name: "Sample game".into(),
+        host: SAMPLE_SERVER.into(),
+        port: 4000,
+        characters: vec!["Sample".into()],
+    }
+}
+
+/// The sheet's sections and questions the other checks leave out.
+fn settings_stops() -> [Stop; 9] {
+    [
+        (
+            "Servers & characters names each server's controls",
+            |shell, window, cx| {
+                measure::open_sample_section(shell, Section::Servers, window, cx);
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.show_servers(vec![sample_server()], None, cx);
+                });
+            },
+            &["Plugins for Sample game"],
+        ),
+        (
+            "Triggers & aliases names each rule's switch and buttons",
+            |shell, window, cx| {
+                shell.show_sample_rules(measure::sample_rules(), cx);
+                measure::open_sample_section(shell, Section::Triggers, window, cx);
+            },
+            &[
+                "tells you",
+                "Edit tells you",
+                "Remove tells you",
+                "New trigger",
+                "gg",
+                "New alias",
+                "Later look",
+                "Earlier inv",
+                "New chip",
+            ],
+        ),
+        (
+            "the trigger form names its fields and choices",
+            |shell, window, cx| {
+                shell.show_sample_rules(measure::sample_rules(), cx);
+                measure::open_sample_section(shell, Section::Triggers, window, cx);
+                shell
+                    .settings_sheet()
+                    .update(cx, |sheet, cx| sheet.edit_sample_trigger(window, cx));
+            },
+            &[
+                "What the line matches",
+                "Regular expression",
+                "Purple",
+                "Hide the line",
+                "Chime",
+                "This character",
+                "Save trigger",
+            ],
+        ),
+        (
+            "the alias form names its fields",
+            |shell, window, cx| {
+                shell
+                    .settings_sheet()
+                    .update(cx, |sheet, cx| sheet.edit_sample_alias(window, cx));
+            },
+            &["Alias name", "What it stands for", "Save alias"],
+        ),
+        (
+            "the chip form names its field",
+            |shell, window, cx| {
+                shell
+                    .settings_sheet()
+                    .update(cx, |sheet, cx| sheet.edit_sample_chip(window, cx));
+            },
+            &["Hotbar command", "Save chip"],
+        ),
+        (
+            "Shortcuts reads each shortcut in words",
+            |shell, window, cx| measure::open_sample_section(shell, Section::Shortcuts, window, cx),
+            &[
+                "Focus the command bar: Command+L",
+                "Back to live: End or Escape",
+                "Move the floating card: Up Arrow or Down Arrow or Left Arrow or Right Arrow",
+            ],
+        ),
+        (
+            "removing a plugin asks with named buttons",
+            |shell, window, cx| {
+                measure::open_sample_section(shell, Section::Plugins, window, cx);
+                let helper = PluginId::try_from("sample-helper".to_owned()).expect("a good id");
+                shell
+                    .settings_sheet()
+                    .update(cx, |sheet, cx| sheet.confirm_remove(&helper, window, cx));
+            },
+            &["Remove Sample helper?", "Cancel", "Remove"],
+        ),
+        (
+            "removing a server asks with buttons that say what they keep and remove",
+            |shell, window, cx| {
+                measure::open_sample_section(shell, Section::Servers, window, cx);
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.show_servers(vec![sample_server()], None, cx);
+                    sheet.ask_to_remove_server(SAMPLE_SERVER, cx);
+                });
+            },
+            &["Keep Sample game", "Remove Sample game"],
+        ),
+        (
+            "removing a password asks with buttons that say what they keep and remove",
+            |shell, window, cx| {
+                measure::open_sample_section(shell, Section::Vault, window, cx);
+                shell
+                    .settings_sheet()
+                    .update(cx, |sheet, cx| sheet.ask_to_remove_sample_password(cx));
+            },
+            &[
+                "Keep the password for Sample on mud.example",
+                "Remove the password for Sample on mud.example",
+            ],
+        ),
+    ]
+}
+
 /// Runs the checks, prints a JSON report and exits: 0 if all passed.
 pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
     let chat = shell.read(cx).chat();
@@ -543,7 +779,8 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         cx.background_executor().timer(pause).await;
 
         let mut checks = Vec::new();
-        let tree = window_tree();
+        let mut sweep = Sweep::default();
+        let tree = sweep.read(cx);
         let chat_nodes = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| {
                 e.is("AXGroup", Some("AXApplicationLog")) && e.title.as_deref() == Some("Chat")
@@ -589,7 +826,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         shell.update(cx, |shell, _| shell.replay(stream::reads(&PROBE_LINES)));
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
         });
@@ -618,7 +855,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             shell.replay(stream::reads(&[crate::measure::SAMPLE_ITEM_LINE]));
         });
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed: Vec<_> = GEAR_CONTROLS
             .into_iter()
             .filter(|name| {
@@ -633,7 +870,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         });
         shell.update(cx, |shell, cx| crate::measure::fill_gear_sets(shell, cx));
         cx.background_executor().timer(pause).await;
-        let set_tree = window_tree();
+        let set_tree = sweep.read(cx);
         let not_found = |tree: &Option<AxElement>, names: &[&'static str]| {
             let missing = names.iter().filter(|name| {
                 let named = |e: &AxElement| {
@@ -659,7 +896,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .expect("the window is open");
         }
         cx.background_executor().timer(pause).await;
-        let editor_tree = window_tree();
+        let editor_tree = sweep.read(cx);
         let unnamed = not_found(&editor_tree, &GEAR_EDITOR_CONTROLS);
         checks.push(Check {
             name: "the set editor names its fields, pieces and actions",
@@ -723,7 +960,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             shell.open_panels(cx);
         });
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed: Vec<_> = COMMAND_BAR_CONTROLS
             .into_iter()
             .filter(|name| {
@@ -735,6 +972,26 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             name: "the hotbar and the pin are named",
             passed: unnamed.is_empty(),
             detail: format!("not found: {unnamed:?}"),
+        });
+        // Tab in the command bar completes a word, so the way out is back.
+        let window = cx.update(|cx| cx.windows().first().copied());
+        if let Some(window) = window {
+            window
+                .update(cx, |_, window, cx| {
+                    shell.update(cx, |shell, cx| shell.focus_command_bar(window, cx));
+                    let back = Keystroke::parse("shift-tab").expect("a keystroke");
+                    window.dispatch_keystroke(back, cx);
+                })
+                .expect("the window is open");
+        }
+        cx.background_executor().timer(pause).await;
+        let focused = app_focus(cx);
+        checks.push(Check {
+            name: "Shift-Tab from the command bar reaches the hotbar",
+            passed: focused
+                .as_ref()
+                .is_some_and(|(_, label)| label == COMMAND_BAR_CONTROLS[2]),
+            detail: format!("{focused:?}"),
         });
         let named_buttons = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXButton", None))
@@ -768,7 +1025,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .expect("the window is open");
         }
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let named = |role: &str, name: &str| {
             tree.as_ref().is_some_and(|tree| {
                 !tree
@@ -819,7 +1076,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 crate::measure::open_sheet_tab(shell, tab, cx);
             });
             cx.background_executor().timer(pause).await;
-            let tree = window_tree();
+            let tree = sweep.read(cx);
             let missing: Vec<&str> = expected
                 .iter()
                 .filter(|(role, name)| {
@@ -864,7 +1121,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let focused = app_focus(cx);
         checks.push(Check {
             name: "the shortcut brings the keyboard to the Find panel's named field",
@@ -900,6 +1157,18 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .is_some_and(|tree| !tree.find(says_where).is_empty()),
             detail: format!("looked for {FIND_PANEL_RESULT:?}"),
         });
+        let dimmed = |e: &AxElement| {
+            e.is("AXButton", None)
+                && e.title.as_deref() == Some(FIND_PANEL_HERE)
+                && e.enabled == Some(false)
+        };
+        checks.push(Check {
+            name: "a Walk with nowhere to go reads as unavailable",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(dimmed).is_empty()),
+            detail: format!("looked for {FIND_PANEL_HERE:?}, dimmed"),
+        });
         in_shell(
             &|_, window, cx| {
                 find_panel.update(cx, |panel, cx| {
@@ -909,7 +1178,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let reads_its_mark = |e: &AxElement| {
             [&e.title, &e.value]
                 .into_iter()
@@ -931,7 +1200,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let statuses = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXGroup", Some("AXApplicationStatus")))
         });
@@ -974,7 +1243,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
         let probe = stream::reads(&SPLIT_PROBE_LINES);
         shell.update(cx, |shell, _| shell.replay(probe));
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let history_lines = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.is("AXGroup", None) && e.title.as_deref() == Some("Chat history"))
                 .first()
@@ -1056,7 +1325,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unread: Vec<_> = HUD_METERS
             .into_iter()
             .filter(|(name, value)| {
@@ -1099,8 +1368,27 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .is_some_and(|(_, label)| label.as_str() == CARD_NAME),
             detail: format!("{focused:?}"),
         });
+        sweep.read(cx);
+        for (name, open, expected) in main_window_stops() {
+            in_window(&open, cx);
+            cx.background_executor().timer(pause).await;
+            let tree = sweep.read(cx);
+            if expected.is_empty() {
+                continue;
+            }
+            let missing = not_found(&tree, expected);
+            checks.push(Check {
+                name,
+                passed: missing.is_empty(),
+                detail: format!("not found: {missing:?}"),
+            });
+        }
         in_window(
-            &|shell, window, cx| shell.place_hud(HudPlacement::Attached, false, window, cx),
+            &|shell, window, cx| {
+                shell.place_hud(HudPlacement::Attached, false, window, cx);
+                shell.open_panels(cx);
+                shell.focus_command_bar(window, cx);
+            },
             cx,
         );
         cx.background_executor().timer(pause).await;
@@ -1114,7 +1402,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed: Vec<_> = MAP_HISTORY_CONTROLS
             .into_iter()
             .filter(|name| {
@@ -1136,7 +1424,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let questions = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| {
                 let says = |text: &Option<String>| text.as_deref().is_some_and(|t| t.contains("?"));
@@ -1194,7 +1482,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = |names: &[&'static str], tree: &Option<AxElement>| -> Vec<&'static str> {
             let shown = |name: &&str| {
                 let named = |e: &AxElement| e.title.as_deref() == Some(*name);
@@ -1231,7 +1519,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed = missing(&REVIEW_CONTROLS, &tree);
         checks.push(Check {
             name: "Review names its buttons, and a way to close it",
@@ -1277,7 +1565,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed = missing(&PICK_CONTROLS, &tree);
         checks.push(Check {
             name: "picking rooms names Join and Clear, and the room's own button",
@@ -1310,7 +1598,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unnamed = missing(&FORGET_CONTROLS, &tree);
         checks.push(Check {
             name: "forgetting a room asks with named Cancel and Forget",
@@ -1340,6 +1628,25 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .is_some_and(|(_, label)| label == FORGET_ROOM),
             detail: format!("{focused:?}"),
         });
+        in_window(
+            &|shell, _, cx| shell.map().update(cx, |map, cx| map.show_sample_join(cx)),
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let unnamed = missing(&["Undo the join"], &tree);
+        let said = tree.as_ref().map_or(0, |tree| {
+            let says = |text: &Option<String>| text.as_deref() == Some(JOINED);
+            tree.find(|e| {
+                e.is("AXGroup", Some("AXApplicationStatus")) && (says(&e.title) || says(&e.value))
+            })
+            .len()
+        });
+        checks.push(Check {
+            name: "a join that went in says so, with a named Undo the join",
+            passed: unnamed.is_empty() && said > 0,
+            detail: format!("not found: {unnamed:?}, {said} status(es) saying it"),
+        });
 
         in_window(
             &|shell, window, cx| {
@@ -1349,7 +1656,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let focused = app_focus(cx);
         checks.push(Check {
             name: "find's field takes focus, with a name",
@@ -1377,7 +1684,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let named_in = |tree: &Option<AxElement>, names: &[&'static str]| -> Vec<&'static str> {
             let unnamed = |name: &&'static str| {
                 let named = |e: &AxElement| e.title.as_deref() == Some(*name);
@@ -1420,12 +1727,13 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &LOGS_CONTROLS);
+        let misread = misread_switches(&tree, &LOGS_SWITCHES);
         checks.push(Check {
             name: "the Logs section names its switches, pin, export and clear",
-            passed: on_logs.is_some() && missing.is_empty(),
-            detail: format!("not found: {missing:?}"),
+            passed: on_logs.is_some() && missing.is_empty() && misread.is_empty(),
+            detail: format!("not found: {missing:?}, misread: {misread:?}"),
         });
 
         let opened = in_window(
@@ -1433,7 +1741,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let unread = reads_all(&tree, &PLUGINS_TEXT);
         checks.push(Check {
             name: "Plugins reads out its layers and what they cost",
@@ -1441,10 +1749,11 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("not found: {unread:?}"),
         });
         let missing = named_in(&tree, &PLUGINS_CONTROLS);
+        let misread = misread_switches(&tree, &PLUGINS_SWITCHES);
         checks.push(Check {
             name: "Plugins names the Inspector and its switches",
-            passed: opened.is_some() && missing.is_empty(),
-            detail: format!("not found: {missing:?}"),
+            passed: opened.is_some() && missing.is_empty() && misread.is_empty(),
+            detail: format!("not found: {missing:?}, misread: {misread:?}"),
         });
 
         let opened = in_window(
@@ -1462,7 +1771,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &OVERRUN_CONTROLS);
         let unread = reads_all(&tree, &OVERRUN_TEXT);
         checks.push(Check {
@@ -1478,7 +1787,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &INSPECTOR_CONTROLS);
         let unread = reads_all(&tree, &INSPECTOR_TEXT);
         let focused = app_focus(cx);
@@ -1495,13 +1804,17 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         let opened = in_window(&measure::open_sample_server_plugins, cx);
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &SERVER_PLUGINS_CONTROLS);
         let unread = reads_all(&tree, &SERVER_PLUGINS_TEXT);
+        let misread = misread_switches(&tree, &SERVER_PLUGINS_SWITCHES);
         checks.push(Check {
             name: "a server's plugins name their switches and read their overrides",
-            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
-            detail: format!("not found: {missing:?}, {unread:?}"),
+            passed: opened.is_some()
+                && missing.is_empty()
+                && unread.is_empty()
+                && misread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}, misread: {misread:?}"),
         });
 
         let opened = in_window(
@@ -1509,7 +1822,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &PLUGINS_APPROVAL_CONTROLS);
         let unread = reads_all(&tree, &PLUGINS_APPROVAL_TEXT);
         checks.push(Check {
@@ -1527,7 +1840,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         let opened = in_window(&measure::open_sample_directory, cx);
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &DIRECTORY_CONTROLS);
         let unread = reads_all(&tree, &DIRECTORY_TEXT);
         checks.push(Check {
@@ -1538,7 +1851,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         let opened = in_window(&measure::open_sample_add_plugin, cx);
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &ADD_PLUGIN_CONTROLS);
         let unread = reads_all(&tree, &ADD_PLUGIN_TEXT);
         checks.push(Check {
@@ -1549,7 +1862,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
 
         let opened = in_window(&measure::open_sample_approval, cx);
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &APPROVAL_CONTROLS);
         let focused = app_focus(cx);
         checks.push(Check {
@@ -1568,7 +1881,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &DATA_CONTROLS);
         checks.push(Check {
             name: "Data & sync names its controls",
@@ -1589,7 +1902,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &VAULT_CONTROLS);
         checks.push(Check {
             name: "Vault names its controls",
@@ -1606,7 +1919,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let masked = tree.as_ref().map_or_else(Vec::new, |tree| {
             tree.find(|e| e.subrole.as_deref() == Some("AXSecureTextField"))
         });
@@ -1624,6 +1937,18 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             detail: format!("{} masked, {} leaks", masked.len(), leaks.len()),
         });
 
+        for (name, open, expected) in settings_stops() {
+            let opened = in_window(&open, cx);
+            cx.background_executor().timer(pause).await;
+            let tree = sweep.read(cx);
+            let missing = not_found(&tree, expected);
+            checks.push(Check {
+                name,
+                passed: opened.is_some() && missing.is_empty(),
+                detail: format!("not found: {missing:?}"),
+            });
+        }
+
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");
         persist::save_server(sample_data.path(), SAMPLE_SERVER, 4000)
@@ -1640,7 +1965,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .ok()
         });
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &EMPTY_STATE_CONTROLS);
         checks.push(Check {
             name: "the empty state names its cards and controls",
@@ -1676,7 +2001,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 .ok()
         });
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &ADD_FORM_CONTROLS);
         checks.push(Check {
             name: "the Add form names its field and buttons",
@@ -1694,6 +2019,20 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
             detail: format!("{focused:?}"),
         });
+        cx.update(|cx| {
+            let empty_state = shell.read(cx).empty_state();
+            empty_state.update(cx, |empty_state, cx| {
+                empty_state.show_update(Some("0.9.0".into()), cx);
+            });
+        });
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let missing = named_in(&tree, &EMPTY_UPDATE_CONTROLS);
+        checks.push(Check {
+            name: "Where to today? says an update is ready, with Later and Restart to update",
+            passed: missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
 
         // Last, as the update renames the sprocket the walks above look for.
         let shown = in_window(
@@ -1704,7 +2043,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &UPDATE_CONTROLS);
         let unread: Vec<_> = UPDATE_TEXT
             .into_iter()
@@ -1713,10 +2052,14 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 tree.as_ref().is_none_or(|tree| tree.find(reads).is_empty())
             })
             .collect();
+        let misread = misread_switches(&tree, &UPDATE_SWITCHES);
         checks.push(Check {
             name: "the update card, the sprocket and Data & sync's rows say an update is ready",
-            passed: shown.is_some() && missing.is_empty() && unread.is_empty(),
-            detail: format!("not found: {missing:?}, {unread:?}"),
+            passed: shown.is_some()
+                && missing.is_empty()
+                && unread.is_empty()
+                && misread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}, misread: {misread:?}"),
         });
 
         let asked = in_window(
@@ -1728,7 +2071,7 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
         cx.background_executor().timer(pause).await;
-        let tree = window_tree();
+        let tree = sweep.read(cx);
         let missing = named_in(&tree, &RESTART_CONTROLS);
         let unread = tree.as_ref().is_none_or(|tree| {
             let reads = |e: &AxElement| e.value.as_deref() == Some(RESTART_QUESTION);
@@ -1746,7 +2089,47 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 !unread
             ),
         });
+        let dialog = |e: &AxElement| {
+            e.is("AXWindow", Some("AXDialog")) && e.title.as_deref() == Some(RESTART_CONTROLS[0])
+        };
+        checks.push(Check {
+            name: "Restart's question is a dialog named for what it asks",
+            passed: tree
+                .as_ref()
+                .is_some_and(|tree| !tree.find(dialog).is_empty()),
+            detail: String::new(),
+        });
 
+        let shown = in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.answer_restart(false, window, cx);
+                    let failure = (UPDATE_FAILURE[0].to_owned(), UPDATE_FAILURE[1].to_owned());
+                    let status = UpdateStatus {
+                        failure: Some(failure),
+                        ..UpdateStatus::default()
+                    };
+                    sheet.show_update(status, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let missing = named_in(&tree, &[UPDATE_FAILURE[0], "OK"]);
+        let alerted = tree.as_ref().is_some_and(|tree| {
+            let says = |e: &AxElement| {
+                (e.value.as_deref()).is_some_and(|value| value.starts_with(UPDATE_FAILURE[1]))
+            };
+            !tree.find(says).is_empty()
+        });
+        checks.push(Check {
+            name: "an update that didn't go in says why, with its OK",
+            passed: shown.is_some() && missing.is_empty() && alerted,
+            detail: format!("not found: {missing:?}, reason read: {alerted}"),
+        });
+
+        checks.push(sweep.check());
         let passed = checks.iter().all(|check| check.passed);
         let report = serde_json::json!({ "passed": passed, "checks": checks });
         println!(
@@ -1775,4 +2158,217 @@ fn focused_accesskit_node(tree_json: &str) -> Option<(String, String)> {
             .to_owned()
     };
     Some((field("role"), field("label")))
+}
+
+/// The switches of `switches` that aren't in `tree` by name reading on or off
+/// as they should. macOS gives a switch's state as its value, 1 or 0.
+fn misread_switches<'a>(tree: &Option<AxElement>, switches: &[(&'a str, bool)]) -> Vec<&'a str> {
+    let reads = |name: &str, on: bool| {
+        let value = if on { "1" } else { "0" };
+        tree.as_ref().is_some_and(|tree| {
+            !tree
+                .find(|e| {
+                    e.subrole.as_deref() == Some("AXSwitch")
+                        && e.title.as_deref() == Some(name)
+                        && e.value.as_deref() == Some(value)
+                })
+                .is_empty()
+        })
+    };
+    switches
+        .iter()
+        .filter(|(name, on)| !reads(name, *on))
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+/// Roles a player acts on, as AccessKit names them.
+const CONTROL_ROLES: [&str; 13] = [
+    "Button",
+    "CheckBox",
+    "ComboBox",
+    "Link",
+    "MenuItem",
+    "MultilineTextInput",
+    "PasswordInput",
+    "RadioButton",
+    "SearchInput",
+    "Slider",
+    "Switch",
+    "Tab",
+    "TextInput",
+];
+/// Other roles a screen reader names: groups of controls, and meters.
+const NAMED_ROLES: [&str; 8] = [
+    "AlertDialog",
+    "Dialog",
+    "Menu",
+    "RadioGroup",
+    "TabList",
+    "TabPanel",
+    "Toolbar",
+    "Meter",
+];
+
+/// What a screen reader would miss in an AccessKit tree dump: a control with
+/// no name, one the keyboard can neither focus nor name a key for, one that
+/// hides whether it's on or chosen, a clickable thing that doesn't say it's a
+/// control, an unnamed group and a meter with no reading.
+fn control_problems(tree_json: &str) -> Vec<String> {
+    let Ok(tree) = serde_json::from_str::<serde_json::Value>(tree_json) else {
+        return vec!["the AccessKit tree doesn't parse".to_owned()];
+    };
+    let Some(nodes) = tree.get("nodes").and_then(|nodes| nodes.as_object()) else {
+        return Vec::new();
+    };
+    let aria = |node: &serde_json::Value, field: &str| -> Option<String> {
+        let value = node.get("aria")?.get(field)?;
+        Some(
+            value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned),
+        )
+    };
+    let named = |node: &serde_json::Value| aria(node, "label").filter(|label| !label.is_empty());
+    let mut parents = std::collections::HashMap::new();
+    for (id, node) in nodes {
+        let children = node.get("children").and_then(|c| c.as_array());
+        for child in children.into_iter().flatten().filter_map(|c| c.as_str()) {
+            parents.insert(child, id.as_str());
+        }
+    }
+    let named_ancestor = |id: &str| {
+        let mut at = parents.get(id).copied();
+        while let Some(parent) = at {
+            if let Some(label) = nodes.get(parent).and_then(named) {
+                return label;
+            }
+            at = parents.get(parent).copied();
+        }
+        "the window".to_owned()
+    };
+    let mut problems = Vec::new();
+    for (id, node) in nodes {
+        let role = aria(node, "role").unwrap_or_default();
+        let actions = node.get("aria").and_then(|aria| aria.get("on_action"));
+        let can = |action: &str| {
+            actions
+                .and_then(|actions| actions.as_array())
+                .is_some_and(|actions| actions.iter().any(|a| a.as_str() == Some(action)))
+        };
+        let control = CONTROL_ROLES.contains(&role.as_str());
+        let Some(name) = named(node) else {
+            if control || NAMED_ROLES.contains(&role.as_str()) {
+                problems.push(format!("a {role} with no name, in {}", named_ancestor(id)));
+            }
+            continue;
+        };
+        let this = format!("{role} {name:?}");
+        if can("Click") && !control {
+            problems.push(format!("{this} is clicked but isn't a control"));
+        }
+        if control && !can("Focus") && aria(node, "keyboard_shortcut").is_none() {
+            problems.push(format!("{this} has no tab stop and names no key"));
+        }
+        let state = match role.as_str() {
+            "Tab" => Some("selected"),
+            "CheckBox" | "RadioButton" | "Switch" => Some("toggled"),
+            _ => None,
+        };
+        if let Some(state) = state.filter(|state| aria(node, state).is_none()) {
+            problems.push(format!("{this} doesn't say whether it's {state}"));
+        }
+        if role == "Meter" && aria(node, "value").is_none() {
+            problems.push(format!("{this} has no reading"));
+        }
+    }
+    problems
+}
+
+/// Reads the window's tree at each stop of the check, and keeps what
+/// [`control_problems`] finds in the AccessKit tree there.
+#[derive(Default)]
+struct Sweep {
+    problems: std::collections::BTreeSet<String>,
+    stops: usize,
+}
+
+impl Sweep {
+    fn read(&mut self, cx: &AsyncApp) -> Option<AxElement> {
+        let json = cx.update(|cx| {
+            let window = *cx.windows().first()?;
+            window
+                .update(cx, |_, window, _| window.debug_a11y_tree_json())
+                .ok()
+                .flatten()
+        });
+        self.problems
+            .extend(json.as_deref().map(control_problems).unwrap_or_default());
+        self.stops += 1;
+        window_tree()
+    }
+
+    fn check(&self) -> Check {
+        Check {
+            name: "every control on every stop has a name, a way in by keyboard and its state",
+            passed: self.problems.is_empty(),
+            detail: format!("{} stops; {:?}", self.stops, self.problems),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::control_problems;
+
+    fn tree(nodes: &str) -> String {
+        format!(
+            r#"{{"root": "a", "nodes": {{"a": {{"children": ["b"], "aria": {{"role": "Group", "label": "Room"}}}}, {nodes}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_named_control_with_a_tab_stop_and_its_state_passes() {
+        let tab = r#""b": {"aria": {"role": "Tab", "label": "Map", "selected": true, "on_action": ["Click", "Focus"]}}"#;
+        assert!(control_problems(&tree(tab)).is_empty());
+    }
+
+    #[test]
+    fn an_unnamed_button_is_found_by_where_it_is() {
+        let button = r#""b": {"aria": {"role": "Button", "on_action": ["Click", "Focus"]}}"#;
+        assert_eq!(
+            control_problems(&tree(button)),
+            ["a Button with no name, in Room"]
+        );
+    }
+
+    #[test]
+    fn a_button_the_keyboard_reaches_by_a_key_alone_passes() {
+        let send = r#""b": {"aria": {"role": "Button", "label": "Send", "keyboard_shortcut": "Enter", "on_action": ["Click"]}}"#;
+        assert!(control_problems(&tree(send)).is_empty());
+        let unreachable = send.replace(r#""keyboard_shortcut": "Enter", "#, "");
+        assert_eq!(
+            control_problems(&tree(&unreachable)),
+            [r#"Button "Send" has no tab stop and names no key"#]
+        );
+    }
+
+    #[test]
+    fn a_switch_must_say_whether_it_is_on() {
+        let switch = r#""b": {"aria": {"role": "Switch", "label": "Sample", "on_action": ["Click", "Focus"]}}"#;
+        assert_eq!(
+            control_problems(&tree(switch)),
+            [r#"Switch "Sample" doesn't say whether it's toggled"#]
+        );
+    }
+
+    #[test]
+    fn something_clicked_must_be_a_control() {
+        let row =
+            r#""b": {"aria": {"role": "ListItem", "label": "a stone", "on_action": ["Click"]}}"#;
+        assert_eq!(
+            control_problems(&tree(row)),
+            [r#"ListItem "a stone" is clicked but isn't a control"#]
+        );
+    }
 }

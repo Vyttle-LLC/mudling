@@ -14,6 +14,7 @@ use super::{
 use crate::assets::UI_FONT;
 use crate::input::CommandInput;
 use crate::launcher::InstalledVersions;
+use crate::room_panel::unavailable;
 use crate::theme::Theme;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Role, SharedString,
@@ -613,7 +614,7 @@ impl SettingsSheet {
                 // One install at a time: what it may replace and keep is read
                 // from the plugins as they were before it.
                 if self.directory.busy.is_some() {
-                    button.opacity(0.5).aria_description(WAITS_FOR_INSTALL)
+                    unavailable(button, WAITS_FOR_INSTALL)
                 } else {
                     let (entry, index) = (entry.clone(), index.clone());
                     button.on_click(cx.listener(move |sheet, _, _, cx| {
@@ -642,7 +643,7 @@ impl SettingsSheet {
 
     /// Asks before taking `plugin` out of the data folder, or forgetting the
     /// folder it was added from.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     pub fn confirm_remove(
         &mut self,
         plugin: &PluginId,

@@ -26,10 +26,8 @@ use gpui::{
     Point, Size, Window, WindowAppearance, point, px, size,
 };
 use mudling_core::LinePipeline;
-use mudling_core::defaults::aliases::AliasRule;
 use mudling_core::defaults::detect::{Source, Suggestion};
 use mudling_core::defaults::hud::Vital;
-use mudling_core::defaults::triggers::{Highlight, Scope, TriggerRule};
 use mudling_core::gear::{ItemRef, Reading};
 use mudling_core::git::FolderFiles;
 use mudling_core::logs::LogSettings;
@@ -41,8 +39,8 @@ use mudling_core::plugin::{Layer, Plugin, PluginCost, PluginId};
 use mudling_core::registry::{self, Fetched, IndexError};
 use mudling_core::stats::Summary;
 use mudling_core::store::{
-    ConnectionStatus, Diff, ItemsState, Revision, RulesState, SettingsState, TerminalChange,
-    TerminalState, VitalsState, WornItem,
+    ConnectionStatus, Diff, ItemsState, Revision, SettingsState, TerminalChange, TerminalState,
+    VitalsState, WornItem,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -294,49 +292,6 @@ fn fill_with_sample(shell: &mut Shell, cx: &mut Context<Shell>) {
         SessionLabel::new("mud.example", Some("Sample".into()), "Connected · 38 ms"),
         cx,
     );
-}
-
-/// Rules made up for this file.
-fn sample_rules() -> RulesState {
-    let trigger = |pattern: &str, color, hides, sound: Option<&str>, scope| TriggerRule {
-        color,
-        hides,
-        sound: sound.map(str::to_owned),
-        scope,
-        ..TriggerRule::new(pattern)
-    };
-    let character = || Scope::Character("sample".to_owned());
-    RulesState {
-        server: "mud.example".to_owned(),
-        character: "sample".to_owned(),
-        separator: None,
-        notepad: String::new(),
-        triggers: vec![
-            trigger(
-                "tells you",
-                Some(Highlight::Purple),
-                false,
-                Some("chime"),
-                Scope::All,
-            ),
-            trigger("flaps its wings", None, true, None, Scope::Server),
-            trigger(
-                "is DEAD!!",
-                Some(Highlight::Red),
-                false,
-                Some("bell"),
-                character(),
-            ),
-        ],
-        aliases: vec![
-            AliasRule::new("k", "kill $1;kick $1"),
-            AliasRule {
-                enabled: false,
-                ..AliasRule::new("gg", "get $2 $1;wear $2")
-            },
-        ],
-        hotbar: crate::measure::sample_chips(),
-    }
 }
 
 fn open_gear_tab(shell: &mut Shell, _: &mut Window, cx: &mut Context<Shell>) {
@@ -756,7 +711,7 @@ fn window_images() {
         ("settings-triggers-light", Light),
     ] {
         render(name, appearance, WIDE, |shell, window, cx| {
-            shell.show_sample_rules(sample_rules(), cx);
+            shell.show_sample_rules(measure::sample_rules(), cx);
             open_sheet(shell, Section::Triggers, window, cx);
         });
     }
@@ -765,7 +720,7 @@ fn window_images() {
         Dark,
         WIDE,
         |shell, window, cx| {
-            shell.show_sample_rules(sample_rules(), cx);
+            shell.show_sample_rules(measure::sample_rules(), cx);
             open_sheet(shell, Section::Triggers, window, cx);
             shell.settings_sheet().update(cx, |sheet, cx| {
                 sheet.edit_sample_trigger(window, cx);
