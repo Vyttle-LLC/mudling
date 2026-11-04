@@ -1,8 +1,9 @@
 # Publishes MUDling for macOS, Windows and Linux when a version tag such as
-# v1.2.3 on main is pushed. The tagged commit must already have a green CI run
-# on main; every build then lands on one GitHub Release, created only after
-# all builds succeed. GitHub publishes each asset's SHA-256 digest. Self-update
-# reads those digests, so assets are never renamed after upload.
+# v1.2.3 on main is pushed. The builds start at once, alongside main's CI for
+# the tagged commit; every build then lands on one GitHub Release, created only
+# after all builds succeed and CI has passed. GitHub publishes each asset's
+# SHA-256 digest. Self-update reads those digests, so assets are never renamed
+# after upload.
 #
 # Run by hand on main, it is a dry run: the same builds, signing and notarizing
 # as a tag, kept as workflow artifacts and never published, under the version
@@ -26,12 +27,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Builds only what CI has already passed on main, rather than running CI
-  # again where a flaky test or a full disk could fail the release. A dry run
-  # checks the commit it was started on.
+  # Waits for main's CI to pass on this commit, rather than running CI again
+  # where a flaky test or a full disk could fail the release. Only publish
+  # needs it, so the builds run meanwhile. A dry run checks the commit it was
+  # started on.
   gate:
     name: CI has passed on this commit
     runs-on: ubuntu-latest
+    timeout-minutes: 100 # Longer than the script's 90-minute wait.
     permissions:
       actions: read
       contents: read
@@ -71,7 +74,8 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.arch }})
-    needs: [gate, version]
+    needs: [version]
+    timeout-minutes: 90
     strategy:
       fail-fast: false # One failing build never cancels the others.
       matrix:
@@ -164,7 +168,8 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.arch }})
-    needs: [gate, version]
+    needs: [version]
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -255,7 +260,8 @@ jobs:
 
   linux:
     name: Linux (${{ matrix.arch }})
-    needs: [gate, version]
+    needs: [version]
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -307,7 +313,7 @@ jobs:
 
   publish:
     name: Publish the release
-    needs: [version, macos, windows, linux]
+    needs: [gate, version, macos, windows, linux]
     if: github.event_name == 'push' # A dry run stops at the artifacts.
     runs-on: ubuntu-latest
     permissions:
