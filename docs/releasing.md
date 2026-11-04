@@ -2,32 +2,32 @@
 
 A release is a version tag on `main`. Pushing it starts
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-checks that CI has passed on the tagged commit, builds every platform and
-attaches the builds to one GitHub Release. It does not run CI again: it relies
-on the run CI already made when that commit landed on `main`.
+builds every platform and attaches the builds to one GitHub Release. It does
+not run CI again: it waits for the run CI makes when the commit lands on
+`main`, and publishes only once that run has passed.
 
 ## Cutting a release
 
-1. Pick a commit on `main` whose CI run is green (check the commit's mark on
-   GitHub or the **CI** runs under Actions), and that holds what you want to
-   ship.
-2. Run a dry run first: under Actions, choose **Release → Run workflow** on
-   `main`, and wait for it to go green. It checks the latest commit on `main`,
-   so run it when that is the commit you mean to tag. See
-   [Dry run](#dry-run).
-3. Tag that commit and push the tag:
+1. Merge the pull request into `main`.
+2. Tag the merge commit as soon as it has landed, without waiting for CI, and
+   push the tag:
 
    ```sh
-   git tag v1.2.3 <commit>   # or origin/main, once its CI is green
+   git tag v1.2.3 <commit>   # or origin/main
    git push origin v1.2.3
    ```
 
-   The tag must look like `v1.2.3` and point at a commit on `main` with a
-   passed CI run, or the workflow stops before building anything.
-4. Watch the **Release** run under Actions. When every build has succeeded, the
-   workflow creates the release; it is then on the
+   The tag must look like `v1.2.3` and point at a commit on `main`, or the
+   workflow stops before building anything.
+3. Watch the **Release** run under Actions. The builds start straight away,
+   alongside main's CI. The **CI has passed on this commit** job waits for that
+   CI run (up to 90 minutes). When every build has succeeded and CI has passed,
+   the workflow creates the release; it is then on the
    [releases page](https://github.com/Vyttle-LLC/mudling/releases) with notes
    generated from the merged pull requests.
+
+If CI fails on `main`, nothing is published. Fix `main`, then tag the fixed
+commit.
 
 Every build runs to the end even when another fails, so one run shows all that
 is broken. Nothing is published unless all of them succeed. Notarizing and
@@ -36,33 +36,36 @@ rejects fails at once, and the run prints Apple's log of why.
 
 ### Dry run
 
-Running **Release** by hand on `main` builds, signs, notarizes and packages
-every asset exactly as a tag would, under the version `0.0.0-dryrun`, and keeps
-them as that run's artifacts. It creates no tag and no GitHub Release, and
-touches none. It needs a green CI run on the commit it starts from, like a tag.
-It runs only from `main`. A release that goes green here has already shown its
-signing secrets, runners and packaging work, so a failure after tagging is
-rare.
+A dry run is optional. Run one after a change to the release workflow or the
+packaging scripts, to see that the release still works before you tag.
+
+Running **Release** by hand on `main` (under Actions, **Release → Run
+workflow**) builds, signs, notarizes and packages every asset exactly as a tag
+would, under the version `0.0.0-dryrun`, and keeps them as that run's
+artifacts. It creates no tag and no GitHub Release, and touches none. It
+checks the latest commit on `main` and waits for that commit's CI like a tag
+does. It runs only from `main`. A release that goes green here has already
+shown its signing secrets, runners and packaging work, so a failure after
+tagging is rare.
 
 Never publish a release in GitHub's UI before the builds land: it would show an
 empty release as the latest one. To write the notes yourself, save a *draft*
 release for the tag first. The workflow attaches the builds to that draft
 instead of creating a release, and you publish it once the run has finished.
 
-### If the first job stops
+### If the CI job stops
 
-The **CI has passed on this commit** job fails with *"CI hasn't passed on main
-for `<sha>`"* when the commit has no finished, green CI run on `main`: CI failed,
-is still running, or never ran. Nothing has been built or published. Wait for
-CI to pass on `main` (or re-run it from the Actions tab), then delete the tag
-and push it again:
+The **CI has passed on this commit** job stops in one of two ways. Either way,
+the builds have run but nothing has been published.
 
-```sh
-git push origin --delete v1.2.3
-git tag -d v1.2.3
-git tag v1.2.3 <commit>
-git push origin v1.2.3
-```
+- *"CI failed on main for `<sha>`"* links the failed CI run. Fix `main`, then
+  tag the fixed commit. Delete the failed tag first (see
+  [Removing a failed tag](#removing-a-failed-tag)) if you want to reuse its
+  version.
+- *"CI on main for `<sha>` didn't finish in 90 minutes"* means CI was stuck or
+  never started. Once CI is green on `main`, re-run the failed jobs of the
+  Release run from the Actions tab. The builds that succeeded are kept, and
+  publishing follows the gate.
 
 ### Removing a failed tag
 
