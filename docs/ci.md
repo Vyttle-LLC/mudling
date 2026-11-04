@@ -5,18 +5,20 @@ it correct?"; the profile, run only when someone asks for it, answers "is it
 still fast?". A shared GitHub runner can't answer the second question
 reliably: it reads up to 4× over PRD §6's budgets and varies 2× from one run
 to the next, and a busy one can stall a thread for seconds. So no automatic
-run measures speed or waits on a short timer, and speed never blocks a merge
-or a release.
+run judges speed, and speed never blocks a merge or a release.
 
 ## Automatically: every pull request and push to `main`
 
-[`ci.yml`](../.github/workflows/ci.yml): correctness only. A release builds
-only from a `main` commit whose CI passed.
+[`ci.yml`](../.github/workflows/ci.yml): correctness only. A release doesn't
+run it again: [`release.yml`](../.github/workflows/release.yml) first checks
+that CI passed on `main` for the tagged commit, and builds nothing otherwise.
+Each job has a `timeout-minutes` well past a normal run, so a hang fails the
+job instead of running for GitHub's six-hour default.
 
 | Job | What it runs |
 | --- | --- |
 | Format and clippy | `cargo fmt --all --check`, then clippy with `-D warnings` |
-| Build, test and bench (macOS, Windows, Ubuntu); the name is from before the benchmark moved, kept so a ruleset's required checks by it still report | `cargo build --workspace --release`, then `cargo test --workspace --no-fail-fast`; on macOS, `mudling-desktop --synthetic --ax-check` |
+| Build, test and bench (macOS, Windows, Ubuntu); the name is from before the benchmark moved, kept so a ruleset's required checks by it still report | On Ubuntu, frees disk space first; `cargo build --workspace --release`, then `cargo test --workspace --no-fail-fast`; on macOS, `mudling-desktop --synthetic --ax-check` |
 | iOS core build | The XCFramework and Swift bindings, then a Swift type-check |
 
 `--no-fail-fast` keeps one failing test binary from hiding the failures in the
@@ -43,12 +45,13 @@ test logs are its artifacts.
 ## What a test may depend on
 
 A test in the automatic run must pass however slow or busy the machine is. So
-it never asserts on elapsed time, and it orders work between threads with a
-channel, a flush, a watch or a store it waits on, not a sleep. A wait for
-another thread is a hang guard of 60 seconds that a passing test never sees,
-and a limit under test starts only once the work has begun, or ends on a
-signal. A test that only shows that something is still waiting may use a
-short timeout, as a slow machine can only make it wait longer.
+it never asserts on how fast something ran, and it orders work between
+threads with a channel, a flush, a watch or a store it waits on, not a sleep.
+A wait for another thread may end in a hang guard, of 10 seconds or more,
+that a passing test never reaches; most use 60. A limit under test starts only
+once the work has begun, or ends on a signal. A test that only shows that
+something is still waiting may use a short timeout, as a slow machine can only
+make it wait longer.
 
 ## Timing tests
 

@@ -20,6 +20,19 @@ const CHEAP_KDF: KdfParams = KdfParams {
 };
 /// Long enough to show that something is waiting, not racing.
 const STILL_WAITING: Duration = Duration::from_millis(50);
+/// A hang guard, long enough that a loaded machine never reaches it.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// Waits for the vault's thread to lock it, up to the hang guard.
+async fn locked(state: &mut watch::Receiver<VaultState>) {
+    timeout(
+        PATIENCE,
+        state.wait_for(|state| *state == VaultState::Locked),
+    )
+    .await
+    .expect("the vault locks")
+    .unwrap();
+}
 
 struct Fixture {
     _folder: TempDir,
@@ -769,10 +782,7 @@ async fn changing_the_master_password_replaces_every_key() {
     let mut state = other_device.subscribe();
     let waiting = timeout(STILL_WAITING, other_device.password(&fikus())).await;
     assert!(waiting.is_err());
-    state
-        .wait_for(|state| *state == VaultState::Locked)
-        .await
-        .unwrap();
+    locked(&mut state).await;
 }
 
 #[tokio::test]
@@ -837,10 +847,7 @@ async fn the_idle_timer_locks_the_vault_and_drops_the_key() {
     let mut state = vault.subscribe();
     vault.unlock_from_device().await.unwrap();
 
-    state
-        .wait_for(|state| *state == VaultState::Locked)
-        .await
-        .unwrap();
+    locked(&mut state).await;
     let key_is_gone = vault.call(|worker| Ok(worker.key.is_none())).await;
     assert!(key_is_gone.unwrap());
 }
@@ -880,10 +887,7 @@ async fn time_asleep_counts_towards_the_idle_timer() {
     let mut state = vault.subscribe();
     let waiting = timeout(STILL_WAITING, vault.password(&fikus())).await;
     assert!(waiting.is_err());
-    state
-        .wait_for(|state| *state == VaultState::Locked)
-        .await
-        .unwrap();
+    locked(&mut state).await;
 }
 
 /// The machine sleeps while the thread waits: the deadline is still ahead when

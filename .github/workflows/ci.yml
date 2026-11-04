@@ -1,7 +1,7 @@
-# Correctness only: what a pull request must not break. Nothing here measures
-# speed or waits on a short timer; that runs only on demand (profile.yml), so a
-# slow runner can't fail a pull request, main or a release. docs/ci.md says
-# which is which.
+# Correctness only: what a pull request must not break. Nothing here judges
+# speed; that runs only on demand (profile.yml), so a slow runner can't fail a
+# pull request or main. A release builds only a commit this passed on main
+# (release.yml's gate). docs/ci.md says which is which.
 name: CI
 
 on:
@@ -16,6 +16,9 @@ jobs:
   lint:
     name: Format and clippy
     runs-on: ubuntu-latest
+    # Well past a normal run, so a hung step fails instead of running for
+    # GitHub's six-hour default; the same for each job below.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -36,6 +39,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       # The release build, the debug test build and the cache together fill a
       # stock Linux runner's disk; these preinstalled tools are never used.
@@ -68,6 +72,8 @@ jobs:
   ios-build:
     name: iOS core build
     runs-on: macos-latest
+    # Two release builds of the core, one per target, on a cold cache.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
