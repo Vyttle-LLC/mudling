@@ -171,8 +171,9 @@ builds that still give useful backtraces.
 
 **Benchmarks.** `mudling-bench --check` holds the core to PRD §6's numbers. Run
 it locally, on a quiet machine, before each phase's pull request. Everything CI
-runs by itself (pull requests and pushes to `main`) checks correctness only: no benchmark, and no test whose result depends on the machine's speed.
-The benchmark, the comparison with the last measured build, and the timing tests
+runs by itself (pull requests and pushes to `main`) checks correctness only: no
+benchmark, and no test whose result depends on the machine's speed. The
+benchmark, the comparison with the last measured build, and the timing tests
 run only in the profile, on demand: Actions, **Profile**, **Run workflow**. To
 run the timing tests locally, on a quiet machine:
 `cargo test --workspace -- --ignored timing_`. See [docs/ci.md](docs/ci.md).

@@ -1016,10 +1016,32 @@ async fn the_default_argon2_cost_opens_what_it_sealed() {
     assert_eq!(saved(&reopened).await.as_deref(), Some("swordfish-42"));
 }
 
-/// The real Argon2 cost, so it has to run on the vault's thread: a heartbeat
-/// on this single-threaded runtime keeps beating all the way through.
+/// The real Argon2 cost, so it has to run on the vault's thread, which every
+/// job, `create`'s Argon2 among them, runs on.
 #[tokio::test]
-async fn argon2_never_stalls_the_callers_thread() {
+async fn argon2_runs_at_full_cost_on_the_vaults_own_thread() {
+    let fixture = Fixture::new();
+    let vault = Vault::open(
+        fixture.path.clone(),
+        fixture.key_store.clone(),
+        AutoLock::NEVER,
+    );
+
+    let _ = vault.create(MASTER.into()).await.unwrap();
+
+    let vault_thread = vault.call(|_| Ok(std::thread::current().id())).await;
+    assert_ne!(vault_thread.unwrap(), std::thread::current().id());
+    assert_eq!(
+        serde_json::from_str::<Value>(&fixture.text()).unwrap()["kdf"],
+        serde_json::json!({ "memory_kib": 65536, "iterations": 3, "parallelism": 1 })
+    );
+}
+
+/// How often this thread runs while Argon2 does depends on the scheduler: a
+/// heartbeat on this single-threaded runtime keeps beating all the way through.
+#[tokio::test]
+#[ignore = "timing: runs in the profile"]
+async fn timing_argon2_never_stalls_the_callers_thread() {
     let fixture = Fixture::new();
     let vault = Vault::open(
         fixture.path.clone(),
@@ -1039,10 +1061,6 @@ async fn argon2_never_stalls_the_callers_thread() {
     heart.abort();
 
     assert!(beats.load(Ordering::Relaxed) > 5);
-    assert_eq!(
-        serde_json::from_str::<Value>(&fixture.text()).unwrap()["kdf"],
-        serde_json::json!({ "memory_kib": 65536, "iterations": 3, "parallelism": 1 })
-    );
 }
 
 #[tokio::test]
