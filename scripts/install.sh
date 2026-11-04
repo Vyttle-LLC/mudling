@@ -84,7 +84,7 @@ install_linux() {
 [Desktop Entry]
 Type=Application
 Name=MUDling
-Comment=A touch-first MUD client
+Comment=A MUD client
 Exec="$bin/MUDling.AppImage"
 Icon=$share/icons/com.vyttle.mudling.png
 Categories=Game;RolePlaying;

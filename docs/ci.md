@@ -8,11 +8,10 @@ to the next, and a busy one can stall a thread for seconds. So no automatic
 run measures speed or waits on a short timer, and speed never blocks a merge
 or a release.
 
-## Automatically: every pull request, push to `main` and release
+## Automatically: every pull request and push to `main`
 
-[`ci.yml`](../.github/workflows/ci.yml): correctness only. The release
-workflow runs the same workflow first, so a tag only builds from a correct
-`main`.
+[`ci.yml`](../.github/workflows/ci.yml): correctness only. A release builds
+only from a `main` commit whose CI passed.
 
 | Job | What it runs |
 | --- | --- |

@@ -26,7 +26,7 @@ write_desktop_entry() {
 [Desktop Entry]
 Type=Application
 Name=MUDling
-Comment=A touch-first MUD client
+Comment=A MUD client
 Exec=mudling-desktop
 Icon=com.vyttle.mudling
 Categories=Game;RolePlaying;
