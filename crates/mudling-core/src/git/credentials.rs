@@ -253,6 +253,8 @@ fn parse_answer(answer: &str, asked_as: Option<&str>) -> Option<(String, String)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn config_with(contents: &str) -> (tempfile::TempDir, Config) {
         let folder = tempfile::tempdir().unwrap();
@@ -343,11 +345,30 @@ mod tests {
     fn a_hanging_helper_is_killed_when_the_limit_is_up() {
         let folder = tempfile::tempdir().unwrap();
         let pid_file = folder.path().join("pid");
-        let helper = format!("!echo $$ > '{}'; exec sleep 600; ", pid_file.display());
+        let partial = folder.path().join("pid.partial");
+        // Moved into place whole, so the pid file means the helper is running.
+        let helper = format!(
+            "!echo $$ > '{partial}'; mv '{partial}' '{pid}'; exec sleep 600; ",
+            partial = partial.display(),
+            pid = pid_file.display()
+        );
         let url = "https://example.com/r.git";
-        let limit = Limit::after(Duration::from_millis(200));
+        // The limit is up once the helper runs, however long it takes to start.
+        let stop = Arc::new(AtomicBool::new(false));
+        let limit = Limit::stopped_by(Duration::from_secs(60), Arc::clone(&stop));
+        let started = thread::spawn({
+            let (pid_file, stop) = (pid_file.clone(), Arc::clone(&stop));
+            move || {
+                while !pid_file.exists() && !stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
 
         let answer = ask(&helper, url, None, &limit);
+        stop.store(true, Ordering::Relaxed);
+        started.join().unwrap();
 
         assert_eq!(answer, None);
         let pid = std::fs::read_to_string(pid_file).unwrap();

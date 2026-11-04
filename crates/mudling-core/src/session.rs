@@ -1015,6 +1015,9 @@ mod tests {
         let hub = Arc::new(StoreHub::new(|| {}));
         let mut engine = engine(folder.path(), &hub);
         walk_to(&mut engine, 1);
+        // The version is taken from the disk, which the engine writes to on
+        // its writer's thread.
+        engine.flush();
         let database = Database::open(&folder.path().join(SERVERS_FOLDER), HOST).unwrap();
         let writer = database.writer().unwrap();
         writer
