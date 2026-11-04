@@ -1053,6 +1053,18 @@ mod tests {
 
     #[test]
     fn a_session_quit_during_a_merge_waits_for_it_to_land() {
+        quit_during_a_merge();
+    }
+
+    #[test]
+    #[ignore = "timing: runs daily"]
+    fn timing_a_session_quit_during_a_merge_waits_for_it_to_land() {
+        assert!(quit_during_a_merge() < RELEASE_TIMEOUT);
+    }
+
+    /// Quits a session while a merge holds its writes, then lands the merge.
+    /// Returns how long the quit took after that.
+    fn quit_during_a_merge() -> Duration {
         let folder = tempfile::tempdir().unwrap();
         let session = Session::open(SessionConfig::new(folder.path(), HOST, 4000), || {}).unwrap();
         let link = SessionLink {
@@ -1068,6 +1080,6 @@ mod tests {
         held.release(RoomMoves::new());
 
         quitting.wait().unwrap();
-        assert!(began.elapsed() < RELEASE_TIMEOUT);
+        began.elapsed()
     }
 }

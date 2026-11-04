@@ -313,11 +313,23 @@ mod tests {
         assert_eq!(matching(&m, "Ana tells you 'hi'"), [0]);
     }
 
+    /// Catastrophic for a backtracking engine: 2^n paths on a near miss.
+    const PATHOLOGICAL: [&str; 3] = [r"^(a+)+$", r"(x+x+)+y", r"^(a|aa)+$"];
+
+    fn near_miss(n: usize) -> String {
+        format!("{}!{} y", "a".repeat(n / 2), "x".repeat(n / 2))
+    }
+
     #[test]
-    fn a_pathological_pattern_runs_in_linear_time() {
-        // Catastrophic for a backtracking engine: 2^n paths on a near miss.
-        let m = matcher(&[r"^(a+)+$", r"(x+x+)+y", r"^(a|aa)+$"]);
-        let near_miss = |n: usize| format!("{}!{} y", "a".repeat(n / 2), "x".repeat(n / 2));
+    fn a_pathological_pattern_matches_nothing_on_a_near_miss() {
+        let m = matcher(&PATHOLOGICAL);
+        assert!(matching(&m, &near_miss(10_000)).is_empty());
+    }
+
+    #[test]
+    #[ignore = "timing: runs daily"]
+    fn timing_a_pathological_pattern_runs_in_linear_time() {
+        let m = matcher(&PATHOLOGICAL);
         // Work is this thread's CPU time, so what else the machine runs
         // doesn't count, however long it preempts this thread.
         let work = |text: &str| {
