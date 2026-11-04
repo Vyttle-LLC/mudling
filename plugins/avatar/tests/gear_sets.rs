@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const HOST: &str = "avatar.outland.org";
+/// A hang guard, long enough that a loaded machine never reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 const NOW: Timestamp = Timestamp(0);
 const SATCHEL_LIST: &str = r#"{"location":"inv","items":[
     {"id":"30","name":"a satchel","type":"container"},
@@ -48,7 +50,7 @@ fn items(hub: &StoreHub) -> ItemsState {
 fn settle_until(engine: &mut Engine, hub: &StoreHub, done: impl Fn(&ItemsState) -> bool) {
     let started = Instant::now();
     while !done(&items(hub)) {
-        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        assert!(started.elapsed() < WAIT, "never landed");
         engine.settle(NOW);
         std::thread::sleep(Duration::from_millis(2));
     }

@@ -57,5 +57,9 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+# O_NONBLOCK, to tell whether a FIFO still has a reader.
+libc = "0.2"
+
 [lints]
 workspace = true

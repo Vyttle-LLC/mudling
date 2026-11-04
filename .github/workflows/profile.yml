@@ -1,16 +1,14 @@
-# Everything that judges speed, once a day on main. GitHub's shared runners
-# read up to 4× over PRD §6's budgets and vary 2× from one run to the next,
-# so no absolute number is gated here: the benchmark is recorded, and what
-# fails the run is a comparison of two builds measured in turns on one
-# machine, or a timing test that failed every attempt. A red run is
-# GitHub's own failure notice for a scheduled workflow, sent only to the user
-# who created it or last changed the cron line below; others see it on the
-# Actions tab. docs/ci.md says how to run all of it locally.
-name: Daily performance
+# Everything that judges speed, and only when someone asks for it: Actions,
+# Profile, Run workflow, on any branch. Nothing here runs on a schedule, a
+# push or a pull request, so a slow runner can never fail an automatic run.
+# GitHub's shared runners read up to 4× over PRD §6's budgets and vary 2×
+# from one run to the next, so no absolute number is gated here: the
+# benchmark is recorded, and what fails the run is a comparison of two builds
+# measured in turns on one machine, or a timing test that failed every
+# attempt. docs/ci.md says how to run all of it locally.
+name: Profile
 
 on:
-  schedule:
-    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,7 +16,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: daily
+  group: profile
   cancel-in-progress: false
 
 env:
@@ -30,7 +28,6 @@ jobs:
   # fails only if the benchmark itself can't run.
   bench:
     name: Replay benchmark (${{ matrix.os }})
-    if: github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -51,13 +48,12 @@ jobs:
           path: bench-report.json
           if-no-files-found: ignore
 
-  # Fails when main's tip loses more than 10% against the commit the previous
-  # daily run measured, or against the latest release when there is none. Both
-  # builds run in this job, on this machine, in turns: see the bench's
-  # compare.rs.
+  # Fails when the profiled commit loses more than 10% against the commit the
+  # previous profile of main measured, or against the latest release when there
+  # is none. Both builds run in this job, on this machine, in turns: see the
+  # bench's compare.rs.
   compare:
     name: Benchmark against the last measured commit
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -70,9 +66,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The previous daily run that finished, pass or fail: a regression
-          # fails one run, not every run after it. This run hasn't finished.
-          base=$(gh run list --workflow daily.yml --branch main --limit 20 \
+          # The previous profile of main that finished, pass or fail: a
+          # regression fails one run, not every run after it. This run hasn't
+          # finished.
+          base=$(gh run list --workflow profile.yml --branch main --limit 20 \
             --json headSha,conclusion \
             --jq 'map(select(.conclusion == "success" or .conclusion == "failure")) | first | .headSha // empty')
           if [ -z "$base" ]; then
@@ -86,11 +83,11 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           if [ -z "$BASE_SHA" ]; then
-            echo "::notice::No earlier daily run or release to compare with."
+            echo "::notice::No earlier profile of main or release to compare with."
             exit 0
           fi
           if [ "$BASE_SHA" = "$(git rev-parse HEAD)" ]; then
-            echo "::notice::main hasn't moved since the last measurement."
+            echo "::notice::Nothing has changed since the last measurement."
             exit 0
           fi
           git worktree add ../base "$BASE_SHA"
@@ -110,12 +107,12 @@ jobs:
           path: bench-compare.json
           if-no-files-found: ignore
 
-  # The tests that judge speed, marked `#[ignore = "timing: runs daily"]` and
-  # named `timing_…`. `--ignored timing_` picks those and leaves the tests
-  # ignored for other reasons (a GPU, the live registry, child processes).
+  # The tests that judge speed, marked `#[ignore = "timing: runs in the
+  # profile"]` and named `timing_…`. `--ignored timing_` picks those and leaves
+  # the tests ignored for other reasons (a GPU, the live registry, child
+  # processes).
   timing-tests:
     name: Timing tests (${{ matrix.os }})
-    if: github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:

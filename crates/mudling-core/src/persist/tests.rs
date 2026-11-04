@@ -433,7 +433,7 @@ fn failures_are_collected_without_waiting_and_capped() {
 
     // Once the last batch is visible, every failure before it is recorded.
     let reader = database.reader().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while reader.map().unwrap().rooms.is_empty() {
         assert!(Instant::now() < deadline, "the writer never caught up");
         std::thread::sleep(Duration::from_millis(5));

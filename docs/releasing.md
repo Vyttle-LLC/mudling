@@ -144,7 +144,7 @@ SmartScreen warning fades as the signature builds reputation.
 
 ## How the workflows protect the secrets
 
-Every action in `release.yml`, `ci.yml` and `daily.yml` is pinned to a full
+Every action in `release.yml`, `ci.yml` and `profile.yml` is pinned to a full
 commit SHA, with its version in a trailing comment, so a moved tag can't change
 what runs with the release's secrets. To update one, look up the SHA of the
 new version's tag in the action's own repository and replace both the SHA and

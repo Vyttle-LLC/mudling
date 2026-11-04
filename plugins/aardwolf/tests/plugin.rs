@@ -41,7 +41,7 @@ fn passes_its_own_tests() {
 /// The same, and it keeps within its cost a line, which depends on how fast
 /// the machine is.
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_keeps_within_its_line_budget() {
     check::own_tests(&load(), &own_files()).unwrap_or_else(|failure| panic!("{failure}"));
 }

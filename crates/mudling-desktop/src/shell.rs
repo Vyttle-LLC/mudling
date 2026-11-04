@@ -2527,7 +2527,8 @@ pub mod tests {
     use std::thread::sleep;
     use std::time::{Duration, Instant};
 
-    const WAIT: Duration = Duration::from_secs(5);
+    /// A hang guard, long enough that a loaded machine never reaches it.
+    const WAIT: Duration = Duration::from_secs(60);
     /// What `main` opens the window at.
     const DEFAULT_WINDOW_WIDTH: Pixels = px(1300.);
 

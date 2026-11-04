@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const WAIT: Duration = Duration::from_secs(5);
+/// A hang guard, long enough that a loaded machine never reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 const HOST: &str = "127.0.0.1";
 
 fn fixtures() -> PathBuf {

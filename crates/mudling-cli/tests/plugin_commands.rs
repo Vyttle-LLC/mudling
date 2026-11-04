@@ -207,7 +207,7 @@ fn a_hook_that_raises_an_error_fails() {
 // Whether 100 catch-all patterns cost more than the budget depends on the
 // machine's speed.
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_a_plugin_over_its_line_budget_fails() {
     let (_parent, plugin) = scaffolded();
     let rules: String = (0..100)
@@ -271,7 +271,7 @@ fn the_avatar_plugin_passes_its_own_tests() {
 
 // The registry's CI judges the cost a line too.
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_the_avatar_plugin_passes_the_command_registry_ci_runs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let avatar = root.join("plugins/avatar");

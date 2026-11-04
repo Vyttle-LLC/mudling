@@ -4,7 +4,8 @@ use crate::map::{CURRENT_ROOM, ISLANDS};
 use crate::persist::*;
 use crate::repo::Error;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::sync::atomic::{self, AtomicBool};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const T1: Timestamp = Timestamp(1_790_000_000_000);
@@ -957,12 +958,19 @@ fn the_game_keeps_writing_while_the_sync_thread_exports() {
     let writer = database.writer().unwrap();
     let first_id = 100;
 
+    // The exports go on until a write has finished, however late the writing
+    // starts, up to a hang guard.
+    let wrote = AtomicBool::new(false);
+    let wrote_yet = || wrote.load(atomic::Ordering::Relaxed);
     let last_id = std::thread::scope(|scope| {
         let sync = scope.spawn(|| {
             let root = TempDir::new().unwrap();
             let repo = Repo::new(root.path());
-            for _ in 0..20 {
+            let guard = Instant::now() + Duration::from_secs(60);
+            let mut exports = 0;
+            while exports < 20 || (!wrote_yet() && Instant::now() < guard) {
                 export(&repo, &database);
+                exports += 1;
             }
         });
         let mut id = first_id;
@@ -971,6 +979,7 @@ fn the_game_keeps_writing_while_the_sync_thread_exports() {
             batch.upsert(room(id, "A new room", MEADOW));
             writer.submit(batch).unwrap();
             writer.flush().unwrap();
+            wrote.store(true, atomic::Ordering::Relaxed);
             id += 1;
         }
         sync.join().unwrap();

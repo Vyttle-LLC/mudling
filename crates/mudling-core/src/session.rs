@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing: runs daily"]
+    #[ignore = "timing: runs in the profile"]
     fn timing_a_session_quit_during_a_merge_waits_for_it_to_land() {
         assert!(quit_during_a_merge() < RELEASE_TIMEOUT);
     }

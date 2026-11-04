@@ -884,7 +884,7 @@ fn quit_lets_go_of_a_hanging_helper() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_quit_lets_go_of_a_hanging_helper_after_about_two_seconds() {
     assert!(quit_with_a_hanging_helper() < QUIT_WAIT + Duration::from_secs(1));
 }
@@ -1021,6 +1021,7 @@ fn refused_repo_leaves_the_vault_alone(data: &Path, repo: &Path) {
     let sync = Syncer::start(
         SyncConfig {
             repo: Some(RepoSettings::new(repo)),
+            quit_wait: PATIENCE,
             ..SyncConfig::new(data)
         },
         || {},
@@ -1028,8 +1029,10 @@ fn refused_repo_leaves_the_vault_alone(data: &Path, repo: &Path) {
     .unwrap();
 
     let state = wait_for(&sync, |state| state.problem.is_some());
+    // The sync thread takes commands in order and runs a full pass at quit,
+    // so the asked-for sync is tried before it ends; the wait returns once it
+    // has.
     sync.sync_now();
-    thread::sleep(Duration::from_millis(300));
     sync.quit().wait();
 
     assert!(
