@@ -1,29 +1,63 @@
 # Releasing MUDling
 
 A release is a version tag on `main`. Pushing it starts
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs
-all of CI, then builds every platform and attaches the builds to one GitHub
-Release.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which
+checks that CI has passed on the tagged commit, builds every platform and
+attaches the builds to one GitHub Release. It does not run CI again: it relies
+on the run CI already made when that commit landed on `main`.
 
 ## Cutting a release
 
-1. Make sure `main` is green and holds what you want to ship.
-2. Tag the commit on `main` and push the tag:
+1. Pick a commit on `main` whose CI run is green (check the commit's mark on
+   GitHub or the **CI** runs under Actions), and that holds what you want to
+   ship.
+2. Tag that commit and push the tag:
 
    ```sh
-   git tag v1.2.3 origin/main
+   git tag v1.2.3 <commit>   # or origin/main, once its CI is green
    git push origin v1.2.3
    ```
 
-   The tag must look like `v1.2.3` and point at a commit on `main`, or the
-   workflow stops before building anything.
-3. Watch the **Release** run under Actions. When it finishes, the release is
-   on the [releases page](https://github.com/Vyttle-LLC/mudling/releases)
-   with notes generated from the merged pull requests.
+   The tag must look like `v1.2.3` and point at a commit on `main` with a
+   passed CI run, or the workflow stops before building anything.
+3. Watch the **Release** run under Actions. When every build has succeeded, the
+   workflow creates the release; it is then on the
+   [releases page](https://github.com/Vyttle-LLC/mudling/releases) with notes
+   generated from the merged pull requests.
 
-To write the notes yourself, draft a release for the tag in GitHub's UI first.
-The workflow then attaches the builds to that draft instead of creating a
-release, and you publish it when you're ready.
+Never publish a release in GitHub's UI before the builds land: it would show an
+empty release as the latest one. To write the notes yourself, save a *draft*
+release for the tag first. The workflow attaches the builds to that draft
+instead of creating a release, and you publish it once the run has finished.
+
+### If the first job stops
+
+The **CI has passed on this commit** job fails with *"CI hasn't passed on main
+for `<sha>`"* when the commit has no finished, green CI run on `main`: CI failed,
+is still running, or never ran. Nothing has been built or published. Wait for
+CI to pass on `main` (or re-run it from the Actions tab), then delete the tag
+and push it again:
+
+```sh
+git push origin --delete v1.2.3
+git tag -d v1.2.3
+git tag v1.2.3 <commit>
+git push origin v1.2.3
+```
+
+### Removing a failed tag
+
+A release whose builds failed leaves a tag and, only if you drafted or
+published one, an empty release. Remove both before trying again:
+
+```sh
+gh release delete v1.2.3 --repo Vyttle-LLC/mudling   # if a release exists
+git push origin --delete v1.2.3
+git tag -d v1.2.3
+```
+
+Then push the tag again, as above. Once a release has been published and
+people may have downloaded it, don't reuse its version: tag the next one.
 
 ## What a release holds
 
