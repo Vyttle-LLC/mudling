@@ -1,6 +1,6 @@
 # Correctness only: what a pull request must not break. Nothing here judges
 # speed; that runs only on demand (profile.yml), so a slow runner can't fail a
-# pull request or main. A release builds only a commit this passed on main
+# pull request or main. A release publishes only a commit this passed on main
 # (release.yml's gate). docs/ci.md says which is which.
 name: CI
 

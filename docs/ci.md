@@ -10,8 +10,8 @@ run judges speed, and speed never blocks a merge or a release.
 ## Automatically: every pull request and push to `main`
 
 [`ci.yml`](../.github/workflows/ci.yml): correctness only. A release doesn't
-run it again: [`release.yml`](../.github/workflows/release.yml) first checks
-that CI passed on `main` for the tagged commit, and builds nothing otherwise.
+run it again: [`release.yml`](../.github/workflows/release.yml) builds at once
+but publishes only once CI has passed on `main` for the tagged commit.
 Each job has a `timeout-minutes` well past a normal run, so a hang fails the
 job instead of running for GitHub's six-hour default.
 
