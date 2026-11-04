@@ -3,18 +3,23 @@
 # on main; every build then lands on one GitHub Release, created only after
 # all builds succeed. GitHub publishes each asset's SHA-256 digest. Self-update
 # reads those digests, so assets are never renamed after upload.
-# docs/releasing.md says how to cut a release.
+#
+# Run by hand on main, it is a dry run: the same builds, signing and notarizing
+# as a tag, kept as workflow artifacts and never published, under the version
+# 0.0.0-dryrun. docs/releasing.md says how to cut a release.
 name: Release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A dry run and a release don't queue behind each other, where one could replace the other while it waits.
 concurrency:
-  group: release
+  group: release-${{ github.event_name }}
   cancel-in-progress: false
 
 env:
@@ -22,7 +27,8 @@ env:
 
 jobs:
   # Builds only what CI has already passed on main, rather than running CI
-  # again where a flaky test or a full disk could fail the release.
+  # again where a flaky test or a full disk could fail the release. A dry run
+  # checks the commit it was started on.
   gate:
     name: CI has passed on this commit
     runs-on: ubuntu-latest
@@ -47,6 +53,13 @@ jobs:
           fetch-depth: 0 # Needed to confirm the tag is on main.
       - id: tag
         run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::A dry run starts from main, not $GITHUB_REF"; exit 1
+            fi
+            echo "version=0.0.0-dryrun" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           version="${GITHUB_REF_NAME#v}"
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Tag $GITHUB_REF_NAME must look like v1.2.3"; exit 1
@@ -60,6 +73,7 @@ jobs:
     name: macOS (${{ matrix.arch }})
     needs: [gate, version]
     strategy:
+      fail-fast: false # One failing build never cancels the others.
       matrix:
         include:
           - arch: arm64
@@ -134,13 +148,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/api-key.p8"
-          ditto -c -k --keepParent target/MUDling.app "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --wait \
-            --key "$RUNNER_TEMP/api-key.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
-          xcrun stapler staple target/MUDling.app
-          spctl --assess --type execute --verbose target/MUDling.app
+        run: bash scripts/notarize-macos.sh target/MUDling.app
 
       - name: Archive
         run: |
@@ -158,6 +166,7 @@ jobs:
     name: Windows (${{ matrix.arch }})
     needs: [gate, version]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: x64
@@ -248,6 +257,7 @@ jobs:
     name: Linux (${{ matrix.arch }})
     needs: [gate, version]
     strategy:
+      fail-fast: false
       matrix:
         include:
           # The oldest supported Ubuntu sets the oldest glibc the builds run on.
@@ -298,6 +308,7 @@ jobs:
   publish:
     name: Publish the release
     needs: [version, macos, windows, linux]
+    if: github.event_name == 'push' # A dry run stops at the artifacts.
     runs-on: ubuntu-latest
     permissions:
       contents: write

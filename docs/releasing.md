@@ -11,7 +11,11 @@ on the run CI already made when that commit landed on `main`.
 1. Pick a commit on `main` whose CI run is green (check the commit's mark on
    GitHub or the **CI** runs under Actions), and that holds what you want to
    ship.
-2. Tag that commit and push the tag:
+2. Run a dry run first: under Actions, choose **Release → Run workflow** on
+   `main`, and wait for it to go green. It checks the latest commit on `main`,
+   so run it when that is the commit you mean to tag. See
+   [Dry run](#dry-run).
+3. Tag that commit and push the tag:
 
    ```sh
    git tag v1.2.3 <commit>   # or origin/main, once its CI is green
@@ -20,10 +24,25 @@ on the run CI already made when that commit landed on `main`.
 
    The tag must look like `v1.2.3` and point at a commit on `main` with a
    passed CI run, or the workflow stops before building anything.
-3. Watch the **Release** run under Actions. When every build has succeeded, the
+4. Watch the **Release** run under Actions. When every build has succeeded, the
    workflow creates the release; it is then on the
    [releases page](https://github.com/Vyttle-LLC/mudling/releases) with notes
    generated from the merged pull requests.
+
+Every build runs to the end even when another fails, so one run shows all that
+is broken. Nothing is published unless all of them succeed. Notarizing and
+stapling retry on a network error, five attempts in all; a submission Apple
+rejects fails at once, and the run prints Apple's log of why.
+
+### Dry run
+
+Running **Release** by hand on `main` builds, signs, notarizes and packages
+every asset exactly as a tag would, under the version `0.0.0-dryrun`, and keeps
+them as that run's artifacts. It creates no tag and no GitHub Release, and
+touches none. It needs a green CI run on the commit it starts from, like a tag.
+It runs only from `main`. A release that goes green here has already shown its
+signing secrets, runners and packaging work, so a failure after tagging is
+rare.
 
 Never publish a release in GitHub's UI before the builds land: it would show an
 empty release as the latest one. To write the notes yourself, save a *draft*
@@ -169,7 +188,7 @@ output.
 | Platform | Command | Output |
 |---|---|---|
 | macOS | `scripts/package-macos.sh` | `target/MUDling.app`, ad-hoc signed for this Mac |
-| Linux | `cargo build --release -p mudling-desktop && scripts/package-linux.sh` | `target/dist/`, needs `appimagetool` |
+| Linux | `scripts/install-linux-deps.sh`, `cargo build --release -p mudling-desktop`, then `scripts/package-linux.sh` | `target/dist/`, needs `appimagetool` |
 | Windows | `cargo build --release -p mudling-desktop --target x86_64-pc-windows-msvc`, then `scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc -Arch x64` | `target\dist\`, needs Inno Setup 6 |
 
 The Windows installer is built with [Inno Setup](https://jrsoftware.org/isinfo.php)
