@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const HOST: &str = "avatar.outland.org";
+/// A hang guard, long enough that a loaded machine never reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 const PROMPT: &[u8] = b"(120h-130m-104v-1210)(-/-)";
 
 /// An engine with Avatar on, its connection started, and its stores.
@@ -163,7 +165,7 @@ fn items(hub: &StoreHub) -> ItemsState {
 fn settle_until(engine: &mut Engine, hub: &StoreHub, done: impl Fn(&ItemsState) -> bool) {
     let started = Instant::now();
     while !done(&items(hub)) {
-        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        assert!(started.elapsed() < WAIT, "never landed");
         engine.settle(Timestamp(0));
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -497,7 +499,7 @@ fn the_hud_has_what_aff_read_and_what_gmcp_lists_each_once() {
     engine.quiet(now);
     let started = Instant::now();
     while affects().is_empty() {
-        assert!(started.elapsed() < Duration::from_secs(5), "no affects");
+        assert!(started.elapsed() < WAIT, "no affects");
         engine.settle(now);
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -575,10 +577,7 @@ fn the_session_suggests_avatar_by_its_host_and_fills_its_stores_when_on() {
     while settings(&session).connection
         != ConnectionStatus::Closed(DisconnectReason::ClosedByServer)
     {
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the replay hung"
-        );
+        assert!(started.elapsed() < WAIT, "the replay hung");
         std::thread::sleep(Duration::from_millis(2));
     }
 

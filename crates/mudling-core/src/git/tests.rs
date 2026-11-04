@@ -20,15 +20,18 @@ fn empty_repo() -> (TempDir, Repo) {
 }
 
 /// Opens a repo this process just released. A child spawned by a parallel test
-/// shares the owner lock for the moment before its exec, so this retries.
+/// shares the owner lock for the moment before its exec, which a loaded
+/// machine can stretch, so this retries until a generous hang guard.
 fn reopen(folder: &Path) -> Repo {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
         match Repo::open_or_init(folder) {
-            Err(GitError::Locked(_)) => thread::sleep(Duration::from_millis(10)),
+            Err(GitError::Locked(_)) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
             opened => return opened.unwrap(),
         }
     }
-    panic!("the repo stayed locked");
 }
 
 /// Leaves the repo as a process killed in the middle of a write does.

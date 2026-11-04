@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing: runs daily"]
+    #[ignore = "timing: runs in the profile"]
     fn timing_a_pathological_pattern_runs_in_linear_time() {
         let m = matcher(&PATHOLOGICAL);
         // Work is this thread's CPU time, so what else the machine runs

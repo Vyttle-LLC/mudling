@@ -766,9 +766,13 @@ async fn changing_the_master_password_replaces_every_key() {
     );
 
     // A device still holding the old key goes back to waiting for an unlock.
+    let mut state = other_device.subscribe();
     let waiting = timeout(STILL_WAITING, other_device.password(&fikus())).await;
     assert!(waiting.is_err());
-    assert_eq!(other_device.state(), VaultState::Locked);
+    state
+        .wait_for(|state| *state == VaultState::Locked)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -873,9 +877,13 @@ async fn time_asleep_counts_towards_the_idle_timer() {
         .await
         .unwrap();
 
+    let mut state = vault.subscribe();
     let waiting = timeout(STILL_WAITING, vault.password(&fikus())).await;
     assert!(waiting.is_err());
-    assert_eq!(vault.state(), VaultState::Locked);
+    state
+        .wait_for(|state| *state == VaultState::Locked)
+        .await
+        .unwrap();
 }
 
 /// The machine sleeps while the thread waits: the deadline is still ahead when

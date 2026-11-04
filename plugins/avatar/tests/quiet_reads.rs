@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const HOST: &str = "avatar.outland.org";
+/// A hang guard, long enough that a loaded machine never reaches it.
+const WAIT: Duration = Duration::from_secs(60);
 const PROMPT: &str = "(120h-130m-104v-1210)(-/-)";
 /// Past every wait a read has.
 const LATER: i64 = 40_000;
@@ -120,7 +122,7 @@ impl Game {
     fn wait_until(&mut self, what: &str, done: impl Fn(&SheetState) -> bool) {
         let started = Instant::now();
         while !done(&self.sheet()) {
-            assert!(started.elapsed() < Duration::from_secs(5), "{what}");
+            assert!(started.elapsed() < WAIT, "{what}");
             let now = self.at();
             self.engine.settle(now);
             std::thread::sleep(Duration::from_millis(2));
@@ -443,7 +445,7 @@ fn a_quiet_equipment_read_fills_the_worn_list_and_a_tell_inside_it_shows() {
         if worn.len() == 2 {
             break worn;
         }
-        assert!(started.elapsed() < Duration::from_secs(5), "never landed");
+        assert!(started.elapsed() < WAIT, "never landed");
         std::thread::sleep(Duration::from_millis(2));
     };
     assert_eq!(worn[0].item, "a pink ice ring");

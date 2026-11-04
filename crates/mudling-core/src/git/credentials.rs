@@ -204,9 +204,13 @@ fn git_install_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// By its full path: a command that sets `PATH` and names a bare program is
+/// forked, and until the fork's exec it holds every file this process has
+/// open, repo owner locks among them, so a repo opened meanwhile on another
+/// thread is busy. With the path, the helper starts by `posix_spawn` instead.
 #[cfg(not(windows))]
 fn shell(line: &str) -> Command {
-    let mut command = Command::new("sh");
+    let mut command = Command::new("/bin/sh");
     command.args(["-c", line]);
     command
 }

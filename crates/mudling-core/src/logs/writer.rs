@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing: runs daily"]
+    #[ignore = "timing: runs in the profile"]
     fn timing_a_stuck_disk_doesnt_hold_the_session() {
         assert!(push_to_a_stuck_disk() < Duration::from_secs(2));
     }

@@ -884,7 +884,7 @@ fn quit_lets_go_of_a_hanging_helper() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_quit_lets_go_of_a_hanging_helper_after_about_two_seconds() {
     assert!(quit_with_a_hanging_helper() < QUIT_WAIT + Duration::from_secs(1));
 }

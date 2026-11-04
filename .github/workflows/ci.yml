@@ -1,6 +1,7 @@
-# Correctness only: what a pull request must not break. Anything that judges
-# speed runs daily instead (daily.yml), where a slow runner can't block a
-# merge. docs/ci.md says which is which.
+# Correctness only: what a pull request must not break. Nothing here measures
+# speed or waits on a short timer; that runs only on demand (profile.yml), so a
+# slow runner can't fail a pull request, main or a release. docs/ci.md says
+# which is which.
 name: CI
 
 on:
@@ -29,7 +30,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --release -- -D warnings
 
   build:
-    # The name keeps "bench" from before the benchmark moved to daily.yml, so
+    # The name keeps "bench" from before the benchmark moved to profile.yml, so
     # a ruleset's required checks by this name still report.
     name: Build, test and bench (${{ matrix.os }})
     strategy:
@@ -45,7 +46,8 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --workspace --release
-      # Correctness only: the timing tests are ignored here and run daily.
+      # Correctness only: the timing tests are ignored here and run in the
+      # profile.
       # --no-fail-fast, so one failing test binary can't hide the others.
       - run: cargo test --workspace --no-fail-fast
       # Reads the window's accessibility tree from inside the app, as

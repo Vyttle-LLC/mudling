@@ -93,8 +93,9 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
 
+    /// A deadline a loaded machine never reaches.
     fn soon() -> Instant {
-        Instant::now() + Duration::from_secs(5)
+        Instant::now() + Duration::from_secs(60)
     }
 
     /// An agent that answers one request, holding `keys` keys.
@@ -134,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timing: runs daily"]
+    #[ignore = "timing: runs in the profile"]
     fn timing_an_agent_that_never_answers_costs_only_the_time_left() {
         assert!(probe_a_silent_agent() < Duration::from_secs(1));
     }

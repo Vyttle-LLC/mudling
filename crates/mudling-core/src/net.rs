@@ -216,9 +216,10 @@ mod tests {
     const UNREACHABLE: &str = "192.0.2.1";
 
     async fn next(events: &mut mpsc::Receiver<Event>) -> Option<Event> {
-        tokio::time::timeout(Duration::from_secs(2), events.recv())
+        // A hang guard, long enough that a loaded machine never reaches it.
+        tokio::time::timeout(Duration::from_secs(60), events.recv())
             .await
-            .expect("the connection ends promptly")
+            .expect("the connection ends")
     }
 
     #[tokio::test]

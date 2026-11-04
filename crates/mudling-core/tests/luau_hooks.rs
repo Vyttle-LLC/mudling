@@ -265,7 +265,7 @@ fn an_infinite_loop_is_stopped_by_the_budget() {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_a_hook_with_slow_ticks_is_stopped_by_the_time_limit() {
     let plugin = hooked(
         &[],
@@ -299,7 +299,7 @@ impl StateView for OneSpike {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_one_jump_past_the_time_limit_isnt_an_overrun() {
     let plugin = hooked(
         &["read_state", "write_store:s"],
@@ -329,7 +329,7 @@ impl StateView for Slow {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_time_off_the_cpu_isnt_charged_to_a_hook() {
     let plugin = hooked(
         &["read_state", "write_store:s"],
@@ -778,7 +778,7 @@ fn a_full_queue_drops_new_events_and_counts_them() {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_a_full_queue_drops_new_events_without_waiting() {
     assert!(fill_a_full_queue() < Duration::from_millis(100));
 }

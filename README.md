@@ -78,11 +78,13 @@ Release builds carry line-table debug info, so daily builds are release
 builds that still give useful backtraces.
 
 **Benchmarks.** `mudling-bench --check` holds the core to PRD §6's numbers. Run
-it locally, on a quiet machine, before each phase's pull request. A pull
-request's CI checks correctness only. The benchmark, the comparison with the
-last measured build, and the timing tests run daily on `main`: GitHub's shared
-runners read up to 4× over the budgets and vary 2× from run to run, so only a
-comparison between two builds on one machine is gated. See [docs/ci.md](docs/ci.md).
+it locally, on a quiet machine, before each phase's pull request. Everything CI
+runs by itself (pull requests, pushes to `main`, a release) checks correctness
+only: no benchmark, and no test whose result depends on the machine's speed.
+The benchmark, the comparison with the last measured build, and the timing tests
+run only in the profile, on demand: Actions, **Profile**, **Run workflow**. To
+run the timing tests locally, on a quiet machine:
+`cargo test --workspace -- --ignored timing_`. See [docs/ci.md](docs/ci.md).
 
 **gpui is pinned** to `gpui-pre 0.3.10`, an exact published snapshot of Zed's
 `main` (zed@08cbb88). The crates.io `gpui` release (0.2.2) predates gpui's

@@ -3991,6 +3991,7 @@ dependencies = [
  "git2",
  "imbl",
  "keyring-core",
+ "libc",
  "memchr",
  "mlua",
  "regex",

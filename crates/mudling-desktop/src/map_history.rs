@@ -549,7 +549,7 @@ mod tests {
                 return settings;
             }
             assert!(
-                started.elapsed().as_secs() < 5,
+                started.elapsed().as_secs() < 60,
                 "the session never answered"
             );
             std::thread::yield_now();

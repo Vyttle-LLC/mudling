@@ -690,7 +690,7 @@ fn a_pathological_pattern_cannot_hang_the_host() {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_a_pathological_pattern_costs_the_host_under_a_second() {
     assert!(read_the_near_miss() < Duration::from_secs(1));
 }

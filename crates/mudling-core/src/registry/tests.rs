@@ -629,11 +629,18 @@ fn what_loads_is_the_copy_that_was_hashed() {
     assert!(made.unwrap().success());
     let later = PATTERNS.replace("tells you", "says");
     let writer = patterns.clone();
-    // The pause lets the first reader see the end of its copy. Once that
-    // read is the only one, this is left blocked on the second.
+    // The second copy must reach only a second reader, so it waits for the
+    // first to let go: a non-blocking open for writing fails once no one
+    // reads. Once that read is the only one, this is left blocked on the
+    // second.
     std::thread::spawn(move || {
+        use std::os::unix::fs::OpenOptionsExt;
         fs::write(&writer, PATTERNS).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = fs::OpenOptions::new();
+        probe.write(true).custom_flags(libc::O_NONBLOCK);
+        while probe.open(&writer).is_ok() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         fs::write(&writer, later).unwrap();
     });
 
@@ -773,7 +780,7 @@ fn a_plugin_from_a_link_that_passes_its_checks_installs_with_its_link() {
 }
 
 #[test]
-#[ignore = "timing: runs daily"]
+#[ignore = "timing: runs in the profile"]
 fn timing_a_link_is_judged_on_its_cost() {
     let upstream = plugin_repo(&new_plugin_files());
     let data = TempDir::new().unwrap();
