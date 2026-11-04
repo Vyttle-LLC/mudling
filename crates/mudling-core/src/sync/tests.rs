@@ -9,7 +9,7 @@ mod git_server;
 use super::*;
 use crate::map::{CURRENT_ROOM, JoinDone, LastJoin, MapRoom, VERSION_JOIN};
 use crate::merge::{self, CHECKPOINT};
-use crate::persist::{Batch, Character, Database, Room, RoomNote, Server, Skill, Timestamp};
+use crate::persist::{self, Batch, Character, Database, Room, RoomNote, Server, Skill, Timestamp};
 use crate::session::{MapEdit, Session, SessionConfig};
 use crate::store::{MapState, SettingsState, Versioned};
 use crate::telnet::Bytes;
@@ -428,6 +428,48 @@ fn a_server_only_the_other_device_has_gets_a_database_here() {
     let arrived = Database::open(&world.ipad.folder(), "other.example.org").unwrap();
     let rooms = arrived.reader().unwrap().map().unwrap().rooms;
     assert_eq!(rooms.len(), 1);
+}
+
+#[test]
+fn a_character_added_or_removed_on_one_device_follows_on_the_other() {
+    let world = two_devices();
+    let listed = |device: &Device| -> Vec<String> {
+        let saved = persist::saved_servers(&device.data);
+        (saved.servers.iter())
+            .flat_map(|server| server.characters.iter().map(|c| c.id.clone()))
+            .collect()
+    };
+    persist::save_character(&world.mac.data, SERVER, "Tamsin").unwrap();
+    world.mac.apply(|batch| {
+        batch.upsert(Skill {
+            character_id: "tamsin".to_owned(),
+            name: "kick".to_owned(),
+            level: Some(1),
+            learned: Some(40),
+            cost: None,
+            updated: Timestamp::now(),
+        });
+    });
+    world.mac.sync();
+    assert_eq!(world.ipad.sync().problem, None);
+    assert_eq!(listed(&world.ipad), ["tamsin"]);
+
+    persist::remove_character(&world.mac.data, SERVER, "tamsin").unwrap();
+    world.mac.sync();
+    assert_eq!(world.ipad.sync().problem, None);
+
+    assert!(listed(&world.ipad).is_empty());
+    let rows = world
+        .ipad
+        .database()
+        .reader()
+        .unwrap()
+        .characters()
+        .unwrap();
+    assert!(
+        (rows.skills.iter()).any(|skill| skill.character_id == "tamsin"),
+        "its history stays"
+    );
 }
 
 #[test]

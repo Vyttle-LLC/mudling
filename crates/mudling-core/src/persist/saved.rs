@@ -6,7 +6,7 @@
 //! from a core thread or another thread that may wait on the disk, never the
 //! UI thread.
 
-use super::records::{Alias, Meta, Server, Trigger};
+use super::records::{Alias, Character, Meta, Server, Trigger};
 use super::{Batch, Database, Error, Key, Timestamp};
 use crate::map::CURRENT_ROOM;
 use std::path::Path;
@@ -22,6 +22,9 @@ const ENABLED_PLUGINS: &str = "session.enabled-plugins";
 const OVERRIDES_OFF: &str = "session.overrides-off";
 /// The `meta` key that hides a server the player removed from their list.
 pub(crate) const REMOVED: &str = "server.removed";
+/// The `meta` keys, one per character id after the dot, that hide a character
+/// the player removed. A character played or added again since is back.
+pub(crate) const CHARACTER_REMOVED: &str = "character.removed.";
 /// Who a session plays when no credentials name a character.
 pub(crate) const UNNAMED_CHARACTER: &str = "player";
 /// Stat keys: a hook's `character` store, as the engine saves it.
@@ -39,10 +42,12 @@ pub struct SavedServer {
     pub characters: Vec<SavedCharacter>,
 }
 
-/// A character on a saved server. Each field is `None` until the game has
-/// told MUDling about it.
+/// A character on a saved server. Each field but `id` is `None` until the
+/// game, or the player adding it, has told MUDling about it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedCharacter {
+    /// The lowercased login name, as the engine keys its rows.
+    pub id: String,
     pub name: Option<String>,
     pub level: Option<i64>,
     pub last_played: Timestamp,
@@ -109,10 +114,17 @@ fn read_server(folder: &Path, name: &str) -> Result<Option<SavedServer>, Error> 
             .find(|stat| stat.character_id == character && stat.key == key)
             .map(|stat| stat.value.clone())
     };
+    let removed = |character: &Character| {
+        let key = format!("{CHARACTER_REMOVED}{}", character.id);
+        meta.iter()
+            .any(|meta| meta.key == key && meta.updated >= character.updated)
+    };
     let characters = rows
         .characters
         .iter()
+        .filter(|character| !removed(character))
         .map(|character| SavedCharacter {
+            id: character.id.clone(),
             name: stat(&character.id, NAME_STAT)
                 .and_then(|name| serde_json::from_str(&name).ok())
                 .or_else(|| (character.id != UNNAMED_CHARACTER).then(|| character.name.clone())),
@@ -212,6 +224,35 @@ pub fn remove_server(data_folder: &Path, host: &str) -> Result<(), Error> {
     let writer = Database::open(&folder, host)?.writer()?;
     writer.submit(batch)?;
     writer.flush()
+}
+
+/// Saves a character the player added on `host`, a saved server, keyed by
+/// its lowercased name as the engine keys who logs in. One they removed comes
+/// back with everything it had. It blocks until the row is on the disk.
+pub fn save_character(data_folder: &Path, host: &str, name: &str) -> Result<(), Error> {
+    let id = name.to_lowercase();
+    let mut batch = Batch::new();
+    batch.delete(Key::Meta(format!("{CHARACTER_REMOVED}{id}")));
+    batch.upsert(Character {
+        id,
+        server_id: host.to_owned(),
+        name: name.to_owned(),
+        updated: Timestamp::now(),
+    });
+    write_to_server(data_folder, host, batch)
+}
+
+/// Takes the character `id` off `host`'s list. Its stats, gear and history
+/// stay in the database, so playing it again brings it all back. It blocks
+/// until that's on the disk.
+pub fn remove_character(data_folder: &Path, host: &str, id: &str) -> Result<(), Error> {
+    let mut batch = Batch::new();
+    batch.upsert(Meta {
+        key: format!("{CHARACTER_REMOVED}{id}"),
+        value: "true".to_owned(),
+        updated: Timestamp::now(),
+    });
+    write_to_server(data_folder, host, batch)
 }
 
 /// The game plugins the player turned on for `host`.

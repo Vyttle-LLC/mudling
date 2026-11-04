@@ -209,13 +209,9 @@ pub const SHORTCUTS: [(&str, &[Shortcut]); 5] = [
                 &["shell::FocusCommandBar"],
             ),
             row(
-                "Close a menu, this sheet or the add-server form",
+                "Close a menu, this sheet or its dialog",
                 &["escape"],
-                &[
-                    "title_bar::CloseMenu",
-                    "settings::CloseSettings",
-                    "empty_state::CancelAdd",
-                ],
+                &["title_bar::CloseMenu", "settings::CloseSettings"],
             ),
             row(
                 "Move through a menu",

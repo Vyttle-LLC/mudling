@@ -10,8 +10,9 @@ cargo run --release -p mudling-desktop -- --synthetic --ax-check
 ```
 
 `--ax-check` (macOS) runs the window off screen, never taking focus, walks it
-through 57 stops (every panel, the HUD in each place, every settings section,
-page and question it can reach without a real game) and prints a JSON report.
+through 59 stops (every panel, the HUD in each place, every settings section,
+page, dialog and question it can reach without a real game) and prints a JSON
+report.
 It exits 1 if a check fails. It checks two ways:
 
 - **Named checks** look for given controls and text by name in the tree macOS
@@ -27,13 +28,14 @@ It exits 1 if a check fails. It checks two ways:
 
 | | |
 |---|---|
-| Stops | 57 |
+| Stops | 59 |
 | Elements, rows folded together (the inventory below) | 168 |
 | Controls seen in the audit's tree dumps, counting each row's copy (48 stops, before the update card) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
 | Gaps found | 18 |
 | Gaps fixed | 18 |
 | Checks in `--ax-check`, before and after (with the update card's two) | 82 and 103 |
+| Checks with Add character, the grouped Servers page and switching character | 105 |
 
 ## Gaps found and fixed
 
@@ -212,9 +214,22 @@ control with several rows, one per item or rule, is one line here.
 | **Appearance:** Theme, chat font, HUD placement | RadioGroup of RadioButtons | Theme, HUD placement and the chat font's group; System, Light, Dark; *fonts*; On the command bar, Floating card, Top strip, Hidden | named (Theme, HUD placement, Floating card), sweep |
 | Smaller chat text, Larger chat text | Button | *same* | named |
 | Show prompt lines | CheckBox | Show prompt lines | named |
-| **Servers & characters:** Plugins | Button | Plugins for *server* | named |
+| **Servers & characters:** Add character, beside the title | Button | Add character | named |
+| A server, heading its characters | Heading | *server*, port *n* | sweep |
+| Plugins | Button | Plugins for *server* | named |
 | Remove a server | Button | Remove *server* | named |
 | Its question | Alert with Buttons | Keep *server*, Remove *server* | named |
+| A character | Label | *character*: what logging in does (Password saved in the vault · logs in automatically, Name sent, you type the password, or the vault is locked) | named |
+| Edit, Remove a character | Button | Edit *character* on *server*, Remove *character* from *server* | named |
+| Its question | Alert with Buttons | Keep *character*, Remove *character* | sweep |
+| **Add character, Edit**, alone over the window | Dialog with Heading | Add character, Edit *character* | named |
+| Name, Address, Password | TextInput, PasswordInput | *same*; Address only for a new server | named, focus (Name) |
+| Server | ComboBox, expanded while open, with its value | Server: *host : port* or New server… | named |
+| Its choices | Menu of MenuItems, the chosen one selected | *host : port* …, New server… | named |
+| Save the password in MUDling's vault | CheckBox, described by its help line | *same* | named |
+| A name already on the server | Alert with Button | *name* is already on *server*; Edit *name* | unit tests (`settings::vault`) |
+| Cancel, Add or Save | Button | *same* | named |
+| Switching character's question, alone over the window | AlertDialog with Heading, Buttons | Switch character; Log out *character* and connect *character*?; Cancel, Log out and connect | named |
 | **A server's plugins:** Back | Button | Back | named |
 | Turn on a suggested plugin | Button | Turn on *plugin* | named |
 | A plugin's switch | Switch | *plugin* | named |
@@ -260,8 +275,7 @@ control with several rows, one per item or rule, is one line here.
 | Its OK | Button | OK | named |
 | **Vault:** Reveal, Change, Remove | Button | Reveal / Change / Remove the password for *character on server* | named |
 | Its question | Buttons | Keep the password for…, Remove the password for… | named |
-| Add a password | Button | Add a password | named |
-| Server, Character, Password | TextInput, PasswordInput | *same*; the password reaches no node | named |
+| Change's Password | PasswordInput | Password; the password reaches no node | named |
 | Lock the vault after | RadioGroup | 5 minutes, 15 minutes, 1 hour, Never | named |
 | Keep a copy of the key on this device | Switch | *same* | sweep |
 | Lock now, Change master password, Enter the old master password | Button | *same* | named |
@@ -270,10 +284,9 @@ control with several rows, one per item or rule, is one line here.
 
 | Element | Role | Name | Checked |
 |---|---|---|---|
-| A saved server's card | Group with Button | Connect to *server* | named, focus |
-| Add a server | Button | Add a server | named |
+| A character's card, or a server's with no character | Group, described by its server, level, last played and password tag, with Button | Connect to *character* on *server*, Connect to *server* | named, focus |
+| Add character | Button | Add character; opens the dialog under Settings | named |
 | Quick connect | TextInput, Button | Quick connect, Connect | named |
-| Add form | TextInput, Buttons | Server address, Save, Cancel | named, focus |
 | Settings | Button | Settings | named |
 | Update card, with an update ready | Group, Heading, Label | MUDling *version* is ready; Restart now, or it goes in when you quit. | named |
 | Its Later and Restart | Button | Later, Restart to update | named |
@@ -294,6 +307,8 @@ label written wrong for one of these alone wouldn't.
 - **Data & sync** before a repo is chosen (Choose a folder) and asking before
   it stops (Keep syncing, Stop syncing).
 - **Where to today?** with nothing saved yet, and its session menu.
+- **Edit character** (the same dialog with its name and server fixed), a
+  character's remove question, and Add character's name-taken line.
 - **Directory** refused, and the approval for an install or a copy to trust
   (the same dialog as Remove, with other words).
 
@@ -316,8 +331,10 @@ what a Tab walk through each page finds.
   Escape goes back.
 - **Settings:** the sheet keeps the keyboard. Tab goes round the section
   tabs, Close settings, then the page in the order it's drawn (Back first on a
-  page that has one). A question (approval, remove) keeps Tab on its own
-  buttons, starting on Cancel. Up, down, Page Up and Page Down scroll what has
+  page that has one). A question (approval, remove, switch character) keeps
+  Tab on its own buttons, starting on Cancel. Add character keeps it on its
+  own stops, from Name: Server, its choices while open, Address for a new
+  server, Password, the checkbox, Cancel, Add; Escape closes it. Up, down, Page Up and Page Down scroll what has
   nothing to land on.
 - **Map:** Review and the questions take focus on their first button and give
   it back where it came from; ⌘⇧J picks the room shown.

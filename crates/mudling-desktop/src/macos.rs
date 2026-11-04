@@ -13,7 +13,7 @@
 
 use crate::dock::{DockState, Side, Slot};
 use crate::hud::HudPlacement;
-use crate::launcher::Launcher;
+use crate::launcher::{Launcher, Target};
 use crate::map_view::harness::duplicated_map;
 use crate::measure;
 use crate::settings::Section;
@@ -387,10 +387,9 @@ const UPDATE_FAILURE: [&str; 2] = [
     "The download didn't match its checksum.",
 ];
 /// What a screen reader must find in Vault, filled with made-up rows.
-const VAULT_CONTROLS: [&str; 7] = [
+const VAULT_CONTROLS: [&str; 6] = [
     "Reveal the password for Sample on mud.example",
     "Change the password for Sample on mud.example",
-    "Add a password",
     "Lock the vault after",
     "Lock now",
     "Change master password",
@@ -503,7 +502,7 @@ const SAMPLE_SERVER: &str = "mud.example";
 /// Connect first.
 const EMPTY_STATE_CONTROLS: [&str; 5] = [
     "Connect to mud.example",
-    "Add a server",
+    "Add character",
     "Quick connect",
     "Connect",
     "Settings",
@@ -554,7 +553,19 @@ const SKILLS_CONTROLS: [(&str, &str); 3] = [
     ("AXRadioButton", "Skills"),
 ];
 /// What the Add form adds, its field first.
-const ADD_FORM_CONTROLS: [&str; 3] = ["Server address", "Save", "Cancel"];
+/// Add character with its pull-down open, Name first.
+const ADD_CHARACTER_CONTROLS: [&str; 6] = [
+    "Name",
+    "Server",
+    "Password",
+    "Save the password in MUDling's vault",
+    "Cancel",
+    "Add",
+];
+/// The pull-down's choices: the saved server, then a new one.
+const ADD_CHARACTER_SERVERS: [&str; 2] = ["mud.example : 4000", "New server…"];
+/// Add character with New server… chosen.
+const NEW_SERVER_CONTROLS: [&str; 3] = ["Address", "Server", "Add"];
 
 /// A stop on the check's way round: what it checks, how to get there, and
 /// what a screen reader must find there, by name or by value. A stop that
@@ -640,28 +651,48 @@ fn main_window_stops() -> [Stop; 6] {
     ]
 }
 
-/// A saved server for the sheet to list. Made up.
+/// A saved server for the sheet to list, with one character whose password
+/// the sample vault holds and one whose it doesn't. Made up.
 fn sample_server() -> crate::settings::SavedServer {
+    let character = |name: &str| persist::SavedCharacter {
+        id: name.to_lowercase(),
+        name: Some(name.to_owned()),
+        level: None,
+        last_played: Timestamp::now(),
+    };
+    let saved = persist::SavedServer {
+        host: SAMPLE_SERVER.to_owned(),
+        port: 4000,
+        updated: Timestamp::now(),
+        last_room: None,
+        characters: vec![character("Sample"), character("Tamsin")],
+    };
     crate::settings::SavedServer {
         name: "Sample game".into(),
-        host: SAMPLE_SERVER.into(),
-        port: 4000,
-        characters: vec!["Sample".into()],
+        ..crate::settings::SavedServer::from(&saved)
     }
 }
 
 /// The sheet's sections and questions the other checks leave out.
-fn settings_stops() -> [Stop; 9] {
+fn settings_stops() -> [Stop; 10] {
     [
         (
-            "Servers & characters names each server's controls",
+            "Servers & characters groups characters under their server, with their controls",
             |shell, window, cx| {
                 measure::open_sample_section(shell, Section::Servers, window, cx);
                 shell.settings_sheet().update(cx, |sheet, cx| {
                     sheet.show_servers(vec![sample_server()], None, cx);
                 });
             },
-            &["Plugins for Sample game"],
+            &[
+                "Add character",
+                "Plugins for Sample game",
+                "Sample: Password saved in the vault · logs in automatically",
+                "Edit Sample on Sample game",
+                "Remove Sample from Sample game",
+                "Tamsin: Name sent, you type the password",
+                "Edit Tamsin on Sample game",
+            ],
         ),
         (
             "Triggers & aliases names each rule's switch and buttons",
@@ -760,6 +791,23 @@ fn settings_stops() -> [Stop; 9] {
             &[
                 "Keep the password for Sample on mud.example",
                 "Remove the password for Sample on mud.example",
+            ],
+        ),
+        // Last: the check answers it before going on.
+        (
+            "switching character asks with its question and buttons",
+            |shell, window, cx| {
+                measure::open_sample_section(shell, Section::Servers, window, cx);
+                let tamsin = Target::server(SAMPLE_SERVER, 4000).with_character("Tamsin");
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.ask_switch("Sample", tamsin, window, cx);
+                });
+            },
+            &[
+                "Switch character",
+                "Log out Sample and connect Tamsin?",
+                "Cancel",
+                "Log out and connect",
             ],
         ),
     ]
@@ -1948,6 +1996,13 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
                 detail: format!("not found: {missing:?}"),
             });
         }
+        in_window(
+            &|shell, window, cx| {
+                (shell.settings_sheet())
+                    .update(cx, |sheet, cx| sheet.answer_switch(false, window, cx));
+            },
+            cx,
+        );
 
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");
@@ -1989,36 +2044,58 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             ),
             detail: format!("{focused:?}"),
         });
-        cx.update(|cx| {
-            let window = cx.windows().into_iter().next()?;
-            window
-                .update(cx, |_, window, cx| {
-                    let empty_state = shell.read(cx).empty_state();
-                    empty_state.update(cx, |empty_state, cx| {
-                        empty_state.start_adding(window, cx);
-                    });
-                })
-                .ok()
-        });
+        let opened = in_window(
+            &|shell, window, cx| {
+                shell.open_add_character(window, cx);
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.type_sample_character("Tamsin", "", false, window, cx);
+                });
+            },
+            cx,
+        );
         cx.background_executor().timer(pause).await;
         let tree = sweep.read(cx);
-        let missing = named_in(&tree, &ADD_FORM_CONTROLS);
+        let missing = named_in(&tree, &ADD_CHARACTER_CONTROLS);
+        let unread = not_found(&tree, &ADD_CHARACTER_SERVERS);
         checks.push(Check {
-            name: "the Add form names its field and buttons",
-            passed: missing.is_empty(),
-            detail: format!("not found: {missing:?}"),
+            name: "Add character names its fields, its pull-down of servers and its buttons",
+            passed: opened.is_some() && missing.is_empty() && unread.is_empty(),
+            detail: format!("not found: {missing:?}, {unread:?}"),
         });
         let focused = app_focus(cx);
         checks.push(Check {
-            name: "the Add form takes focus in its text field",
+            name: "Add character takes focus in its Name field",
             passed: focus_is_on(
                 focused.as_ref(),
                 tree.as_ref(),
                 TEXT_FIELD,
-                ADD_FORM_CONTROLS[0],
+                ADD_CHARACTER_CONTROLS[0],
             ),
             detail: format!("{focused:?}"),
         });
+        let opened = in_window(
+            &|shell, window, cx| {
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.type_sample_character("Wren", "", true, window, cx);
+                });
+            },
+            cx,
+        );
+        cx.background_executor().timer(pause).await;
+        let tree = sweep.read(cx);
+        let missing = named_in(&tree, &NEW_SERVER_CONTROLS);
+        checks.push(Check {
+            name: "Add character on a new server names its Address field",
+            passed: opened.is_some() && missing.is_empty(),
+            detail: format!("not found: {missing:?}"),
+        });
+        in_window(
+            &|shell, window, cx| {
+                (shell.settings_sheet())
+                    .update(cx, |sheet, cx| sheet.close_character_form(window, cx));
+            },
+            cx,
+        );
         cx.update(|cx| {
             let empty_state = shell.read(cx).empty_state();
             empty_state.update(cx, |empty_state, cx| {

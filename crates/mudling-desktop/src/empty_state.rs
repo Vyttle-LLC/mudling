@@ -1,6 +1,6 @@
 //! "Where to today?": what the window shows with no game. A card for each
-//! saved character, adding a server, and Quick connect, under an update
-//! that's ready.
+//! saved character, Add character, and Quick connect, under an update that's
+//! ready.
 //!
 //! It only draws and validates. What it asks for, it emits, and the shell does
 //! off the UI thread. Nothing here runs while the player reads it.
@@ -8,23 +8,21 @@
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::input::{CommandInput, InputEvent};
 use crate::launcher::Target;
-use crate::settings::UpdateAsk;
+use crate::settings::{PasswordState, Passwords, UpdateAsk};
 use crate::theme::Theme;
 use crate::title_bar::{FocusNextControl, runestone_mark};
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
-    MouseButton, Pixels, Role, SharedString, Stateful, Subscription, Window, actions, div,
-    prelude::*, px, relative, transparent_black,
+    MouseButton, Pixels, Role, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    relative, transparent_black,
 };
 use mudling_core::persist::{Database, SavedServer, SavedServers, Timestamp};
 
 const CONTEXT: &str = "EmptyState";
-const ADD_CONTEXT: &str = "AddServer";
 /// The cards are 560 wide on the canvas, inside this column's padding.
 const COLUMN_WIDTH: Pixels = px(592.);
 const MARK_SIZE: Pixels = px(84.);
 const CARD_HEIGHT: Pixels = px(74.);
-const AVATAR_SIZE: Pixels = px(40.);
 const BUTTON_HEIGHT: Pixels = px(36.);
 const HOST_RULE: &str = "A host can hold letters, digits, dots, dashes and underscores.";
 const PORT_RULE: &str = "The port must be a number from 1 to 65535.";
@@ -34,13 +32,8 @@ const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
 /// Keeps its gaps by hand: gpui text has no letter spacing.
 const QUICK_CONNECT: &str = "Q U I C K   C O N N E C T";
 
-actions!(empty_state, [CancelAdd]);
-
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("tab", FocusNextControl, Some(CONTEXT)),
-        KeyBinding::new("escape", CancelAdd, Some(ADD_CONTEXT)),
-    ]);
+    cx.bind_keys([KeyBinding::new("tab", FocusNextControl, Some(CONTEXT))]);
 }
 
 /// What the player typed as a server, or why it can't be one.
@@ -64,19 +57,16 @@ pub fn parse_address(typed: &str) -> Result<Target, &'static str> {
         });
     }
     match port.parse() {
-        Ok(port) if port > 0 => Ok(Target {
-            host: host.to_ascii_lowercase(),
-            port,
-        }),
+        Ok(port) if port > 0 => Ok(Target::server(host.to_ascii_lowercase(), port)),
         _ => Err(PORT_RULE),
     }
 }
 
 /// One place to go: a saved character, or a server nobody has played on.
+/// Connecting a character's card logs in as that character.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Card {
     pub target: Target,
-    pub character: Option<SharedString>,
     pub detail: SharedString,
     last_played: Timestamp,
 }
@@ -86,17 +76,15 @@ impl Card {
         self.target.host.clone().into()
     }
 
+    pub fn character(&self) -> Option<SharedString> {
+        self.target.character.clone().map(Into::into)
+    }
+
     pub fn title(&self) -> SharedString {
-        match &self.character {
+        match &self.target.character {
             Some(character) => format!("{character} on {}", self.target.host).into(),
             None => self.server(),
         }
-    }
-
-    fn initial(&self) -> SharedString {
-        let name = self.character.clone().unwrap_or_else(|| self.server());
-        let initial = name.chars().next().unwrap_or('?');
-        initial.to_uppercase().collect::<String>().into()
     }
 }
 
@@ -113,28 +101,24 @@ pub fn cards(servers: &[SavedServer], now: Timestamp) -> Vec<Card> {
 }
 
 fn server_cards(server: &SavedServer, now: Timestamp) -> Vec<Card> {
-    let target = Target {
-        host: server.host.clone(),
-        port: server.port,
-    };
+    let target = Target::server(server.host.clone(), server.port);
     let any_named = server.characters.iter().any(|c| c.name.is_some());
-    let shown = server
-        .characters
-        .iter()
-        .filter(|character| character.name.is_some() || !any_named);
+    let shown =
+        (server.characters.iter()).filter(|character| character.name.is_some() || !any_named);
     let cards: Vec<Card> = shown
         .map(|character| {
+            // A character's title doesn't name its server, so this does.
             let facts = [
-                character.level.map(|level| format!("Level {level}")),
-                server
-                    .last_room
-                    .as_ref()
-                    .map(|room| format!("last in {room}")),
-                Some(days_ago(character.last_played, now)),
+                character.name.as_ref().map(|_| server.host.clone()),
+                character.level.map(|level| format!("level {level}")),
+                Some(format!("played {}", days_ago(character.last_played, now))),
             ];
+            let target = match &character.name {
+                Some(name) => target.clone().with_character(name),
+                None => target.clone(),
+            };
             Card {
-                target: target.clone(),
-                character: character.name.clone().map(Into::into),
+                target,
                 detail: facts
                     .into_iter()
                     .flatten()
@@ -149,7 +133,6 @@ fn server_cards(server: &SavedServer, now: Timestamp) -> Vec<Card> {
         return vec![Card {
             detail: target.to_string().into(),
             target,
-            character: None,
             last_played: server.updated,
         }];
     }
@@ -161,6 +144,15 @@ fn days_ago(then: Timestamp, now: Timestamp) -> String {
         ..=0 => "today".to_owned(),
         1 => "yesterday".to_owned(),
         days => format!("{days} days ago"),
+    }
+}
+
+/// The words on a character's tag, by what the vault holds for it.
+pub fn password_tag(state: PasswordState) -> &'static str {
+    match state {
+        PasswordState::Saved => "Password saved",
+        PasswordState::Typed => "You type the password",
+        PasswordState::Unknown => "Vault locked",
     }
 }
 
@@ -213,6 +205,24 @@ pub fn text_button(
         .child(label)
 }
 
+/// A card's small rounded tag: moss when a password is saved.
+fn password_chip(state: PasswordState, theme: &Theme) -> Div {
+    let (text, border) = match state {
+        PasswordState::Saved => (theme.accent, theme.accent),
+        PasswordState::Typed | PasswordState::Unknown => (theme.text_muted, theme.border),
+    };
+    div()
+        .flex_none()
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .border_color(border)
+        .text_size(px(12.))
+        .text_color(text)
+        .whitespace_nowrap()
+        .child(password_tag(state))
+}
+
 fn quiet_line(id: &'static str, role: Role, text: impl Into<SharedString>) -> Stateful<Div> {
     let text = text.into();
     div()
@@ -225,24 +235,22 @@ fn quiet_line(id: &'static str, role: Role, text: impl Into<SharedString>) -> St
 
 pub enum EmptyStateEvent {
     Connect(Target),
-    Add(Target),
+    AddCharacter,
     Update(UpdateAsk),
 }
 
 pub struct EmptyState {
     cards: Vec<Card>,
+    /// What the vault says of each card's password.
+    passwords: Passwords,
     first_connect: FocusHandle,
-    add_button: FocusHandle,
     quick: Entity<CommandInput>,
     quick_error: Option<&'static str>,
-    address: Entity<CommandInput>,
-    adding: bool,
-    add_error: Option<&'static str>,
     /// What went wrong that isn't about what's typed.
     problem: Option<SharedString>,
     /// The version of the update that's ready, unless Later put it off.
     update: Option<SharedString>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 1],
 }
 
 impl EventEmitter<EmptyStateEvent> for EmptyState {}
@@ -250,29 +258,27 @@ impl EventEmitter<EmptyStateEvent> for EmptyState {}
 impl EmptyState {
     pub fn new(window: &mut Window, cx: &mut Context<EmptyState>) -> EmptyState {
         let quick = cx.new(|cx| CommandInput::field("Quick connect", "host:port", cx));
-        let address = cx.new(|cx| CommandInput::field("Server address", "host:port", cx));
         let quick_typed = cx.subscribe_in(&quick, window, |landing, _, event, _, cx| {
             if let InputEvent::Submitted(typed) = event {
                 landing.quick_connect(&typed.clone(), cx);
             }
         });
-        let address_typed = cx.subscribe_in(&address, window, |landing, _, event, window, cx| {
-            if let InputEvent::Submitted(typed) = event {
-                landing.add_server(&typed.clone(), window, cx);
-            }
-        });
         EmptyState {
             cards: Vec::new(),
+            passwords: Passwords::default(),
             first_connect: cx.focus_handle().tab_stop(true),
-            add_button: cx.focus_handle().tab_stop(true),
             quick,
             quick_error: None,
-            address,
-            adding: false,
-            add_error: None,
             problem: None,
             update: None,
-            _subscriptions: [quick_typed, address_typed],
+            _subscriptions: [quick_typed],
+        }
+    }
+
+    pub fn show_passwords(&mut self, passwords: Passwords, cx: &mut Context<EmptyState>) {
+        if passwords != self.passwords {
+            self.passwords = passwords;
+            cx.notify();
         }
     }
 
@@ -358,13 +364,6 @@ impl EmptyState {
         self.quick.read(cx).content()
     }
 
-    /// What the Add form holds, while it's open.
-    #[cfg(test)]
-    pub fn address_being_added(&self, cx: &App) -> Option<String> {
-        self.adding
-            .then(|| self.address.read(cx).content().to_owned())
-    }
-
     pub fn show_problem(&mut self, problem: String, cx: &mut Context<EmptyState>) {
         self.problem = Some(problem.into());
         cx.notify();
@@ -373,31 +372,15 @@ impl EmptyState {
     /// Focuses the first card's Connect, or Quick connect with none, unless
     /// the player has started typing.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<EmptyState>) {
-        let typing = [&self.quick, &self.address]
-            .iter()
-            .any(|field| field.focus_handle(cx).is_focused(window));
-        if typing {
+        let quick = self.quick.focus_handle(cx);
+        if quick.is_focused(window) {
             return;
         }
         if self.cards.is_empty() {
-            window.focus(&self.quick.focus_handle(cx), cx);
+            window.focus(&quick, cx);
         } else {
             window.focus(&self.first_connect, cx);
         }
-    }
-
-    /// Puts an address that couldn't be saved back where the player typed it.
-    pub fn keep_address(
-        &mut self,
-        target: &Target,
-        window: &mut Window,
-        cx: &mut Context<EmptyState>,
-    ) {
-        let typed = target.to_string();
-        let end = typed.len();
-        self.address
-            .update(cx, |address, cx| address.show(typed, end, window, cx));
-        self.start_adding(window, cx);
     }
 
     fn quick_connect(&mut self, typed: &str, cx: &mut Context<EmptyState>) {
@@ -409,31 +392,6 @@ impl EmptyState {
         }
     }
 
-    fn add_server(&mut self, typed: &str, window: &mut Window, cx: &mut Context<EmptyState>) {
-        let parsed = parse_address(typed);
-        self.add_error = parsed.as_ref().err().copied();
-        cx.notify();
-        if let Ok(target) = parsed {
-            self.stop_adding(window, cx);
-            cx.emit(EmptyStateEvent::Add(target));
-        }
-    }
-
-    pub fn start_adding(&mut self, window: &mut Window, cx: &mut Context<EmptyState>) {
-        self.adding = true;
-        window.focus(&self.address.focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    fn stop_adding(&mut self, window: &mut Window, cx: &mut Context<EmptyState>) {
-        self.adding = false;
-        self.add_error = None;
-        self.address
-            .update(cx, |address, cx| address.show(String::new(), 0, window, cx));
-        window.focus(&self.add_button, cx);
-        cx.notify();
-    }
-
     fn render_card(
         &self,
         index: usize,
@@ -443,8 +401,13 @@ impl EmptyState {
     ) -> impl IntoElement + use<> {
         let first = index == 0;
         let target = card.target.clone();
-        let world = card.character.as_ref().map(|_| card.server());
-        let name = card.character.clone().unwrap_or_else(|| card.server());
+        let name = card.character().unwrap_or_else(|| card.server());
+        let tag =
+            (target.character.as_ref()).map(|character| self.passwords.of(&target.host, character));
+        let described = match tag {
+            Some(tag) => format!("{} · {}", card.detail, password_tag(tag)),
+            None => card.detail.to_string(),
+        };
         let connect = text_button(format!("connect-{index}"), "Connect", first, theme)
             .aria_label(format!("Connect to {}", card.title()))
             .on_click(cx.listener(move |_, _, _, cx| {
@@ -462,7 +425,7 @@ impl EmptyState {
             .debug_selector(move || format!("card-{index}"))
             .role(Role::Group)
             .aria_label(card.title())
-            .aria_description(card.detail.clone())
+            .aria_description(described)
             .w_full()
             .h(CARD_HEIGHT)
             .px_4()
@@ -475,33 +438,15 @@ impl EmptyState {
             .bg(theme.surface_raised)
             .child(
                 div()
-                    .flex_none()
-                    .size(AVATAR_SIZE)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .bg(theme.segment)
-                    .font_family(HEADING_FONT)
-                    .text_color(theme.accent)
-                    .child(card.initial()),
-            )
-            .child(
-                div()
                     .flex_1()
                     .min_w_0()
                     .child(
                         div()
-                            .flex()
-                            .gap_1()
+                            .font_weight(FontWeight::MEDIUM)
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                            .children(world.map(|world| {
-                                div()
-                                    .text_color(theme.text_muted)
-                                    .child(format!("on {world}"))
-                            })),
+                            .text_ellipsis()
+                            .child(name),
                     )
                     .child(
                         div()
@@ -513,81 +458,15 @@ impl EmptyState {
                             .child(card.detail.clone()),
                     ),
             )
+            .children(tag.map(|tag| password_chip(tag, theme)))
             .child(connect)
     }
 
-    fn render_add_prompt(&self, theme: &Theme, cx: &mut Context<EmptyState>) -> Div {
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap_4()
-            .child(
-                div()
-                    .flex_none()
-                    .size(AVATAR_SIZE)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border)
-                    .child(Icon::Plus.svg().size(px(14.)).text_color(theme.text_muted)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Add a server"))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme.text_muted)
-                            .child("MUDling suggests a game plugin when it recognizes the server."),
-                    ),
-            )
-            .child(
-                text_button("add-server", "Add", false, theme)
-                    .aria_label("Add a server")
-                    .track_focus(&self.add_button)
-                    .on_click(cx.listener(|landing, _, window, cx| {
-                        landing.start_adding(window, cx);
-                    })),
-            )
-    }
-
-    fn render_add_form(&self, theme: &Theme, cx: &mut Context<EmptyState>) -> Div {
-        div()
-            .w_full()
-            .key_context(ADD_CONTEXT)
-            .on_action(cx.listener(|landing, _: &CancelAdd, window, cx| {
-                landing.stop_adding(window, cx);
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().child(self.address.clone()))
-                    .child(
-                        text_button("save-server", "Save", true, theme).on_click(cx.listener(
-                            |landing, _, window, cx| {
-                                let typed = landing.address.read(cx).content().to_owned();
-                                landing.add_server(&typed, window, cx);
-                            },
-                        )),
-                    )
-                    .child(text_button("cancel-add", "Cancel", false, theme).on_click(
-                        cx.listener(|landing, _, window, cx| landing.stop_adding(window, cx)),
-                    )),
-            )
-            .children(self.add_error.map(|error| {
-                quiet_line("add-error", Role::Alert, error)
-                    .pt_1()
-                    .text_size(px(13.))
-                    .text_color(theme.error)
-            }))
+    fn render_add_character(&self, theme: &Theme, cx: &mut Context<EmptyState>) -> Stateful<Div> {
+        text_button("add-character", "Add character", false, theme)
+            .mt_2()
+            .child(Icon::Plus.svg().size(px(12.)).text_color(theme.text_muted))
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(EmptyStateEvent::AddCharacter)))
     }
 
     fn render_quick_connect(&self, theme: &Theme, cx: &mut Context<EmptyState>) -> Div {
@@ -650,11 +529,6 @@ impl Render for EmptyState {
             .enumerate()
             .map(|(index, card)| self.render_card(index, card, &theme, cx).into_any_element())
             .collect();
-        let add_body = if self.adding {
-            self.render_add_form(&theme, cx)
-        } else {
-            self.render_add_prompt(&theme, cx)
-        };
         let column = div()
             .w_full()
             .max_w(COLUMN_WIDTH)
@@ -683,23 +557,7 @@ impl Render for EmptyState {
             )
             .children(self.render_update(&theme, cx))
             .child(div().w_full().flex().flex_col().gap_2().children(cards))
-            .child(
-                div()
-                    .id("add-server-card")
-                    .debug_selector(|| "add-server-card".to_owned())
-                    .w_full()
-                    .mt_2()
-                    .min_h(CARD_HEIGHT)
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .items_center()
-                    .rounded_lg()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border)
-                    .child(add_body),
-            )
+            .child(self.render_add_character(&theme, cx))
             .child(self.render_quick_connect(&theme, cx))
             .children(self.problem.clone().map(|problem| {
                 quiet_line("empty-state-problem", Role::Alert, problem)
@@ -756,6 +614,7 @@ mod tests {
 
     fn character(name: Option<&str>, level: Option<i64>, days: i64) -> SavedCharacter {
         SavedCharacter {
+            id: name.unwrap_or("player").to_lowercase(),
             name: name.map(str::to_owned),
             level,
             last_played: Timestamp(NOW.0 - days * DAY_MILLIS),
@@ -785,12 +644,34 @@ mod tests {
         );
         let card = &cards(&[known], NOW)[0];
         assert_eq!(card.title(), "Altissima on mud.example");
-        assert_eq!(card.detail, "Level 2 · last in the Donation Room · today");
+        assert_eq!(card.detail, "mud.example · level 2 · played today");
 
         let unknown = server(vec![character(None, None, 3)], None);
         let card = &cards(&[unknown], NOW)[0];
         assert_eq!(card.title(), "mud.example");
-        assert_eq!(card.detail, "3 days ago");
+        assert_eq!(card.detail, "played 3 days ago");
+        assert_eq!(card.target.character, None, "Quick connect's sends nothing");
+    }
+
+    #[test]
+    fn two_characters_on_one_server_are_two_cards_that_log_in_as_themselves() {
+        let saved = server(
+            vec![
+                character(Some("Bren"), Some(42), 0),
+                character(Some("Tamsin"), Some(9), 3),
+            ],
+            None,
+        );
+        let targets: Vec<_> = (cards(&[saved], NOW).into_iter())
+            .map(|card| card.target)
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                Target::server("mud.example", 4000).with_character("Bren"),
+                Target::server("mud.example", 4000).with_character("Tamsin"),
+            ]
+        );
     }
 
     #[test]

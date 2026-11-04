@@ -66,7 +66,9 @@ use crate::hud::HudPlacement;
 use crate::launcher::InstalledVersions;
 use crate::map_view::harness::{noted_map, versioned};
 use crate::notes::{Host, NoteTarget};
-use crate::settings::{Listing, PluginRow, Section, Sending, ServerPlugins, SuggestedPlugin};
+use crate::settings::{
+    Listing, Passwords, PluginRow, SavedServer, Section, Sending, ServerPlugins, SuggestedPlugin,
+};
 use crate::shell::Shell;
 use crate::stream;
 use crate::update::Staged;
@@ -1210,6 +1212,7 @@ struct FrameReport {
     settings_open: bool,
     settings_section: Option<String>,
     hud: Option<String>,
+    where_to_today: bool,
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
@@ -1248,7 +1251,56 @@ pub fn open_sample_section(
         sheet.show_sample_vault(entries, 1, cx);
         sheet.show_logs(LogSettings::default(), sample_logs(), cx);
         sheet.show_plugins(sample_plugins(), cx);
+        let servers = sample_saved_servers().servers;
+        sheet.show_servers(servers.iter().map(SavedServer::from).collect(), None, cx);
     });
+}
+
+/// Made-up servers, each with characters on it: the first two of each with
+/// saved passwords.
+pub fn sample_saved_servers() -> persist::SavedServers {
+    let now = Timestamp::now();
+    let hours = |count: i64| Timestamp(now.0 - count * 60 * 60 * 1000);
+    let servers = [
+        SAMPLE_HOST,
+        "aardmud.org",
+        "avatar.outland.org",
+        "discworld.example",
+    ];
+    let names = ["Bren", "Tamsin", "Wren"];
+    let servers = (servers.iter().enumerate())
+        .map(|(number, host)| persist::SavedServer {
+            host: (*host).to_owned(),
+            port: 4000 + number as u16,
+            updated: now,
+            last_room: None,
+            characters: (names.iter().enumerate())
+                .map(|(index, name)| persist::SavedCharacter {
+                    id: name.to_lowercase(),
+                    name: Some((*name).to_owned()),
+                    level: (index != 2).then_some(9 + 11 * index as i64),
+                    last_played: hours((number * names.len() + index) as i64 * 20),
+                })
+                .collect(),
+        })
+        .collect();
+    persist::SavedServers {
+        servers,
+        problems: Vec::new(),
+    }
+}
+
+/// Where to today? with [`sample_saved_servers`]' cards, drawn in place of
+/// the game.
+pub fn show_sample_where_to_today(shell: &mut Shell, cx: &mut Context<Shell>) {
+    let saved = sample_saved_servers();
+    let entries = (saved.servers.iter())
+        .flat_map(|server| {
+            let saved = server.characters.iter().take(2);
+            saved.map(|character| EntryKey::new(&server.host, character.id.as_str()))
+        })
+        .collect();
+    shell.hold_empty_state(&saved, Passwords::Listed(entries), cx);
 }
 
 /// A page of the sheet to measure, as `--settings-section` names it.
@@ -1611,6 +1663,7 @@ pub fn run_parent(
             .position(|arg| arg == "--hud")
             .and_then(|flag| child_args.get(flag + 1))
             .cloned(),
+        where_to_today: child_args.iter().any(|arg| arg == "--where-to-today"),
         find_open: child_args.iter().any(|arg| arg == "--find-open"),
         find_panel: child_args.iter().any(|arg| arg == "--find-panel"),
         notes_open: child_args.iter().any(|arg| arg == "--notes-open"),
@@ -1656,6 +1709,9 @@ fn print_report(report: &FrameReport) {
     );
     if let Some(hud) = &report.hud {
         println!("HUD: {hud}");
+    }
+    if report.where_to_today {
+        println!("Where to today?: in place of the game");
     }
     println!(
         "find bar: {}",

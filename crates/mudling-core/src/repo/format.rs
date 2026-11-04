@@ -73,14 +73,16 @@ pub(super) const ATTRIBUTES: [&str; 1] = ["* -text"];
 /// keyword travel, since a device that hasn't met the item can use them.
 /// `plugin.gear.holds.` and `plugin.gear.verb.` stay, as the plugin says them
 /// again each connection, so they're left out by name rather than by a wider
-/// `plugin.gear.`.
-const SYNCED_META: [&str; 6] = [
+/// `plugin.gear.`. A removed character travels, so it leaves every device's
+/// list, though its rows stay.
+const SYNCED_META: [&str; 7] = [
     ISLANDS,
     HOTBAR_META,
     JOINED,
     NOT_SAME,
     GEAR_NAME,
     GEAR_KEYWORD,
+    CHARACTER_REMOVED,
 ];
 const GEAR_NAME: &str = "plugin.gear.name.";
 const GEAR_KEYWORD: &str = "plugin.gear.keyword.";

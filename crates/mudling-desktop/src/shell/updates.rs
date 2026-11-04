@@ -252,6 +252,9 @@ impl Shell {
             let mut arguments = link.arguments.clone();
             if let Some(target) = reopen {
                 arguments.extend(["--reopen".to_owned(), target.to_string()]);
+                if let Some(character) = target.character {
+                    arguments.extend(["--character".to_owned(), character]);
+                }
             }
             arguments
         });

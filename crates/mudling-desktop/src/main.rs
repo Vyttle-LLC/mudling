@@ -1,13 +1,15 @@
 //! `mudling-desktop`: MUDling's gpui shell, a thin window over a `Session`.
 //!
 //! ```text
-//! mudling-desktop [--host <host> --port <port> | --reopen <host:port> |
+//! mudling-desktop [--host <host> --port <port> |
+//!                  --reopen <host:port> [--character <name>] |
 //!                  --replay <session.log>… | --synthetic]
 //!                 [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>]
 //!                 [--long-lines] [--rate <lines/s>]
 //!                 [--measure [--seconds <n>] [--report <path>] [--settings-open]
-//!                            [--settings-section plugins|inspector|server-plugins|directory|
-//!                                                approval|add-plugin|data|vault|logs]
+//!                            [--settings-section servers|plugins|inspector|server-plugins|
+//!                                                directory|approval|add-plugin|data|vault|logs]
+//!                            [--where-to-today]
 //!                            [--hud attached|open|floating|dragged|strip|hidden]
 //!                            [--find-open] [--find-panel] [--notes-open] [--character-open]
 //!                            [--skills-open] [--sample-map <rooms>]]
@@ -16,8 +18,9 @@
 //!
 //! With no arguments the window shows the saved servers ("Where to today?").
 //! `--host` and `--port` connect to a server at once. `--reopen` opens a saved
-//! server as its card would, logging in, which is how a restart to update
-//! goes back to the server it left (see `update`). The plugins bundled with
+//! server as its card would, logging in as `--character` if one is named,
+//! which is how a restart to update goes back to the server it left (see
+//! `update`). The plugins bundled with
 //! the app are installed, off, as are those in the data folder and any
 //! `--plugin` folder, so game detection can suggest them; `--enable` turns one
 //! on and lets it send commands. A plugin in a folder replaces a bundled one
@@ -116,13 +119,13 @@ use update::Eligibility;
 const SCROLLBACK_LINES: usize = 100_000;
 /// A replay has no server; its data folder holds this one's database.
 const REPLAY_HOST: &str = "replay";
-const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --reopen <host:port> | \
-                     --replay <session.log>… | --synthetic] \
+const USAGE: &str = "usage: mudling-desktop [--host <host> --port <port> | --reopen <host:port> \
+                     [--character <name>] | --replay <session.log>… | --synthetic] \
                      [--plugin <folder>]… [--enable <plugin id>]… [--data <folder>] [--long-lines] \
                      [--rate <lines/s>] [--measure [--seconds <n>] [--report <path>] \
                      [--settings-open] \
-                     [--settings-section plugins|inspector|server-plugins|directory|approval|\
-                     add-plugin|data|vault|logs] \
+                     [--settings-section servers|plugins|inspector|server-plugins|directory|\
+                     approval|add-plugin|data|vault|logs] [--where-to-today] \
                      [--hud attached|open|floating|dragged|strip|hidden] \
                      [--find-open] [--find-panel] [--notes-open] [--gear-open] \
                      [--gear-sets-open] [--character-open] [--skills-open] \
@@ -149,6 +152,8 @@ struct Options {
     settings_section: Option<Section>,
     settings_page: Option<SamplePage>,
     hud: Option<HudRun>,
+    /// Where to today?, with made-up cards, in place of the game measured.
+    where_to_today: bool,
     find_open: bool,
     find_panel: bool,
     notes_open: bool,
@@ -203,7 +208,7 @@ fn main() -> ExitCode {
                 let launcher = launcher_for(&options, waker)?.with_sync(syncer.clone());
                 let target = options.host.clone().zip(options.port);
                 let game = target
-                    .map(|(host, port)| launcher.open(&Target { host, port }, None, None))
+                    .map(|(host, port)| launcher.open(&Target::server(host, port), None, None))
                     .transpose()?;
                 (game, Some(launcher), syncer)
             }
@@ -357,6 +362,13 @@ fn main() -> ExitCode {
                 if let Some(hud) = options.hud {
                     window
                         .update(cx, |shell, window, cx| hud.put(shell, window, cx))
+                        .expect("the measured window is open");
+                }
+                if options.where_to_today {
+                    window
+                        .update(cx, |shell, _, cx| {
+                            measure::show_sample_where_to_today(shell, cx)
+                        })
                         .expect("the measured window is open");
                 }
                 if options.notes_open {
@@ -537,10 +549,7 @@ fn open_replay(
         enabled,
         verbs,
         plugins: plugin_rows,
-        target: Target {
-            host: REPLAY_HOST.to_owned(),
-            port: 0,
-        },
+        target: Target::server(REPLAY_HOST, 0),
     })
 }
 
@@ -612,6 +621,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         settings_section: None,
         settings_page: None,
         hud: None,
+        where_to_today: false,
         find_open: false,
         find_panel: false,
         notes_open: false,
@@ -621,6 +631,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         sample_map: None,
         ax_check: false,
     };
+    let mut character = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -633,6 +644,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 let address = empty_state::parse_address(value()?);
                 options.reopen = Some(address.map_err(|rule| format!("--reopen: {rule}"))?);
             }
+            "--character" => character = Some(value()?.clone()),
             "--plugin" => options.plugins.push(PathBuf::from(value()?)),
             "--enable" => options.enable.push(value()?.clone()),
             "--data" => options.data = Some(PathBuf::from(value()?)),
@@ -661,6 +673,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--settings-section" => {
                 options.settings_open = true;
                 match value()?.as_str() {
+                    "servers" => options.settings_section = Some(Section::Servers),
                     "plugins" => options.settings_section = Some(Section::Plugins),
                     "data" => options.settings_section = Some(Section::Data),
                     "vault" => options.settings_section = Some(Section::Vault),
@@ -671,7 +684,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     "approval" => options.settings_page = Some(SamplePage::Approval),
                     "add-plugin" => options.settings_page = Some(SamplePage::AddPlugin),
                     _ => {
-                        return Err("--settings-section needs plugins, inspector, \
+                        return Err("--settings-section needs servers, plugins, inspector, \
                                     server-plugins, directory, approval, add-plugin, data, \
                                     vault or logs"
                             .into());
@@ -681,6 +694,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--hud" => {
                 options.hud = Some(HudRun::named(value()?).ok_or("--hud doesn't know that place")?)
             }
+            "--where-to-today" => options.where_to_today = true,
             "--find-open" => options.find_open = true,
             "--find-panel" => options.find_panel = true,
             "--notes-open" => options.notes_open = true,
@@ -714,12 +728,21 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     if options.host.is_some() && options.reopen.is_some() {
         return Err("use either --host or --reopen".into());
     }
+    if let Some(character) = character {
+        let Some(reopen) = options.reopen.take() else {
+            return Err("--character needs --reopen".into());
+        };
+        options.reopen = Some(reopen.with_character(character));
+    }
     if (options.measure || options.measured_run) && options.replay.is_empty() && !options.synthetic
     {
         return Err("--measure needs --replay <logs> or --synthetic".into());
     }
     if options.hud.is_some() && !options.measure && !options.measured_run {
         return Err("--hud needs --measure".into());
+    }
+    if options.where_to_today && !options.measure && !options.measured_run {
+        return Err("--where-to-today needs --measure".into());
     }
     if options.lines_per_second < 0.0
         || ((options.measure || options.measured_run) && options.lines_per_second == 0.0)
@@ -802,6 +825,14 @@ mod tests {
         assert!(refusal("--synthetic one.log").contains("either"));
         assert!(refusal("--host a --port 1 --synthetic").contains("either"));
         assert!(refusal("--long-lines").contains("--long-lines needs"));
+        assert!(refusal("--character Bren").contains("--character needs --reopen"));
+    }
+
+    #[test]
+    fn a_restart_reopens_the_server_as_its_character() {
+        let options = parse("--reopen mud.example:4000 --character Bren").unwrap();
+        let bren = Target::server("mud.example", 4000).with_character("Bren");
+        assert_eq!(options.reopen, Some(bren));
     }
 
     #[test]

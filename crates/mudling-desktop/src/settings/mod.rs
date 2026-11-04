@@ -9,6 +9,7 @@
 
 mod add_plugin;
 mod appearance;
+mod character;
 mod data;
 mod directory;
 mod inspector;
@@ -27,11 +28,12 @@ pub use directory::{Downloaded, Listing};
 pub use plugins::{PluginRow, Sending};
 pub use saved::{LockAfter, SavedSettings, SyncChoices, app_settings, with_app_settings};
 pub use server_plugins::{ServerPlugins, SuggestedPlugin};
-pub use servers::SavedServer;
+pub use servers::{CharacterOn, PasswordState, Passwords, SavedServer};
 pub use updates::UpdateAsk;
 
 use crate::assets::{HEADING_FONT, Icon, UI_FONT};
 use crate::input;
+use crate::launcher::Target;
 use crate::shell::{FocusHotbar, PinCommand, ToggleLeftPanel, ToggleRightPanel};
 use crate::theme::{Appearance, CHAT_FONTS, Theme};
 use crate::title_bar::{FindInScrollback, OpenSettings, problems_text};
@@ -135,6 +137,17 @@ pub enum SheetEvent {
     Chose(Appearance),
     /// The player confirmed taking this host off their list.
     RemoveServer(String),
+    /// Save this character, and its server if that's new.
+    AddCharacter(Target),
+    /// The player confirmed taking the character `id` off `host`'s list.
+    RemoveCharacter {
+        host: String,
+        id: String,
+    },
+    /// What the vault says of the characters' passwords changed.
+    PasswordsChanged,
+    /// The player chose to log out and connect `Target` instead.
+    Switch(Target),
     TurnOn(PluginId),
     /// The Inspector page opened or closed: the session records only between.
     Inspect(bool),
@@ -411,6 +424,14 @@ pub struct SettingsSheet {
     playing: Option<SharedString>,
     /// The host whose removal is being asked about.
     removing: Option<SharedString>,
+    /// The character whose removal is being asked about.
+    removing_character: Option<CharacterOn>,
+    /// Add character or Edit, open alone over the window.
+    character: Option<character::CharacterForm>,
+    character_fields: character::Fields,
+    /// Whether to log out and connect another character, asked alone over
+    /// the window.
+    switching: Option<character::Switch>,
     plugins: Vec<PluginRow>,
     /// The player installed, updated or removed a plugin since the session
     /// opened, which it won't follow.
@@ -479,6 +500,10 @@ impl SettingsSheet {
             servers_problem: None,
             playing: None,
             removing: None,
+            removing_character: None,
+            character: None,
+            character_fields: character::Fields::new(window, cx),
+            switching: None,
             plugins: Vec::new(),
             installs_changed: false,
             refused: Vec::new(),
@@ -528,6 +553,9 @@ impl SettingsSheet {
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         self.removing = None;
+        self.removing_character = None;
+        self.switching = None;
+        self.close_character_form_quietly(window, cx);
         self.logs.stop_asking();
         let opening_on = if self.is_waited_on() {
             Section::Vault
@@ -734,8 +762,9 @@ impl SettingsSheet {
 
     /// Moves `step` stops on, round the sheet, and brings the stop into view.
     fn walk(&mut self, step: isize, window: &mut Window, cx: &mut Context<SettingsSheet>) {
-        // An approval or a question keeps the keyboard on its own buttons.
-        let fixed = if self.asking.is_some() || self.asking_to_restart() {
+        // An approval, a question or a dialog keeps the keyboard on its own
+        // stops.
+        let fixed = if self.asking.is_some() || self.stands_alone() {
             0
         } else {
             self.tabs.len() + 1
@@ -998,11 +1027,7 @@ impl gpui::Render for SettingsSheet {
         let width = sheet.width;
         let scrim_click = cx.listener(|sheet, _, window, cx| {
             window.prevent_default();
-            if sheet.asking_to_restart() {
-                sheet.answer_restart(false, window, cx);
-            } else {
-                sheet.close(cx);
-            }
+            sheet.step_back(window, cx);
         });
         let dialog = div()
             .id("settings-sheet")
@@ -1019,12 +1044,10 @@ impl gpui::Render for SettingsSheet {
                 cx.stop_propagation();
             }))
             .on_action(cx.listener(|sheet, _: &CloseSettings, window, cx| {
-                if sheet.asking_to_restart() {
-                    sheet.answer_restart(false, window, cx);
-                } else if sheet.asking.is_some() {
+                if sheet.asking.is_some() && !sheet.stands_alone() {
                     sheet.answer(false, false, window, cx);
                 } else {
-                    sheet.close(cx);
+                    sheet.step_back(window, cx);
                 }
             }))
             .on_action(cx.listener(|sheet, _: &NextStop, window, cx| sheet.walk(1, window, cx)))
@@ -1046,11 +1069,22 @@ impl gpui::Render for SettingsSheet {
             .on_action(|_: &OpenSettings, _, _| {})
             .on_action(|_: &FocusHotbar, _, _| {})
             .on_action(|_: &PinCommand, _, _| {});
-        let dialog = match self.render_restart_question(&theme, cx) {
-            Some(question) => dialog
+        let alone = (self.render_restart_question(&theme, cx))
+            .map(|question| (updates::RESTART_TITLE, question.into_any_element()))
+            .or_else(|| {
+                let question = self.render_switch_question(&theme, cx)?;
+                Some((character::SWITCH_TITLE, question.into_any_element()))
+            });
+        let dialog = match alone {
+            Some((title, question)) => dialog
                 .role(Role::AlertDialog)
-                .aria_label(updates::RESTART_TITLE)
+                .aria_label(title)
                 .child(question),
+            None if self.character.is_some() => {
+                let form = self.render_character_dialog(&theme, cx);
+                let title = self.character_title();
+                dialog.role(Role::Dialog).aria_label(title).children(form)
+            }
             None => {
                 let dialog = dialog
                     .role(Role::Dialog)
@@ -1087,6 +1121,27 @@ impl gpui::Render for SettingsSheet {
             .bg(theme.scrim)
             .on_mouse_down(MouseButton::Left, scrim_click)
             .child(dialog)
+    }
+}
+
+impl SettingsSheet {
+    /// Whether a question or a dialog stands alone over the window, with the
+    /// sheet stepped aside for it.
+    fn stands_alone(&self) -> bool {
+        self.asking_to_restart() || self.switching.is_some() || self.character.is_some()
+    }
+
+    /// Esc or a click beside it: what stands alone goes, or else the sheet.
+    fn step_back(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        if self.asking_to_restart() {
+            self.answer_restart(false, window, cx);
+        } else if self.switching.is_some() {
+            self.answer_switch(false, window, cx);
+        } else if self.character.is_some() {
+            self.close_character_form(window, cx);
+        } else {
+            self.close(cx);
+        }
     }
 }
 
