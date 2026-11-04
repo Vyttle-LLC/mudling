@@ -225,17 +225,20 @@ impl Drop for Disk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::{Receiver, sync_channel};
+    use std::sync::mpsc::{self, Receiver, Sender, sync_channel};
     use std::time::Instant;
 
-    /// A disk that takes each write only when the test lets it.
+    /// A disk that takes each write only when the test lets it, and says
+    /// when a write has begun waiting.
     struct StuckDisk {
         go: Receiver<()>,
+        entered: Sender<()>,
         wrote: Arc<Mutex<Vec<u8>>>,
     }
 
     impl Write for StuckDisk {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let _ = self.entered.send(());
             let _ = self.go.recv();
             self.wrote.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
@@ -283,16 +286,20 @@ mod tests {
     /// Fills a stuck disk's spool twice over; returns how long the pushes took.
     fn push_to_a_stuck_disk() -> Duration {
         let (go, stuck) = sync_channel(0);
+        let (entered, writing) = mpsc::channel();
         let wrote = Arc::default();
         let disk = StuckDisk {
             go: stuck,
+            entered,
             wrote: Arc::clone(&wrote),
         };
         let writer = LogWriter::over(disk).unwrap();
         let line = [b'x'; 1024];
         // The first flush takes something, then the disk never answers.
         writer.push(&[&line]);
-        thread::sleep(FLUSH_EVERY * 3);
+        writing
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the first flush reaches the disk");
 
         let started = Instant::now();
         let troubles: Vec<_> = (0..2 * SPOOL_BYTES / line.len())
