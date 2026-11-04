@@ -543,22 +543,15 @@ impl Launcher {
             .map_err(|error| format!("couldn't save {target}: {error}"))
     }
 
-    /// Saves `target`'s character, and its server first if that isn't on the
-    /// list.
-    pub fn add_character(&self, target: &Target) -> Result<(), String> {
-        let Some(name) = &target.character else {
-            return self.save(target);
-        };
+    /// Saves the character `name` on `server`, and the server first if that
+    /// isn't on the list.
+    pub fn add_character(&self, server: &Target, name: &str) -> Result<(), String> {
         let saved = self.saved();
-        if !saved
-            .servers
-            .iter()
-            .any(|server| server.host == target.host)
-        {
-            self.save(target)?;
+        if !saved.servers.iter().any(|saved| saved.host == server.host) {
+            self.save(server)?;
         }
-        persist::save_character(&self.data_folder, &target.host, name)
-            .map_err(|error| format!("couldn't save {name} on {}: {error}", target.host))
+        persist::save_character(&self.data_folder, &server.host, name)
+            .map_err(|error| format!("couldn't save {name} on {}: {error}", server.host))
     }
 
     /// Takes the character `id` off `host`'s list. See
@@ -788,9 +781,7 @@ async fn saved_password(
     let mut state = vault.subscribe();
     let read = async {
         let entries = vault.entries().await?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.server == host && entry.character.eq_ignore_ascii_case(character));
+        let entry = entries.iter().find(|entry| entry.is_for(host, character));
         match entry {
             Some(entry) => vault.password(entry).await,
             None => Ok(None),
@@ -1110,9 +1101,9 @@ mod tests {
     fn an_added_character_is_saved_with_its_new_server() {
         let folder = TempDir::new().unwrap();
         let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
-        let target = Target::server("new.example", 23).with_character("Wren");
-
-        launcher.add_character(&target).unwrap();
+        launcher
+            .add_character(&Target::server("new.example", 23), "Wren")
+            .unwrap();
 
         let saved = launcher.saved();
         assert_eq!(

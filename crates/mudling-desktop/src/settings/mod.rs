@@ -137,8 +137,11 @@ pub enum SheetEvent {
     Chose(Appearance),
     /// The player confirmed taking this host off their list.
     RemoveServer(String),
-    /// Save this character, and its server if that's new.
-    AddCharacter(Target),
+    /// Save the character `name` on `server`, and the server if that's new.
+    AddCharacter {
+        server: Target,
+        name: String,
+    },
     /// The player confirmed taking the character `id` off `host`'s list.
     RemoveCharacter {
         host: String,

@@ -245,7 +245,11 @@ pub(super) struct VaultPane {
     conflicts: Option<Conflicts>,
     /// The entry whose removal is being asked about.
     removing: Option<EntryKey>,
+    /// A password change waiting for the vault to be created or unlocked.
     pending: Option<Pending>,
+    /// Password changes waiting for the job that runs, in the order asked.
+    /// The sheet closing leaves them to finish.
+    queued: VecDeque<Pending>,
     problem: Option<SharedString>,
     note: Option<SharedString>,
     /// A server that's waiting for the vault so it can log in.
@@ -277,6 +281,7 @@ impl VaultPane {
             conflicts: None,
             removing: None,
             pending: None,
+            queued: VecDeque::new(),
             problem: None,
             note: None,
             waiting_host: None,
@@ -361,9 +366,23 @@ impl SettingsSheet {
         let Some(vault) = self.vault.vault.clone() else {
             return false;
         };
-        let note = match (self.vault.state, &password) {
+        let change = Pending {
+            host: host.to_owned(),
+            character: character.to_owned(),
+            password,
+        };
+        let note = match (self.vault.state, &change.password) {
+            // One job at a time: a change behind another waits its turn.
+            (VaultState::Unlocked, _) if self.vault.busy => {
+                self.vault.queued.push_back(change);
+                return false;
+            }
             (VaultState::Unlocked, _) => {
-                let (host, character) = (host.to_owned(), character.to_owned());
+                let Pending {
+                    host,
+                    character,
+                    password,
+                } = change;
                 self.vault_job(
                     replace_password(vault, host, character, password),
                     |sheet, (), _, cx| sheet.list_vault(cx),
@@ -384,11 +403,7 @@ impl SettingsSheet {
             }
         };
         self.select(Section::Vault, cx);
-        self.vault.pending = Some(Pending {
-            host: host.to_owned(),
-            character: character.to_owned(),
-            password,
-        });
+        self.vault.pending = Some(change);
         self.vault.note = Some(note.into());
         let master = self.vault.fields.master.clone();
         window.focus(&gpui::Focusable::focus_handle(master.read(cx), cx), cx);
@@ -430,8 +445,25 @@ impl SettingsSheet {
         pane.entries.clear();
         pane.stranded = 0;
         pane.job = None;
+        pane.queued.clear();
         pane.listing = None;
         pane.busy = false;
+    }
+
+    /// Starts the next password change waiting, once the vault is open and
+    /// no job runs.
+    fn keep_next_password(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        if self.vault.state != VaultState::Unlocked || self.vault.busy {
+            return;
+        }
+        if let Some(Pending {
+            host,
+            character,
+            password,
+        }) = self.vault.queued.pop_front()
+        {
+            self.keep_password(&host, &character, password, window, cx);
+        }
     }
 
     fn vault_state_changed(
@@ -445,14 +477,10 @@ impl SettingsSheet {
         if state == VaultState::Unlocked {
             self.vault.waiting_host = None;
             self.list_vault(cx);
-            if let Some(Pending {
-                host,
-                character,
-                password,
-            }) = self.vault.pending.take()
-            {
-                self.keep_password(&host, &character, password, window, cx);
+            if let Some(pending) = self.vault.pending.take() {
+                self.vault.queued.push_back(pending);
             }
+            self.keep_next_password(window, cx);
             cx.emit(SheetEvent::VaultUnlocked);
         } else {
             self.forget_vault_secrets(cx);
@@ -524,6 +552,7 @@ impl SettingsSheet {
                     Ok(value) => done(sheet, value, window, cx),
                     Err(error) => sheet.vault.problem = Some(words(&error).into()),
                 }
+                sheet.keep_next_password(window, cx);
                 cx.notify();
             });
         }));
@@ -1483,8 +1512,7 @@ async fn replace_password(
     password: Option<Secret>,
 ) -> Result<(), Error> {
     let entries = vault.entries().await?;
-    let copies = (entries.into_iter())
-        .filter(|entry| entry.server == host && entry.character.eq_ignore_ascii_case(&character));
+    let copies = (entries.into_iter()).filter(|entry| entry.is_for(&host, &character));
     for entry in copies {
         vault.remove_password(entry).await?;
     }
@@ -2055,8 +2083,8 @@ mod tests {
             let sheet = self.sheet();
             self.cx.update(|_, cx| {
                 cx.subscribe(&sheet, move |_, event, _| {
-                    if let SheetEvent::AddCharacter(target) = event {
-                        kept.borrow_mut().push(target.clone());
+                    if let SheetEvent::AddCharacter { server, name } = event {
+                        kept.borrow_mut().push(server.clone().with_character(name));
                     }
                 })
                 .detach();
@@ -2166,6 +2194,80 @@ mod tests {
         });
 
         assert_eq!(open.saved_password("Fikus"), None);
+    }
+
+    #[gpui::test]
+    fn the_vault_box_follows_the_password_until_the_player_chooses(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        open.unlock();
+        open.open_character(false);
+        let ticked = |open: &mut Open<'_>| {
+            let sheet = open.sheet();
+            sheet.read_with(open.cx, |sheet, cx| sheet.vault_box_ticked(cx))
+        };
+        assert_eq!(ticked(&mut open), Some(false), "off with no password");
+        open.type_character("Mira", "moonstone");
+        assert_eq!(ticked(&mut open), Some(true), "ticked once one is typed");
+        open.type_character("Mira", "");
+        assert_eq!(
+            ticked(&mut open),
+            Some(false),
+            "off again when it's cleared"
+        );
+
+        open.click("character-in-vault");
+        assert_eq!(ticked(&mut open), Some(true), "the player's choice holds");
+        open.click("character-submit");
+        assert!(
+            open.cx.debug_bounds("character-problem").is_some(),
+            "a ticked box needs a password"
+        );
+    }
+
+    #[gpui::test]
+    fn removing_a_character_deletes_its_saved_password(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        open.unlock();
+        open.open_character(false);
+        let sheet = open.sheet();
+        open.cx.update(|window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.close_character_form_quietly(window, cx);
+                sheet.select(Section::Servers, cx);
+            });
+        });
+        open.cx.run_until_parked();
+        assert!(open.saved_password("Fikus").is_some());
+
+        open.click("remove-character-0-0");
+        open.click("confirm-remove-character-0-0");
+        open.until("the delete", |pane| {
+            !pane.busy && !pane.entries.iter().any(|e| e.character == "Fikus")
+        });
+
+        assert_eq!(open.saved_password("Fikus"), None);
+    }
+
+    #[gpui::test]
+    fn password_changes_asked_together_run_in_turn_and_both_land(cx: &mut TestAppContext) {
+        let mut open = opened(cx);
+        open.unlock();
+        let mira = EntryKey::new(HOST, "Mira");
+        futures::executor::block_on(open.vault.set_password(mira, "moonstone".into())).unwrap();
+        let sheet = open.sheet();
+        // An Edit's Save and a Remove, the second asked before the first ran.
+        open.cx.update(|window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.keep_password(HOST, "Fikus", Some("a new one".into()), window, cx);
+                assert!(sheet.vault.busy, "the save runs");
+                sheet.keep_password(HOST, "Mira", None, window, cx);
+                assert_eq!(sheet.vault.queued.len(), 1, "the remove waits its turn");
+            });
+        });
+        open.until("both done", |pane| !pane.busy && pane.queued.is_empty());
+
+        assert_eq!(open.saved_password("Fikus").as_deref(), Some("a new one"));
+        assert_eq!(open.saved_password("Mira"), None);
     }
 
     #[gpui::test]

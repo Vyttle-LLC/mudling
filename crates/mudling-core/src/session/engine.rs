@@ -375,7 +375,7 @@ impl Engine {
         // Each connection starts unnamed. Until the game says who plays, it's
         // who's logging in, if anyone is.
         let logging_in = (self.config.credentials.as_ref())
-            .map(|credentials| credentials.name.to_lowercase())
+            .map(|credentials| persist::character_id(&credentials.name))
             .unwrap_or_default();
         self.character_named(logging_in, Timestamp::now());
         if let Some(credentials) = self
@@ -1406,7 +1406,7 @@ impl Engine {
         }
         self.contents_changed |= heard.contents;
         if let Some(HookValue::Text(name)) = heard.character.get(CHARACTER_NAME) {
-            self.character_named(name.to_lowercase(), now);
+            self.character_named(persist::character_id(name), now);
         }
         if !heard.character.is_empty() {
             let lasting = heard
@@ -1892,7 +1892,7 @@ impl Engine {
         if key == CHARACTER_NAME
             && let HookValue::Text(name) = &value
         {
-            self.character_named(name.to_lowercase(), now);
+            self.character_named(persist::character_id(name), now);
         }
         if values::is_gear_store(&store) {
             let row = values::to_row(&value);

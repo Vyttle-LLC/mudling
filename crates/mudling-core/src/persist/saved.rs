@@ -226,11 +226,17 @@ pub fn remove_server(data_folder: &Path, host: &str) -> Result<(), Error> {
     writer.flush()
 }
 
+/// The id a character's rows are kept by: its name, lowercased, however the
+/// player or the game capitalized it.
+pub fn character_id(name: &str) -> String {
+    name.to_lowercase()
+}
+
 /// Saves a character the player added on `host`, a saved server, keyed by
-/// its lowercased name as the engine keys who logs in. One they removed comes
+/// [`character_id`] as the engine keys who logs in. One they removed comes
 /// back with everything it had. It blocks until the row is on the disk.
 pub fn save_character(data_folder: &Path, host: &str, name: &str) -> Result<(), Error> {
-    let id = name.to_lowercase();
+    let id = character_id(name);
     let mut batch = Batch::new();
     batch.delete(Key::Meta(format!("{CHARACTER_REMOVED}{id}")));
     batch.upsert(Character {

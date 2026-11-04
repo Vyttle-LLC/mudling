@@ -552,7 +552,6 @@ const SKILLS_CONTROLS: [(&str, &str); 3] = [
     ("AXRadioButton", "Spells"),
     ("AXRadioButton", "Skills"),
 ];
-/// What the Add form adds, its field first.
 /// Add character with its pull-down open, Name first.
 const ADD_CHARACTER_CONTROLS: [&str; 6] = [
     "Name",

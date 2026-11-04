@@ -18,6 +18,7 @@ use gpui::{
     Context, Div, Entity, FocusHandle, Focusable, FontWeight, Role, SharedString, Stateful, Window,
     div, prelude::*, px,
 };
+use mudling_core::persist;
 use mudling_core::vault::VaultState;
 
 pub(super) const ADD_TITLE: &str = "Add character";
@@ -134,6 +135,13 @@ impl SettingsSheet {
             .update(cx, |field, cx| drop(field.take_secret(cx)));
     }
 
+    /// Whether the vault box shows ticked, while the dialog is open.
+    #[cfg(test)]
+    pub(super) fn vault_box_ticked(&self, cx: &gpui::App) -> Option<bool> {
+        let typed = !self.character_fields.password.read(cx).content().is_empty();
+        Some(self.character.as_ref()?.ticked(typed))
+    }
+
     /// Drops a dialog left open when the sheet last closed, its password
     /// wiped.
     pub(super) fn close_character_form_quietly(
@@ -214,7 +222,9 @@ impl SettingsSheet {
         let host = target.host.clone();
         let name = target.character.clone().unwrap_or_default();
         if adding {
-            cx.emit(SheetEvent::AddCharacter(target));
+            let server = Target::server(target.host, target.port);
+            let name = name.clone();
+            cx.emit(SheetEvent::AddCharacter { server, name });
         }
         let leaves = form.alone;
         self.character = None;
@@ -258,7 +268,7 @@ impl SettingsSheet {
             .servers
             .iter()
             .find(|server| server.host == target.host)?;
-        let id = name.to_lowercase();
+        let id = persist::character_id(name);
         let character = server.characters.iter().find(|c| c.id == id)?;
         Some(CharacterOn {
             host: server.host.clone(),

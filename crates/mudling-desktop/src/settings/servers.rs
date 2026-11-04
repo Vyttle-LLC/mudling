@@ -87,17 +87,13 @@ pub enum Passwords {
 }
 
 impl Passwords {
-    /// What's saved for `character` on `host`, matched as login matches it,
-    /// however the player capitalized it.
+    /// What's saved for `character` on `host`, matched as login matches it.
     pub fn of(&self, host: &str, character: &str) -> PasswordState {
         match self {
             Passwords::NoVault => PasswordState::Typed,
             Passwords::Locked => PasswordState::Unknown,
             Passwords::Listed(entries) => {
-                let saved = entries.iter().any(|entry| {
-                    entry.server == host && entry.character.eq_ignore_ascii_case(character)
-                });
-                match saved {
+                match entries.iter().any(|entry| entry.is_for(host, character)) {
                     true => PasswordState::Saved,
                     false => PasswordState::Typed,
                 }
@@ -346,8 +342,8 @@ impl SettingsSheet {
                 .pt_2()
                 .child(question_line(
                     format!(
-                        "Remove {name} from your list? Its stats and gear history stay on this \
-                         device, and its saved password is deleted."
+                        "Remove {name} from your list on every device you sync? Its stats and \
+                         gear history stay, and its saved password is deleted."
                     ),
                     theme,
                 ))

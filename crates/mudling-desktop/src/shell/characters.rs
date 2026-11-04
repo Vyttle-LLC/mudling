@@ -4,6 +4,7 @@
 use super::{Outcome, Shell};
 use crate::launcher::Target;
 use gpui::{Context, Window};
+use mudling_core::persist;
 use mudling_core::plugin::luau::Value;
 use mudling_core::store::{CHARACTER_NAME, ConnectionStatus};
 
@@ -19,7 +20,7 @@ impl Shell {
         let Some(game) = self.game.as_ref().filter(|game| !game.is_replay()) else {
             return self.ask_to_open(target, window, cx);
         };
-        if game.target == *target {
+        if self.is_in_play(target) {
             return self.focus_command_bar(window, cx);
         }
         let connected = matches!(
@@ -29,14 +30,39 @@ impl Shell {
         if !connected {
             return self.ask_to_open(target, window, cx);
         }
-        let playing = match self.copies.characters.value().0.get(CHARACTER_NAME) {
-            Some(Value::Text(name)) => name.clone(),
-            _ => (game.target.character.clone()).unwrap_or_else(|| game.target.host.clone()),
-        };
+        let playing = (self.playing_name()).unwrap_or_else(|| game.target.host.clone());
         self.open_settings(window, cx);
         self.settings.update(cx, |sheet, cx| {
             sheet.ask_switch(&playing, target.clone(), window, cx);
         });
+    }
+
+    /// Who the game in play plays: the name the game gave, else the one it
+    /// logged in as.
+    fn playing_name(&self) -> Option<String> {
+        let game = self.game.as_ref()?;
+        match self.copies.characters.value().0.get(CHARACTER_NAME) {
+            Some(Value::Text(name)) => Some(name.clone()),
+            _ => game.target.character.clone(),
+        }
+    }
+
+    /// Whether `target` is the game in play: its server, and its character
+    /// as the game names it, so a game opened from a server card that has
+    /// since named Bren is Bren's.
+    pub(super) fn is_in_play(&self, target: &Target) -> bool {
+        let Some(game) = &self.game else {
+            return false;
+        };
+        let same_server = (&game.target.host, game.target.port) == (&target.host, target.port);
+        same_server
+            && match (&target.character, self.playing_name()) {
+                (None, _) => game.target.character.is_none(),
+                (Some(wanted), Some(playing)) => {
+                    persist::character_id(wanted) == persist::character_id(&playing)
+                }
+                (Some(_), None) => false,
+            }
     }
 
     /// Add character, from Where to today?.
@@ -49,13 +75,14 @@ impl Shell {
 
     pub(super) fn add_character(
         &mut self,
-        target: Target,
+        server: Target,
+        name: String,
         window: &mut Window,
         cx: &mut Context<Shell>,
     ) {
         self.off_the_ui_thread(
             move |launcher| Outcome {
-                problem: launcher.add_character(&target).err(),
+                problem: launcher.add_character(&server, &name).err(),
                 saved: launcher.saved(),
                 ..Outcome::default()
             },

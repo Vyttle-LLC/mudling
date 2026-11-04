@@ -256,7 +256,10 @@ enum Request {
         login: bool,
     },
     ChooseServer,
-    AddCharacter(Target),
+    AddCharacter {
+        server: Target,
+        name: String,
+    },
     RemoveCharacter {
         host: String,
         id: String,
@@ -479,8 +482,9 @@ impl Shell {
                     SheetEvent::RemoveServer(host) => {
                         shell.ask(Request::Remove(host.clone()), window, cx);
                     }
-                    SheetEvent::AddCharacter(target) => {
-                        shell.ask(Request::AddCharacter(target.clone()), window, cx);
+                    SheetEvent::AddCharacter { server, name } => {
+                        let (server, name) = (server.clone(), name.clone());
+                        shell.ask(Request::AddCharacter { server, name }, window, cx);
                     }
                     SheetEvent::RemoveCharacter { host, id } => {
                         let (host, id) = (host.clone(), id.clone());
@@ -1216,7 +1220,7 @@ impl Shell {
                 login,
             } => self.open(target, turn_on, login, window, cx),
             Request::ChooseServer => self.choose_server(window, cx),
-            Request::AddCharacter(target) => self.add_character(target, window, cx),
+            Request::AddCharacter { server, name } => self.add_character(server, name, window, cx),
             Request::RemoveCharacter { host, id } => self.remove_character(host, id, window, cx),
             Request::Remove(host) => self.remove_server(host, window, cx),
             Request::ListServers => self.off_the_ui_thread(
@@ -1799,16 +1803,15 @@ impl Shell {
     /// Brings the title bar and what's beside the chat in line with whether
     /// a game is running, once that changes.
     fn show_where_things_stand(&mut self, cx: &mut Context<Shell>) {
-        let current = self.game.as_ref().map(|game| &game.target);
         let elsewhere = self
             .empty_state
             .read(cx)
             .cards()
             .iter()
-            .filter(|card| Some(&card.target) != current)
+            .filter(|card| !self.is_in_play(&card.target))
             .cloned()
             .collect();
-        let current = current.map(|target| target.host.as_str());
+        let current = self.game.as_ref().map(|game| game.target.host.as_str());
         let can_choose_server = self.game.is_some() && self.launcher.is_some();
         let bare = self.on_empty_state();
         let find_open = self.chat.read(cx).find_is_open();
@@ -2529,9 +2532,9 @@ pub mod tests {
     use mudling_core::map::MapChange;
     use mudling_core::persist::{self, GearPiece, GearSet, Timestamp};
     use mudling_core::plugin::Plugin;
-    use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
+    use mudling_core::plugin::luau::{DisabledReason, PluginDisabled, Value};
     use mudling_core::session::{GearEdit, SessionConfig};
-    use mudling_core::store::{Diff, Revision, TerminalState};
+    use mudling_core::store::{CHARACTER_NAME, Diff, Revision, TerminalState};
     use mudling_core::sync::SyncConfig;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
@@ -4686,9 +4689,7 @@ pub mod tests {
         let launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
             shell.left = true;
-            shell
-                .waiting
-                .push_back(Request::AddCharacter(target("late.example", 9)));
+            shell.waiting.push_back(adding("late.example", "Wren"));
             let listing = Outcome {
                 only_listing: true,
                 ..Outcome::default()
@@ -4700,12 +4701,20 @@ pub mod tests {
         assert!(saved_hosts(launched.folder.path()).is_empty());
     }
 
+    /// Add character's ask for `name` on `host`, a new server.
+    fn adding(host: &str, name: &str) -> Request {
+        Request::AddCharacter {
+            server: target(host, 4000),
+            name: name.to_owned(),
+        }
+    }
+
     #[gpui::test]
-    fn servers_added_while_a_job_runs_are_saved_in_turn(cx: &mut TestAppContext) {
+    fn characters_added_while_a_job_runs_are_saved_in_turn(cx: &mut TestAppContext) {
         let mut launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::AddCharacter(target("one.example", 1)), window, cx);
-            shell.ask(Request::AddCharacter(target("two.example", 2)), window, cx);
+            shell.ask(adding("one.example", "Bren"), window, cx);
+            shell.ask(adding("two.example", "Tamsin"), window, cx);
             assert_eq!(shell.waiting.len(), 1);
         });
         launched.frames_until("both cards", |shell, cx| {
@@ -4719,9 +4728,9 @@ pub mod tests {
     fn only_the_newest_ask_to_go_somewhere_waits(cx: &mut TestAppContext) {
         let launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::AddCharacter(target("one.example", 1)), window, cx);
+            shell.ask(adding("one.example", "Bren"), window, cx);
             shell.ask_to_open(&target("first.example", 1), window, cx);
-            shell.ask(Request::AddCharacter(target("two.example", 2)), window, cx);
+            shell.ask(adding("two.example", "Tamsin"), window, cx);
             shell.ask_to_open(&target("second.example", 2), window, cx);
 
             let waiting: Vec<_> = shell
@@ -4755,9 +4764,8 @@ pub mod tests {
     fn a_character_that_could_not_be_saved_says_why(cx: &mut TestAppContext) {
         let mut launched = launch(&[], cx);
         std::fs::write(launched.folder.path().join(persist::SERVERS_FOLDER), "").unwrap();
-        let wren = target("mud.example", 4000).with_character("Wren");
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::AddCharacter(wren), window, cx);
+            shell.ask(adding("mud.example", "Wren"), window, cx);
         });
         launched.frames_until("the problem", |shell, _| shell.trouble.is_some());
         assert!(launched.is_drawn("empty-state-problem"));
@@ -4888,6 +4896,42 @@ pub mod tests {
                 .as_ref()
                 .is_some_and(|game| game.target == tamsin)
         });
+        assert!(!launched.is_drawn("settings-sheet"));
+    }
+
+    #[gpui::test]
+    fn the_character_a_server_card_s_game_named_just_comes_forward(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask_to_open(&target("127.0.0.1", port), window, cx);
+        });
+        launched.cx.run_until_parked();
+        let _socket = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        // The game says who plays, as its plugin would.
+        launched.shell.read_with(launched.cx, |shell, _| {
+            let named = [(CHARACTER_NAME.to_owned(), Value::Text("Bren".to_owned()))];
+            let stores = shell.game.as_ref().unwrap().session.stores();
+            stores.write::<CharactersState>(CharactersState(named.into()));
+        });
+        launched.frames_until("Bren named", |shell, _| {
+            shell
+                .copies
+                .characters
+                .value()
+                .0
+                .contains_key(CHARACTER_NAME)
+        });
+
+        let bren = target("127.0.0.1", port).with_character("bren");
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.choose_character(&bren, window, cx);
+        });
+        let asked = launched.shell.read_with(launched.cx, |shell, cx| {
+            shell.settings.read(cx).switch_question().map(str::to_owned)
+        });
+        assert_eq!(asked, None, "Bren is the one in play");
         assert!(!launched.is_drawn("settings-sheet"));
     }
 
