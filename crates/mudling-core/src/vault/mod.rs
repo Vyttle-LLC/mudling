@@ -94,6 +94,12 @@ impl EntryKey {
             character: character.into(),
         }
     }
+
+    /// Whether this is the password for `character` on `host`, however the
+    /// player capitalized the name: what login goes by.
+    pub fn is_for(&self, host: &str, character: &str) -> bool {
+        self.server == host && self.character.eq_ignore_ascii_case(character)
+    }
 }
 
 /// Which password survives a conflict.

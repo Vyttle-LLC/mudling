@@ -847,11 +847,56 @@ fn a_saved_character_shows_its_level_name_and_last_room() {
     assert_eq!(
         server.characters,
         [SavedCharacter {
+            id: "player".to_owned(),
             name: Some("Altissima".to_owned()),
             level: Some(2),
             last_played: T2,
         }]
     );
+}
+
+#[test]
+fn an_added_character_is_keyed_as_the_engine_keys_who_logs_in() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+
+    save_character(folder.path(), "mud.example.org", "Tamsin").unwrap();
+
+    let saved = saved_servers(folder.path());
+    let character = &saved.servers[0].characters[0];
+    assert_eq!(character.id, "tamsin");
+    assert_eq!(character.name.as_deref(), Some("Tamsin"));
+}
+
+#[test]
+fn a_removed_character_leaves_the_list_and_keeps_its_history_until_added_again() {
+    let folder = TempDir::new().unwrap();
+    save_server(folder.path(), "mud.example.org", 4000).unwrap();
+    let database = Database::open(&folder.path().join(SERVERS_FOLDER), "mud.example.org").unwrap();
+    save_stat(&database, "bren", "character.level", "42.0");
+    save_character(folder.path(), "mud.example.org", "Tamsin").unwrap();
+
+    remove_character(folder.path(), "mud.example.org", "bren").unwrap();
+
+    let listed = |folder: &TempDir| -> Vec<String> {
+        let saved = saved_servers(folder.path());
+        let characters = saved.servers[0].characters.iter();
+        characters.map(|character| character.id.clone()).collect()
+    };
+    assert_eq!(listed(&folder), ["tamsin"]);
+    let rows = database.reader().unwrap().characters().unwrap();
+    assert!(
+        (rows.stats.iter()).any(|stat| stat.character_id == "bren"),
+        "its stats stay"
+    );
+
+    save_character(folder.path(), "mud.example.org", "Bren").unwrap();
+    let mut back = listed(&folder);
+    back.sort();
+    assert_eq!(back, ["bren", "tamsin"]);
+    let saved = saved_servers(folder.path());
+    let bren = saved.servers[0].characters.iter().find(|c| c.id == "bren");
+    assert_eq!(bren.unwrap().level, Some(42), "with what it had");
 }
 
 #[test]

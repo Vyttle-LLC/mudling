@@ -9,6 +9,7 @@
 //! comes from a core thread; each wake asks for the next frame, and that
 //! frame drains the stores once, so updates apply at most once per frame.
 
+mod characters;
 mod directory;
 mod updates;
 mod watch;
@@ -26,7 +27,7 @@ use crate::gear_panel::sets::SetAction;
 use crate::hotbar::{Hotbar, HotbarEvent};
 use crate::hud::{Hud, HudEvent, HudPlacement, ToggleHud};
 use crate::input::{self, CommandInput, InputEvent};
-use crate::launcher::{Launcher, Login, Target};
+use crate::launcher::{Launcher, Login, Target, login_for};
 use crate::map_history::MapHistoryView;
 #[cfg(any(test, target_os = "macos"))]
 use crate::map_view::harness::versioned;
@@ -37,8 +38,8 @@ use crate::session_bar::{Offers, SessionBar, SessionBarEvent};
 #[cfg(target_os = "macos")]
 use crate::settings::Section;
 use crate::settings::{
-    LockAfter, PluginRow, SavedServer, SavedSettings, ServerPlugins, SettingsSheet, SheetEvent,
-    SyncChoices, app_settings, hidden_under_sheet, with_app_settings,
+    LockAfter, Passwords, PluginRow, SavedServer, SavedSettings, ServerPlugins, SettingsSheet,
+    SheetEvent, SyncChoices, app_settings, hidden_under_sheet, with_app_settings,
 };
 use crate::skills_panel::{self, SkillsPanel};
 use crate::sound::Speaker;
@@ -255,7 +256,14 @@ enum Request {
         login: bool,
     },
     ChooseServer,
-    Save(Target),
+    AddCharacter {
+        server: Target,
+        name: String,
+    },
+    RemoveCharacter {
+        host: String,
+        id: String,
+    },
     Remove(String),
     /// Read the saved servers again, as a sync may have changed them.
     ListServers,
@@ -282,8 +290,6 @@ struct Outcome {
     game: Option<Game>,
     saved: SavedServers,
     problem: Option<String>,
-    /// A server the player added that couldn't be saved.
-    unsaved: Option<Target>,
     /// A server that can't log in until the player unlocks the vault.
     locked_out: Option<WaitingForVault>,
     /// Only the saved servers were read again: no game opened or ended, so
@@ -368,6 +374,8 @@ pub struct Shell {
     settings_open: bool,
     /// A measured run draws its sample in the HUD, whatever the stores say.
     hud_held: bool,
+    /// A measured run draws Where to today? over its game.
+    empty_state_held: bool,
     /// Where focus goes back to when the sheet closes.
     focus_before_settings: Option<FocusHandle>,
     /// Keeps the player's choices, if there's a folder to keep them in.
@@ -474,6 +482,19 @@ impl Shell {
                     SheetEvent::RemoveServer(host) => {
                         shell.ask(Request::Remove(host.clone()), window, cx);
                     }
+                    SheetEvent::AddCharacter { server, name } => {
+                        let (server, name) = (server.clone(), name.clone());
+                        shell.ask(Request::AddCharacter { server, name }, window, cx);
+                    }
+                    SheetEvent::RemoveCharacter { host, id } => {
+                        let (host, id) = (host.clone(), id.clone());
+                        shell.ask(Request::RemoveCharacter { host, id }, window, cx);
+                    }
+                    SheetEvent::PasswordsChanged => shell.show_passwords(cx),
+                    SheetEvent::Switch(target) => {
+                        shell.close_settings(window, cx);
+                        shell.ask_to_open(target, window, cx);
+                    }
                     SheetEvent::TurnOn(plugin) => shell.turn_plugin_on(plugin),
                     SheetEvent::Inspect(open) => shell.inspect(*open),
                     SheetEvent::ClearInspector => {
@@ -572,7 +593,7 @@ impl Shell {
             &title_bar,
             window,
             |shell, _, event, window, cx| match event {
-                TitleBarEvent::Open(target) => shell.ask_to_open(target, window, cx),
+                TitleBarEvent::Open(target) => shell.choose_character(target, window, cx),
                 TitleBarEvent::ChooseServer => shell.ask(Request::ChooseServer, window, cx),
             },
         );
@@ -590,9 +611,7 @@ impl Shell {
             window,
             |shell, _, event, window, cx| match event {
                 EmptyStateEvent::Connect(target) => shell.ask_to_open(target, window, cx),
-                EmptyStateEvent::Add(target) => {
-                    shell.ask(Request::Save(target.clone()), window, cx);
-                }
+                EmptyStateEvent::AddCharacter => shell.open_add_character(window, cx),
                 EmptyStateEvent::Update(ask) => shell.on_update_ask(*ask, window, cx),
             },
         );
@@ -658,6 +677,7 @@ impl Shell {
             settings,
             settings_open: false,
             hud_held: false,
+            empty_state_held: false,
             focus_before_settings: None,
             saved_settings: None,
             speaker: None,
@@ -1111,9 +1131,6 @@ impl Shell {
             if let Some(problem) = outcome.problem.clone() {
                 empty_state.show_problem(problem, cx);
             }
-            if let Some(target) = outcome.unsaved {
-                empty_state.keep_address(&target, window, cx);
-            }
         });
         self.settings.update(cx, |sheet, cx| {
             let servers = outcome.saved.servers.iter().map(SavedServer::from);
@@ -1203,7 +1220,8 @@ impl Shell {
                 login,
             } => self.open(target, turn_on, login, window, cx),
             Request::ChooseServer => self.choose_server(window, cx),
-            Request::Save(target) => self.add_server(target, window, cx),
+            Request::AddCharacter { server, name } => self.add_character(server, name, window, cx),
+            Request::RemoveCharacter { host, id } => self.remove_character(host, id, window, cx),
             Request::Remove(host) => self.remove_server(host, window, cx),
             Request::ListServers => self.off_the_ui_thread(
                 |launcher| Outcome {
@@ -1302,8 +1320,9 @@ impl Shell {
     /// is a game plugin the player just turned on: a session reads its
     /// plugins when it opens, so this is also how that takes effect. A repeat
     /// of what's already running, such as a double click, does nothing. With
-    /// `login`, the vault is asked for the saved login, and a vault only the
-    /// player can open sends them to it, with nothing connected yet.
+    /// `login`, the vault is asked for the character's saved password, and a
+    /// vault only the player can open sends them to it, with nothing
+    /// connected yet. Without, a character sends only its name.
     fn open(
         &mut self,
         target: Target,
@@ -1336,8 +1355,8 @@ impl Shell {
         self.off_the_ui_thread(
             move |launcher| {
                 let stuck = leaving.and_then(Game::finish);
-                let credentials = match vault.map(|vault| launcher.login(&vault, &target.host)) {
-                    Some(Login::Locked) => {
+                let credentials = match login_for(vault.as_ref(), &target) {
+                    Login::Locked => {
                         return Outcome {
                             saved: launcher.saved(),
                             problem: stuck,
@@ -1345,8 +1364,7 @@ impl Shell {
                             ..Outcome::default()
                         };
                     }
-                    Some(Login::Ready(credentials)) => credentials,
-                    None => None,
+                    Login::Ready(credentials) => credentials,
                 };
                 let opened = launcher.open(&target, turn_on.as_ref(), credentials);
                 let (game, problem) = match opened {
@@ -1374,22 +1392,6 @@ impl Shell {
                 problem: leaving.and_then(Game::finish),
                 saved: launcher.saved(),
                 ..Outcome::default()
-            },
-            window,
-            cx,
-        );
-    }
-
-    fn add_server(&mut self, target: Target, window: &mut Window, cx: &mut Context<Shell>) {
-        self.off_the_ui_thread(
-            move |launcher| {
-                let problem = launcher.save(&target).err();
-                Outcome {
-                    unsaved: problem.is_some().then_some(target),
-                    problem,
-                    saved: launcher.saved(),
-                    ..Outcome::default()
-                }
             },
             window,
             cx,
@@ -1801,15 +1803,15 @@ impl Shell {
     /// Brings the title bar and what's beside the chat in line with whether
     /// a game is running, once that changes.
     fn show_where_things_stand(&mut self, cx: &mut Context<Shell>) {
-        let current = self.game.as_ref().map(|game| game.target.host.as_str());
         let elsewhere = self
             .empty_state
             .read(cx)
             .cards()
             .iter()
-            .filter(|card| Some(card.target.host.as_str()) != current)
+            .filter(|card| !self.is_in_play(&card.target))
             .cloned()
             .collect();
+        let current = self.game.as_ref().map(|game| game.target.host.as_str());
         let can_choose_server = self.game.is_some() && self.launcher.is_some();
         let bare = self.on_empty_state();
         let find_open = self.chat.read(cx).find_is_open();
@@ -2175,6 +2177,22 @@ impl Shell {
         self.hud_held = true;
     }
 
+    /// Draws Where to today? with `saved`'s cards in place of the game, for
+    /// a measured run.
+    pub fn hold_empty_state(
+        &mut self,
+        saved: &SavedServers,
+        passwords: Passwords,
+        cx: &mut Context<Shell>,
+    ) {
+        self.empty_state_held = true;
+        self.empty_state.update(cx, |empty_state, cx| {
+            empty_state.show(saved, cx);
+            empty_state.show_passwords(passwords, cx);
+        });
+        cx.notify();
+    }
+
     /// Puts the HUD at `placement`, opened or not, as the sheet would.
     pub fn place_hud(
         &mut self,
@@ -2395,7 +2413,7 @@ impl Render for Shell {
                     .child(command_bar),
             );
         let on_empty_state = self.on_empty_state();
-        let body = if on_empty_state {
+        let body = if on_empty_state || self.empty_state_held {
             div().flex_1().min_h_0().child(self.empty_state.clone())
         } else {
             div()
@@ -2514,9 +2532,9 @@ pub mod tests {
     use mudling_core::map::MapChange;
     use mudling_core::persist::{self, GearPiece, GearSet, Timestamp};
     use mudling_core::plugin::Plugin;
-    use mudling_core::plugin::luau::{DisabledReason, PluginDisabled};
+    use mudling_core::plugin::luau::{DisabledReason, PluginDisabled, Value};
     use mudling_core::session::{GearEdit, SessionConfig};
-    use mudling_core::store::{Diff, Revision, TerminalState};
+    use mudling_core::store::{CHARACTER_NAME, Diff, Revision, TerminalState};
     use mudling_core::sync::SyncConfig;
     use mudling_core::telnet::command::{IAC, SB, SE, WILL, WONT};
     use mudling_core::telnet::option::{ECHO, GMCP};
@@ -2548,10 +2566,7 @@ pub mod tests {
             replay_folder: None,
             enabled,
             verbs,
-            target: Target {
-                host: "127.0.0.1".to_owned(),
-                port,
-            },
+            target: Target::server("127.0.0.1", port),
             plugins: Vec::new(),
         }
     }
@@ -4427,39 +4442,61 @@ pub mod tests {
     }
 
     #[gpui::test]
-    fn a_server_added_is_saved_and_gets_a_card(cx: &mut TestAppContext) {
+    fn a_character_added_on_a_new_server_is_saved_and_gets_a_card(cx: &mut TestAppContext) {
         let mut launched = launch(&[], cx);
-        launched.click("add-server");
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        launched.click("add-character");
+        assert!(launched.is_drawn("character-dialog"));
+        // Name has the keyboard; with no saved server, Address is two stops on.
+        launched.cx.simulate_input("Wren");
+        launched.cx.simulate_keystrokes("tab tab");
         launched.cx.simulate_input("mud.example");
         launched.cx.simulate_keystrokes("enter");
-        assert!(launched.is_drawn("add-error"));
+        assert!(launched.is_drawn("character-problem"), "it needs a port");
         launched.cx.simulate_input(":4000");
         launched.cx.simulate_keystrokes("enter");
-        assert!(launched.is_drawn("connect-0"));
-        assert!(!launched.is_drawn("add-error"));
+        launched.frames_until("the card", |shell, cx| {
+            !shell.empty_state.read(cx).cards().is_empty()
+        });
+        assert!(!launched.is_drawn("character-dialog"));
 
         let saved = persist::saved_servers(launched.folder.path());
         assert_eq!(saved.servers[0].host, "mud.example");
         assert_eq!(saved.servers[0].port, 4000);
+        assert_eq!(saved.servers[0].characters[0].id, "wren");
+        launched.shell.read_with(launched.cx, |shell, cx| {
+            let card = &shell.empty_state.read(cx).cards()[0];
+            assert_eq!(card.target.character.as_deref(), Some("Wren"));
+        });
     }
 
     #[gpui::test]
-    fn esc_cancels_adding_a_server(cx: &mut TestAppContext) {
+    fn esc_cancels_adding_a_character(cx: &mut TestAppContext) {
         let mut launched = launch(&[], cx);
-        launched.click("add-server");
-        assert!(launched.is_drawn("save-server"));
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        launched.click("add-character");
+        assert!(launched.is_drawn("character-dialog"));
         launched.cx.simulate_keystrokes("escape");
-        assert!(!launched.is_drawn("save-server"));
-        assert!(launched.is_drawn("add-server"));
+        assert!(!launched.is_drawn("character-dialog"));
+        assert!(
+            !launched.is_drawn("settings-sheet"),
+            "the sheet went with it"
+        );
+        assert!(launched.is_drawn("add-character"));
     }
 
     #[gpui::test]
     fn the_keyboard_reaches_every_control(cx: &mut TestAppContext) {
         let mut launched = launch(&[("mud.example", 4000)], cx);
-        // From the first card: Add, Quick connect's field, then its button.
+        launched.cx.update(|_, cx| crate::settings::bind_keys(cx));
+        // From the first card: Add character, Quick connect's field, then its
+        // button.
         launched.cx.simulate_keystrokes("tab");
         press_enter(launched.cx);
-        assert!(launched.is_drawn("save-server"), "Add opened the form");
+        assert!(
+            launched.is_drawn("character-dialog"),
+            "Add character opened"
+        );
         launched.cx.simulate_keystrokes("escape");
         launched.cx.simulate_keystrokes("tab");
         launched.cx.simulate_input("bad");
@@ -4521,6 +4558,8 @@ pub mod tests {
         assert!(launched.is_drawn("session-current"));
         launched.cx.simulate_keystrokes("down");
         press_enter(launched.cx);
+        // Connected, so it asks before logging out.
+        launched.click("switch-now");
         let (_second, _) = server.accept().unwrap();
         launched.wait_for_connection(ConnectionStatus::Connected);
         assert_ne!(launched.host().unwrap(), playing);
@@ -4539,8 +4578,7 @@ pub mod tests {
     }
 
     fn target(host: &str, port: u16) -> Target {
-        let host = host.to_owned();
-        Target { host, port }
+        Target::server(host, port)
     }
 
     #[test]
@@ -4651,9 +4689,7 @@ pub mod tests {
         let launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
             shell.left = true;
-            shell
-                .waiting
-                .push_back(Request::Save(target("late.example", 9)));
+            shell.waiting.push_back(adding("late.example", "Wren"));
             let listing = Outcome {
                 only_listing: true,
                 ..Outcome::default()
@@ -4665,12 +4701,20 @@ pub mod tests {
         assert!(saved_hosts(launched.folder.path()).is_empty());
     }
 
+    /// Add character's ask for `name` on `host`, a new server.
+    fn adding(host: &str, name: &str) -> Request {
+        Request::AddCharacter {
+            server: target(host, 4000),
+            name: name.to_owned(),
+        }
+    }
+
     #[gpui::test]
-    fn servers_added_while_a_job_runs_are_saved_in_turn(cx: &mut TestAppContext) {
+    fn characters_added_while_a_job_runs_are_saved_in_turn(cx: &mut TestAppContext) {
         let mut launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::Save(target("one.example", 1)), window, cx);
-            shell.ask(Request::Save(target("two.example", 2)), window, cx);
+            shell.ask(adding("one.example", "Bren"), window, cx);
+            shell.ask(adding("two.example", "Tamsin"), window, cx);
             assert_eq!(shell.waiting.len(), 1);
         });
         launched.frames_until("both cards", |shell, cx| {
@@ -4684,9 +4728,9 @@ pub mod tests {
     fn only_the_newest_ask_to_go_somewhere_waits(cx: &mut TestAppContext) {
         let launched = launch(&[], cx);
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::Save(target("one.example", 1)), window, cx);
+            shell.ask(adding("one.example", "Bren"), window, cx);
             shell.ask_to_open(&target("first.example", 1), window, cx);
-            shell.ask(Request::Save(target("two.example", 2)), window, cx);
+            shell.ask(adding("two.example", "Tamsin"), window, cx);
             shell.ask_to_open(&target("second.example", 2), window, cx);
 
             let waiting: Vec<_> = shell
@@ -4717,17 +4761,14 @@ pub mod tests {
     }
 
     #[gpui::test]
-    fn an_address_that_could_not_be_saved_goes_back_in_the_field(cx: &mut TestAppContext) {
-        let launched = launch(&[], cx);
+    fn a_character_that_could_not_be_saved_says_why(cx: &mut TestAppContext) {
+        let mut launched = launch(&[], cx);
         std::fs::write(launched.folder.path().join(persist::SERVERS_FOLDER), "").unwrap();
         launched.shell.update_in(launched.cx, |shell, window, cx| {
-            shell.ask(Request::Save(target("mud.example", 4000)), window, cx);
+            shell.ask(adding("mud.example", "Wren"), window, cx);
         });
-        launched.cx.run_until_parked();
-        launched.shell.read_with(launched.cx, |shell, cx| {
-            let kept = shell.empty_state.read(cx).address_being_added(cx);
-            assert_eq!(kept.as_deref(), Some("mud.example:4000"));
-        });
+        launched.frames_until("the problem", |shell, _| shell.trouble.is_some());
+        assert!(launched.is_drawn("empty-state-problem"));
     }
 
     fn open_servers(launched: &mut Launched<'_>) {
@@ -4757,6 +4798,141 @@ pub mod tests {
         assert_eq!(saved_hosts(launched.folder.path()), ["mud.example"]);
         let servers = launched.folder.path().join(persist::SERVERS_FOLDER);
         assert!(servers.join("typo.example.sqlite").exists());
+    }
+
+    /// Saves `names` on `host` and shows them, as Add character does.
+    fn add_characters(launched: &mut Launched<'_>, host: &str, names: &[&str]) {
+        for name in names {
+            persist::save_character(launched.folder.path(), host, name).unwrap();
+        }
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask(Request::ListServers, window, cx);
+        });
+        let count = names.len();
+        launched.frames_until("the characters' cards", move |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == count
+        });
+    }
+
+    #[gpui::test]
+    fn removing_a_character_asks_first_and_keeps_its_history(cx: &mut TestAppContext) {
+        let mut launched = launch(&[("mud.example", 4000)], cx);
+        add_characters(&mut launched, "mud.example", &["Bren", "Tamsin"]);
+        let mut batch = persist::Batch::new();
+        batch.upsert(persist::CharacterStat {
+            character_id: "bren".to_owned(),
+            key: "character.level".to_owned(),
+            value: "42".to_owned(),
+            updated: Timestamp(1),
+        });
+        persist::write_to_server(launched.folder.path(), "mud.example", batch).unwrap();
+        open_servers(&mut launched);
+
+        // Characters list by id, so Bren's row is first.
+        launched.click("remove-character-0-0");
+        launched.click("keep-character-0-0");
+        assert_eq!(launched.cards(), 2);
+
+        launched.click("remove-character-0-0");
+        launched.click("confirm-remove-character-0-0");
+        launched.frames_until("one card", |shell, cx| {
+            shell.empty_state.read(cx).cards().len() == 1
+        });
+        let saved = persist::saved_servers(launched.folder.path());
+        let ids: Vec<_> = (saved.servers[0].characters.iter())
+            .map(|character| character.id.as_str())
+            .collect();
+        assert_eq!(ids, ["tamsin"]);
+        let servers = launched.folder.path().join(persist::SERVERS_FOLDER);
+        let database = persist::Database::open(&servers, "mud.example").unwrap();
+        let rows = database.reader().unwrap().characters().unwrap();
+        assert!(
+            (rows.stats.iter()).any(|stat| stat.character_id == "bren"),
+            "Bren's stats stay"
+        );
+    }
+
+    #[gpui::test]
+    fn choosing_another_character_while_connected_asks_then_logs_in_as_it(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        add_characters(&mut launched, "127.0.0.1", &["Bren", "Tamsin"]);
+        let bren = target("127.0.0.1", port).with_character("Bren");
+        let tamsin = target("127.0.0.1", port).with_character("Tamsin");
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask_to_open(&bren, window, cx);
+        });
+        launched.cx.run_until_parked();
+        let _first = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        let menu_rows = launched.shell.read_with(launched.cx, |shell, cx| {
+            shell.title_bar.read(cx).saved_row_handles().len()
+        });
+        assert_eq!(menu_rows, 1, "the menu offers Tamsin, not Bren in play");
+
+        let question = |launched: &mut Launched<'_>| {
+            launched.shell.read_with(launched.cx, |shell, cx| {
+                shell.settings.read(cx).switch_question().map(str::to_owned)
+            })
+        };
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.choose_character(&bren, window, cx);
+        });
+        assert_eq!(question(&mut launched), None, "Bren just comes forward");
+        assert!(!launched.is_drawn("settings-sheet"));
+
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.choose_character(&tamsin, window, cx);
+        });
+        assert_eq!(
+            question(&mut launched).as_deref(),
+            Some("Log out Bren and connect Tamsin?")
+        );
+        launched.click("switch-now");
+        let _second = server.accept().unwrap();
+        launched.frames_until("Tamsin in play", move |shell, _| {
+            shell
+                .game
+                .as_ref()
+                .is_some_and(|game| game.target == tamsin)
+        });
+        assert!(!launched.is_drawn("settings-sheet"));
+    }
+
+    #[gpui::test]
+    fn the_character_a_server_card_s_game_named_just_comes_forward(cx: &mut TestAppContext) {
+        let (server, port) = fake_server();
+        let mut launched = launch(&[("127.0.0.1", port)], cx);
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.ask_to_open(&target("127.0.0.1", port), window, cx);
+        });
+        launched.cx.run_until_parked();
+        let _socket = server.accept().unwrap();
+        launched.wait_for_connection(ConnectionStatus::Connected);
+        // The game says who plays, as its plugin would.
+        launched.shell.read_with(launched.cx, |shell, _| {
+            let named = [(CHARACTER_NAME.to_owned(), Value::Text("Bren".to_owned()))];
+            let stores = shell.game.as_ref().unwrap().session.stores();
+            stores.write::<CharactersState>(CharactersState(named.into()));
+        });
+        launched.frames_until("Bren named", |shell, _| {
+            shell
+                .copies
+                .characters
+                .value()
+                .0
+                .contains_key(CHARACTER_NAME)
+        });
+
+        let bren = target("127.0.0.1", port).with_character("bren");
+        launched.shell.update_in(launched.cx, |shell, window, cx| {
+            shell.choose_character(&bren, window, cx);
+        });
+        let asked = launched.shell.read_with(launched.cx, |shell, cx| {
+            shell.settings.read(cx).switch_question().map(str::to_owned)
+        });
+        assert_eq!(asked, None, "Bren is the one in play");
+        assert!(!launched.is_drawn("settings-sheet"));
     }
 
     #[gpui::test]
@@ -4964,7 +5140,8 @@ pub mod tests {
             let close = shell.settings.read(cx).close_stop();
             window.focus(&close, cx);
         });
-        launched.cx.simulate_keystrokes("tab");
+        // Add character, at the top, then the server's Plugins.
+        launched.cx.simulate_keystrokes("tab tab");
         press_enter(launched.cx);
         launched.frames_until("the server's plugins", |shell, cx| {
             let sheet = shell.settings.read(cx);
@@ -5800,10 +5977,7 @@ pub mod tests {
         let (shell, cx) = window_with_keys(cx);
         let folder = TempDir::new().unwrap();
         let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
-        let target = Target {
-            host: "127.0.0.1".to_owned(),
-            port: unused_port(),
-        };
+        let target = Target::server("127.0.0.1", unused_port());
         shell.update_in(cx, |shell, window, cx| {
             shell.use_launcher(launcher, window, cx);
             let outcome = Outcome {

@@ -27,11 +27,29 @@ use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
 
-/// A server to connect to.
+/// A server to connect to, and who logs in there: no one, for Quick connect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub host: String,
     pub port: u16,
+    pub character: Option<String>,
+}
+
+impl Target {
+    pub fn server(host: impl Into<String>, port: u16) -> Target {
+        Target {
+            host: host.into(),
+            port,
+            character: None,
+        }
+    }
+
+    pub fn with_character(self, character: impl Into<String>) -> Target {
+        Target {
+            character: Some(character.into()),
+            ..self
+        }
+    }
 }
 
 impl fmt::Display for Target {
@@ -516,27 +534,6 @@ impl Launcher {
         Launcher { sync, ..self }
     }
 
-    /// The saved login for the character last played on `host`. A locked
-    /// vault is tried from this device's cache first; this waits on the
-    /// vault's thread, so call it off the UI thread.
-    pub fn login(&self, vault: &Vault, host: &str) -> Login {
-        match self.last_played(host) {
-            Some(character) => login_as(vault, host, character),
-            None => Login::Ready(None),
-        }
-    }
-
-    fn last_played(&self, host: &str) -> Option<String> {
-        let saved = self.saved();
-        let server = saved.servers.iter().find(|server| server.host == host)?;
-        let newest = server
-            .characters
-            .iter()
-            .filter(|character| character.name.is_some())
-            .max_by_key(|character| character.last_played)?;
-        newest.name.clone()
-    }
-
     pub fn saved(&self) -> persist::SavedServers {
         persist::saved_servers(&self.data_folder)
     }
@@ -544,6 +541,24 @@ impl Launcher {
     pub fn save(&self, target: &Target) -> Result<(), String> {
         persist::save_server(&self.data_folder, &target.host, target.port)
             .map_err(|error| format!("couldn't save {target}: {error}"))
+    }
+
+    /// Saves the character `name` on `server`, and the server first if that
+    /// isn't on the list.
+    pub fn add_character(&self, server: &Target, name: &str) -> Result<(), String> {
+        let saved = self.saved();
+        if !saved.servers.iter().any(|saved| saved.host == server.host) {
+            self.save(server)?;
+        }
+        persist::save_character(&self.data_folder, &server.host, name)
+            .map_err(|error| format!("couldn't save {name} on {}: {error}", server.host))
+    }
+
+    /// Takes the character `id` off `host`'s list. See
+    /// [`persist::remove_character`] for what stays.
+    pub fn remove_character(&self, host: &str, id: &str) -> Result<(), String> {
+        persist::remove_character(&self.data_folder, host, id)
+            .map_err(|error| format!("couldn't remove {id} from {host}: {error}"))
     }
 
     /// Takes `host` off the saved list. See [`persist::remove_server`] for what
@@ -710,21 +725,48 @@ impl Launcher {
     }
 }
 
+/// How `target` logs in: as its character, with the password the vault holds
+/// for it or else with its name alone, and as no one for Quick connect. With
+/// no `vault` to ask, only the name. A locked vault is tried from this
+/// device's cache first; this waits on the vault's thread, so call it off the
+/// UI thread.
+pub fn login_for(vault: Option<&Vault>, target: &Target) -> Login {
+    let Some(character) = target.character.clone() else {
+        return Login::Ready(None);
+    };
+    match vault {
+        Some(vault) => login_as(vault, &target.host, character),
+        None => Login::Ready(Some(name_only(character))),
+    }
+}
+
+/// Answers the game's name prompt and leaves the password to the player.
+fn name_only(name: String) -> Credentials {
+    Credentials {
+        name,
+        password: String::new(),
+    }
+}
+
 fn login_as(vault: &Vault, host: &str, character: String) -> Login {
+    if vault.state() == VaultState::NotCreated {
+        return Login::Ready(Some(name_only(character)));
+    }
     if vault.state() != VaultState::Unlocked {
         match block_on(vault.unlock_from_device()) {
             Ok(()) => {}
             Err(VaultError::NotCached | VaultError::Cancelled) => return Login::Locked,
-            Err(_) => return Login::Ready(None),
+            Err(_) => return Login::Ready(Some(name_only(character))),
         }
     }
     match block_on(saved_password(vault, host, &character)) {
-        Ok(password) => Login::Ready(password.map(|password| Credentials {
+        Ok(Some(password)) => Login::Ready(Some(Credentials {
             name: character,
             password: password.expose().to_owned(),
         })),
+        Ok(None) => Login::Ready(Some(name_only(character))),
         Err(VaultError::Locked) => Login::Locked,
-        Err(_) => Login::Ready(None),
+        Err(_) => Login::Ready(Some(name_only(character))),
     }
 }
 
@@ -739,9 +781,7 @@ async fn saved_password(
     let mut state = vault.subscribe();
     let read = async {
         let entries = vault.entries().await?;
-        let entry = entries
-            .iter()
-            .find(|entry| entry.server == host && entry.character.eq_ignore_ascii_case(character));
+        let entry = entries.iter().find(|entry| entry.is_for(host, character));
         match entry {
             Some(entry) => vault.password(entry).await,
             None => Ok(None),
@@ -804,10 +844,7 @@ mod tests {
         let plugins = bundled_plugins();
         let id = plugins[0].id().clone();
         let launcher = Launcher::new(folder.path().to_owned(), plugins, Vec::new(), || {});
-        let target = Target {
-            host: "mud.example".to_owned(),
-            port: 4000,
-        };
+        let target = Target::server("mud.example", 4000);
 
         let game = launcher.open(&target, None, None).unwrap();
         assert!(game.enabled.is_empty(), "detection turns nothing on");
@@ -828,10 +865,7 @@ mod tests {
         let plugins = bundled_plugins();
         let game = plugins[0].id().clone();
         let launcher = Launcher::new(folder.path().to_owned(), plugins, Vec::new(), || {});
-        let target = Target {
-            host: "mud.example".to_owned(),
-            port: 4000,
-        };
+        let target = Target::server("mud.example", 4000);
 
         launcher.set_plugin("mud.example", &game, true).unwrap();
         let on = |launcher: &Launcher, host| {
@@ -1017,16 +1051,66 @@ mod tests {
         assert_eq!(credentials.password, "swordfish-42");
 
         let nobody = login_as(&vault, HOST, "Nobody".to_owned());
-        assert!(matches!(nobody, Login::Ready(None)), "{nobody:?}");
+        assert_name_only(nobody, "Nobody");
+    }
+
+    /// Logs in with `name` and leaves the password to the player.
+    fn assert_name_only(login: Login, name: &str) {
+        let Login::Ready(Some(credentials)) = login else {
+            panic!("{name} logs in: {login:?}");
+        };
+        assert_eq!(credentials.name, name);
+        assert_eq!(credentials.password, "", "the player types it");
     }
 
     #[test]
-    fn with_no_vault_a_server_just_connects() {
+    fn two_characters_on_one_server_each_log_in_as_themselves() {
+        let folder = TempDir::new().unwrap();
+        let vault = fixture_vault(folder.path());
+        let master = "violet anchor mosaic drifting under quiet lanterns";
+        let _ = block_on(vault.unlock_with_password(master.into())).unwrap();
+        let mira = mudling_core::vault::EntryKey::new(HOST, "Mira");
+        block_on(vault.set_password(mira, "moonstone".into())).unwrap();
+        let server = Target::server(HOST, 4000);
+
+        for (character, password) in [("Fikus", "swordfish-42"), ("Mira", "moonstone")] {
+            let target = server.clone().with_character(character);
+            let Login::Ready(Some(credentials)) = login_for(Some(&vault), &target) else {
+                panic!("{character} has a saved login");
+            };
+            assert_eq!(credentials.name, character);
+            assert_eq!(credentials.password, password);
+        }
+        assert!(matches!(
+            login_for(Some(&vault), &server),
+            Login::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn with_no_vault_a_character_sends_only_its_name() {
         let folder = TempDir::new().unwrap();
         let path = folder.path().join(FILE_NAME);
         let vault = Vault::open(path, Arc::new(MemoryKeyStore::default()), AutoLock::NEVER);
-        let login = login_as(&vault, HOST, "Fikus".to_owned());
-        assert!(matches!(login, Login::Ready(None)), "{login:?}");
+        let target = Target::server(HOST, 4000).with_character("Fikus");
+        assert_name_only(login_for(Some(&vault), &target), "Fikus");
+        assert_name_only(login_for(None, &target), "Fikus");
+    }
+
+    #[test]
+    fn an_added_character_is_saved_with_its_new_server() {
+        let folder = TempDir::new().unwrap();
+        let launcher = Launcher::new(folder.path().to_owned(), Vec::new(), Vec::new(), || {});
+        launcher
+            .add_character(&Target::server("new.example", 23), "Wren")
+            .unwrap();
+
+        let saved = launcher.saved();
+        assert_eq!(
+            (&*saved.servers[0].host, saved.servers[0].port),
+            ("new.example", 23)
+        );
+        assert_eq!(saved.servers[0].characters[0].id, "wren");
     }
 
     #[test]

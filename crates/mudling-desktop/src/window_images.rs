@@ -200,9 +200,7 @@ fn open_sheet(shell: &mut Shell, section: Section, window: &mut Window, cx: &mut
         sheet.show_servers(
             vec![SheetServer {
                 name: "Sample game".into(),
-                host: "mud.example".into(),
-                port: 4000,
-                characters: vec!["Sample".into()],
+                ..SheetServer::from(&sample_saved().servers[0])
             }],
             None,
             cx,
@@ -265,6 +263,7 @@ fn sample_saved() -> SavedServers {
             updated: last_played,
             last_room: Some("the Donation Room".to_owned()),
             characters: vec![SavedCharacter {
+                id: "altissima".to_owned(),
                 name: Some("Altissima".to_owned()),
                 level: Some(2),
                 last_played,
