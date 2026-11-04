@@ -1,6 +1,7 @@
 # Publishes MUDling for macOS, Windows and Linux when a version tag such as
-# v1.2.3 on main is pushed. CI runs first; every build then lands on one
-# GitHub Release, which publishes each asset's SHA-256 digest. Self-update
+# v1.2.3 on main is pushed. The tagged commit must already have a green CI run
+# on main; every build then lands on one GitHub Release, created only after
+# all builds succeed. GitHub publishes each asset's SHA-256 digest. Self-update
 # reads those digests, so assets are never renamed after upload.
 # docs/releasing.md says how to cut a release.
 name: Release
@@ -20,8 +21,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    uses: ./.github/workflows/ci.yml
+  # Builds only what CI has already passed on main, rather than running CI
+  # again where a flaky test or a full disk could fail the release.
+  gate:
+    name: CI has passed on this commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: scripts/require-green-ci.sh "$GITHUB_SHA"
 
   version:
     name: Read the version from the tag
@@ -45,7 +58,7 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.arch }})
-    needs: [check, version]
+    needs: [gate, version]
     strategy:
       matrix:
         include:
@@ -143,7 +156,7 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.arch }})
-    needs: [check, version]
+    needs: [gate, version]
     strategy:
       matrix:
         include:
@@ -233,7 +246,7 @@ jobs:
 
   linux:
     name: Linux (${{ matrix.arch }})
-    needs: [check, version]
+    needs: [gate, version]
     strategy:
       matrix:
         include:
@@ -250,6 +263,13 @@ jobs:
       # The runners have no FUSE, so appimagetool runs from its extracted self.
       APPIMAGE_EXTRACT_AND_RUN: 1
     steps:
+      # The preinstalled tools below are never used and take space the build needs.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - name: Install gpui's Linux libraries (X11 and Wayland)
@@ -288,7 +308,6 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
-          # Only the builds: CI, run first, uploads its bench reports to this run too.
           pattern: '{macos,windows,linux}-*'
           merge-multiple: true
 
