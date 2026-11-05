@@ -2051,6 +2051,36 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             cx,
         );
 
+        // The version line's result is a live status with a value only once a
+        // check was asked for from it: at rest it would say "MIT" at each opening.
+        let mut live = Vec::new();
+        for (clicked, words) in [(false, "MIT"), (true, "Up to date")] {
+            in_window(
+                &|shell, window, cx| {
+                    measure::open_sample_section(shell, Section::Appearance, window, cx);
+                    let status = sample_version_status(|_| {});
+                    shell.settings_sheet().update(cx, |sheet, cx| {
+                        sheet.show_sample_version_check(status, clicked, cx);
+                    });
+                },
+                cx,
+            );
+            cx.background_executor().timer(pause).await;
+            let tree = sweep.read(cx);
+            let result = tree.as_ref().map(|tree| {
+                tree.find(|e| {
+                    e.is("AXGroup", Some("AXApplicationStatus"))
+                        && e.title.as_deref() == Some(words)
+                })
+            });
+            live.push(result.and_then(|found| found.first().map(|e| e.value.clone())));
+        }
+        checks.push(Check {
+            name: "the version line's result is read out as a live status only after a click",
+            passed: live == [Some(None), Some(Some("Up to date".to_owned()))],
+            detail: format!("value at rest, then after a click: {live:?}"),
+        });
+
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");
         persist::save_server(sample_data.path(), SAMPLE_SERVER, 4000)

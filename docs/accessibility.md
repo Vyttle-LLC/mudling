@@ -36,7 +36,7 @@ It exits 1 if a check fails. It checks two ways:
 | Gaps fixed | 18 |
 | Checks in `--ax-check`, before and after (with the update card's two) | 82 and 103 |
 | Checks with Add character, the grouped Servers page and switching character | 105 |
-| Checks with the version line's three | 108 |
+| Checks with the version line's four | 109 |
 
 ## Gaps found and fixed
 
@@ -211,7 +211,7 @@ control with several rows, one per item or rule, is one line here.
 | Sections | TabList | Settings sections | sweep |
 | Each section | Tab, selected, with its problems described | *section* | named, focus |
 | The version, at the foot of the sidebar; Tab reaches it after the sections | Button | MUDling *version*, check for updates | named |
-| Its result, read out politely when it changes | Status | Checking…, Up to date, *version* is ready, Couldn't check; MIT before any click | named (Up to date, *version* is ready) |
+| Its result, a polite live status with a value once a check was asked for here; at rest it reads MIT and isn't live, so opening Settings says nothing | Status | Checking…, Up to date, *version* is ready, Couldn't check; MIT before any click | named (Up to date, *version* is ready), value at rest and after a click |
 | Its Restart to update, while a release is ready | Button | Restart to update | named |
 | The same line on a copy that can't update (built from source), with the reason as its tooltip | Label | MUDling *version* · MIT · A Vyttle app | sweep |
 | Close settings | Button | Close settings | named |

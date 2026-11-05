@@ -14,7 +14,7 @@ use crate::update::UpdateStatus;
 use chrono::{DateTime, TimeZone};
 use gpui::{
     AnyElement, AnyView, App, Context, Div, FocusHandle, FontWeight, Render, Role, SharedString,
-    Stateful, Window, div, prelude::*, px, transparent_black,
+    Stateful, Window, div, prelude::*, px,
 };
 use mudling_core::persist::Timestamp;
 use std::fmt::Display;
@@ -22,6 +22,7 @@ use std::fmt::Display;
 pub const RESTART_TITLE: &str = "Restart to update?";
 const CHECKS_WHEN: &str = "Daily and at launch, from GitHub Releases.";
 const CHECK_TIP: &str = "Check for updates";
+const VERSION_GROUP: &str = "check-for-updates-version";
 
 /// What the player asked of updates, in Settings or on the empty state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,27 +72,17 @@ impl CheckResult {
     }
 }
 
-/// A button that reads as part of a line of text. The caller sets its hover.
+/// A button that reads as part of a line of text.
 fn link(
     id: &'static str,
     label: impl Into<SharedString>,
     stop: &FocusHandle,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .debug_selector(|| id.to_owned())
-        .role(Role::Button)
-        .aria_label(label)
-        .track_focus(stop)
-        .flex_none()
+    control(id, label, stop, theme)
         .ml(px(-4.))
         .px_1()
-        .rounded_md()
-        .border_1()
-        .border_color(transparent_black())
         .cursor_pointer()
-        .focus_visible(|style| style.border_color(theme.accent))
 }
 
 /// A tooltip with one line of words.
@@ -284,21 +275,27 @@ impl SettingsSheet {
                 .child(MAKER)
                 .into_any_element();
         }
-        let (hover, text, ok, error) = (theme.hover, theme.text, theme.accent, theme.error);
+        let (text, ok, error) = (theme.text, theme.accent, theme.error);
         let check = link(
             "check-for-updates-version",
             format!("{version}, check for updates"),
             &self.about,
             theme,
         )
-        .hover(move |style| style.bg(hover).text_color(text).underline())
+        .group(VERSION_GROUP)
         .tooltip(|_, cx| tip(CHECK_TIP, cx))
         .on_click(cx.listener(|sheet, _, _, cx| {
             sheet.checked_here = true;
             cx.emit(SheetEvent::Update(UpdateAsk::CheckNow));
             cx.notify();
         }))
-        .child(version);
+        .child(
+            div()
+                .group_hover(VERSION_GROUP, move |style| {
+                    style.text_color(text).underline()
+                })
+                .child(version),
+        );
         let result = self.about_result();
         let (words, color) = match &result {
             None => (env!("CARGO_PKG_LICENSE").to_owned(), theme.text_muted),
@@ -306,21 +303,28 @@ impl SettingsSheet {
             Some(result @ (CheckResult::UpToDate | CheckResult::Ready(_))) => (result.words(), ok),
             Some(result) => (result.words(), theme.text_muted),
         };
-        // One polite live node for the line's end, so a screen reader announces
-        // its changes: macOS reads the value, Windows and Linux the label.
+        // The line's end is one node, so a screen reader announces its changes.
+        // It goes live only once a check was asked for here: at rest it would
+        // read out "MIT" each time Settings opens. macOS reads a live node's
+        // value, Windows and Linux its label.
         let result_line = div()
             .id("settings-check-result")
             .role(Role::Status)
             .aria_label(words.clone())
-            .aria_value(words.clone())
-            .a11y_synthetic_children(|builder| {
-                builder
-                    .parent_node()
-                    .set_live(gpui::accesskit::Live::Polite);
+            .when(result.is_some(), |node| {
+                node.aria_value(words.clone())
+                    .a11y_synthetic_children(|builder| {
+                        builder
+                            .parent_node()
+                            .set_live(gpui::accesskit::Live::Polite);
+                    })
             })
+            .flex()
+            .gap_1()
             .pl_1()
-            .text_color(color)
-            .child(format!("· {words}"));
+            .text_color(theme.text_muted)
+            .child("·")
+            .child(div().text_color(color).child(words));
         let restart = self.ready_to_restart().then(|| {
             link(
                 "settings-check-restart",
