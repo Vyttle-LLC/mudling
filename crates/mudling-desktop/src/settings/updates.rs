@@ -306,11 +306,18 @@ impl SettingsSheet {
             Some(result @ (CheckResult::UpToDate | CheckResult::Ready(_))) => (result.words(), ok),
             Some(result) => (result.words(), theme.text_muted),
         };
-        // One node for the line's end, so a screen reader announces its changes.
+        // One polite live node for the line's end, so a screen reader announces
+        // its changes: macOS reads the value, Windows and Linux the label.
         let result_line = div()
             .id("settings-check-result")
             .role(Role::Status)
             .aria_label(words.clone())
+            .aria_value(words.clone())
+            .a11y_synthetic_children(|builder| {
+                builder
+                    .parent_node()
+                    .set_live(gpui::accesskit::Live::Polite);
+            })
             .pl_1()
             .text_color(color)
             .child(format!("· {words}"));
