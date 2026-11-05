@@ -19,7 +19,7 @@ use crate::measure;
 use crate::settings::Section;
 use crate::shell::Shell;
 use crate::stream;
-use crate::update::UpdateStatus;
+use crate::update::{Ready, UpdateStatus};
 use gpui::{App, AsyncApp, Context, Entity, Keystroke, Window, px};
 use mudling_core::logs::{Kind, LogFile};
 use mudling_core::persist::{self, Timestamp};
@@ -672,8 +672,19 @@ fn sample_server() -> crate::settings::SavedServer {
     }
 }
 
+/// A copy that can update, running 0.8.2, with `change` made to its status.
+fn sample_version_status(change: fn(&mut UpdateStatus)) -> UpdateStatus {
+    let mut status = UpdateStatus {
+        current: "0.8.2".to_owned(),
+        cant: None,
+        ..UpdateStatus::default()
+    };
+    change(&mut status);
+    status
+}
+
 /// The sheet's sections and questions the other checks leave out.
-fn settings_stops() -> [Stop; 10] {
+fn settings_stops() -> [Stop; 13] {
     [
         (
             "Servers & characters groups characters under their server, with their controls",
@@ -791,6 +802,43 @@ fn settings_stops() -> [Stop; 10] {
                 "Keep the password for Sample on mud.example",
                 "Remove the password for Sample on mud.example",
             ],
+        ),
+        (
+            "the version line is a button that checks for updates",
+            |shell, _, cx| {
+                let status = sample_version_status(|_| {});
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.show_sample_version_check(status, false, cx);
+                });
+            },
+            &["MUDling 0.8.2, check for updates"],
+        ),
+        (
+            "the version line says the check found nothing newer",
+            |shell, _, cx| {
+                let status = sample_version_status(|_| {});
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.show_sample_version_check(status, true, cx);
+                });
+            },
+            &["Up to date"],
+        ),
+        (
+            "the version line offers Restart to update when a release is ready",
+            |shell, _, cx| {
+                let status = sample_version_status(|status| {
+                    status.ready = Some(Ready {
+                        version: "0.9.0".to_owned(),
+                        summary: Vec::new(),
+                        page: String::new(),
+                        put_off: false,
+                    });
+                });
+                shell.settings_sheet().update(cx, |sheet, cx| {
+                    sheet.show_sample_version_check(status, true, cx);
+                });
+            },
+            &["0.9.0 is ready", "Restart to update"],
         ),
         // Last: the check answers it before going on.
         (
@@ -2002,6 +2050,36 @@ pub fn run_ax_check(shell: Entity<Shell>, cx: &mut App) {
             },
             cx,
         );
+
+        // The version line's result is a live status with a value only once a
+        // check was asked for from it: at rest it would say "MIT" at each opening.
+        let mut live = Vec::new();
+        for (clicked, words) in [(false, "MIT"), (true, "Up to date")] {
+            in_window(
+                &|shell, window, cx| {
+                    measure::open_sample_section(shell, Section::Appearance, window, cx);
+                    let status = sample_version_status(|_| {});
+                    shell.settings_sheet().update(cx, |sheet, cx| {
+                        sheet.show_sample_version_check(status, clicked, cx);
+                    });
+                },
+                cx,
+            );
+            cx.background_executor().timer(pause).await;
+            let tree = sweep.read(cx);
+            let result = tree.as_ref().map(|tree| {
+                tree.find(|e| {
+                    e.is("AXGroup", Some("AXApplicationStatus"))
+                        && e.title.as_deref() == Some(words)
+                })
+            });
+            live.push(result.and_then(|found| found.first().map(|e| e.value.clone())));
+        }
+        checks.push(Check {
+            name: "the version line's result is read out as a live status only after a click",
+            passed: live == [Some(None), Some(Some("Up to date".to_owned()))],
+            detail: format!("value at rest, then after a click: {live:?}"),
+        });
 
         // Throwaway, like the replay's: the check never reads the player's list.
         let sample_data = TempDir::new().expect("a folder for the sample server");

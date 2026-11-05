@@ -5,19 +5,24 @@
 
 use super::appearance::toggled;
 use super::plugins::switch;
-use super::{Pane, SettingsSheet, SheetEvent, control, muted_line, section_heading, text_button};
+use super::{
+    MAKER, Pane, SettingsSheet, SheetEvent, control, muted_line, section_heading, text_button,
+};
 use crate::assets::UI_FONT;
 use crate::theme::Theme;
 use crate::update::UpdateStatus;
 use chrono::{DateTime, TimeZone};
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Role, SharedString, Stateful, Window, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, FocusHandle, FontWeight, Render, Role, SharedString,
+    Stateful, Window, div, prelude::*, px,
 };
 use mudling_core::persist::Timestamp;
 use std::fmt::Display;
 
 pub const RESTART_TITLE: &str = "Restart to update?";
 const CHECKS_WHEN: &str = "Daily and at launch, from GitHub Releases.";
+const CHECK_TIP: &str = "Check for updates";
+const VERSION_GROUP: &str = "check-for-updates-version";
 
 /// What the player asked of updates, in Settings or on the empty state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +36,79 @@ pub enum UpdateAsk {
     /// The player answered Restart.
     RestartNow,
     DismissFailure,
+}
+
+/// What the version line says of a check the player asked for there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CheckResult {
+    Checking,
+    UpToDate,
+    /// A release was staged: its version.
+    Ready(String),
+    Failed,
+}
+
+impl CheckResult {
+    /// What `status` says of a check asked for since Settings opened.
+    fn of(status: &UpdateStatus) -> CheckResult {
+        if status.checking {
+            CheckResult::Checking
+        } else if let Some(ready) = &status.ready {
+            CheckResult::Ready(ready.version.clone())
+        } else if status.problem.is_some() || status.failure.is_some() {
+            CheckResult::Failed
+        } else {
+            CheckResult::UpToDate
+        }
+    }
+
+    fn words(&self) -> String {
+        match self {
+            CheckResult::Checking => "Checking…".to_owned(),
+            CheckResult::UpToDate => "Up to date".to_owned(),
+            CheckResult::Ready(version) => format!("{version} is ready"),
+            CheckResult::Failed => "Couldn't check".to_owned(),
+        }
+    }
+}
+
+/// A button that reads as part of a line of text.
+fn link(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    stop: &FocusHandle,
+    theme: &Theme,
+) -> Stateful<Div> {
+    control(id, label, stop, theme)
+        .ml(px(-4.))
+        .px_1()
+        .cursor_pointer()
+}
+
+/// A tooltip with one line of words.
+struct Tip(SharedString);
+
+fn tip(words: impl Into<SharedString>, cx: &mut App) -> AnyView {
+    let words = words.into();
+    cx.new(|_| Tip(words)).into()
+}
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Tip>) -> impl IntoElement {
+        let theme = cx.global::<Theme>();
+        div()
+            .max_w(px(320.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .font_family(UI_FONT)
+            .text_size(px(12.))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
 }
 
 /// When the last check ran, as the player reads it: "Today at 9:12".
@@ -141,6 +219,144 @@ impl SettingsSheet {
             self.update = status;
             cx.notify();
         }
+    }
+
+    /// What the version line says of the check asked for there, if one was
+    /// and this copy can update.
+    fn about_result(&self) -> Option<CheckResult> {
+        (self.checked_here && self.update.cant.is_none()).then(|| CheckResult::of(&self.update))
+    }
+
+    /// Shows the version line as it reads for `status`, after a click on it if
+    /// `clicked`, for `--ax-check`.
+    #[cfg(target_os = "macos")]
+    pub fn show_sample_version_check(
+        &mut self,
+        status: UpdateStatus,
+        clicked: bool,
+        cx: &mut Context<SettingsSheet>,
+    ) {
+        self.checked_here = clicked;
+        self.show_update(status, cx);
+        cx.notify();
+    }
+
+    /// The version line's check, a stop unless this copy can't update.
+    pub(super) fn about_stop(&self) -> Option<&FocusHandle> {
+        self.update.cant.is_none().then_some(&self.about)
+    }
+
+    /// Whether the version line offers Restart to update.
+    pub(super) fn ready_to_restart(&self) -> bool {
+        matches!(self.about_result(), Some(CheckResult::Ready(_)))
+    }
+
+    /// The foot of the sidebar: "MUDling 0.1.0 · MIT" and who makes it. The
+    /// version checks for updates, and the line then shows how that went.
+    pub(super) fn render_about(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<SettingsSheet>,
+    ) -> impl IntoElement + use<> {
+        let version = format!("MUDling {}", self.update.current);
+        let line = div()
+            .id("settings-about")
+            .debug_selector(|| "settings-about".to_owned())
+            .px_3()
+            .pb_2()
+            .text_size(px(13.))
+            .text_color(theme.text_muted);
+        if let Some(why) = self.update.cant {
+            let said = format!("{version} · {} · {MAKER}", env!("CARGO_PKG_LICENSE"));
+            return line
+                .role(Role::Label)
+                .aria_value(said)
+                .tooltip(move |_, cx| tip(why, cx))
+                .child(format!("{version} · {}", env!("CARGO_PKG_LICENSE")))
+                .child(MAKER)
+                .into_any_element();
+        }
+        let (text, ok, error) = (theme.text, theme.accent, theme.error);
+        let check = link(
+            "check-for-updates-version",
+            format!("{version}, check for updates"),
+            &self.about,
+            theme,
+        )
+        .group(VERSION_GROUP)
+        .tooltip(|_, cx| tip(CHECK_TIP, cx))
+        .on_click(cx.listener(|sheet, _, _, cx| {
+            sheet.checked_here = true;
+            cx.emit(SheetEvent::Update(UpdateAsk::CheckNow));
+            cx.notify();
+        }))
+        .child(
+            div()
+                .group_hover(VERSION_GROUP, move |style| {
+                    style.text_color(text).underline()
+                })
+                .child(version),
+        );
+        let result = self.about_result();
+        let (words, color) = match &result {
+            None => (env!("CARGO_PKG_LICENSE").to_owned(), theme.text_muted),
+            Some(result @ CheckResult::Failed) => (result.words(), error),
+            Some(result @ (CheckResult::UpToDate | CheckResult::Ready(_))) => (result.words(), ok),
+            Some(result) => (result.words(), theme.text_muted),
+        };
+        // The line's end is one node, so a screen reader announces its changes.
+        // It goes live only once a check was asked for here: at rest it would
+        // read out "MIT" each time Settings opens. macOS reads a live node's
+        // value, Windows and Linux its label.
+        let result_line = div()
+            .id("settings-check-result")
+            .role(Role::Status)
+            .aria_label(words.clone())
+            .when(result.is_some(), |node| {
+                node.aria_value(words.clone())
+                    .a11y_synthetic_children(|builder| {
+                        builder
+                            .parent_node()
+                            .set_live(gpui::accesskit::Live::Polite);
+                    })
+            })
+            .flex()
+            .gap_1()
+            .pl_1()
+            .text_color(theme.text_muted)
+            .child("·")
+            .child(div().text_color(color).child(words));
+        let restart = self.ready_to_restart().then(|| {
+            link(
+                "settings-check-restart",
+                "Restart to update",
+                &self.about_restart,
+                theme,
+            )
+            .text_color(ok)
+            .underline()
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(SheetEvent::Update(UpdateAsk::Restart));
+            }))
+            .child("Restart to update")
+        });
+        line.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .child(check)
+                .child(result_line),
+        )
+        .children(restart.map(|restart| div().flex().child(restart)))
+        .child(
+            div()
+                .id("settings-maker")
+                .role(Role::Label)
+                .aria_value(MAKER)
+                .child(MAKER),
+        )
+        .into_any_element()
     }
 
     /// Asks whether to restart while connected, over everything else.
@@ -380,7 +596,12 @@ impl SettingsSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::{Shell, tests::window_with_keys};
+    use crate::update::{Checked, Eligibility, Staged, UpdateChoices, Updates};
     use chrono::Utc;
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn the_last_check_reads_as_a_day_and_a_time() {
@@ -395,5 +616,145 @@ mod tests {
         assert_eq!(checked_words(at(1, 23, 5), &now), "Yesterday at 23:05");
         assert_eq!(checked_words(Some(Timestamp(0)), &now), "Jan 1 at 0:00");
         assert_eq!(checked_words(None, &now), "Not yet");
+    }
+
+    fn can_update() -> UpdateStatus {
+        UpdateStatus {
+            cant: None,
+            ..UpdateStatus::default()
+        }
+    }
+
+    /// The status after a check staged `version`, and after Later if `put_off`.
+    fn staged(version: &str, put_off: bool) -> UpdateStatus {
+        let sample = Staged::sample(version, &[]);
+        let mut updates = Updates::new(
+            Eligibility::Updates(sample.installed().clone()),
+            UpdateChoices::default(),
+            None,
+        );
+        updates.begin_check(true);
+        updates.finish_check(Ok(Checked::Ready(sample)), Timestamp(0));
+        if put_off {
+            updates.later();
+        }
+        updates.status()
+    }
+
+    #[test]
+    fn a_check_reads_as_the_status_says() {
+        let words = |status: UpdateStatus| CheckResult::of(&status).words();
+        let status = |change: fn(&mut UpdateStatus)| {
+            let mut status = can_update();
+            change(&mut status);
+            status
+        };
+        assert_eq!(words(can_update()), "Up to date");
+        assert_eq!(words(status(|s| s.checking = true)), "Checking…");
+        assert_eq!(
+            words(status(|s| s.problem = Some("No network.".into()))),
+            "Couldn't check"
+        );
+        assert_eq!(
+            words(status(
+                |s| s.failure = Some(("Didn't go in".into(), "Why.".into()))
+            )),
+            "Couldn't check"
+        );
+        assert_eq!(words(staged("0.1.1", false)), "0.1.1 is ready");
+        // A release put off with Later is still ready to restart into.
+        assert_eq!(words(staged("0.1.1", true)), "0.1.1 is ready");
+    }
+
+    fn asks(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<UpdateAsk>>> {
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let kept = Rc::clone(&asked);
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        cx.update(|_, cx| {
+            cx.subscribe(&sheet, move |_, event: &SheetEvent, _| {
+                if let SheetEvent::Update(ask) = event {
+                    kept.borrow_mut().push(*ask);
+                }
+            })
+            .detach();
+        });
+        asked
+    }
+
+    fn show(shell: &Entity<Shell>, status: UpdateStatus, cx: &mut VisualTestContext) {
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.update(cx, |sheet, cx| sheet.show_update(status, cx));
+        cx.run_until_parked();
+    }
+
+    fn line(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<CheckResult> {
+        let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
+        sheet.read_with(cx, |sheet, _| sheet.about_result())
+    }
+
+    fn click(id: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds(id).expect("the control is drawn");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        shell.update_in(cx, |shell, window, cx| shell.open_settings(window, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn clicking_the_version_asks_for_a_check(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let asked = asks(&shell, cx);
+        open(&shell, cx);
+        show(&shell, can_update(), cx);
+
+        click("check-for-updates-version", cx);
+        assert_eq!(*asked.borrow(), [UpdateAsk::CheckNow]);
+    }
+
+    #[gpui::test]
+    fn the_result_waits_for_a_click_and_goes_when_settings_close(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        open(&shell, cx);
+        // A background check found a release; the line doesn't say so.
+        show(&shell, staged("0.1.1", false), cx);
+        assert_eq!(line(&shell, cx), None);
+
+        click("check-for-updates-version", cx);
+        assert_eq!(line(&shell, cx), Some(CheckResult::Ready("0.1.1".into())));
+        show(&shell, can_update(), cx);
+        assert_eq!(line(&shell, cx), Some(CheckResult::UpToDate));
+
+        cx.simulate_keystrokes("escape");
+        open(&shell, cx);
+        assert_eq!(line(&shell, cx), None);
+    }
+
+    #[gpui::test]
+    fn restart_to_update_asks_to_restart(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let asked = asks(&shell, cx);
+        open(&shell, cx);
+        show(&shell, can_update(), cx);
+        assert!(cx.debug_bounds("settings-check-restart").is_none());
+
+        click("check-for-updates-version", cx);
+        show(&shell, staged("0.1.1", false), cx);
+        click("settings-check-restart", cx);
+        assert_eq!(*asked.borrow(), [UpdateAsk::CheckNow, UpdateAsk::Restart]);
+    }
+
+    #[gpui::test]
+    fn a_copy_that_cant_update_ignores_the_click(cx: &mut TestAppContext) {
+        let (shell, cx) = window_with_keys(cx);
+        let asked = asks(&shell, cx);
+        open(&shell, cx);
+        assert!(cx.debug_bounds("check-for-updates-version").is_none());
+
+        click("settings-about", cx);
+        assert!(asked.borrow().is_empty());
+        assert_eq!(line(&shell, cx), None);
     }
 }

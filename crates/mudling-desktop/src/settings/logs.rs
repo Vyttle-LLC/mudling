@@ -556,7 +556,7 @@ mod tests {
         let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
         let (walk, controls) = sheet.read_with(cx, |sheet, _| {
             let controls = sheet.stops.in_use().to_vec();
-            (sheet.tabs.len() + 1 + controls.len(), controls)
+            (sheet.sheet_stops().len() + controls.len(), controls)
         });
         // Two switches, then Clear, Pin and Export for each kind.
         assert_eq!(controls.len(), 8);

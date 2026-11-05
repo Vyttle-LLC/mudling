@@ -471,8 +471,14 @@ pub struct SettingsSheet {
     update: UpdateStatus,
     /// What restarting would drop, while Restart to update asks about it.
     asking_restart: Option<SharedString>,
+    /// The version line was clicked since Settings opened, so it shows what
+    /// the update status says of that check.
+    checked_here: bool,
     dialog: FocusHandle,
     tabs: [FocusHandle; Section::ALL.len()],
+    /// The version line's two stops: the check, and Restart to update.
+    about: FocusHandle,
+    about_restart: FocusHandle,
     close: FocusHandle,
     stops: Stops,
     /// A stop to bring into view at the next draw, once its row exists.
@@ -530,8 +536,11 @@ impl SettingsSheet {
             asking: None,
             update: UpdateStatus::default(),
             asking_restart: None,
+            checked_here: false,
             dialog: cx.focus_handle(),
             tabs: std::array::from_fn(|_| cx.focus_handle()),
+            about: cx.focus_handle(),
+            about_restart: cx.focus_handle(),
             close: cx.focus_handle(),
             stops: Stops::default(),
             reveal: None,
@@ -555,6 +564,7 @@ impl SettingsSheet {
     /// Takes the keyboard. With problems to show, opens on the section that
     /// shows them.
     pub fn opened(&mut self, window: &mut Window, cx: &mut Context<SettingsSheet>) {
+        self.checked_here = false;
         self.removing = None;
         self.removing_character = None;
         self.switching = None;
@@ -763,26 +773,36 @@ impl SettingsSheet {
         cx.emit(SheetEvent::Closed);
     }
 
+    /// The stops the sheet keeps outside its pane, in Tab order: the section
+    /// tabs, the version line, then Close.
+    fn sheet_stops(&self) -> Vec<&FocusHandle> {
+        let restart = self.ready_to_restart().then_some(&self.about_restart);
+        (self.tabs.iter())
+            .chain(self.about_stop())
+            .chain(restart)
+            .chain([&self.close])
+            .collect()
+    }
+
     /// Moves `step` stops on, round the sheet, and brings the stop into view.
     fn walk(&mut self, step: isize, window: &mut Window, cx: &mut Context<SettingsSheet>) {
         // An approval, a question or a dialog keeps the keyboard on its own
         // stops.
         let fixed = if self.asking.is_some() || self.stands_alone() {
-            0
+            Vec::new()
         } else {
-            self.tabs.len() + 1
+            self.sheet_stops()
         };
-        let order: Vec<&FocusHandle> = (self.tabs.iter())
-            .chain([&self.close])
-            .skip(self.tabs.len() + 1 - fixed)
-            .chain(self.stops.in_use())
-            .collect();
+        let order: Vec<&FocusHandle> = (fixed.iter().copied()).chain(self.stops.in_use()).collect();
         let at = order.iter().position(|stop| stop.is_focused(window));
         let next = at.map_or(0, |at| {
             (at as isize + step).rem_euclid(order.len() as isize) as usize
         });
         window.focus(order[next], cx);
-        if let Some(stop) = next.checked_sub(fixed).filter(|_| self.asking.is_none()) {
+        if let Some(stop) = next
+            .checked_sub(fixed.len())
+            .filter(|_| self.asking.is_none())
+        {
             self.scroll.scroll_to_item(self.stops.rows[stop]);
             cx.notify();
         }
@@ -839,12 +859,6 @@ impl SettingsSheet {
         cx: &mut Context<SettingsSheet>,
     ) -> impl IntoElement + use<> {
         let tabs = Section::ALL.map(|section| self.render_tab(section, theme, cx));
-        // A local build says so, as it never matches a release.
-        let version = match mudling_core::RELEASE_VERSION {
-            Some(release) => release.to_owned(),
-            None => format!("{} dev", env!("CARGO_PKG_VERSION")),
-        };
-        let version = format!("MUDling {version} · {}", env!("CARGO_PKG_LICENSE"));
         div()
             .flex_none()
             .w(width)
@@ -881,18 +895,7 @@ impl SettingsSheet {
                     .gap_0p5()
                     .children(tabs),
             )
-            .child(
-                div()
-                    .id("settings-about")
-                    .role(Role::Label)
-                    .aria_value(format!("{version} · {MAKER}"))
-                    .px_3()
-                    .pb_2()
-                    .text_size(px(13.))
-                    .text_color(theme.text_muted)
-                    .child(version)
-                    .child(MAKER),
-            )
+            .child(self.render_about(theme, cx))
     }
 
     fn render_pane(
@@ -1464,17 +1467,14 @@ mod tests {
         open(&shell, cx);
         let stops = shell.read_with(cx, |shell, cx| {
             let sheet = shell.settings_sheet().read(cx);
-            sheet.tabs.len() + 1 + sheet.stops.in_use().len()
+            sheet.sheet_stops().len() + sheet.stops.in_use().len()
         });
         assert!(stops > 8, "Appearance has controls: {stops}");
         let focused_in_sheet = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
             let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
             cx.update(|window, cx| {
                 let sheet = sheet.read(cx);
-                sheet
-                    .tabs
-                    .iter()
-                    .chain([&sheet.close])
+                (sheet.sheet_stops().into_iter())
                     .chain(sheet.stops.in_use())
                     .any(|stop| stop.is_focused(window))
             })
@@ -1880,7 +1880,7 @@ mod tests {
         let sheet = shell.read_with(cx, |shell, _| shell.settings_sheet());
         let (stops, field) = sheet.read_with(cx, |sheet, cx| {
             (
-                sheet.tabs.len() + 1 + sheet.stops.in_use().len(),
+                sheet.sheet_stops().len() + sheet.stops.in_use().len(),
                 sheet.form_field_handle(cx),
             )
         });
