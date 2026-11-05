@@ -229,6 +229,7 @@ impl SettingsSheet {
 
     /// Shows the version line as it reads for `status`, after a click on it if
     /// `clicked`, for `--ax-check`.
+    #[cfg(target_os = "macos")]
     pub fn show_sample_version_check(
         &mut self,
         status: UpdateStatus,

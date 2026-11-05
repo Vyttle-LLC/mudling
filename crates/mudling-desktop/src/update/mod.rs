@@ -19,7 +19,9 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::{Ready, UpdateChoices, UpdateStatus, Updates};
+#[cfg(target_os = "macos")]
+pub use state::Ready;
+pub use state::{UpdateChoices, UpdateStatus, Updates};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
