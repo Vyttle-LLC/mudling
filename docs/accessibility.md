@@ -10,7 +10,7 @@ cargo run --release -p mudling-desktop -- --synthetic --ax-check
 ```
 
 `--ax-check` (macOS) runs the window off screen, never taking focus, walks it
-through 59 stops (every panel, the HUD in each place, every settings section,
+through 62 stops (every panel, the HUD in each place, every settings section,
 page, dialog and question it can reach without a real game) and prints a JSON
 report.
 It exits 1 if a check fails. It checks two ways:
@@ -28,14 +28,15 @@ It exits 1 if a check fails. It checks two ways:
 
 | | |
 |---|---|
-| Stops | 59 |
-| Elements, rows folded together (the inventory below) | 168 |
+| Stops | 62 |
+| Elements, rows folded together (the inventory below) | 172 |
 | Controls seen in the audit's tree dumps, counting each row's copy (48 stops, before the update card) | 1,127 |
 | Distinct controls in those dumps, by role and name | 315 |
 | Gaps found | 18 |
 | Gaps fixed | 18 |
 | Checks in `--ax-check`, before and after (with the update card's two) | 82 and 103 |
 | Checks with Add character, the grouped Servers page and switching character | 105 |
+| Checks with the version line's three | 108 |
 
 ## Gaps found and fixed
 
@@ -209,6 +210,10 @@ control with several rows, one per item or rule, is one line here.
 | Settings | Dialog, modal | Settings | named |
 | Sections | TabList | Settings sections | sweep |
 | Each section | Tab, selected, with its problems described | *section* | named, focus |
+| The version, at the foot of the sidebar; Tab reaches it after the sections | Button | MUDling *version*, check for updates | named |
+| Its result, read out politely when it changes | Status | Checking…, Up to date, *version* is ready, Couldn't check; MIT before any click | named (Up to date, *version* is ready) |
+| Its Restart to update, while a release is ready | Button | Restart to update | named |
+| The same line on a copy that can't update (built from source), with the reason as its tooltip | Label | MUDling *version* · MIT · A Vyttle app | sweep |
 | Close settings | Button | Close settings | named |
 | The page | TabPanel | *page title* | sweep |
 | **Appearance:** Theme, chat font, HUD placement | RadioGroup of RadioButtons | Theme, HUD placement and the chat font's group; System, Light, Dark; *fonts*; On the command bar, Floating card, Top strip, Hidden | named (Theme, HUD placement, Floating card), sweep |

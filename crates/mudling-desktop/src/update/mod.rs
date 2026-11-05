@@ -19,7 +19,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::{UpdateChoices, UpdateStatus, Updates};
+pub use state::{Ready, UpdateChoices, UpdateStatus, Updates};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
